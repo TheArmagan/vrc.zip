@@ -17,6 +17,8 @@ export const ROUTE_IDS = [
   "feed",
   "gamelog",
   "notifications",
+  // `#/consent/<pairingId>` — where the daemon's browser-open lands when an app asks for access.
+  "consent",
   "settings",
 ] as const;
 

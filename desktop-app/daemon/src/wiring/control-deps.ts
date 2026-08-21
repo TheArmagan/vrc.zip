@@ -10,6 +10,7 @@ import type {
   User,
   World,
 } from "@vrcz/api/types";
+import { isScope, SCOPES } from "@vrcz/shared";
 import type { Account, AccountSnapshot } from "../accounts/account.ts";
 import type { AccountManager } from "../accounts/manager.ts";
 import { type PresenceService, trustLevelOf } from "../accounts/presence.ts";
@@ -18,6 +19,7 @@ import { ImageCache } from "../net/image-cache.ts";
 import type { RateLimiter } from "../net/rate-limiter.ts";
 import { vrcFetch } from "../net/request.ts";
 import { pickUserImageUrl, pickUserImageUrlFull } from "../net/user-image.ts";
+import type { ConsentRegistry, PendingConsent } from "../proxy/consent.ts";
 import type { SecretsStore } from "../security/secrets.ts";
 import {
   type ControlAccount,
@@ -37,6 +39,7 @@ import {
   type MutualFriendPage,
   type MutualFriendSummary,
   type NotificationItem,
+  type PendingConsentRequest,
   type SettingsPatch,
   type StatusSnapshot,
   type StreamEvent,
@@ -69,6 +72,12 @@ export interface ControlDepsOptions {
   readonly limiter: RateLimiter;
   readonly secrets: SecretsStore;
   readonly presence: PresenceService;
+  /**
+   * The proxy's pending consent sheets. Optional so a test that only exercises the Phase 1 surface
+   * does not have to construct one; without it the consent routes answer as though nothing is
+   * pending, which is exactly true.
+   */
+  readonly consent?: ConsentRegistry | undefined;
   readonly settings: Settings;
   readonly env?: NodeJS.ProcessEnv;
   readonly connectPipeline: (accountId: string) => void;
@@ -504,6 +513,13 @@ function toControlAccount(snapshot: AccountSnapshot, addedAt: number): ControlAc
 export function createControlDeps(options: ControlDepsOptions): ControlDeps {
   const { accounts, store, bus, limiter, secrets, presence, connectPipeline } = options;
   let settings = options.settings;
+
+  /**
+   * Live event-stream sockets. The consent alerts read it to decide whether anyone is watching:
+   * with a UI connected the app raises its own sheet, and an OS notification plus an unbidden
+   * browser tab on top of that is the kind of "help" that trains people to dismiss things unread.
+   */
+  let streamClients = 0;
 
   // One cache for the whole daemon. Its de-duplication only works if every caller shares it, and a
   // per-request instance would also re-run the eviction sweep on every avatar.
@@ -1211,6 +1227,37 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         }));
     },
 
+    async listPendingConsent(): Promise<PendingConsentRequest[]> {
+      return (options.consent?.list() ?? []).map((pending) => toConsentRequest(pending, accounts));
+    },
+
+    async setConsentAccount(pairingId, accountId): Promise<PendingConsentRequest> {
+      const registry = options.consent;
+      if (registry === undefined) {
+        throw new ControlError(404, "unknown_consent", "no consent request is pending");
+      }
+      // Checked before the attach rather than after: binding a grant to an account that is not
+      // there is the one outcome this whole flow exists to prevent.
+      if (accounts.get(accountId) === undefined) {
+        throw new ControlError(404, "unknown_account", `no account ${accountId}`);
+      }
+      if (!registry.attachAccount(pairingId, accountId)) {
+        throw new ControlError(404, "unknown_consent", "that consent request has expired");
+      }
+
+      const pending = registry.get(pairingId);
+      if (pending === null) {
+        throw new ControlError(404, "unknown_consent", "that consent request has expired");
+      }
+      return toConsentRequest(pending, accounts);
+    },
+
+    async denyConsent(pairingId): Promise<void> {
+      // Idempotent on purpose. A user who clicks Deny twice, or denies a request that has just
+      // expired, has got the outcome they wanted either way.
+      options.consent?.deny(pairingId);
+    },
+
     async markNotificationSeen(id): Promise<void> {
       store.markNotificationSeen(id);
     },
@@ -1624,7 +1671,12 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       return next as unknown as WireSettings;
     },
 
+    streamClientCount(): number {
+      return streamClients;
+    },
+
     subscribeEvents(listener: (event: StreamEvent) => void): () => void {
+      streamClients += 1;
       const subscription = bus.subscribe((event) => {
         listener({
           type: event.kind,
@@ -1639,9 +1691,55 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         });
       });
 
+      let released = false;
       return () => {
+        // Guarded because `onClose` and an explicit teardown can both fire for one socket, and a
+        // count that drifts below zero would make `streamClientCount() > 0` permanently false —
+        // silently disabling every OS notification for the rest of the run.
+        if (released) return;
+        released = true;
+        streamClients -= 1;
         subscription.unsubscribe();
       };
     },
+  };
+}
+
+/**
+ * A pending consent request, as the sheet renders it.
+ *
+ * The plain-English scope descriptions come from the shared registry rather than being written
+ * here, because that registry is also what the plugin consent screen and the generated docs read.
+ * A scope described one way in the docs and another on the screen that actually grants it is a
+ * documentation bug with security consequences.
+ */
+function toConsentRequest(
+  pending: PendingConsent,
+  accounts: AccountManager,
+): PendingConsentRequest {
+  const isNew = new Set<string>(pending.newScopes);
+  return {
+    id: pending.id,
+    accountId: pending.accountId,
+    accountName:
+      pending.accountId === null
+        ? null
+        : (accounts.get(pending.accountId)?.user?.displayName ??
+          accounts.get(pending.accountId)?.username ??
+          null),
+    requestedUsername: pending.requestedUsername,
+    app: { ...pending.app },
+    scopes: pending.scopes.map((scope) => ({
+      scope,
+      description: isScope(scope) ? SCOPES[scope].description : scope,
+      dangerous: isScope(scope) ? SCOPES[scope].dangerous : true,
+      isNew: isNew.has(scope),
+    })),
+    // An app asking for exactly what it already holds is not an escalation, and the sheet should
+    // not imply the user is being asked for something new when they are not.
+    escalation: pending.newScopes.length < pending.scopes.length,
+    code: pending.code,
+    createdAt: pending.createdAt,
+    expiresAt: pending.expiresAt,
   };
 }

@@ -147,12 +147,14 @@ handshake, because the alternative is a login flow that mints credentials with n
       never reaches VRChat. Also `proxy/route-table.ts`: a request is matched to exactly one
       operation, literal segments beating parameters, so an unknown path gets VRChat's real 404
       instead of a catch-all's guess. Decisions 54–58.
-- [ ] **2.6 Consent UI** — the sheet showing app identity, requested scopes (delta only, on an
-      escalation), the account picker for the reserved username, and the six-digit code. The daemon
-      side is ready: `ConsentRegistry.list()` has the pending set, `consent.pending` /
-      `consent.resolved` are on the bus, and `attachAccount` / `deny` are the two actions the sheet
-      needs. What is missing is the control-API surface and the screen. **Until this lands the
-      handshake is unusable in practice** — nothing shows the user the code.
+- [x] **2.6 Consent UI + alerts** — `GET /api/consent`, `POST /api/consent/:id/account`, and
+      `POST /api/consent/:id/deny` on the control API; `ui/src/screens/ConsentScreen.svelte` and a
+      sidebar entry with a live badge. **There is no Allow button and there must never be one** —
+      approval is the user typing the code into the app, and a button here would defeat the code.
+      Reaching the user is two channels, picked on whether anyone is watching: a UI client connected
+      means the app raises its own sheet plus a Web Notification, and nothing connected means the
+      daemon raises an **OS notification** and opens the browser on the consent screen
+      (`os/desktop-notification.ts`, `os/open-url.ts`, `wiring/consent-alert.ts`). Decisions 59–61.
 - [ ] **2.7 Mirror routes** — one Hono route per operation from the generated route table, never a
       catch-all, so an unknown path falls through to VRChat's real 404 and a route with no scope
       mapping fails to register. `scopeGuard` off the route table, hard denials regardless of scope,
@@ -524,6 +526,27 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     pending code, which is correct — they expire in five minutes and an app simply logs in again.
     The `consent.pending` / `consent.resolved` bus events are **ephemeral**: `pairing_requests` is
     already their durable record, and the feed is otherwise about what happened in VRChat.
+59. **Reaching the user is two channels, and which one runs depends on whether anyone is watching.**
+    A Web Notification only fires from a loaded page, which is precisely the case a consent prompt
+    cannot assume — the flow exists because the user may be elsewhere. So: a UI client connected
+    (`ControlDeps.streamClientCount() > 0`) means the app handles it and the daemon stays out of the
+    way entirely; nothing connected means an OS notification *and* an opened browser tab. Both, not
+    either: a Windows toast cannot carry a click handler without a registered AppUserModelID and a
+    COM activator, which needs an installer (Phase 5), so the tab is what actually delivers the user
+    and the toast is what explains why one just opened. Opening a tab on top of an app the user
+    already has open is the kind of "help" that trains people to close things unread.
+60. **The OS notification shims are spawned argv, never shell strings, and are best-effort.** The
+    app name and contact in them come off a third-party `User-Agent`, so they are attacker-influenced
+    text; a toast is not worth a command injection. On Windows the text goes through `$env:` rather
+    than being interpolated into the PowerShell script, because PowerShell has its own quoting rules
+    on top of the argv boundary. `openUrl` refuses anything that is not loopback HTTP — the URL it
+    opens carries a session token, and without that check it is a general "launch whatever this
+    string says" primitive. Every failure is silent: headless boxes, containers, and desktops with
+    notifications off are all normal environments and none is a reason to fail a login.
+61. **The pairing code never rides on the bus.** `consent.pending` carries the app identity and the
+    scopes; the code is read from the registry by the daemon's alert path and from the control API
+    by the UI. The stream fans out to every client and, later, to plugins, while the code belongs
+    only behind the session token — and it is the whole proof-of-presence the flow rests on.
 41. **The pipeline endpoint is injectable, and there is a fixture socket behind it.**
     `startDaemon({ pipelineUrl })` joins `baseUrl` as a test seam, and
     `daemon/src/testing/pipeline-fixture.ts` is a real `Bun.serve` WebSocket rather than an injected
@@ -560,6 +583,12 @@ Empirical notes. Add to this as you hit things — especially where the plan tur
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
 
+- **`clock.now` is frozen unless something calls `clock.subscribe()`.** The shared clock only runs
+  its interval while a reader has claimed it, so a screen that reads `clock.now` inside a `$derived`
+  without subscribing renders the time it mounted at and then never moves. Nothing errors and
+  nothing logs. On the consent screen that meant a five-minute countdown stuck at 4:27 and an
+  expired code still offered as though it worked — caught by watching the real screen for ten
+  seconds, and invisible to `svelte-check`, which is exactly the gap §UI notes warns about.
 - **A path segment in VRChat's spec can hold more than one parameter.**
   `/instances/{worldId}:{instanceId}` is one segment, two parameters and a separator, and the
   obvious `startsWith("{") && endsWith("}")` test reads it as a single parameter named

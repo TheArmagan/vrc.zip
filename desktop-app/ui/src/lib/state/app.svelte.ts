@@ -21,7 +21,7 @@ import {
   type Settings,
 } from "../api.ts";
 import { EPHEMERAL_KINDS, frameToEvent, type LiveEvent } from "../events.ts";
-import { notifyForEvent } from "../notifications.ts";
+import { notify, notifyForEvent } from "../notifications.ts";
 import { hrefFor } from "../router.ts";
 import {
   connectStream,
@@ -29,6 +29,7 @@ import {
   type StreamFrame,
   type StreamState,
 } from "../stream.ts";
+import { consent } from "./consent.svelte.ts";
 import { liveSessions } from "./live-sessions.svelte.ts";
 import { prefs } from "./prefs.svelte.ts";
 
@@ -264,6 +265,9 @@ class AppState {
       case "notification":
         this.#applyNotificationFrame(frame);
         break;
+      case "consent":
+        this.#applyConsentFrame(frame);
+        break;
       default:
         break;
     }
@@ -274,6 +278,37 @@ class AppState {
    * would otherwise turn every incoming invite into a round trip. Only `received` needs the
    * daemon, because the frame carries VRChat's shape and the list wants the daemon's.
    */
+  /**
+   * An app is asking for access, or has stopped asking.
+   *
+   * The list is **re-read from the control API** rather than built from this frame, because the
+   * frame carries no pairing code — it fans out to every stream client and, later, to plugins,
+   * while the code belongs only to a screen behind the session token.
+   *
+   * The Web Notification here is the in-app half of getting the user's attention. The daemon covers
+   * the other half: when no UI client is connected at all it raises an OS notification and opens
+   * the browser, because a page that is not loaded cannot notify anybody. See
+   * `daemon/src/wiring/consent-alert.ts`.
+   */
+  #applyConsentFrame(frame: StreamFrame): void {
+    void consent.refresh();
+    if (frame.type !== "consent.pending") return;
+
+    const payload = frame.payload;
+    const data = (payload?.data ?? null) as { app?: { name?: string } } | null;
+    const name = data?.app?.name ?? "An app";
+    const pairingId = payload?.subjectId ?? null;
+    notify({
+      title: `${name} wants to use your VRChat account`,
+      body: "Open vrc.zip to see the code it needs.",
+      // One notification per request, not one per retry.
+      tag: `vrcz:consent:${pairingId ?? "unknown"}`,
+      onClick: () => {
+        window.location.hash = hrefFor("consent", pairingId ?? undefined);
+      },
+    });
+  }
+
   #applyNotificationFrame(frame: StreamFrame): void {
     const subjectId = frame.payload?.subjectId ?? null;
 

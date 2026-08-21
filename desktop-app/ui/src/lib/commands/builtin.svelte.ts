@@ -24,6 +24,7 @@ const NAV_TITLES: Record<RouteId, string> = {
   feed: "Go to Feed",
   gamelog: "Go to Game log",
   notifications: "Go to Notifications",
+  consent: "Go to App access",
   settings: "Go to Settings",
 };
 
@@ -35,6 +36,7 @@ const NAV_SUBTITLES: Record<RouteId, string> = {
   feed: "Everything that happened, newest first",
   gamelog: "Parsed lines from the running clients' log files",
   notifications: "Invites, friend requests, and messages",
+  consent: "Apps asking to use your VRChat accounts through vrc.zip",
   settings: "Contact address, log directories, ports",
 };
 

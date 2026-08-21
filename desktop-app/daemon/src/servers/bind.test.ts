@@ -17,6 +17,12 @@ const deps: ControlDeps = {
     rateLimit: { limit: 20, remaining: 20, queued: 0, retryAfter: null },
   }),
   listAccounts: async () => [],
+  listPendingConsent: async () => [],
+  setConsentAccount: async () => {
+    throw new Error("unused");
+  },
+  denyConsent: async () => {},
+  streamClientCount: () => 0,
   login: async () => ({ status: "requires-2fa", accountId: "usr_1", methods: ["totp"] }),
   verifyTwoFactor: async () => {
     throw new Error("unused");

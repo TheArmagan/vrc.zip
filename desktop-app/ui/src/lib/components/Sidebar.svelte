@@ -17,8 +17,10 @@ import UsersIcon from "@lucide/svelte/icons/users";
 import UsersRoundIcon from "@lucide/svelte/icons/users-round";
 import { Badge } from "$lib/components/ui/badge/index.js";
 import { Separator } from "$lib/components/ui/separator/index.js";
+import PlugZapIcon from "@lucide/svelte/icons/plug-zap";
 import { hrefFor, type RouteId } from "$lib/router.ts";
 import { app } from "$lib/state/app.svelte.ts";
+import { consent } from "$lib/state/consent.svelte.ts";
 
 let { current }: { current: RouteId } = $props();
 
@@ -55,6 +57,13 @@ const items: readonly NavItem[] = [
     icon: BellIcon,
     badge: () => (app.unseenNotifications.length === 0 ? null : app.unseenNotifications.length),
     badgeTitle: "Unseen VRChat notifications",
+  },
+  {
+    id: "consent",
+    label: "App access",
+    icon: PlugZapIcon,
+    badge: () => (consent.count === 0 ? null : consent.count),
+    badgeTitle: "Apps waiting for you to approve them",
   },
   { id: "settings", label: "Settings", icon: SettingsIcon },
 ];

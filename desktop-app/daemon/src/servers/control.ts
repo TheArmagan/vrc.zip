@@ -692,6 +692,47 @@ export interface StreamEvent {
  * Narrow on purpose: every method here is one route's worth of work, which keeps the seam between
  * "HTTP" and "the daemon" small enough to hold in your head and lets the two be built in parallel.
  */
+/**
+ * One app waiting at the consent sheet. PLAN.md §Phase 2 "Pending consent".
+ *
+ * **The pairing code is on this payload, and that is deliberate.** It is the whole point of the
+ * screen: the user reads it here and types it into the app, and that gesture is the consent. It
+ * never goes to the app itself, only to the vrc.zip UI behind the session token.
+ */
+export interface PendingConsentRequest {
+  id: string;
+  /** Null when the app asked the user to choose, or named an account not in vrc.zip yet. */
+  accountId: string | null;
+  /** Whichever account `accountId` names, resolved for display. Null with `accountId`. */
+  accountName: string | null;
+  /** What the app put in the username field, shown verbatim so the user recognises it. */
+  requestedUsername: string;
+  app: { name: string; version: string; contact: string };
+  /** Everything the app asked for, each with the plain-English line from the shared registry. */
+  scopes: ConsentScope[];
+  /**
+   * Whether this is an escalation: the app already holds a grant and is asking for more.
+   *
+   * The sheet leads with the *new* scopes in that case. Re-listing what the user already approved
+   * makes the new ask harder to see, not easier.
+   */
+  escalation: boolean;
+  /** Six digits. */
+  code: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
+/** One requested scope, as the consent sheet renders it. */
+export interface ConsentScope {
+  scope: string;
+  description: string;
+  /** Shown in its own block behind a second toggle, and never reachable through a wildcard. */
+  dangerous: boolean;
+  /** False when the app already holds this scope — an escalation shows those greyed, not hidden. */
+  isNew: boolean;
+}
+
 export interface ControlDeps {
   /** Backing data for `GET /api/status`. `version` is added by the route from `@vrcz/shared`. */
   status(): Promise<StatusSnapshot>;
@@ -743,6 +784,35 @@ export interface ControlDeps {
   /** `null` means every account. Notifications are state, not feed history — see the sink. */
   listNotifications(accountId: string | null): Promise<NotificationItem[]>;
   markNotificationSeen(id: string): Promise<void>;
+
+  /**
+   * Apps currently waiting at the consent sheet, oldest first.
+   *
+   * Carries the pairing code, so this route is exactly as sensitive as the session token that
+   * guards it. There is no unauthenticated variant and there must never be one.
+   */
+  listPendingConsent(): Promise<PendingConsentRequest[]>;
+
+  /**
+   * Binds a pending request to an account — the picker, for the reserved "let the user choose"
+   * username, and for an app that named an account only added just now.
+   *
+   * Until this happens a correct code is still refused, because pairing to nothing would either
+   * fail later or pick an account on the user's behalf. Throws `ControlError(404, "unknown_consent")`
+   * for a request that has expired or already been answered.
+   */
+  setConsentAccount(pairingId: string, accountId: string): Promise<PendingConsentRequest>;
+
+  /** The user said no. Idempotent; a request that is already gone is not an error. */
+  denyConsent(pairingId: string): Promise<void>;
+
+  /**
+   * How many UI clients currently hold an event-stream socket.
+   *
+   * Synchronous and not a promise: it is read on the path that decides whether to raise an OS
+   * notification, and that decision must not be able to lag behind the socket it describes.
+   */
+  streamClientCount(): number;
 
   /**
    * VRChat's `getUser` merged with the local friend log and note, for the user modal.
@@ -1450,6 +1520,29 @@ export function createControlApp({ port, deps, token }: ControlAppOptions) {
           ETag: etag,
         },
       });
+    })
+
+    /*
+     * Consent. These three are the whole of the sheet: read what is pending, tell the daemon which
+     * account the user picked, or refuse. Approval is deliberately *not* here — the approving
+     * gesture is the user typing the code into the app, which lands on `:7774`. A button here that
+     * approved directly would defeat the point of the code, which is to prove the person at this
+     * screen is the person operating that app.
+     */
+    .get("/api/consent", async (c) => c.json(await deps.listPendingConsent()))
+
+    .post("/api/consent/:id/account", async (c) => {
+      const body = await readJsonObject(c.req.raw);
+      const accountId = typeof body?.accountId === "string" ? body.accountId : "";
+      if (accountId === "") {
+        throw new ControlError(400, "invalid_body", "accountId is required");
+      }
+      return c.json(await deps.setConsentAccount(c.req.param("id"), accountId));
+    })
+
+    .post("/api/consent/:id/deny", async (c) => {
+      await deps.denyConsent(c.req.param("id"));
+      return c.body(null, 204);
     })
 
     .get("/api/settings", async (c) => c.json(await deps.getSettings()))

@@ -264,6 +264,12 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
       rateLimit: { limit: 20, remaining: 20, queued: 0, retryAfter: null },
     }),
     listAccounts: async () => [ACCOUNT],
+    listPendingConsent: async () => [],
+    setConsentAccount: async () => {
+      throw new Error("unused");
+    },
+    denyConsent: async () => {},
+    streamClientCount: () => 0,
     login: async ({ username }) =>
       username === "needs2fa"
         ? { status: "requires-2fa", accountId: ACCOUNT.id, methods: ["totp", "emailOtp"] }

@@ -549,6 +549,38 @@ export interface InstanceDetail {
   readonly instance: InstanceInfo | null;
 }
 
+/**
+ * One app waiting at the consent sheet. See `PLAN.md` §Phase 2 "Pending consent".
+ *
+ * **`code` is the point of the screen.** The user reads it here and types it into the app, and that
+ * gesture is the consent — it proves the person operating the app is the person at this screen. It
+ * is never sent to the app.
+ */
+export interface PendingConsent {
+  readonly id: string;
+  /** Null when the app asked the user to choose, or named an account not added yet. */
+  readonly accountId: string | null;
+  readonly accountName: string | null;
+  /** What the app typed in the username field, shown verbatim so the user recognises it. */
+  readonly requestedUsername: string;
+  readonly app: { readonly name: string; readonly version: string; readonly contact: string };
+  readonly scopes: readonly ConsentScope[];
+  /** The app already holds a grant and is asking for more; the sheet leads with the new ones. */
+  readonly escalation: boolean;
+  readonly code: string;
+  readonly createdAt: number;
+  readonly expiresAt: number;
+}
+
+export interface ConsentScope {
+  readonly scope: string;
+  readonly description: string;
+  /** Shown in its own block, and never reachable through a wildcard request. */
+  readonly dangerous: boolean;
+  /** False when the app already holds it — an escalation greys those rather than hiding them. */
+  readonly isNew: boolean;
+}
+
 export interface SettingsPorts {
   readonly ui: number;
   readonly proxy: number;
@@ -1057,6 +1089,28 @@ export const api = {
         method: "POST",
         body: { location },
       }),
+  },
+
+  /**
+   * The proxy's consent sheets. There is deliberately no "approve" call here: approval is the user
+   * typing the code into the app, which lands on the mirror port. A button that granted access
+   * directly would defeat the code, whose whole job is to prove the person at this screen is the
+   * person operating that app.
+   */
+  consent: {
+    list: (signal?: AbortSignal): Promise<PendingConsent[]> =>
+      request<PendingConsent[]>("/consent", withSignal(signal)),
+
+    /** Binds a request to an account — the picker, and the "add this account first" case. */
+    setAccount: (pairingId: string, accountId: string): Promise<PendingConsent> =>
+      request<PendingConsent>(`/consent/${encodeURIComponent(pairingId)}/account`, {
+        method: "POST",
+        body: { accountId },
+      }),
+
+    /** Idempotent: denying something already gone is the outcome the user wanted anyway. */
+    deny: (pairingId: string): Promise<void> =>
+      request<void>(`/consent/${encodeURIComponent(pairingId)}/deny`, { method: "POST" }),
   },
 
   sessions: (signal?: AbortSignal): Promise<GameSession[]> =>

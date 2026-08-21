@@ -16,6 +16,7 @@ import { readStateFile, removeStateFile, writeStateFile } from "./security/state
 import { type BoundServers, bindServers } from "./servers/index.ts";
 import { loadSettings, needsFirstRun, type Settings, saveSettings } from "./settings.ts";
 import { type RetentionScheduler, Store, startRetentionScheduler } from "./store/index.ts";
+import { attachConsentAlerts } from "./wiring/consent-alert.ts";
 import { createControlDeps } from "./wiring/control-deps.ts";
 import { FeedWriter } from "./wiring/feed-writer.ts";
 import { createLogSink } from "./wiring/log-bridge.ts";
@@ -206,23 +207,11 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     );
   }
 
-  const deps = createControlDeps({
-    accounts,
-    store,
-    bus,
-    limiter,
-    secrets,
-    settings,
-    presence,
-    connectPipeline,
-    ...(env !== undefined ? { env } : {}),
-    onSettingsSaved: (next) => saveSettings(next, env),
-  });
-
   // --- the proxy's collaborators --------------------------------------------
   // Consent is its own object rather than something the proxy owns, because the *UI* is the other
   // half of it: the sheet, the account picker, and the six-digit code all live on the control API,
-  // and a registry buried inside the mirror would have to be reached back into from there.
+  // and a registry buried inside the mirror would have to be reached back into from there. It is
+  // built here, above the control deps, because both sides read the same instance.
   const consent = new ConsentRegistry({ store, bus });
 
   const proxyDeps = {
@@ -239,6 +228,20 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     // be faithful to, because the login never reaches VRChat.
     currentUser: (accountId: string) => accounts.get(accountId)?.user ?? null,
   };
+
+  const deps = createControlDeps({
+    accounts,
+    store,
+    bus,
+    limiter,
+    secrets,
+    settings,
+    presence,
+    consent,
+    connectPipeline,
+    ...(env !== undefined ? { env } : {}),
+    onSettingsSaved: (next) => saveSettings(next, env),
+  });
 
   const servers = await bindServers({
     deps,
@@ -280,6 +283,19 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
 
   const launchUrl = `${servers.urls.uiUrl}/?token=${sessionToken}`;
 
+  // --- getting a consent request in front of the user -----------------------
+  // Which channel runs depends on whether anyone is watching; see `wiring/consent-alert.ts`. The
+  // token is in the URL because a browser opened cold has no other way to authenticate its first
+  // navigation — the same reason the launch URL carries one.
+  const detachConsentAlerts = attachConsentAlerts({
+    bus,
+    consent,
+    uiConnected: () => deps.streamClientCount() > 0,
+    consentUrl: (pairingId) =>
+      `${servers.urls.uiUrl}/?token=${sessionToken}#/consent/${encodeURIComponent(pairingId)}`,
+    openBrowser: () => settings.openBrowserOnStart,
+  });
+
   return {
     bus,
     store,
@@ -291,6 +307,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     async stop() {
       // Order is the reverse of construction, and the first two lines are the ones that matter:
       // stop accepting work, then flush what is already queued, before anything closes.
+      detachConsentAlerts();
       watcher.stop();
       presence.stop();
       notificationSync.stop();

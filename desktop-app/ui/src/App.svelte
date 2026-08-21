@@ -23,6 +23,7 @@ import { currentRoute, onRouteChange, type Route } from "$lib/router.ts";
 import { app } from "$lib/state/app.svelte.ts";
 import { theme } from "$lib/state/theme.svelte.ts";
 import AccountsScreen from "./screens/AccountsScreen.svelte";
+import ConsentScreen from "./screens/ConsentScreen.svelte";
 import FeedScreen from "./screens/FeedScreen.svelte";
 import FriendsScreen from "./screens/FriendsScreen.svelte";
 import GameLogScreen from "./screens/GameLogScreen.svelte";
@@ -126,6 +127,9 @@ const offline = $derived(!app.reachable);
       <GameLogScreen sessionId={route.param} />
     {:else if route.id === "notifications"}
       <NotificationsScreen />
+    {:else if route.id === "consent"}
+      <!-- `#/consent/<pairingId>` — where the daemon's browser-open lands. -->
+      <ConsentScreen pairingId={route.param} />
     {:else}
       <SettingsScreen />
     {/if}

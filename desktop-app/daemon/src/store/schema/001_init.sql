@@ -53,7 +53,11 @@ CREATE UNIQUE INDEX ux_sessions_log ON sessions (log_path, started_at);
 
 CREATE TABLE events (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  account_id TEXT    NOT NULL REFERENCES accounts (id) ON DELETE CASCADE,
+  -- Nullable on purpose. A VRChat client signed into an account vrc.zip does not manage is a
+  -- normal state, not an error: its session stays unlinked and so do its gamelog events. NOT NULL
+  -- here would force us to either drop those events or invent an account for them, and both are
+  -- worse than a null. A NULL foreign key is permitted and skips the reference check.
+  account_id TEXT    REFERENCES accounts (id) ON DELETE CASCADE,
   ts         INTEGER NOT NULL,
   session_id INTEGER REFERENCES sessions (id) ON DELETE SET NULL,
   kind       TEXT    NOT NULL,
@@ -167,7 +171,9 @@ CREATE INDEX ix_avatar_history_acct_last ON avatar_history (account_id, last_see
 -- with the same arithmetic as every other timestamp. `subject_id` is '' rather than NULL so the
 -- primary key stays usable (SQLite treats NULLs in a PK as distinct).
 CREATE TABLE events_daily (
-  account_id TEXT    NOT NULL,
+  -- '' stands in for "no account" here, matching subject_id below: SQLite treats NULLs in a
+  -- primary key as distinct, so a nullable column would let duplicate rollup rows accumulate.
+  account_id TEXT    NOT NULL DEFAULT '',
   day        INTEGER NOT NULL,
   kind       TEXT    NOT NULL,
   subject_id TEXT    NOT NULL DEFAULT '',

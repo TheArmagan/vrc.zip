@@ -130,7 +130,7 @@ export const SQL = {
   rollupExpiring: `
     INSERT INTO events_daily (account_id, day, kind, subject_id, count, total_ms)
     SELECT
-      account_id,
+      COALESCE(account_id, '') AS account_id,
       (ts / 86400000) * 86400000 AS day,
       kind,
       COALESCE(subject_id, '') AS subject,
@@ -142,7 +142,7 @@ export const SQL = {
       ), 0)
     FROM events
     WHERE kind = ? AND ts < ?
-    GROUP BY account_id, day, kind, subject
+    GROUP BY COALESCE(account_id, ''), day, kind, subject
     ON CONFLICT(account_id, day, kind, subject_id) DO UPDATE SET
       count    = events_daily.count + excluded.count,
       total_ms = events_daily.total_ms + excluded.total_ms`,

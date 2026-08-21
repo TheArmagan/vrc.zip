@@ -400,7 +400,7 @@ function prepareAll(db: Database) {
 
     insertEvent: q<
       void,
-      [string, number, number | null, string, string | null, string | null, string | null]
+      [string | null, number, number | null, string, string | null, string | null, string | null]
     >(SQL.insertEvent),
     listEvents: q<EventRow, [string, number, number]>(SQL.listEvents),
     listEventsBySubject: q<EventRow, [string, number, number]>(SQL.listEventsBySubject),

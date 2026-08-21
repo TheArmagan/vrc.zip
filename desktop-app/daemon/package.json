@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@vrcz/api": "workspace:*",
-    "@vrcz/shared": "workspace:*"
+    "@vrcz/shared": "workspace:*",
+    "hono": "4.13.3"
   }
 }

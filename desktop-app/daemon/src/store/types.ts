@@ -34,7 +34,8 @@ export type NewSession = Omit<SessionRow, "id" | "ended_at" | "exit_kind">;
 
 export type EventRow = {
   id: number;
-  account_id: string;
+  /** Null for events from a game client signed into an account vrc.zip does not manage. */
+  account_id: string | null;
   ts: number;
   session_id: number | null;
   kind: string;

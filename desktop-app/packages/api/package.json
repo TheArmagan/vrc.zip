@@ -4,7 +4,8 @@
   "description": "Generated VRChat API client and route table (codegen output, committed).",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./types": "./src/generated/types.gen.ts"
   },
   "private": true,
   "scripts": {

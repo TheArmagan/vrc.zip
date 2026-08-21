@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>vrc.zip</title>
+    <script>
+      // Applied before first paint so the shell never flashes the wrong theme.
+      // Dark is the default; light is opt-in and persisted per browser profile.
+      try {
+        const stored = localStorage.getItem("vrcz.theme");
+        document.documentElement.classList.toggle("dark", stored !== "light");
+      } catch {
+        /* private mode / storage disabled — keep the dark default from the markup */
+      }
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

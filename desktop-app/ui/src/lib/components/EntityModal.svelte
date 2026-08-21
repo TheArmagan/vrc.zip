@@ -144,7 +144,7 @@ const BODY = "min-h-0 overflow-y-auto px-6 pt-4 pb-6";
       <button
         type="button"
         onclick={onClose}
-        class="absolute top-3.5 left-4 z-20 inline-flex max-w-[55%] items-center gap-1 rounded-full bg-popover/85 px-2 py-1 text-xs text-popover-foreground ring-1 ring-foreground/10 backdrop-blur transition-colors hover:bg-popover focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
+        class="absolute top-3.5 left-4 z-20 inline-flex max-w-[55%] cursor-pointer items-center gap-1 rounded-full bg-popover/85 px-2 py-1 text-xs text-popover-foreground ring-1 ring-foreground/10 backdrop-blur transition-colors hover:bg-popover focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
       >
         <ChevronLeftIcon class="size-3.5 shrink-0" aria-hidden="true" />
         <span class="truncate">{backLabel}</span>

@@ -11,7 +11,14 @@ import type { Store } from "../store/index.ts";
  */
 
 /** Kinds that are UI state, not history. Writing them would bloat the feed with noise. */
-const EPHEMERAL = new Set(["account.state", "session.update", "pipeline.state"]);
+const EPHEMERAL = new Set([
+  "account.state",
+  "session.update",
+  "pipeline.state",
+  // A backfill summary, not something that happened to the user. Persisting it would put a row
+  // reading "synced 250 notifications" into the feed on every poll, forever.
+  "notification.synced",
+]);
 
 export interface FeedWriterOptions {
   readonly flushIntervalMs?: number;

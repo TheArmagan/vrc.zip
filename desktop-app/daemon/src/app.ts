@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { AccountManager } from "./accounts/manager.ts";
+import { NotificationService } from "./accounts/notifications.ts";
 import { PresenceService } from "./accounts/presence.ts";
 import { EventBus } from "./bus/event-bus.ts";
 import { discoverLogDirectories, LogWatcher } from "./game-logs/index.ts";
@@ -156,6 +157,14 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
   const presence = new PresenceService({ accounts, store, bus });
   presence.start();
 
+  // --- notification backfill -------------------------------------------------
+  // The sink below persists what the *socket* delivers; this fetches what was already pending
+  // before we connected. Without it the Notifications screen only ever shows what happened to
+  // arrive while the daemon was watching, which on a real account means an empty screen and a
+  // three-hundred-item backlog nobody can see.
+  const notificationSync = new NotificationService({ accounts, store, bus });
+  notificationSync.start();
+
   // --- game log watcher -----------------------------------------------------
   const logDirectories =
     settings.logDirectories.length > 0
@@ -254,6 +263,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
       // stop accepting work, then flush what is already queued, before anything closes.
       watcher.stop();
       presence.stop();
+      notificationSync.stop();
       retention.stop();
       for (const client of pipelines.values()) client.dispose();
       feedWriter.detach();

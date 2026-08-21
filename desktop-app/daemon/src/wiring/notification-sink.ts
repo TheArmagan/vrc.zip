@@ -1,5 +1,6 @@
 import type { BusEvent, EventBus, Subscription } from "../bus/event-bus.ts";
 import type { Store } from "../store/index.ts";
+import type { NotificationRow } from "../store/types.ts";
 
 /**
  * Persists notifications from the pipeline into the `notifications` table.
@@ -13,15 +14,22 @@ import type { Store } from "../store/index.ts";
  * nothing downstream has to know which generation a notification came from.
  */
 
-interface NotificationPayload {
+export interface NotificationPayload {
   id?: unknown;
   type?: unknown;
+  /** v2 calls it `category`. */
+  category?: unknown;
   senderUserId?: unknown;
   senderUsername?: unknown;
   message?: unknown;
+  /** v2 only; used when `message` is empty. */
+  title?: unknown;
   created_at?: unknown;
   createdAt?: unknown;
+  seen?: unknown;
   data?: unknown;
+  /** v1 REST only, and a JSON-encoded string rather than an object. See `toNotificationRow`. */
+  details?: unknown;
 }
 
 function str(value: unknown): string | null {
@@ -88,33 +96,81 @@ export class NotificationSink {
   }
 
   #upsert(event: BusEvent): void {
-    const payload = event.payload;
-    if (typeof payload !== "object" || payload === null) return;
-
-    const record = payload as NotificationPayload;
-    const id = str(record.id);
-    if (!id || !event.accountId) return;
-
-    const created = record.created_at ?? record.createdAt;
-    const createdAt = typeof created === "string" ? Date.parse(created) : Number.NaN;
-
-    this.store.putNotification({
-      id,
-      account_id: event.accountId,
-      // VRChat's `created_at` is an ISO string; we store integer ms everywhere. Fall back to when
-      // we received it rather than to 0, which would sort the row to the beginning of time.
-      ts: Number.isFinite(createdAt) ? createdAt : event.ts,
-      type: str(record.type) ?? "unknown",
-      sender_user_id: str(record.senderUserId),
-      sender_display_name: str(record.senderUsername),
-      message: str(record.message),
-      seen: 0,
-      data: record.data === undefined ? null : JSON.stringify(record.data),
-    });
+    if (!event.accountId) return;
+    const row = toNotificationRow(event.payload, event.accountId, event.ts);
+    if (row !== null) this.store.putNotification(row);
   }
 
   #markSeen(event: BusEvent): void {
     const id = idFromPayload(event.payload);
     if (id) this.store.markNotificationSeen(id);
   }
+}
+
+/**
+ * One VRChat notification — from the socket **or** from the REST backfill — as a store row.
+ *
+ * Exported and shared on purpose: the pipeline and the REST poll deliver the same notifications in
+ * subtly different shapes, and two mappings would drift into two different sets of bugs. The
+ * differences this has to absorb:
+ *
+ *  - **`details` is a JSON-encoded *string* over REST and a real object over the socket.** The
+ *    generated types say so explicitly. Storing the raw string would put an escaped blob in the
+ *    `data` column for exactly half of all notifications.
+ *  - **`created_at` (v1) vs `createdAt` (v2)**, both ISO strings, while every column here is
+ *    integer ms.
+ *  - **`type` (v1) vs `category` (v2)**.
+ *  - **`senderUsername` is deprecated and VRChat no longer returns it**, so a backfilled row's
+ *    display name is usually null. That is not a failure: the id is what matters, and the UI
+ *    resolves names from the user endpoint.
+ *
+ * Returns null when the payload carries no usable id, which is the only genuinely unusable case.
+ */
+export function toNotificationRow(
+  payload: unknown,
+  accountId: string,
+  receivedAt: number,
+): NotificationRow | null {
+  if (typeof payload !== "object" || payload === null) return null;
+
+  const record = payload as NotificationPayload;
+  const id = str(record.id);
+  if (id === null) return null;
+
+  const created = record.created_at ?? record.createdAt;
+  const createdAt = typeof created === "string" ? Date.parse(created) : Number.NaN;
+
+  return {
+    id,
+    account_id: accountId,
+    // Fall back to when we received it rather than to 0, which would sort the row to the
+    // beginning of time and bury it under every notification the user has ever had.
+    ts: Number.isFinite(createdAt) ? createdAt : receivedAt,
+    type: str(record.type) ?? str(record.category) ?? "unknown",
+    sender_user_id: str(record.senderUserId),
+    sender_display_name: str(record.senderUsername),
+    message: str(record.message) ?? str(record.title),
+    seen: record.seen === true ? 1 : 0,
+    data: encodeData(record),
+  };
+}
+
+/** `data` (v2, object), `details` (v1, a JSON *string*), or nothing. */
+function encodeData(record: NotificationPayload): string | null {
+  if (record.data !== undefined && record.data !== null) return JSON.stringify(record.data);
+
+  const details = record.details;
+  if (typeof details === "string") {
+    if (details === "") return null;
+    try {
+      // Re-encode rather than pass through, so the column holds one shape: a JSON object, never a
+      // JSON string containing JSON.
+      return JSON.stringify(JSON.parse(details));
+    } catch {
+      // VRChat has shipped malformed `details` before. Keep it as a string rather than losing it.
+      return JSON.stringify(details);
+    }
+  }
+  if (details !== undefined && details !== null) return JSON.stringify(details);
+  return null;
 }

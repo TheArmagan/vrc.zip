@@ -17,7 +17,7 @@ async function main(): Promise<void> {
   const daemon = await startDaemon();
 
   console.log(`  UI       ${daemon.servers.urls.uiUrl}`);
-  console.log(`  proxy    ${daemon.servers.urls.proxyUrl}  (Phase 2, not implemented)`);
+  console.log(`  proxy    ${daemon.servers.urls.proxyUrl}  (VRChat API mirror)`);
   console.log(`  control  ${daemon.servers.urls.controlUrl}`);
   console.log("");
   console.log(`  Open: ${daemon.launchUrl}`);

@@ -69,7 +69,7 @@ export function attachConsentAlerts(options: ConsentAlertOptions): () => void {
     const result = await notify({
       title: `${pending.app.name} wants to use your VRChat account`,
       body:
-        `Code ${pending.code} — type it into ${pending.app.name} to allow it ` +
+        `Code ${pending.code}. Type it into ${pending.app.name} to allow it ` +
         `${scopeCount === 1 ? "one new permission" : `${String(scopeCount)} new permissions`}.`,
     });
 

@@ -886,6 +886,12 @@ Carried in from research, not yet verified against running code:
 
 ## Conventions
 
+- **No em-dashes in user-facing text.** UI copy, notification titles and bodies, daemon console
+  output, and API error `message` fields use a full stop or a colon instead. Comments, JSDoc, and
+  these documents are unaffected: the rule is about product copy. A few pre-existing instances are
+  still around (the startup banner, the setup-required message, the game-log empty state) and are
+  worth sweeping when those lines are next touched.
+
 - **Bun-first.** `bun:sqlite`, `Bun.serve`, `Bun.spawn`, `bun test`. No Node compat shims unless forced.
 - **Hono** for HTTP, three separate app instances (one per port) so the mirror cannot accidentally
   serve a control route. Cross-cutting concerns are middleware, never per-route code: `hostGuard`,

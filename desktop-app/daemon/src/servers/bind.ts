@@ -152,7 +152,7 @@ function reportEgressViolation(
   console.error(
     `[vrc.zip] EGRESS FILTER BLOCKED A RESPONSE: a real VRChat credential appeared in the ` +
       `${violation.where} (${violation.detail}) of ${request.method} ${request.path}. ` +
-      `The client received an empty 500. This is a bug in the proxy path — see PLAN.md §Phase 2.`,
+      `The client received an empty 500. This is a bug in the proxy path. See PLAN.md §Phase 2.`,
   );
 }
 

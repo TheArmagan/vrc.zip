@@ -1,0 +1,36 @@
+# dependencies
+node_modules
+
+# build output
+dist
+out
+*.tgz
+*.tsbuildinfo
+
+# test / coverage
+coverage
+*.lcov
+
+# local runtime state — the daemon writes these; they hold tokens and credentials
+state.json
+secrets.enc
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# the bundled bun binary is fetched by tools/, not committed — see PLAN.md §Phase 5
+/runtime/
+
+# env
+.env
+.env.*.local
+
+# caches
+.cache
+.eslintcache
+
+# editors / OS
+.idea
+.vscode/*
+!.vscode/extensions.json
+.DS_Store

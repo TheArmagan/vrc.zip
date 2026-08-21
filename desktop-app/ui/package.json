@@ -1,0 +1,14 @@
+{
+  "name": "@vrcz/ui",
+  "version": "0.1.0",
+  "description": "Svelte 5 + shadcn-svelte frontend, built by Vite and served statically by the daemon.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "echo 'Not scaffolded yet — Phase 1.9.' && exit 1",
+    "build": "echo 'Not scaffolded yet — Phase 1.9.' && exit 1"
+  },
+  "dependencies": {
+    "@vrcz/shared": "workspace:*"
+  }
+}

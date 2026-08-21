@@ -1,0 +1,17 @@
+{
+  "name": "@vrcz/daemon",
+  "version": "0.1.0",
+  "description": "vrc.zip daemon — accounts, pipeline, store, log watcher, and the three HTTP servers.",
+  "type": "module",
+  "private": true,
+  "main": "./src/index.ts",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@vrcz/api": "workspace:*",
+    "@vrcz/shared": "workspace:*"
+  }
+}

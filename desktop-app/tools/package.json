@@ -1,0 +1,14 @@
+{
+  "name": "@vrcz/tools",
+  "version": "0.1.0",
+  "description": "Build-time tooling: OpenAPI codegen, route-table emit, packaging.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "codegen": "bun src/codegen.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@vrcz/shared": "workspace:*"
+  }
+}

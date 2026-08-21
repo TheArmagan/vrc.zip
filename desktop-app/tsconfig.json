@@ -1,0 +1,11 @@
+{
+  // Single whole-workspace typecheck. Deliberately not project references: those require
+  // `composite`, which is incompatible with the `noEmit` posture here — Bun runs the TS
+  // directly and nothing in this repo is compiled by `tsc`.
+  // Cross-package imports resolve through Bun's workspace symlinks and each package's
+  // `exports` field, so no `paths` mapping is needed (and none should be added — a second
+  // resolution mechanism is a second thing to drift).
+  "extends": "./tsconfig.base.json",
+  "include": ["packages/*/src/**/*.ts", "daemon/src/**/*.ts", "tools/src/**/*.ts"],
+  "exclude": ["node_modules", "**/dist", "ui"]
+}

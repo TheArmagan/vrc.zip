@@ -1,0 +1,13 @@
+{
+  "name": "@vrcz/shared",
+  "version": "0.1.0",
+  "description": "Event types, scope registry, and wire protocol shared by daemon, proxy, UI, and docs.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  }
+}

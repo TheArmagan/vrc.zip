@@ -1,0 +1,9 @@
+# The bundled runtime is a build input, not a developer prerequisite — see PLAN.md §Phase 5.
+# `.bun-version` and `packageManager` pin it; keep all three in step when bumping.
+
+[install]
+exact = true
+linker = "hoisted"
+
+[test]
+coverage = false

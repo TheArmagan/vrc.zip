@@ -1,0 +1,8 @@
+/**
+ * `@vrcz/shared` — the single source of truth for anything the daemon, proxy, UI, and docs must
+ * agree on: event types, the scope registry, and wire protocol types.
+ *
+ * Nothing here may import from `@vrcz/daemon`, `@vrcz/api`, or `@vrcz/ui`. This package is a leaf.
+ */
+
+export { APP_NAME, APP_VERSION, PLUGIN_API_PROTOCOL_MAJOR } from "./version.ts";

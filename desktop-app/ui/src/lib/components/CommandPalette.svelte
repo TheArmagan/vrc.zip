@@ -7,8 +7,7 @@
   indistinguishable from one that never existed, and the user has no way to learn why.
 -->
 <script lang="ts">
-import { HugeiconsIcon } from "@hugeicons/svelte";
-import { Search01Icon } from "@hugeicons/core-free-icons";
+import SearchIcon from "@lucide/svelte/icons/search";
 import {
   type CommandMatch,
   formatBinding,
@@ -135,8 +134,8 @@ function indexOfCommand(command: RegisteredCommand): number {
       <Dialog.Description>Search every action in vrc.zip and run it.</Dialog.Description>
     </Dialog.Header>
 
-    <div class="flex items-center gap-2 border-b border-border px-3">
-      <HugeiconsIcon icon={Search01Icon} size={16} class="shrink-0 text-muted-foreground" />
+    <div class="flex items-center gap-3 border-b border-border px-4">
+      <SearchIcon class="size-4 shrink-0 text-muted-foreground" />
       <!-- svelte-ignore a11y_autofocus -->
       <input
         bind:this={input}
@@ -150,9 +149,9 @@ function indexOfCommand(command: RegisteredCommand): number {
         placeholder="Run a command…"
         autocomplete="off"
         spellcheck="false"
-        class="h-11 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+        class="h-12 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
       />
-      <kbd class="shrink-0 border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">
+      <kbd class="shrink-0 border border-border px-1.5 py-0.5 text-xs text-muted-foreground">
         Esc
       </kbd>
     </div>
@@ -162,7 +161,7 @@ function indexOfCommand(command: RegisteredCommand): number {
       id="command-palette-list"
       role="listbox"
       aria-label="Commands"
-      class="max-h-[52vh] overflow-y-auto p-1"
+      class="max-h-[52vh] overflow-y-auto p-2"
     >
       {#if flat.length === 0}
         <p class="px-3 py-8 text-center text-sm text-muted-foreground">
@@ -170,7 +169,7 @@ function indexOfCommand(command: RegisteredCommand): number {
         </p>
       {:else}
         {#each grouped as [group, entries] (group)}
-          <div class="px-2 pt-2 pb-1 text-[11px] font-medium tracking-wide text-muted-foreground">
+          <div class="px-2 pt-3 pb-1 text-xs font-medium tracking-wide text-muted-foreground uppercase">
             {group}
           </div>
           {#each entries as match (match.command.id)}
@@ -186,7 +185,7 @@ function indexOfCommand(command: RegisteredCommand): number {
               onmousemove={() => {
                 cursor = indexOfCommand(match.command);
               }}
-              class="flex w-full items-center gap-3 px-2.5 py-2 text-left text-sm
+              class="flex w-full items-center gap-3 px-2 py-2 text-left text-sm
                      {active ? 'bg-muted' : ''} {enabled
                 ? 'text-foreground'
                 : 'cursor-not-allowed text-muted-foreground/60'}"
@@ -206,11 +205,11 @@ function indexOfCommand(command: RegisteredCommand): number {
               </span>
 
               {#if !enabled}
-                <span class="shrink-0 text-[11px] text-muted-foreground">Unavailable</span>
+                <span class="shrink-0 text-xs text-muted-foreground">Unavailable</span>
               {:else if match.command.keybinding}
                 <span class="flex shrink-0 items-center gap-1">
                   {#each formatBinding(match.command.keybinding) as key (key)}
-                    <kbd class="border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                    <kbd class="border border-border px-1.5 py-0.5 text-xs text-muted-foreground">
                       {key}
                     </kbd>
                   {/each}

@@ -11,6 +11,7 @@
 -->
 <script lang="ts">
 import type { Snippet } from "svelte";
+import { Badge } from "$lib/components/ui/badge/index.js";
 
 let {
   title,
@@ -26,19 +27,16 @@ let {
 </script>
 
 <header
-  class="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-border
-         bg-background px-5 py-3"
+  class="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-border bg-background px-4 py-3"
 >
-  <h1 class="text-sm font-semibold tracking-tight">{title}</h1>
+  <h1 class="text-base font-semibold tracking-tight">{title}</h1>
 
   {#if count !== undefined}
-    <span class="tabular bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
-      {count}
-    </span>
+    <Badge variant="secondary" class="tabular">{count}</Badge>
   {/if}
 
   {#if description}
-    <p class="min-w-0 truncate text-xs text-muted-foreground">{description}</p>
+    <p class="min-w-0 truncate text-sm text-muted-foreground">{description}</p>
   {/if}
 
   {#if actions}

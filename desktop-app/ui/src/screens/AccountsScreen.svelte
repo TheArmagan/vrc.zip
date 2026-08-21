@@ -5,13 +5,10 @@
   two numbers in their head, and this is where the app says plainly that the two are unrelated.
 -->
 <script lang="ts">
-import {
-  Delete02Icon,
-  Key01Icon,
-  UserAdd01Icon,
-  UserMultiple02Icon,
-} from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/svelte";
+import KeyRoundIcon from "@lucide/svelte/icons/key-round";
+import Trash2Icon from "@lucide/svelte/icons/trash-2";
+import UserPlusIcon from "@lucide/svelte/icons/user-plus";
+import UsersRoundIcon from "@lucide/svelte/icons/users-round";
 import { toast } from "svelte-sonner";
 import { api, describeError } from "$lib/api.ts";
 import ConnectionDot from "$lib/components/ConnectionDot.svelte";
@@ -19,10 +16,13 @@ import EmptyState from "$lib/components/EmptyState.svelte";
 import ErrorNote from "$lib/components/ErrorNote.svelte";
 import RelativeTime from "$lib/components/RelativeTime.svelte";
 import SectionHeader from "$lib/components/SectionHeader.svelte";
+import * as Alert from "$lib/components/ui/alert/index.js";
+import { Avatar, AvatarFallback } from "$lib/components/ui/avatar/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
 import * as Dialog from "$lib/components/ui/dialog/index.js";
+import { Separator } from "$lib/components/ui/separator/index.js";
 import { Skeleton } from "$lib/components/ui/skeleton/index.js";
-import { connectionLabel } from "$lib/format.ts";
+import { connectionLabel, initials } from "$lib/format.ts";
 import { hrefFor, navigate } from "$lib/router.ts";
 import { app } from "$lib/state/app.svelte.ts";
 
@@ -58,8 +58,8 @@ async function confirmRemove(): Promise<void> {
   description="VRChat accounts vrc.zip holds credentials for"
 >
   {#snippet actions()}
-    <Button size="sm" href={hrefFor("login")} class="h-7 gap-1.5 text-xs">
-      <HugeiconsIcon icon={UserAdd01Icon} size={13} />
+    <Button size="sm" href={hrefFor("login")}>
+      <UserPlusIcon />
       Add account
     </Button>
   {/snippet}
@@ -67,32 +67,35 @@ async function confirmRemove(): Promise<void> {
 
 <div class="min-h-0 flex-1 overflow-y-auto">
   {#if app.accountsNeeding2fa.length > 0}
-    <div class="border-b border-warning/40 bg-warning/10 px-5 py-2.5 text-sm">
-      <p class="font-medium">
-        {app.accountsNeeding2fa.length}
-        {app.accountsNeeding2fa.length === 1 ? "account is" : "accounts are"} waiting on a two-factor
-        code.
-      </p>
-      <p class="text-xs text-muted-foreground">
-        Nothing arrives for these accounts until the challenge is answered.
-      </p>
+    <div class="p-4">
+      <Alert.Root class="border-warning/50 bg-warning/10">
+        <KeyRoundIcon class="text-warning" />
+        <Alert.Title>
+          {app.accountsNeeding2fa.length}
+          {app.accountsNeeding2fa.length === 1 ? "account is" : "accounts are"} waiting on a
+          two-factor code.
+        </Alert.Title>
+        <Alert.Description>
+          Nothing arrives for these accounts until the challenge is answered.
+        </Alert.Description>
+      </Alert.Root>
     </div>
   {/if}
 
   {#if loading}
-    <div class="space-y-px p-4">
+    <div class="space-y-2 p-4">
       {#each [0, 1, 2] as index (index)}
-        <Skeleton class="h-14 w-full" />
+        <Skeleton class="h-16 w-full" />
       {/each}
     </div>
   {:else if app.accounts.length === 0}
     <EmptyState
-      icon={UserMultiple02Icon}
+      icon={UsersRoundIcon}
       title="No accounts yet"
       description="vrc.zip signs in to VRChat on your behalf and keeps the credentials encrypted on this machine. Nothing is sent anywhere else."
     >
       {#snippet action()}
-        <Button size="sm" href={hrefFor("login")}>Sign in to VRChat</Button>
+        <Button href={hrefFor("login")}>Sign in to VRChat</Button>
       {/snippet}
     </EmptyState>
   {:else}
@@ -101,27 +104,30 @@ async function confirmRemove(): Promise<void> {
         {@const sessionsForAccount = app.sessions.filter(
           (session) => session.accountId === account.id,
         )}
-        <li class="flex items-center gap-3 px-5 py-3">
-          <ConnectionDot connection={account.connection} size={9} />
+        <li class="flex items-center gap-3 px-4 py-3">
+          <div class="relative shrink-0">
+            <Avatar class="size-9">
+              <AvatarFallback class="text-xs">{initials(account.displayName)}</AvatarFallback>
+            </Avatar>
+            <span class="absolute -right-0.5 -bottom-0.5 rounded-full bg-background p-0.5">
+              <ConnectionDot connection={account.connection} size={9} />
+            </span>
+          </div>
 
           <div class="min-w-0 flex-1">
             <p class="truncate text-sm font-medium">{account.displayName}</p>
-            <p class="flex flex-wrap items-center gap-x-2 text-[11px] text-muted-foreground">
+            <p class="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
               <span>{connectionLabel(account.connection)}</span>
               <span aria-hidden="true">·</span>
-              <span>
-                Added <RelativeTime ts={account.addedAt} />
-              </span>
+              <span>Added <RelativeTime ts={account.addedAt} /></span>
               {#if account.lastSeenAt !== null}
                 <span aria-hidden="true">·</span>
-                <span>
-                  Last event <RelativeTime ts={account.lastSeenAt} />
-                </span>
+                <span>Last event <RelativeTime ts={account.lastSeenAt} /></span>
               {/if}
             </p>
           </div>
 
-          <span class="shrink-0 text-[11px] text-muted-foreground">
+          <span class="hidden shrink-0 text-xs text-muted-foreground sm:inline">
             {#if sessionsForAccount.length === 0}
               No client running
             {:else}
@@ -134,12 +140,11 @@ async function confirmRemove(): Promise<void> {
             <Button
               size="sm"
               variant="outline"
-              class="h-7 gap-1.5 text-xs"
               onclick={() => {
                 navigate("login", account.id);
               }}
             >
-              <HugeiconsIcon icon={Key01Icon} size={13} />
+              <KeyRoundIcon />
               Enter code
             </Button>
           {/if}
@@ -154,13 +159,15 @@ async function confirmRemove(): Promise<void> {
               error = null;
             }}
           >
-            <HugeiconsIcon icon={Delete02Icon} size={15} />
+            <Trash2Icon />
           </Button>
         </li>
       {/each}
     </ul>
 
-    <p class="px-5 py-4 text-xs text-muted-foreground">
+    <Separator />
+
+    <p class="px-4 py-4 text-sm text-muted-foreground">
       Signing an account in here does not start VRChat, and closing VRChat does not sign an account
       out. Running clients live on the Live sessions screen.
     </p>

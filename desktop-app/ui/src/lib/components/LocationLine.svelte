@@ -7,8 +7,8 @@
   a layout designed for `wrld_… #42 · Friends · us`.
 -->
 <script lang="ts">
-import { ArrowRight01Icon } from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/svelte";
+import ChevronRightIcon from "@lucide/svelte/icons/chevron-right";
+import { Badge } from "$lib/components/ui/badge/index.js";
 import { accessLabel, launchLink, parseLocation, shortId } from "$lib/format.ts";
 
 let {
@@ -21,33 +21,28 @@ const parsed = $derived(parseLocation(location));
 const jump = $derived(showJump ? launchLink(location) : null);
 </script>
 
-<div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+<div class="flex min-w-0 flex-wrap items-center gap-2 text-xs">
   {#if parsed.opaque}
     <span class="text-muted-foreground">{parsed.label}</span>
   {:else}
-    <span class="truncate font-medium text-foreground" title={location ?? undefined}>
+    <span class="truncate text-sm font-medium text-foreground" title={location ?? undefined}>
       {worldName ?? shortId(parsed.worldId, 14)}
     </span>
     {#if parsed.instanceId}
       <span class="tabular text-muted-foreground">{parsed.label}</span>
     {/if}
-    <span
-      class="border border-border px-1 py-px text-[10px] tracking-wide text-muted-foreground uppercase"
-    >
-      {accessLabel(parsed.access)}
-    </span>
+    <Badge variant="outline" class="tracking-wide uppercase">{accessLabel(parsed.access)}</Badge>
     {#if parsed.region}
-      <span class="text-[10px] tracking-wide text-muted-foreground uppercase">{parsed.region}</span>
+      <span class="tracking-wide text-muted-foreground uppercase">{parsed.region}</span>
     {/if}
     {#if jump}
       <a
         href={jump}
-        class="inline-flex items-center gap-0.5 text-muted-foreground underline
-               underline-offset-2 hover:text-foreground"
+        class="inline-flex items-center text-muted-foreground underline underline-offset-4 hover:text-foreground"
         title="Open this instance in VRChat"
       >
         Jump
-        <HugeiconsIcon icon={ArrowRight01Icon} size={12} />
+        <ChevronRightIcon class="size-3.5" />
       </a>
     {/if}
   {/if}

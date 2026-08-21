@@ -8,19 +8,16 @@
   under an unmanaged account is an ordinary thing and not an error to hide.
 -->
 <script lang="ts">
-import {
-  ComputerIcon,
-  MonitorDotIcon,
-  UserAdd01Icon,
-  UserGroupIcon,
-  VirtualRealityVr01Icon,
-} from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/svelte";
+import HeadsetIcon from "@lucide/svelte/icons/headset";
+import MonitorIcon from "@lucide/svelte/icons/monitor";
+import UserPlusIcon from "@lucide/svelte/icons/user-plus";
 import EmptyState from "$lib/components/EmptyState.svelte";
 import LocationLine from "$lib/components/LocationLine.svelte";
 import SectionHeader from "$lib/components/SectionHeader.svelte";
 import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
+import * as Card from "$lib/components/ui/card/index.js";
+import { Separator } from "$lib/components/ui/separator/index.js";
 import { Skeleton } from "$lib/components/ui/skeleton/index.js";
 import { duration, isVrMode, timeOfDay, vrModeLabel } from "$lib/format.ts";
 import { hrefFor } from "$lib/router.ts";
@@ -44,16 +41,20 @@ const loading = $derived(app.phase === "loading" || app.phase === "idle");
   {#if loading}
     <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
       {#each [0, 1] as index (index)}
-        <div class="space-y-3 border border-border bg-card p-4">
-          <Skeleton class="h-5 w-40" />
-          <Skeleton class="h-3 w-56" />
-          <Skeleton class="h-24 w-full" />
-        </div>
+        <Card.Root size="sm">
+          <Card.Header>
+            <Skeleton class="h-5 w-40" />
+            <Skeleton class="h-4 w-56" />
+          </Card.Header>
+          <Card.Content>
+            <Skeleton class="h-24 w-full" />
+          </Card.Content>
+        </Card.Root>
       {/each}
     </div>
   {:else if merged.length === 0}
     <EmptyState
-      icon={ComputerIcon}
+      icon={MonitorIcon}
       title="No VRChat client is running"
       description="vrc.zip watches the VRChat log directory. Start the game and a card appears here within a few seconds, whether or not the account is one vrc.zip manages."
     >
@@ -69,110 +70,107 @@ const loading = $derived(app.phase === "loading" || app.phase === "idle");
         {@const session = entry.session}
         {@const account = app.accountById(session.accountId)}
         {@const vr = isVrMode(session.vrMode)}
-        <article class="flex flex-col border border-border bg-card">
-          <header class="flex items-start gap-2 border-b border-border px-4 py-3">
-            <div class="min-w-0 flex-1">
-              <h2 class="truncate text-sm font-semibold">
-                {app.sessionLabel(session)}
-              </h2>
-              <p class="tabular mt-0.5 text-[11px] text-muted-foreground">
-                Started {timeOfDay(session.startedAt)}, up {duration(
-                  clock.now - session.startedAt,
-                )}
-              </p>
-            </div>
-            <Badge variant="outline" class="shrink-0 gap-1 text-[10px]">
-              <HugeiconsIcon icon={vr ? VirtualRealityVr01Icon : MonitorDotIcon} size={12} />
-              {vrModeLabel(session.vrMode)}
-            </Badge>
-          </header>
+        <Card.Root size="sm">
+          <Card.Header class="border-b">
+            <Card.Title class="truncate text-sm">{app.sessionLabel(session)}</Card.Title>
+            <Card.Description class="tabular text-xs">
+              Started {timeOfDay(session.startedAt)}, up {duration(clock.now - session.startedAt)}
+            </Card.Description>
+            <Card.Action>
+              <Badge variant="outline">
+                {#if vr}
+                  <HeadsetIcon />
+                {:else}
+                  <MonitorIcon />
+                {/if}
+                {vrModeLabel(session.vrMode)}
+              </Badge>
+            </Card.Action>
+          </Card.Header>
 
           {#if account === null}
-            <div
-              class="flex items-center gap-2 border-b border-border bg-muted/40 px-4 py-2
-                     text-[11px] text-muted-foreground"
-            >
-              <span class="min-w-0 flex-1">
-                This client is signed into an account vrc.zip does not manage, so there is no
-                presence or friend data for it.
-              </span>
-              <Button
-                variant="outline"
-                size="sm"
-                href={hrefFor("login")}
-                class="h-6 shrink-0 gap-1 px-2 text-[11px]"
+            <Card.Content>
+              <div
+                class="flex flex-wrap items-center gap-3 bg-muted/50 px-3 py-2 text-xs text-muted-foreground"
               >
-                <HugeiconsIcon icon={UserAdd01Icon} size={12} />
-                Add it
-              </Button>
-            </div>
+                <span class="min-w-0 flex-1">
+                  This client is signed into an account vrc.zip does not manage, so there is no
+                  presence or friend data for it.
+                </span>
+                <Button variant="outline" size="xs" href={hrefFor("login")}>
+                  <UserPlusIcon />
+                  Add it
+                </Button>
+              </div>
+            </Card.Content>
           {/if}
 
-          <div class="border-b border-border px-4 py-3">
-            <p class="mb-1 text-[11px] tracking-wide text-muted-foreground uppercase">Instance</p>
+          <Card.Content class="space-y-2">
+            <p class="text-xs tracking-wide text-muted-foreground uppercase">Instance</p>
             {#if session.currentLocation === null}
-              <p class="text-xs text-muted-foreground">
+              <p class="text-sm text-muted-foreground">
                 No instance yet. The client is at the menu or still loading.
               </p>
             {:else}
               <LocationLine location={session.currentLocation} worldName={entry.worldName} />
             {/if}
-          </div>
+          </Card.Content>
 
-          <div class="min-h-0 flex-1 px-4 py-3">
-            <div class="mb-1.5 flex items-baseline gap-2">
-              <p class="text-[11px] tracking-wide text-muted-foreground uppercase">In the room</p>
+          <Separator />
+
+          <Card.Content class="min-h-0 flex-1 space-y-2">
+            <div class="flex items-baseline gap-2">
+              <p class="text-xs tracking-wide text-muted-foreground uppercase">In the room</p>
               {#if entry.players !== null}
-                <span class="tabular text-[11px] text-muted-foreground">
-                  {entry.players.length}
-                </span>
+                <Badge variant="secondary" class="tabular">{entry.players.length}</Badge>
               {/if}
             </div>
 
             {#if entry.players === null}
-              <p class="text-xs text-muted-foreground">
-                Not observed yet. The roster is built from join and leave lines, so it fills in
-                from the next player who moves.
+              <p class="text-sm text-muted-foreground">
+                Not observed yet. The roster is built from join and leave lines, so it fills in from
+                the next player who moves.
               </p>
             {:else if entry.players.length === 0}
-              <p class="text-xs text-muted-foreground">
+              <p class="text-sm text-muted-foreground">
                 Nobody has joined since vrc.zip started watching this client.
               </p>
             {:else}
-              <ul class="max-h-44 space-y-0.5 overflow-y-auto">
+              <!--
+                A plain scroll pane rather than `ScrollArea`: the roster has no fixed height, and
+                the bits-ui viewport is `size-full`, which resolves to nothing against a parent
+                that is only `max-h`. The app styles native scrollbars in `app.css`, so this looks
+                the same either way.
+              -->
+              <ul class="max-h-44 divide-y divide-border/60 overflow-y-auto">
                 {#each entry.players as player (player.displayName)}
-                  <li class="flex items-baseline gap-2 text-xs">
-                    <HugeiconsIcon
-                      icon={UserGroupIcon}
-                      size={11}
-                      class="shrink-0 translate-y-px text-muted-foreground"
-                    />
+                  <li class="flex items-baseline gap-3 py-1.5 text-sm">
                     <span class="min-w-0 flex-1 truncate">{player.displayName}</span>
-                    <span class="tabular shrink-0 text-[10px] text-muted-foreground">
+                    <span class="tabular shrink-0 text-xs text-muted-foreground">
                       {timeOfDay(player.joinedAt)}
                     </span>
                   </li>
                 {/each}
               </ul>
             {/if}
-          </div>
+          </Card.Content>
 
-          <footer class="border-t border-border px-4 py-2">
+          <Card.Footer class="border-t">
             <Button
               variant="ghost"
               size="sm"
               href={hrefFor("gamelog", String(session.id))}
-              class="h-6 px-2 text-[11px] text-muted-foreground"
+              class="-mx-3 text-muted-foreground"
             >
               Open game log
             </Button>
-          </footer>
-        </article>
+          </Card.Footer>
+        </Card.Root>
       {/each}
     </div>
 
     {#if app.unlinkedSessions.length > 0}
-      <p class="mt-4 text-xs text-muted-foreground">
+      <p class="mt-4 text-sm text-muted-foreground">
         {app.unlinkedSessions.length} of these
         {app.unlinkedSessions.length === 1 ? "clients is" : "clients are"} unlinked. That is separate
         from the {app.accounts.length}

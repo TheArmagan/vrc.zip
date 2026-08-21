@@ -3,7 +3,7 @@
   from a broken one, so each empty state says what would be here and what puts it here.
 -->
 <script lang="ts">
-import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/svelte";
+import type { LucideIcon } from "@lucide/svelte";
 import type { Snippet } from "svelte";
 
 let {
@@ -12,24 +12,26 @@ let {
   description,
   action,
 }: {
-  icon?: IconSvgElement;
+  icon?: LucideIcon;
   title: string;
   description: string;
   action?: Snippet;
 } = $props();
+
+const Icon = $derived(icon);
 </script>
 
-<div class="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
-  {#if icon}
-    <div class="border border-border bg-muted/40 p-3 text-muted-foreground">
-      <HugeiconsIcon {icon} size={20} />
+<div class="flex flex-col items-center justify-center gap-4 px-6 py-16 text-center">
+  {#if Icon}
+    <div class="flex size-12 items-center justify-center border border-border bg-muted/40">
+      <Icon class="size-5 text-muted-foreground" />
     </div>
   {/if}
-  <div class="space-y-1">
-    <p class="text-sm font-medium text-foreground">{title}</p>
-    <p class="mx-auto max-w-sm text-sm text-muted-foreground">{description}</p>
+  <div class="space-y-2">
+    <p class="text-base font-medium text-foreground">{title}</p>
+    <p class="mx-auto max-w-md text-sm text-muted-foreground">{description}</p>
   </div>
   {#if action}
-    <div class="pt-1">{@render action()}</div>
+    {@render action()}
   {/if}
 </div>

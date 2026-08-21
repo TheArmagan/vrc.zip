@@ -172,6 +172,21 @@ export function shortId(id: string | null, keep = 10): string {
   return id.length <= keep + 3 ? id : `${id.slice(0, keep)}…`;
 }
 
+/**
+ * Avatar initials for a VRChat display name.
+ *
+ * VRChat names are frequently a single word, often decorated with brackets, dots or emoji, so this
+ * takes the first two *letters or digits* of the first two such runs rather than splitting on
+ * whitespace and hoping. A name with nothing alphanumeric in it falls back to a bullet, because an
+ * empty avatar reads as a failed image load.
+ */
+export function initials(displayName: string): string {
+  const words = displayName.match(/[\p{L}\p{N}]+/gu) ?? [];
+  if (words.length === 0) return "•";
+  if (words.length === 1) return (words[0] ?? "").slice(0, 2).toUpperCase();
+  return `${(words[0] ?? "").charAt(0)}${(words[1] ?? "").charAt(0)}`.toUpperCase();
+}
+
 // ---------------------------------------------------------------------------
 // Vocabulary
 // ---------------------------------------------------------------------------

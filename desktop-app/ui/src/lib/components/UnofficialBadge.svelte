@@ -7,20 +7,16 @@
   eventually is, and then the disclosure is not a disclosure.
 -->
 <script lang="ts">
-import { LinkSquare02Icon } from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/svelte";
+import ExternalLinkIcon from "@lucide/svelte/icons/external-link";
+import { Badge } from "$lib/components/ui/badge/index.js";
 </script>
 
 <div
-  class="flex items-center gap-2 border-b border-warning/30 bg-warning/10 px-3 py-1.5
-         text-[11px] leading-tight"
+  class="flex shrink-0 items-center gap-3 border-b border-warning/30 bg-warning/10 px-4 py-2 text-xs"
 >
-  <span
-    class="shrink-0 bg-warning px-1.5 py-0.5 text-[10px] font-bold tracking-wider
-           text-warning-foreground uppercase"
-  >
+  <Badge class="bg-warning font-bold tracking-wider text-warning-foreground uppercase">
     Unofficial
-  </span>
+  </Badge>
   <span class="min-w-0 truncate text-muted-foreground">
     Not affiliated with, endorsed by, or operated by VRChat Inc. You are signing in with your own
     VRChat credentials.
@@ -29,10 +25,9 @@ import { HugeiconsIcon } from "@hugeicons/svelte";
     href="https://hello.vrchat.com/legal"
     target="_blank"
     rel="noreferrer noopener"
-    class="ml-auto inline-flex shrink-0 items-center gap-1 text-muted-foreground underline
-           underline-offset-2 hover:text-foreground"
+    class="ml-auto inline-flex shrink-0 items-center gap-1.5 text-muted-foreground underline underline-offset-4 hover:text-foreground"
   >
     VRChat ToS
-    <HugeiconsIcon icon={LinkSquare02Icon} size={11} />
+    <ExternalLinkIcon class="size-3.5" />
   </a>
 </div>

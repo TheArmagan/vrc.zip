@@ -1,8 +1,7 @@
 <script lang="ts">
+	import SearchIcon from "@lucide/svelte/icons/search";
 	import { Command as CommandPrimitive } from "bits-ui";
 	import * as InputGroup from "$lib/components/ui/input-group/index.js";
-	import { HugeiconsIcon } from "@hugeicons/svelte"
-	import { SearchIcon } from '@hugeicons/core-free-icons';
 	import { cn } from "$lib/utils.js";
 
 	let {
@@ -29,7 +28,7 @@
 			{/snippet}
 		</CommandPrimitive.Input>
 		<InputGroup.Addon>
-			<HugeiconsIcon icon={SearchIcon} strokeWidth={2} class="size-4 shrink-0 opacity-50" />
+			<SearchIcon class="size-4 shrink-0 opacity-50" />
 		</InputGroup.Addon>
 	</InputGroup.Root>
 </div>

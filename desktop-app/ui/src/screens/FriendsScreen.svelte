@@ -7,17 +7,20 @@
   the question this screen exists to answer.
 -->
 <script lang="ts">
-import { Search01Icon, UserGroupIcon } from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/svelte";
+import SearchIcon from "@lucide/svelte/icons/search";
+import UsersIcon from "@lucide/svelte/icons/users";
 import { api, describeError, type Friend, isAbort } from "$lib/api.ts";
+import AccountFilter from "$lib/components/AccountFilter.svelte";
 import EmptyState from "$lib/components/EmptyState.svelte";
 import ErrorNote from "$lib/components/ErrorNote.svelte";
 import LocationLine from "$lib/components/LocationLine.svelte";
 import RelativeTime from "$lib/components/RelativeTime.svelte";
 import SectionHeader from "$lib/components/SectionHeader.svelte";
 import StatusDot from "$lib/components/StatusDot.svelte";
+import { Avatar, AvatarFallback } from "$lib/components/ui/avatar/index.js";
+import * as InputGroup from "$lib/components/ui/input-group/index.js";
 import { Skeleton } from "$lib/components/ui/skeleton/index.js";
-import { platformLabel, statusLabel } from "$lib/format.ts";
+import { initials, platformLabel, statusLabel } from "$lib/format.ts";
 import { app } from "$lib/state/app.svelte.ts";
 
 let friends = $state<Friend[]>([]);
@@ -83,31 +86,20 @@ const onlineCount = $derived(friends.filter((friend) => friend.status !== "offli
   description={`${String(onlineCount)} online right now`}
 >
   {#snippet actions()}
-    <div class="flex items-center gap-2">
-      {#if app.accounts.length > 1}
-        <select
-          bind:value={accountFilter}
-          aria-label="Filter by account"
-          class="h-7 border border-border bg-input/30 px-2 text-xs outline-none
-                 focus-visible:border-ring"
-        >
-          <option value="">All accounts</option>
-          {#each app.accounts as account (account.id)}
-            <option value={account.id}>{account.displayName}</option>
-          {/each}
-        </select>
-      {/if}
-      <div class="flex h-7 items-center gap-1.5 border border-border bg-input/30 px-2">
-        <HugeiconsIcon icon={Search01Icon} size={12} class="text-muted-foreground" />
-        <input
-          bind:value={query}
-          type="search"
-          placeholder="Filter friends"
-          aria-label="Filter friends"
-          class="w-36 bg-transparent text-xs outline-none placeholder:text-muted-foreground"
-        />
-      </div>
-    </div>
+    <AccountFilter bind:value={accountFilter} />
+    <InputGroup.Root class="h-8 w-52">
+      <InputGroup.Addon>
+        <SearchIcon />
+      </InputGroup.Addon>
+      <InputGroup.Input
+        bind:value={query}
+        name="filter"
+        type="search"
+        placeholder="Filter friends"
+        aria-label="Filter friends"
+        class="h-8 text-sm"
+      />
+    </InputGroup.Root>
   {/snippet}
 </SectionHeader>
 
@@ -117,26 +109,26 @@ const onlineCount = $derived(friends.filter((friend) => friend.status !== "offli
   {/if}
 
   {#if loading}
-    <div class="space-y-px p-4">
+    <div class="space-y-2 p-4">
       {#each [0, 1, 2, 3, 4, 5] as index (index)}
-        <Skeleton class="h-12 w-full" />
+        <Skeleton class="h-14 w-full" />
       {/each}
     </div>
   {:else if app.accounts.length === 0}
     <EmptyState
-      icon={UserGroupIcon}
+      icon={UsersIcon}
       title="No accounts signed in"
       description="Friend presence comes from VRChat's pipeline socket, which needs a signed-in account. Add one and this fills in within seconds."
     />
   {:else if friends.length === 0}
     <EmptyState
-      icon={UserGroupIcon}
+      icon={UsersIcon}
       title="No friends cached yet"
       description="vrc.zip builds this list from the pipeline socket as friends come and go. If an account has just signed in, give it a moment."
     />
   {:else if visible.length === 0}
     <EmptyState
-      icon={Search01Icon}
+      icon={SearchIcon}
       title="Nothing matches that filter"
       description={`None of the ${String(friends.length)} cached friends match "${query}".`}
     />
@@ -144,15 +136,20 @@ const onlineCount = $derived(friends.filter((friend) => friend.status !== "offli
     <ul class="divide-y divide-border">
       {#each visible as friend (friend.id)}
         {@const platform = platformLabel(friend.platform)}
-        <li class="flex items-center gap-3 px-5 py-2.5">
-          <StatusDot status={friend.status} size={9} />
+        <li class="flex items-center gap-3 px-4 py-3">
+          <div class="relative shrink-0">
+            <Avatar class="size-9">
+              <AvatarFallback class="text-xs">{initials(friend.displayName)}</AvatarFallback>
+            </Avatar>
+            <span class="absolute -right-0.5 -bottom-0.5 rounded-full bg-background p-0.5">
+              <StatusDot status={friend.status} size={9} />
+            </span>
+          </div>
 
           <div class="min-w-0 flex-1">
             <p class="truncate text-sm">{friend.displayName}</p>
             {#if friend.statusDescription}
-              <p class="truncate text-[11px] text-muted-foreground">
-                {friend.statusDescription}
-              </p>
+              <p class="truncate text-xs text-muted-foreground">{friend.statusDescription}</p>
             {/if}
           </div>
 
@@ -170,11 +167,11 @@ const onlineCount = $derived(friends.filter((friend) => friend.status !== "offli
             {/if}
           </div>
 
-          <span class="w-20 shrink-0 text-right text-[11px] text-muted-foreground">
+          <span class="w-24 shrink-0 text-right text-xs text-muted-foreground">
             {statusLabel(friend.status)}
           </span>
 
-          <span class="tabular w-10 shrink-0 text-right text-[10px] text-muted-foreground">
+          <span class="tabular w-12 shrink-0 text-right text-xs text-muted-foreground">
             {platform ?? ""}
           </span>
         </li>

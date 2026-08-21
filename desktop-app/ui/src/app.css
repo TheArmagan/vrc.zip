@@ -6,7 +6,6 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
-
   /*
    * vrc.zip's own tokens, on top of the preset palette.
    *
@@ -63,7 +62,6 @@
 }
 
 .dark {
-
   /* Lifted for the dark surface — the light values read as muddy against it. */
   --status-online: oklch(0.78 0.19 145);
   --status-join-me: oklch(0.72 0.16 235);
@@ -116,7 +114,7 @@
   --color-warning: var(--warning);
   --color-warning-foreground: var(--warning-foreground);
   --color-success: var(--success);
-  --font-sans: 'Inter Variable', sans-serif;
+  --font-sans: "Inter Variable", sans-serif;
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -192,5 +190,49 @@
   #app {
     height: 100%;
     overflow: hidden;
+  }
+}
+
+@layer base {
+  /*
+   * Scrollbars.
+   *
+   * The shell has scroll panes inside a fixed-height window, so the platform scrollbar is on
+   * screen most of the time. Left alone it is the loudest chrome in the app: on Windows a wide
+   * light-grey trough that ignores the dark theme entirely, with rounded ends against a design
+   * whose `--radius` is deliberately 0.
+   *
+   * Both syntaxes are here on purpose and neither is redundant. Firefox reads
+   * `scrollbar-width`/`scrollbar-color`; Chromium, once any `::-webkit-scrollbar` rule matches,
+   * drops the standard properties and takes the pseudo-elements instead. The thumb gets its
+   * inset from a transparent border plus `background-clip: content-box` rather than from padding,
+   * which scrollbar pseudo-elements do not honour.
+   *
+   * The colour is mixed from `--muted-foreground` rather than taken from `--border`, which in dark
+   * mode is `oklch(1 0 0 / 10%)` and leaves the thumb all but invisible against the pane.
+   */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in oklab, var(--muted-foreground) 45%, transparent) transparent;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track,
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background-color: color-mix(in oklab, var(--muted-foreground) 45%, transparent);
+    background-clip: content-box;
+    border: 3px solid transparent;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: var(--muted-foreground);
   }
 }

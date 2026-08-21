@@ -9,14 +9,19 @@
   query parameter is an exact match with no prefix support, so family filtering happens here.
 -->
 <script lang="ts">
-import { Activity03Icon } from "@hugeicons/core-free-icons";
+import ActivityIcon from "@lucide/svelte/icons/activity";
 import { api, describeError, EVENT_FAMILIES, familyOf, isAbort } from "$lib/api.ts";
+import AccountFilter from "$lib/components/AccountFilter.svelte";
 import EmptyState from "$lib/components/EmptyState.svelte";
 import ErrorNote from "$lib/components/ErrorNote.svelte";
 import EventRow from "$lib/components/EventRow.svelte";
 import SectionHeader from "$lib/components/SectionHeader.svelte";
+import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
+import { Label } from "$lib/components/ui/label/index.js";
 import { Skeleton } from "$lib/components/ui/skeleton/index.js";
+import { Switch } from "$lib/components/ui/switch/index.js";
+import * as Tabs from "$lib/components/ui/tabs/index.js";
 import { type LiveEvent, mergeEvents, rowToEvent } from "$lib/events.ts";
 import { dateHeading, familyLabel } from "$lib/format.ts";
 import { app } from "$lib/state/app.svelte.ts";
@@ -24,13 +29,18 @@ import { prefs } from "$lib/state/prefs.svelte.ts";
 
 const PAGE_SIZE = 150;
 
+/** bits-ui reads the empty string as "nothing selected", so the "everything" tab needs a name. */
+const ALL = "all";
+
 let stored = $state<LiveEvent[]>([]);
 let loading = $state(true);
 let loadingMore = $state(false);
 let exhausted = $state(false);
 let error = $state<string | null>(null);
-let family = $state("");
+let tab = $state(ALL);
 let accountFilter = $state("");
+
+const family = $derived(tab === ALL ? "" : tab);
 
 $effect(() => {
   const account = accountFilter;
@@ -61,9 +71,7 @@ $effect(() => {
 });
 
 const live = $derived(
-  app.liveEvents.filter(
-    (event) => accountFilter === "" || event.accountId === accountFilter,
-  ),
+  app.liveEvents.filter((event) => accountFilter === "" || event.accountId === accountFilter),
 );
 
 const merged = $derived(mergeEvents(stored, live));
@@ -119,67 +127,36 @@ async function loadMore(): Promise<void> {
 <SectionHeader title="Feed" count={visible.length} description="Newest first, every account">
   {#snippet actions()}
     <div class="flex items-center gap-2">
-      <label class="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-        <input
-          type="checkbox"
-          checked={prefs.denseFeed}
-          onchange={(event) => {
-            prefs.setDenseFeed(event.currentTarget.checked);
-          }}
-          class="size-3.5 accent-primary"
-        />
-        Dense
-      </label>
-      {#if app.accounts.length > 1}
-        <select
-          bind:value={accountFilter}
-          aria-label="Filter by account"
-          class="h-7 border border-border bg-input/30 px-2 text-xs outline-none
-                 focus-visible:border-ring"
-        >
-          <option value="">All accounts</option>
-          {#each app.accounts as account (account.id)}
-            <option value={account.id}>{account.displayName}</option>
-          {/each}
-        </select>
-      {/if}
+      <Switch
+        id="feed-dense"
+        size="sm"
+        checked={prefs.denseFeed}
+        onCheckedChange={(checked) => {
+          prefs.setDenseFeed(checked);
+        }}
+      />
+      <Label for="feed-dense" class="text-xs text-muted-foreground">Dense</Label>
     </div>
+    <AccountFilter bind:value={accountFilter} />
   {/snippet}
 </SectionHeader>
 
 {#if presentFamilies.length > 1}
-  <div
-    class="flex flex-wrap items-center gap-1 border-b border-border px-5 py-2"
-    role="group"
-    aria-label="Filter by event kind"
-  >
-    <button
-      type="button"
-      onclick={() => {
-        family = "";
-      }}
-      aria-pressed={family === ""}
-      class="border px-2 py-0.5 text-[11px] {family === ''
-        ? 'border-primary bg-primary text-primary-foreground'
-        : 'border-border text-muted-foreground hover:bg-muted'}"
-    >
-      All {merged.length}
-    </button>
-    {#each presentFamilies as entry (entry.name)}
-      <button
-        type="button"
-        onclick={() => {
-          family = entry.name;
-        }}
-        aria-pressed={family === entry.name}
-        class="border px-2 py-0.5 text-[11px] {family === entry.name
-          ? 'border-primary bg-primary text-primary-foreground'
-          : 'border-border text-muted-foreground hover:bg-muted'}"
-      >
-        {familyLabel(entry.name)}
-        <span class="tabular opacity-70">{entry.count}</span>
-      </button>
-    {/each}
+  <div class="shrink-0 overflow-x-auto border-b border-border px-4 py-2">
+    <Tabs.Root bind:value={tab}>
+      <Tabs.List variant="line" aria-label="Filter by event kind">
+        <Tabs.Trigger value={ALL}>
+          All
+          <Badge variant="secondary" class="tabular">{merged.length}</Badge>
+        </Tabs.Trigger>
+        {#each presentFamilies as entry (entry.name)}
+          <Tabs.Trigger value={entry.name}>
+            {familyLabel(entry.name)}
+            <Badge variant="secondary" class="tabular">{entry.count}</Badge>
+          </Tabs.Trigger>
+        {/each}
+      </Tabs.List>
+    </Tabs.Root>
   </div>
 {/if}
 
@@ -189,28 +166,38 @@ async function loadMore(): Promise<void> {
   {/if}
 
   {#if loading}
-    <div class="space-y-px p-4">
+    <div class="space-y-2 p-4">
       {#each [0, 1, 2, 3, 4, 5, 6, 7] as index (index)}
-        <Skeleton class="h-9 w-full" />
+        <Skeleton class="h-10 w-full" />
       {/each}
     </div>
   {:else if merged.length === 0}
     <EmptyState
-      icon={Activity03Icon}
+      icon={ActivityIcon}
       title="Nothing has happened yet"
       description="The feed fills as VRChat pushes events to the daemon: friends coming online, invites arriving, players joining the instance your client is in."
     />
   {:else if visible.length === 0}
     <EmptyState
-      icon={Activity03Icon}
+      icon={ActivityIcon}
       title={`No ${familyLabel(family).toLowerCase()} events`}
       description="Nothing of that kind is in the loaded window. Clear the filter, or load more history."
-    />
+    >
+      {#snippet action()}
+        <Button
+          variant="outline"
+          onclick={() => {
+            tab = ALL;
+          }}
+        >
+          Show every kind
+        </Button>
+      {/snippet}
+    </EmptyState>
   {:else}
     {#each days as day (day.heading)}
       <div
-        class="sticky top-0 z-[1] border-b border-border bg-background/90 px-5 py-1
-               text-[11px] font-medium text-muted-foreground backdrop-blur"
+        class="sticky top-0 z-[1] border-b border-border bg-background/90 px-4 py-1.5 text-xs font-medium tracking-wide text-muted-foreground uppercase backdrop-blur"
       >
         {day.heading}
       </div>
@@ -223,11 +210,11 @@ async function loadMore(): Promise<void> {
 
     <div class="p-4 text-center">
       {#if exhausted}
-        <p class="text-xs text-muted-foreground">
+        <p class="text-sm text-muted-foreground">
           That is everything vrc.zip has recorded. Older events are trimmed by the retention job.
         </p>
       {:else}
-        <Button variant="outline" size="sm" disabled={loadingMore} onclick={() => void loadMore()}>
+        <Button variant="outline" disabled={loadingMore} onclick={() => void loadMore()}>
           {loadingMore ? "Loading" : "Load older events"}
         </Button>
       {/if}

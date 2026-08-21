@@ -39,23 +39,24 @@ const subjectFallback = $derived(
 </script>
 
 <li
-  class="flex gap-3 border-l-2 {FAMILY_RULE[family]} pr-5 pl-4 {dense ? 'py-1' : 'py-2'}
-         hover:bg-muted/40"
+  class="flex gap-3 border-l-2 {FAMILY_RULE[family]} pr-4 pl-3 {dense
+    ? 'py-1'
+    : 'py-2'} hover:bg-muted/40"
 >
-  <span class="tabular w-12 shrink-0 pt-px text-[11px] text-muted-foreground">
+  <span class="tabular w-14 shrink-0 text-xs leading-5 text-muted-foreground">
     {timeOfDay(event.ts)}
   </span>
 
   <div class="min-w-0 flex-1">
-    <p class="flex flex-wrap items-baseline gap-x-2 text-[13px]">
+    <p class="flex flex-wrap items-baseline gap-2 text-sm">
       <span class="font-medium">{eventLabel(event.kind)}</span>
       {#if who}
         <span class="text-muted-foreground">{who}</span>
       {:else if subjectFallback}
-        <span class="font-mono text-[11px] text-muted-foreground">{subjectFallback}</span>
+        <span class="font-mono text-xs text-muted-foreground">{subjectFallback}</span>
       {/if}
       {#if event.live}
-        <span class="text-[10px] tracking-wide text-status-online uppercase">live</span>
+        <span class="text-xs tracking-wide text-status-online uppercase">live</span>
       {/if}
     </p>
 
@@ -69,7 +70,7 @@ const subjectFallback = $derived(
   </div>
 
   <span
-    class="hidden w-24 shrink-0 truncate text-right font-mono text-[10px] text-muted-foreground md:block"
+    class="hidden w-28 shrink-0 truncate text-right font-mono text-xs leading-5 text-muted-foreground md:block"
     title={event.kind}
   >
     {event.kind}

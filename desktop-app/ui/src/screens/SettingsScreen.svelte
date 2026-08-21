@@ -7,18 +7,18 @@
   who cannot find this field has an app that does nothing and no explanation.
 -->
 <script lang="ts">
-import {
-  Delete02Icon,
-  FolderOpenIcon,
-  PlusSignIcon,
-  SecurityValidationIcon,
-} from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/svelte";
+import FolderOpenIcon from "@lucide/svelte/icons/folder-open";
+import PlusIcon from "@lucide/svelte/icons/plus";
+import ShieldCheckIcon from "@lucide/svelte/icons/shield-check";
+import Trash2Icon from "@lucide/svelte/icons/trash-2";
 import { toast } from "svelte-sonner";
 import { api, describeError, EVENT_FAMILIES } from "$lib/api.ts";
 import ErrorNote from "$lib/components/ErrorNote.svelte";
 import SectionHeader from "$lib/components/SectionHeader.svelte";
+import * as Alert from "$lib/components/ui/alert/index.js";
+import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
+import * as Card from "$lib/components/ui/card/index.js";
 import { Input } from "$lib/components/ui/input/index.js";
 import { Label } from "$lib/components/ui/label/index.js";
 import { Switch } from "$lib/components/ui/switch/index.js";
@@ -123,18 +123,22 @@ async function askForNotifications(): Promise<void> {
     {/if}
 
     <!-- Contact address -->
-    <section
-      class="border p-4 {app.needsFirstRun ? 'border-warning/60 bg-warning/10' : 'border-border'}"
-    >
-      <h2 class="text-sm font-semibold">Contact address</h2>
-      <p class="mt-1 text-xs text-muted-foreground">
-        VRChat requires every API client to put a working contact address in its User-Agent so they
-        can reach whoever is responsible. An email address or a link to your profile both work.
-        Until this is set, vrc.zip sends nothing to VRChat at all and every sign-in fails with
-        <code class="bg-muted px-1 font-mono">setup_required</code>.
-      </p>
-
-      <div class="mt-3 flex flex-wrap items-end gap-2">
+    <!--
+      Still tinted while unset. It is the one setting the whole app depends on, so it keeps a
+      colour the eye lands on before reading anything.
+    -->
+    <Card.Root class={app.needsFirstRun ? "border-warning/60 bg-warning/10" : ""}>
+      <Card.Header>
+        <Card.Title>Contact address</Card.Title>
+        <Card.Description>
+          VRChat requires every API client to put a working contact address in its User-Agent so
+          they can reach whoever is responsible. An email address or a link to your profile both
+          work. Until this is set, vrc.zip sends nothing to VRChat at all and every sign-in fails
+          with <code class="bg-muted px-1 font-mono text-xs">setup_required</code>.
+        </Card.Description>
+      </Card.Header>
+      <Card.Content>
+      <div class="flex flex-wrap items-end gap-2">
         <div class="min-w-64 flex-1 space-y-1.5">
           <Label for="contact">Email or profile URL</Label>
           <Input
@@ -154,17 +158,18 @@ async function askForNotifications(): Promise<void> {
       </div>
 
       {#if contact.trim() !== "" && !contactValid}
-        <p class="mt-2 text-xs text-destructive">
+        <p class="mt-2 text-sm text-destructive">
           That is not an address anyone could reach. Use an email address or an https link.
         </p>
       {/if}
-    </section>
+      </Card.Content>
+    </Card.Root>
 
     <!-- Log directories -->
     <section class="space-y-3">
       <div>
-        <h2 class="text-sm font-semibold">VRChat log directories</h2>
-        <p class="mt-1 text-xs text-muted-foreground">
+        <h2 class="text-base font-semibold">VRChat log directories</h2>
+        <p class="mt-1 text-sm text-muted-foreground">
           Live sessions and the game log come from tailing VRChat's own log files. Leave this empty
           and the daemon uses the directories it discovers for your platform. Add a path to
           override that, for a portable install or a second drive.
@@ -172,37 +177,35 @@ async function askForNotifications(): Promise<void> {
       </div>
 
       {#if app.settings === null}
-        <p class="text-xs text-muted-foreground">Loading</p>
+        <p class="text-sm text-muted-foreground">Loading</p>
       {:else if app.settings.logDirectories.length === 0}
-        <div class="flex items-start gap-2 border border-border bg-muted/30 p-3 text-xs">
-          <HugeiconsIcon
-            icon={FolderOpenIcon}
-            size={14}
-            class="mt-0.5 shrink-0 text-muted-foreground"
-          />
-          <p class="text-muted-foreground">
+        <Alert.Root>
+          <FolderOpenIcon />
+          <Alert.Description>
             Using auto-discovery. The daemon logs which directories it found at startup, and the
             Live sessions screen fills in as soon as it sees a log file.
-          </p>
-        </div>
+          </Alert.Description>
+        </Alert.Root>
       {:else}
-        <ul class="divide-y divide-border border border-border">
-          {#each app.settings.logDirectories as path (path)}
-            <li class="flex items-center gap-2 px-3 py-2">
-              <HugeiconsIcon icon={FolderOpenIcon} size={14} class="shrink-0 text-muted-foreground" />
-              <code class="min-w-0 flex-1 truncate font-mono text-xs">{path}</code>
-              <Button
-                size="icon-sm"
-                variant="ghost"
-                aria-label={`Remove ${path}`}
-                class="text-muted-foreground hover:text-destructive"
-                onclick={() => void removeDirectory(path)}
-              >
-                <HugeiconsIcon icon={Delete02Icon} size={14} />
-              </Button>
-            </li>
-          {/each}
-        </ul>
+        <Card.Root class="py-0">
+          <ul class="divide-y divide-border">
+            {#each app.settings.logDirectories as path (path)}
+              <li class="flex items-center gap-2 px-3 py-2">
+                <FolderOpenIcon class="size-4 shrink-0 text-muted-foreground" />
+                <code class="min-w-0 flex-1 truncate font-mono text-sm">{path}</code>
+                <Button
+                  size="icon-sm"
+                  variant="ghost"
+                  aria-label={`Remove ${path}`}
+                  class="text-muted-foreground hover:text-destructive"
+                  onclick={() => void removeDirectory(path)}
+                >
+                  <Trash2Icon class="size-4" />
+                </Button>
+              </li>
+            {/each}
+          </ul>
+        </Card.Root>
       {/if}
 
       <div class="flex gap-2">
@@ -210,14 +213,14 @@ async function askForNotifications(): Promise<void> {
           bind:value={newDirectory}
           placeholder="C:\Users\you\AppData\LocalLow\VRChat\VRChat"
           spellcheck={false}
-          class="font-mono text-xs"
+          class="font-mono text-sm"
         />
         <Button
           variant="outline"
           disabled={newDirectory.trim() === ""}
           onclick={() => void addDirectory()}
         >
-          <HugeiconsIcon icon={PlusSignIcon} size={14} />
+          <PlusIcon class="size-4" />
           Add
         </Button>
       </div>
@@ -225,13 +228,14 @@ async function askForNotifications(): Promise<void> {
 
     <!-- Daemon behaviour -->
     <section class="space-y-3">
-      <h2 class="text-sm font-semibold">Daemon</h2>
+      <h2 class="text-base font-semibold">Daemon</h2>
 
-      <div class="divide-y divide-border border border-border">
+      <Card.Root class="py-0">
+        <div class="divide-y divide-border">
         <div class="flex items-start gap-4 px-4 py-3">
           <div class="min-w-0 flex-1">
             <p class="text-sm">Open the browser at startup</p>
-            <p class="text-xs text-muted-foreground">
+            <p class="text-sm text-muted-foreground">
               Launches this window when the daemon starts. Turn it off if you run vrc.zip headless
               and open it yourself from the tray.
             </p>
@@ -247,7 +251,7 @@ async function askForNotifications(): Promise<void> {
         <div class="flex items-start gap-4 px-4 py-3">
           <div class="min-w-0 flex-1">
             <p class="text-sm">Serve on local.vrc.zip</p>
-            <p class="text-xs text-muted-foreground">
+            <p class="text-sm text-muted-foreground">
               Uses the hostname local.vrc.zip instead of 127.0.0.1. It resolves to loopback and
               nothing leaves the machine either way, so this is cosmetic. Takes effect on the next
               daemon restart.
@@ -260,18 +264,19 @@ async function askForNotifications(): Promise<void> {
             aria-label="Serve on local.vrc.zip"
           />
         </div>
-      </div>
+        </div>
+      </Card.Root>
 
       {#if app.settings !== null}
-        <dl class="grid grid-cols-3 gap-px border border-border bg-border text-xs">
+        <dl class="grid grid-cols-3 gap-3">
           {#each [["UI", app.settings.ports.ui], ["Mirror", app.settings.ports.proxy], ["Control API", app.settings.ports.control]] as [label, port] (label)}
-            <div class="bg-card px-3 py-2">
-              <dt class="text-[11px] text-muted-foreground">{label}</dt>
-              <dd class="tabular font-mono">{port}</dd>
+            <div class="space-y-1.5">
+              <dt class="text-sm text-muted-foreground">{label}</dt>
+              <dd><Badge variant="secondary" class="tabular font-mono">{port}</Badge></dd>
             </div>
           {/each}
         </dl>
-        <p class="text-xs text-muted-foreground">
+        <p class="text-sm text-muted-foreground">
           Ports are read-only here. The daemon falls back to an ephemeral port when one of these is
           taken, so the numbers above are what was requested, not necessarily what is bound. Change
           them in settings.json and restart.
@@ -281,21 +286,21 @@ async function askForNotifications(): Promise<void> {
 
     <!-- History -->
     <section class="space-y-3">
-      <h2 class="text-sm font-semibold">History</h2>
-      <div class="border border-border p-4 text-xs text-muted-foreground">
-        <p>
+      <h2 class="text-base font-semibold">History</h2>
+      <Alert.Root>
+        <Alert.Description>
           The daemon runs a retention job that trims old events on a schedule it chooses. There is
           no setting for it on the control API yet, so this screen cannot offer one. Until there
           is, the Feed and Game log say plainly when they have reached the end of what is kept.
-        </p>
-      </div>
+        </Alert.Description>
+      </Alert.Root>
     </section>
 
     <!-- This browser -->
     <section class="space-y-3">
       <div>
-        <h2 class="text-sm font-semibold">This browser</h2>
-        <p class="mt-1 text-xs text-muted-foreground">
+        <h2 class="text-base font-semibold">This browser</h2>
+        <p class="mt-1 text-sm text-muted-foreground">
           Kept in local storage rather than in daemon settings, so a second machine can disagree.
         </p>
       </div>
@@ -349,7 +354,7 @@ async function askForNotifications(): Promise<void> {
                 onclick={() => {
                   prefs.toggleNotifyFamily(name);
                 }}
-                class="border px-2 py-0.5 text-[11px] {on
+                class="border px-2 py-0.5 text-xs {on
                   ? 'border-primary bg-primary text-primary-foreground'
                   : 'border-border text-muted-foreground hover:bg-muted'}"
               >
@@ -363,37 +368,30 @@ async function askForNotifications(): Promise<void> {
 
     <!-- Credential storage -->
     <section class="space-y-3">
-      <h2 class="text-sm font-semibold">Credential storage</h2>
-      <div
-        class="flex items-start gap-3 border p-4 {app.status?.degradedKeychain
-          ? 'border-destructive/50 bg-destructive/10'
-          : 'border-border'}"
-      >
-        <HugeiconsIcon icon={SecurityValidationIcon} size={16} class="mt-0.5 shrink-0" />
-        <div class="min-w-0 space-y-1 text-xs">
-          {#if app.status === null}
-            <p class="text-muted-foreground">Waiting for the daemon.</p>
-          {:else if app.status.degradedKeychain}
-            <p class="font-medium text-destructive">
-              The master key is in a file, not the OS keychain.
-            </p>
-            <p class="text-muted-foreground">
-              Backend reported: <code class="bg-muted px-1 font-mono">{app.status.backend}</code>.
-              Credentials are still encrypted, but the key sits next to them with only file
-              permissions protecting it. Anyone who can read your user profile can attempt to
-              decrypt your VRChat passwords and auth cookies. On Linux this usually means no
-              keyring daemon is running in the session.
-            </p>
-          {:else}
-            <p class="font-medium">Credentials are protected by the OS keychain.</p>
-            <p class="text-muted-foreground">
-              Backend: <code class="bg-muted px-1 font-mono">{app.status.backend}</code>. Passwords
-              and VRChat auth cookies are encrypted with a key the keychain holds, never written in
-              the clear, and never sent anywhere except to VRChat.
-            </p>
-          {/if}
-        </div>
-      </div>
+      <h2 class="text-base font-semibold">Credential storage</h2>
+      <Alert.Root variant={app.status?.degradedKeychain === true ? "destructive" : "default"}>
+        <ShieldCheckIcon />
+        {#if app.status === null}
+          <Alert.Description>Waiting for the daemon.</Alert.Description>
+        {:else if app.status.degradedKeychain}
+          <Alert.Title>The master key is in a file, not the OS keychain.</Alert.Title>
+          <Alert.Description>
+            Backend reported:
+            <code class="bg-muted px-1 font-mono text-xs">{app.status.backend}</code>. Credentials
+            are still encrypted, but the key sits next to them with only file permissions
+            protecting it. Anyone who can read your user profile can attempt to decrypt your VRChat
+            passwords and auth cookies. On Linux this usually means no keyring daemon is running in
+            the session.
+          </Alert.Description>
+        {:else}
+          <Alert.Title>Credentials are protected by the OS keychain.</Alert.Title>
+          <Alert.Description>
+            Backend: <code class="bg-muted px-1 font-mono text-xs">{app.status.backend}</code>.
+            Passwords and VRChat auth cookies are encrypted with a key the keychain holds, never
+            written in the clear, and never sent anywhere except to VRChat.
+          </Alert.Description>
+        {/if}
+      </Alert.Root>
     </section>
   </div>
 </div>

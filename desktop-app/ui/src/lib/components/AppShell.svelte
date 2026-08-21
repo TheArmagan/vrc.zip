@@ -6,49 +6,55 @@
   scroll; the warnings do not, so no amount of scrolling ever puts them off screen.
 -->
 <script lang="ts">
-import { CommandIcon, Moon02Icon, RefreshIcon, Sun03Icon } from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/svelte";
-import type { Snippet } from "svelte";
-import KeychainWarning from "$lib/components/KeychainWarning.svelte";
-import UnofficialBadge from "$lib/components/UnofficialBadge.svelte";
-import Sidebar from "$lib/components/Sidebar.svelte";
-import { Button } from "$lib/components/ui/button/index.js";
-import type { RouteId } from "$lib/router.ts";
-import { app } from "$lib/state/app.svelte.ts";
-import { theme } from "$lib/state/theme.svelte.ts";
-import type { StreamState } from "$lib/stream.ts";
+  import CommandIcon from "@lucide/svelte/icons/command";
+  import MoonIcon from "@lucide/svelte/icons/moon";
+  import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
+  import SunIcon from "@lucide/svelte/icons/sun";
+  import type { Snippet } from "svelte";
+  import KeychainWarning from "$lib/components/KeychainWarning.svelte";
+  import UnofficialBadge from "$lib/components/UnofficialBadge.svelte";
+  import Sidebar from "$lib/components/Sidebar.svelte";
+  import { Badge } from "$lib/components/ui/badge/index.js";
+  import { Button } from "$lib/components/ui/button/index.js";
+  import { Separator } from "$lib/components/ui/separator/index.js";
+  import * as Tooltip from "$lib/components/ui/tooltip/index.js";
+  import type { RouteId } from "$lib/router.ts";
+  import { app } from "$lib/state/app.svelte.ts";
+  import { theme } from "$lib/state/theme.svelte.ts";
+  import type { StreamState } from "$lib/stream.ts";
 
-let {
-  route,
-  onOpenPalette,
-  children,
-}: { route: RouteId; onOpenPalette: () => void; children: Snippet } = $props();
+  let {
+    route,
+    onOpenPalette,
+    children,
+  }: { route: RouteId; onOpenPalette: () => void; children: Snippet } =
+    $props();
 
-const STREAM_TEXT: Record<StreamState, string> = {
-  connecting: "Connecting",
-  open: "Live",
-  reconnecting: "Reconnecting",
-  closed: "Disconnected",
-  unauthorized: "Token rejected",
-};
+  const STREAM_TEXT: Record<StreamState, string> = {
+    connecting: "Connecting",
+    open: "Live",
+    reconnecting: "Reconnecting",
+    closed: "Disconnected",
+    unauthorized: "Token rejected",
+  };
 
-const STREAM_DOT: Record<StreamState, string> = {
-  connecting: "bg-status-ask-me animate-pulse",
-  open: "bg-status-online",
-  reconnecting: "bg-status-ask-me animate-pulse",
-  closed: "bg-status-offline",
-  unauthorized: "bg-status-busy",
-};
+  const STREAM_DOT: Record<StreamState, string> = {
+    connecting: "bg-status-ask-me animate-pulse",
+    open: "bg-status-online",
+    reconnecting: "bg-status-ask-me animate-pulse",
+    closed: "bg-status-offline",
+    unauthorized: "bg-status-busy",
+  };
 
-const streamHint = $derived(
-  app.streamState === "unauthorized"
-    ? "The daemon rejected this window's session token. Relaunch vrc.zip from the tray to get a new one."
-    : app.streamState === "open"
-      ? "Events are arriving over the daemon's WebSocket."
-      : "Not receiving live events. Screens fall back to what they last read.",
-);
+  const streamHint = $derived(
+    app.streamState === "unauthorized"
+      ? "The daemon rejected this window's session token. Relaunch vrc.zip from the tray to get a new one."
+      : app.streamState === "open"
+        ? "Events are arriving over the daemon's WebSocket."
+        : "Not receiving live events. Screens fall back to what they last read.",
+  );
 
-const rateLimit = $derived(app.status?.rateLimit ?? null);
+  const rateLimit = $derived(app.status?.rateLimit ?? null);
 </script>
 
 <div class="flex h-full flex-col overflow-hidden bg-background text-foreground">
@@ -57,74 +63,100 @@ const rateLimit = $derived(app.status?.rateLimit ?? null);
     <KeychainWarning />
   {/if}
 
-  <header class="flex h-11 shrink-0 items-center gap-3 border-b border-border px-3">
-    <span class="font-mono text-[13px] font-semibold tracking-tight">vrc.zip</span>
-    {#if app.status}
-      <span class="tabular text-[11px] text-muted-foreground">v{app.status.version}</span>
-    {/if}
-
-    <div class="ml-auto flex items-center gap-3">
-      {#if rateLimit && rateLimit.retryAfter !== null}
-        <span
-          class="tabular border border-warning/40 bg-warning/10 px-1.5 py-0.5 text-[11px] text-warning"
-          title="VRChat returned 429. The daemon is holding requests until the backoff lifts."
-        >
-          Rate limited
-        </span>
-      {:else if rateLimit}
-        <span
-          class="tabular hidden text-[11px] text-muted-foreground sm:inline"
-          title="Requests per second the daemon allows itself across every account."
-        >
-          {rateLimit.limit}/s
-        </span>
+  <Tooltip.Provider delayDuration={200}>
+    <header
+      class="flex h-12 shrink-0 items-center gap-3 border-b border-border px-4"
+    >
+      <span class="font-mono text-sm font-semibold tracking-tight">vrc.zip</span
+      >
+      {#if app.status}
+        <Badge variant="outline" class="tabular">v{app.status.version}</Badge>
       {/if}
 
-      <span
-        class="flex items-center gap-1.5 text-[11px] text-muted-foreground"
-        title={streamHint}
-      >
-        <span
-          class="inline-block size-2 rounded-full {STREAM_DOT[app.streamState]}"
-          aria-hidden="true"
-        ></span>
-        {STREAM_TEXT[app.streamState]}
-      </span>
+      <div class="ml-auto flex items-center gap-2">
+        {#if rateLimit && rateLimit.retryAfter !== null}
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              <Badge class="tabular bg-warning text-warning-foreground"
+                >Rate limited</Badge
+              >
+            </Tooltip.Trigger>
+            <Tooltip.Content>
+              VRChat returned 429. The daemon is holding requests until the
+              backoff lifts.
+            </Tooltip.Content>
+          </Tooltip.Root>
+        {:else if rateLimit}
+          <Tooltip.Root>
+            <Tooltip.Trigger class="hidden sm:block">
+              <span class="tabular text-xs text-muted-foreground"
+                >{rateLimit.limit}/s</span
+              >
+            </Tooltip.Trigger>
+            <Tooltip.Content>
+              Requests per second the daemon allows itself across every account.
+            </Tooltip.Content>
+          </Tooltip.Root>
+        {/if}
 
-      <Button
-        variant="ghost"
-        size="sm"
-        onclick={onOpenPalette}
-        class="h-7 gap-1.5 px-2 text-[11px] text-muted-foreground"
-        title="Command palette (Ctrl+Shift+P)"
-      >
-        <HugeiconsIcon icon={CommandIcon} size={13} />
-        Commands
-      </Button>
+        <Tooltip.Root>
+          <Tooltip.Trigger>
+            <span class="flex items-center gap-2 text-xs text-muted-foreground">
+              <span
+                class="inline-block size-2 rounded-full {STREAM_DOT[
+                  app.streamState
+                ]}"
+                aria-hidden="true"
+              ></span>
+              {STREAM_TEXT[app.streamState]}
+            </span>
+          </Tooltip.Trigger>
+          <Tooltip.Content>{streamHint}</Tooltip.Content>
+        </Tooltip.Root>
 
-      <Button
-        variant="ghost"
-        size="icon"
-        class="size-7"
-        onclick={() => app.retry()}
-        title="Re-read everything and reopen the event socket"
-        aria-label="Refresh"
-      >
-        <HugeiconsIcon icon={RefreshIcon} size={14} />
-      </Button>
+        <Separator orientation="vertical" class="h-5" />
 
-      <Button
-        variant="ghost"
-        size="icon"
-        class="size-7"
-        onclick={() => theme.toggle()}
-        title={theme.current === "dark" ? "Switch to light" : "Switch to dark"}
-        aria-label="Toggle theme"
-      >
-        <HugeiconsIcon icon={theme.current === "dark" ? Sun03Icon : Moon02Icon} size={14} />
-      </Button>
-    </div>
-  </header>
+        <Button
+          variant="ghost"
+          size="sm"
+          onclick={onOpenPalette}
+          class="text-muted-foreground"
+          title="Command palette (Ctrl+Shift+P)"
+        >
+          <CommandIcon />
+          Commands
+        </Button>
+
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          class="text-muted-foreground"
+          onclick={() => app.retry()}
+          title="Re-read everything and reopen the event socket"
+          aria-label="Refresh"
+        >
+          <RefreshCwIcon />
+        </Button>
+
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          class="text-muted-foreground"
+          onclick={() => theme.toggle()}
+          title={theme.current === "dark"
+            ? "Switch to light"
+            : "Switch to dark"}
+          aria-label="Toggle theme"
+        >
+          {#if theme.current === "dark"}
+            <SunIcon />
+          {:else}
+            <MoonIcon />
+          {/if}
+        </Button>
+      </div>
+    </header>
+  </Tooltip.Provider>
 
   <div class="flex min-h-0 flex-1">
     <Sidebar current={route} />

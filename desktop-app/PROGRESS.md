@@ -138,13 +138,21 @@ handshake, because the alternative is a login flow that mints credentials with n
       the `{name, version, contact}` triple the consent sheet names, and the scope request read out
       of the Basic-auth password field. An unknown scope is a hard failure; a wildcard never reaches
       a dangerous scope.
-- [ ] **2.5 The login handshake** — `GET /auth/user` with Basic auth on `:7774`: resolve the
-      username to an account, find or create a grant, and answer *now* with
-      `{"requiresTwoFactorAuth":["totp"]}` plus a half-authenticated cookie when consent is pending.
-      `/auth/twofactorauth/*/verify` completes the pairing; `GET /auth` validates and returns **our**
-      token; `PUT /logout` revokes only the grant.
+- [x] **2.5 The login handshake** (`proxy/handshake.ts`, `proxy/consent.ts`) — `GET /auth/user`
+      with Basic auth answers *now* with `{"requiresTwoFactorAuth":["totp"]}` and a
+      half-authenticated cookie, exactly as real VRChat does pre-2FA, while a consent sheet opens
+      behind it. `/auth/twofactorauth/{totp,emailotp,otp}/verify` takes the six-digit code — typing
+      it **is** the consent gesture — and returns the grant cookie plus a device-trust cookie.
+      `GET /auth` returns **our** token, never the real one. `PUT /logout` revokes the grant and
+      never reaches VRChat. Also `proxy/route-table.ts`: a request is matched to exactly one
+      operation, literal segments beating parameters, so an unknown path gets VRChat's real 404
+      instead of a catch-all's guess. Decisions 54–58.
 - [ ] **2.6 Consent UI** — the sheet showing app identity, requested scopes (delta only, on an
-      escalation), the account picker for the reserved username, and the six-digit code.
+      escalation), the account picker for the reserved username, and the six-digit code. The daemon
+      side is ready: `ConsentRegistry.list()` has the pending set, `consent.pending` /
+      `consent.resolved` are on the bus, and `attachAccount` / `deny` are the two actions the sheet
+      needs. What is missing is the control-API surface and the screen. **Until this lands the
+      handshake is unusable in practice** — nothing shows the user the code.
 - [ ] **2.7 Mirror routes** — one Hono route per operation from the generated route table, never a
       catch-all, so an unknown path falls through to VRChat's real 404 and a route with no scope
       mapping fails to register. `scopeGuard` off the route table, hard denials regardless of scope,
@@ -488,6 +496,34 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     matter under roster polling, and a read is not the thing anyone needs evidence of. `grant_id` on
     `audit_log` is deliberately not a foreign key: a denied call may have no grant at all, and a
     revoked grant must not take its history with it.
+54. **Device trust is the only thing that skips a consent sheet — an existing grant is not.** Any
+    local process can send another app's `User-Agent`, so treating "this app already has a grant" as
+    proof of identity would hand a working token to whoever asked in its name. The `twoFactorAuth`
+    cookie is the thing an impersonator does not have, which is what device trust means upstream
+    too. It is checked against the app identity *and* the named account, and it never covers a wider
+    scope than the grant it belongs to — an escalation re-prompts even on a trusted device, because
+    the new ask is the entire point of the sheet.
+55. **A re-login issues a new grant rather than rotating the existing one's token.** Rotation would
+    kill a running instance of the app mid-request, and PLAN.md's escalation flow promises the
+    existing grant keeps working throughout. Both appear in "Connected apps" and either can be
+    revoked. The cost is that a long-lived app accumulates grant rows; the UI groups them by app.
+56. **The proxy sets its own cookies through marker headers the egress filter converts.** `Set-Cookie`
+    is stripped unconditionally on the way out, which would otherwise make the handshake unable to
+    set the one cookie the whole flow depends on. Rather than weakening the strip into a judgement
+    call, a route names the value in `X-Vrcz-Set-Auth` / `X-Vrcz-Set-Two-Factor` and the filter
+    writes the header. The strip stays unconditional, the value is checked to be a `_vrczip` token
+    before it is emitted, and the cookie attributes live in one place — so no route can forget
+    `HttpOnly`.
+57. **The mirror advertises exactly one 2FA method and accepts all three verify paths.** Advertising
+    `["totp"]` alone: a client offered several may prompt for a choice when there is only one thing
+    to type, and one offered `emailOtp` may sit waiting for an email that is never coming. Accepting
+    all three verifiers anyway, because the code being typed is a vrc.zip pairing code regardless of
+    which endpoint a client prefers, and refusing its preference would break it for no gain.
+58. **Pairing codes live in memory; the store keeps only their hash.** A six-digit code sitting in a
+    readable table is a bypass of the consent gesture. A daemon restart therefore drops every
+    pending code, which is correct — they expire in five minutes and an app simply logs in again.
+    The `consent.pending` / `consent.resolved` bus events are **ephemeral**: `pairing_requests` is
+    already their durable record, and the feed is otherwise about what happened in VRChat.
 41. **The pipeline endpoint is injectable, and there is a fixture socket behind it.**
     `startDaemon({ pipelineUrl })` joins `baseUrl` as a test seam, and
     `daemon/src/testing/pipeline-fixture.ts` is a real `Bun.serve` WebSocket rather than an injected
@@ -524,6 +560,17 @@ Empirical notes. Add to this as you hit things — especially where the plan tur
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
 
+- **A path segment in VRChat's spec can hold more than one parameter.**
+  `/instances/{worldId}:{instanceId}` is one segment, two parameters and a separator, and the
+  obvious `startsWith("{") && endsWith("}")` test reads it as a single parameter named
+  `worldId}:{instanceId` — matching, capturing the whole segment, and naming it nonsense. Nothing
+  fails loudly: the route resolves to the right operation and the right scope, and only the extracted
+  parameters are wrong, which is exactly what the pass-through path will later rebuild a URL from.
+  Segments are compiled to a regex each now.
+- **`pairing_requests.grant_id` is a foreign key, so a pairing can only be approved after its grant
+  row exists.** The handshake already does it in that order; a test that approved against an invented
+  id is what surfaced the constraint. Worth knowing before anyone reorders those two lines for
+  tidiness.
 - **Assigning `c.res` in Hono copies the previous response's headers onto the new one — including
   `Set-Cookie`, by name.** So an egress filter written the obvious way, as the last middleware,
   strips the upstream cookie and then hands back a response that still carries it. The test that
@@ -846,6 +893,11 @@ active, wrong `Host` 403, wrong `Origin` 403, missing token 401, proxy 501, UI 2
 
 Unresolved; flag to the user rather than guessing.
 
+- **One control-deps test is flaky.** `control deps: groups and mutual friends > the user batch is
+  cache-first, sequential, and leaves the unreadable out` failed once in a full run and has passed
+  every run since, including three consecutive full runs. It is timing-dependent rather than
+  order-dependent as far as anyone has looked. Worth catching properly before it starts failing in
+  a way that gets ignored.
 - Whether `local.vrc.zip` DNS + the DNS-01 cert pipeline is stood up yet, and who owns the renewal
   endpoint that has to stay up for the life of the product. Not blocking — it is opt-in and
   `127.0.0.1` is the default — but the README documents it, so it should exist before release.

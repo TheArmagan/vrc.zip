@@ -151,13 +151,44 @@ describe("daemon end to end", () => {
 
   test("the proxy port still refuses to serve a control route", async () => {
     // The separation PLAN.md §1.8 actually insists on: the byte-faithful mirror must not be able
-    // to answer a control request. Mounting the API on the UI port must not have weakened it.
+    // to answer a control request. Mounting the API on the UI port must not have weakened it, and
+    // neither must the mirror having grown real routes — `/api/status` is not one of VRChat's, so
+    // it gets VRChat's real 404 rather than the control answer.
     const running = await boot();
 
     const response = await fetch(`${running.servers.urls.proxyUrl}/api/status`, {
       headers: { Authorization: `Bearer ${running.sessionToken}` },
     });
-    expect(response.status).toBe(501);
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ error: { message: '"Not Found"', status_code: 404 } });
+  });
+
+  test("an app can log into the mirror and reach a consent sheet", async () => {
+    // The composition root's half of the handshake: a real account manager behind
+    // `resolveAccount`, so the username an app types resolves to an account that actually exists.
+    const running = await boot();
+    await api(running, "/api/accounts/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: ALICE.username, password: ALICE.password }),
+    });
+
+    const credentials = Buffer.from(
+      `${encodeURIComponent(ALICE.username)}:${encodeURIComponent("friends:read")}`,
+      "utf8",
+    ).toString("base64");
+
+    const response = await fetch(`${running.servers.urls.proxyUrl}/api/1/auth/user`, {
+      headers: {
+        Authorization: `Basic ${credentials}`,
+        "User-Agent": "SomeApp/1.0 someone@somewhere.dev",
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ requiresTwoFactorAuth: ["totp"] });
+    // The half-authenticated cookie survives the egress filter, which strips every other one.
+    expect(response.headers.get("set-cookie")).toMatch(/^auth=authcookie_.+_vrczip/);
   });
 
   test("rejects an unauthenticated request and a rebinding Host", async () => {

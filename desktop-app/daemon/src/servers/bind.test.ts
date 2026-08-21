@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { ConsentRegistry } from "../proxy/consent.ts";
+import type { ProxyDeps } from "../proxy/handshake.ts";
 import { generateSessionToken } from "../security/session-token.ts";
+import { MEMORY, Store } from "../store/store.ts";
 import { type BoundServers, bindServer, bindServers, launchUrl } from "./bind.ts";
 import type { ControlDeps } from "./control.ts";
 
@@ -123,27 +126,68 @@ describe("bindServers", () => {
     }
   });
 
-  test("requires the session token on every port", async () => {
+  test("requires the session token on the two ports that use one", async () => {
     bound = await bindServers({ deps, token: () => TOKEN, ports: { ui: 0, proxy: 0, control: 0 } });
-    for (const server of [bound.ui, bound.proxy, bound.control]) {
+    for (const server of [bound.ui, bound.control]) {
       expect((await fetch(`${server.url}/api/status`)).status).toBe(401);
     }
   });
 
-  test("the proxy port answers 501 until Phase 2 fills it in", async () => {
-    bound = await bindServers({ deps, token: () => TOKEN, ports: { ui: 0, proxy: 0, control: 0 } });
-    const res = await fetch(`${bound.proxy.url}/api/1/auth/user`, {
-      headers: { authorization: `Bearer ${TOKEN}` },
+  /** The mirror's collaborators, over a throwaway in-memory database. */
+  function proxyDeps(): ProxyDeps {
+    const store = Store.open(MEMORY);
+    return {
+      consent: new ConsentRegistry({ store }),
+      grants: store,
+      resolveAccount: () => null,
+      currentUser: () => null,
+    };
+  }
+
+  test("the mirror does not take a session token, and is not open either", async () => {
+    // Phase 2 changed the model on `:7774` on purpose: an app authenticates by *logging in*, with
+    // Basic auth and a consent sheet, exactly as it would against VRChat. A pre-shared token would
+    // defeat the whole handshake, whose point is that a stock client library needs no modification.
+    // What replaces it is that there is nothing to reach without a grant.
+    bound = await bindServers({
+      deps,
+      proxyDeps: proxyDeps(),
+      token: () => TOKEN,
+      ports: { ui: 0, proxy: 0, control: 0 },
     });
-    expect(res.status).toBe(501);
+
+    // No credentials at all: VRChat's own missing-credentials 401, not a vrc.zip auth error.
+    const anonymous = await fetch(`${bound.proxy.url}/api/1/auth/user`, {
+      headers: { "user-agent": "SomeApp/1.0 me@somewhere.dev" },
+    });
+    expect(anonymous.status).toBe(401);
+
+    // And the session token buys nothing here — it is not a credential this port understands.
+    const withToken = await fetch(`${bound.proxy.url}/api/1/auth/user`, {
+      headers: { authorization: `Bearer ${TOKEN}`, "user-agent": "SomeApp/1.0 me@somewhere.dev" },
+    });
+    expect(withToken.status).toBe(401);
+  });
+
+  test("the mirror answers 503 when the daemon has not wired the handshake up", async () => {
+    // `bindServers` without `proxyDeps`: the port still binds, because the three-instance shape is
+    // structural, and every route says so rather than half-working.
+    bound = await bindServers({ deps, token: () => TOKEN, ports: { ui: 0, proxy: 0, control: 0 } });
+    const res = await fetch(`${bound.proxy.url}/api/1/auth`, {
+      headers: { "user-agent": "SomeApp/1.0 me@somewhere.dev" },
+    });
+    expect(res.status).toBe(503);
   });
 
   test("the control API is only on the control port", async () => {
     bound = await bindServers({ deps, token: () => TOKEN, ports: { ui: 0, proxy: 0, control: 0 } });
     const auth = { authorization: `Bearer ${TOKEN}` };
     expect((await fetch(`${bound.control.url}/api/status`, { headers: auth })).status).toBe(200);
-    // On the mirror the same path is a 501 placeholder, never the control route.
-    expect((await fetch(`${bound.proxy.url}/api/status`, { headers: auth })).status).toBe(501);
+    // On the mirror the same path is not a route at all, and gets VRChat's real 404 — never the
+    // control route, and never a catch-all guessing what was meant.
+    const mirrored = await fetch(`${bound.proxy.url}/api/status`, { headers: auth });
+    expect(mirrored.status).toBe(404);
+    expect(await mirrored.json()).toEqual({ error: { message: '"Not Found"', status_code: 404 } });
   });
 });
 

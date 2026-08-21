@@ -8,6 +8,7 @@ import { RateLimiter } from "./net/rate-limiter.ts";
 import { buildUserAgent } from "./net/user-agent.ts";
 import { databasePath, ensureStateDir } from "./paths.ts";
 import { PipelineClient } from "./pipeline/index.ts";
+import { ConsentRegistry } from "./proxy/consent.ts";
 import { loadOrCreateMasterKey } from "./security/keychain.ts";
 import { SecretsStore } from "./security/secrets.ts";
 import { resolveSessionToken } from "./security/session-token.ts";
@@ -218,8 +219,30 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     onSettingsSaved: (next) => saveSettings(next, env),
   });
 
+  // --- the proxy's collaborators --------------------------------------------
+  // Consent is its own object rather than something the proxy owns, because the *UI* is the other
+  // half of it: the sheet, the account picker, and the six-digit code all live on the control API,
+  // and a registry buried inside the mirror would have to be reached back into from there.
+  const consent = new ConsentRegistry({ store, bus });
+
+  const proxyDeps = {
+    consent,
+    grants: store,
+    resolveAccount: (username: string) => {
+      const account = accounts.resolve(username);
+      return account === undefined
+        ? null
+        : { id: account.id, displayName: account.user?.displayName ?? account.username };
+    },
+    // The account's own cached `CurrentUser`. §2.7 replaces this with a real proxied response, at
+    // which point byte-fidelity starts mattering; on the handshake there are no upstream bytes to
+    // be faithful to, because the login never reaches VRChat.
+    currentUser: (accountId: string) => accounts.get(accountId)?.user ?? null,
+  };
+
   const servers = await bindServers({
     deps,
+    proxyDeps,
     token: () => sessionToken,
     ports: settings.ports,
     // `new URL(...).pathname` yields "/C:/Users/..." on Windows, which no fs call resolves — the

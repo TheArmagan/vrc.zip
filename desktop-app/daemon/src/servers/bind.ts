@@ -1,5 +1,6 @@
 import type { Server, WebSocketHandler } from "bun";
 import { type EgressViolation, filterResponse } from "../proxy/egress-filter.ts";
+import type { ProxyDeps } from "../proxy/handshake.ts";
 import type { TokenSource } from "../security/guards.ts";
 import { type ControlDeps, controlWebSocketHandler, createControlApp } from "./control.ts";
 import { createProxyApp } from "./proxy.ts";
@@ -157,6 +158,11 @@ function reportEgressViolation(
 
 export interface BindServersOptions {
   deps: ControlDeps;
+  /**
+   * The mirror's collaborators. Omitted, `:7774` binds and answers 503 rather than half-working —
+   * the port must exist either way, because the "three separate instances" property is structural.
+   */
+  proxyDeps?: ProxyDeps | undefined;
   /** Resolves the session token every port accepts for this run. */
   token: TokenSource;
   ports?: {
@@ -179,7 +185,7 @@ export interface BoundServers {
 }
 
 export async function bindServers(options: BindServersOptions): Promise<BoundServers> {
-  const { deps, token, ports, hostname = DEFAULT_HOSTNAME, uiDistDir } = options;
+  const { deps, proxyDeps, token, ports, hostname = DEFAULT_HOSTNAME, uiDistDir } = options;
 
   // Control first: its URL goes on the UI's placeholder page.
   const control = bindServer({
@@ -195,7 +201,10 @@ export async function bindServers(options: BindServersOptions): Promise<BoundSer
   const proxy = bindServer({
     port: ports?.proxy ?? DEFAULT_PROXY_PORT,
     hostname,
-    createApp: (port) => egressGuarded(createProxyApp({ port, token })),
+    createApp: (port) =>
+      egressGuarded(
+        createProxyApp({ port, ...(proxyDeps === undefined ? {} : { deps: proxyDeps }) }),
+      ),
   });
 
   const ui = bindServer({

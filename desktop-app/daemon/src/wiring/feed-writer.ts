@@ -22,6 +22,11 @@ const EPHEMERAL = new Set([
   // in anybody's day. It exists to wake the friends list up, and opening a card would otherwise
   // write a feed row for every friend whose status had drifted.
   "friend.presence",
+  // A live prompt and its answer. `pairing_requests` is already their durable record — what an app
+  // asked for, when, and how it ended — so a feed row would be a second copy of the same fact,
+  // filed under a timeline that is otherwise about what happened in VRChat.
+  "consent.pending",
+  "consent.resolved",
 ]);
 
 export interface FeedWriterOptions {

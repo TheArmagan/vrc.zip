@@ -112,6 +112,28 @@ export function scanHeaders(headers: Headers): string | null {
 }
 
 /**
+ * Marker headers a vrc.zip route sets to ask for a cookie the filter will emit on its behalf.
+ *
+ * The proxy has to be able to set `auth` and `twoFactorAuth` — that is the whole handshake — while
+ * `Set-Cookie` is stripped unconditionally on the way out. Rather than weakening the strip into a
+ * judgement call, a route names the *value* and the filter writes the header. Three properties fall
+ * out of that, all of them things a per-route `Set-Cookie` could get wrong:
+ *
+ *  - the strip stays unconditional, so an upstream cookie can never survive by resembling ours;
+ *  - the value is checked to be a `_vrczip` token before it is emitted, so a route that somehow got
+ *    hold of a real cookie cannot set it — that fails closed like any other leak;
+ *  - the attributes are written in one place, so no route can forget `HttpOnly`.
+ *
+ * One header per cookie rather than one repeated header: repeated custom headers fold into a single
+ * comma-joined value, and cookie values are not safely splittable on a comma.
+ */
+export const COOKIE_MARKER_HEADERS = {
+  "x-vrcz-set-auth": (value: string) => `auth=${value}; Path=/; HttpOnly`,
+  "x-vrcz-set-two-factor": (value: string) =>
+    `twoFactorAuth=${value}; Path=/; Max-Age=2592000; HttpOnly`,
+} as const;
+
+/**
  * Applies the filter to one response. Exported for tests and for the pipeline mirror, which needs
  * the same scan over frames rather than over an HTTP response.
  *
@@ -125,6 +147,15 @@ export async function filterResponse(
 ): Promise<Response> {
   const limit = options.maxBufferedBytes ?? DEFAULT_MAX_BUFFERED_BYTES;
   const headers = stripResponseHeaders(new Headers(response.headers));
+
+  // After the strip, so a route's requested cookie is the only one that can survive, and before the
+  // scan, so a requested cookie carrying a real credential fails closed like anything else.
+  for (const [marker, format] of Object.entries(COOKIE_MARKER_HEADERS)) {
+    const value = headers.get(marker);
+    if (value === null) continue;
+    headers.delete(marker);
+    headers.append("set-cookie", format(value));
+  }
 
   const offendingHeader = scanHeaders(headers);
   if (offendingHeader !== null) {

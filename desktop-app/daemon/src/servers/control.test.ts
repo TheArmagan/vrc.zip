@@ -102,6 +102,7 @@ const INSTANCE_USER = {
   ageVerificationStatus: "18+",
   ageVerified: true,
   isFriend: true,
+  status: "join me",
   platform: "standalonewindows",
   developerType: "none",
 };

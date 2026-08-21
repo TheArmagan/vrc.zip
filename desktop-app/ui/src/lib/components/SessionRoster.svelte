@@ -20,19 +20,25 @@ import { type GameSession, imageUrl } from "$lib/api.ts";
 import EmptyState from "$lib/components/EmptyState.svelte";
 import ErrorNote from "$lib/components/ErrorNote.svelte";
 import PlayerAttributes from "$lib/components/PlayerAttributes.svelte";
+import StatusDot from "$lib/components/StatusDot.svelte";
 import UserName from "$lib/components/UserName.svelte";
-import { Avatar, AvatarFallback, AvatarImage } from "$lib/components/ui/avatar/index.js";
+import {
+  Avatar,
+  AvatarBadge,
+  AvatarFallback,
+  AvatarImage,
+} from "$lib/components/ui/avatar/index.js";
 import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
 import * as InputGroup from "$lib/components/ui/input-group/index.js";
 import * as Select from "$lib/components/ui/select/index.js";
 import * as Tooltip from "$lib/components/ui/tooltip/index.js";
 import {
+  chosenStatus,
   duration,
   fullTimestamp,
   initials,
   parseLocation,
-  platformLabel,
   timeOfDay,
   trustRank,
 } from "$lib/format.ts";
@@ -265,12 +271,27 @@ const refreshing = $derived(entry?.status === "loading");
       {:else}
         <ul class="divide-y divide-border/60">
           {#each sorted as row (row.key)}
-            {@const platform = platformLabel(row.attributes?.platform ?? null)}
+            {@const status = chosenStatus(row.attributes?.status)}
             <li class="flex items-center gap-3 px-4 py-2">
               <!-- alt="" deliberately: the name is the next column, so announcing it twice is noise. -->
               <Avatar class="size-8 shrink-0">
                 <AvatarImage src={imageUrl(row.attributes?.iconUrl)} alt="" loading="lazy" />
                 <AvatarFallback class="text-[10px]">{initials(row.displayName)}</AvatarFallback>
+                {#if status !== null}
+                  <!--
+                    Only a status the person *chose* — see `chosenStatus`. This list is not asking
+                    whether they are online: the game log has them in the room, which is a better
+                    answer than VRChat's and the reason the column this replaced was a lie. So
+                    nobody here gets an offline dot, and somebody VRChat said nothing about gets no
+                    dot at all rather than a grey one meaning "we did not ask".
+
+                    `ring-background` and not `ring-popover`: these rows sit on the page, unlike the
+                    same badge inside the modals.
+                  -->
+                  <AvatarBadge class="bg-transparent ring-background">
+                    <StatusDot {status} size={null} class="size-full" />
+                  </AvatarBadge>
+                {/if}
               </Avatar>
 
               <div class="flex min-w-0 flex-1 items-center gap-2">
@@ -300,10 +321,6 @@ const refreshing = $derived(entry?.status === "loading");
                 seenThrough={account?.displayName ?? null}
                 matchedBy={row.matchedBy}
               />
-
-              <span class="tabular hidden w-10 shrink-0 text-right text-xs text-muted-foreground sm:block">
-                {platform ?? ""}
-              </span>
 
               <span
                 class="tabular w-24 shrink-0 text-right text-xs text-muted-foreground"

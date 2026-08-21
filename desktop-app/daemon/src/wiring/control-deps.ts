@@ -208,6 +208,16 @@ function toInstanceUser(raw: Partial<LimitedUserInstance>, isFriend: boolean): I
     ageVerificationStatus: emptyToNull(raw.ageVerificationStatus),
     ageVerified: raw.ageVerified === true,
     isFriend,
+    status: emptyToNull(raw.status),
+    /*
+     * Verbatim, including the word `offline`.
+     *
+     * VRChat sets `platform` to `"offline"` for somebody it considers offline — which it will say
+     * about a person the game log has standing in the room, because the two answers come from
+     * different places at different times. Deciding what that means is the UI's job and it has the
+     * log to decide it with; collapsing it here would only move the guess somewhere with less
+     * information.
+     */
     platform: emptyToNull(raw.platform),
     developerType: emptyToNull(raw.developerType),
   };

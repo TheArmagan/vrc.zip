@@ -762,6 +762,14 @@ export interface InstanceUser {
   readonly ageVerified: boolean;
   /** Whether the *asking account* is friends with them. Two accounts get two different answers. */
   readonly isFriend: boolean;
+  /**
+   * VRChat's `status`: the person's *chosen* status, or `offline`. Null when unset.
+   *
+   * Never read as "are they here". Everyone in a roster is here — that is what the game log is for
+   * — and VRChat answers `offline` for some of them anyway. `chosenStatus` in `format.ts` is the
+   * one place that decides what is worth drawing.
+   */
+  readonly status: string | null;
   readonly platform: string | null;
   readonly developerType: string | null;
 }
@@ -805,6 +813,7 @@ function decodeUser(value: unknown): InstanceUser | null {
     ageVerificationStatus: rosterStr(row, "ageVerificationStatus"),
     ageVerified: row.ageVerified === true,
     isFriend: row.isFriend === true,
+    status: rosterStr(row, "status"),
     platform: rosterStr(row, "platform"),
     developerType: rosterStr(row, "developerType"),
   };

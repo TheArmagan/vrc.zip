@@ -476,6 +476,25 @@ export function statusLabel(status: FriendStatus): string {
   return STATUS_LABELS[status] ?? "Unknown";
 }
 
+/**
+ * The status worth drawing, or null when there is nothing to say.
+ *
+ * For a list where presence is *already established* — an instance roster, where the game log has
+ * these people standing in a room — `status` adds one thing and one thing only: what they chose to
+ * tell people. `offline` is not that. It is VRChat's presence answer, it is contradicted by the log
+ * for anyone on such a list, and drawing a grey dot from it would repeat a contradiction as if it
+ * were information. So `offline`, an empty string, and any value this build does not recognise all
+ * come back null, and the caller draws nothing — absence is never a claim, as everywhere else.
+ *
+ * The friends screen deliberately does **not** use this: there, offline is the answer to the
+ * question being asked, and a grey dot is exactly right.
+ */
+export function chosenStatus(status: string | null | undefined): FriendStatus | null {
+  if (status === null || status === undefined) return null;
+  if (status === "offline") return null;
+  return status in STATUS_LABELS ? status : null;
+}
+
 /** Presence status -> the theme token suffix declared in `app.css`. */
 export function statusToken(status: FriendStatus): string {
   switch (status) {
@@ -512,6 +531,10 @@ const PLATFORM_LABELS: Readonly<Record<string, string>> = {
 
 export function platformLabel(platform: string | null): string | null {
   if (platform === null || platform === "") return null;
+  // `offline` is not a platform. VRChat puts it in this field for somebody it considers offline,
+  // and the pass-through below — which exists so a platform VRChat invents next year still shows
+  // up — printed the word verbatim in a column headed by device names.
+  if (platform.toLowerCase() === "offline") return null;
   return PLATFORM_LABELS[platform.toLowerCase()] ?? platform;
 }
 

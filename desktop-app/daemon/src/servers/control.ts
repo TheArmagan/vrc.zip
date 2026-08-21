@@ -556,6 +556,15 @@ export interface InstanceUser {
   ageVerified: boolean;
   /** Whether they are a friend **of the account this roster was read through**. */
   isFriend: boolean;
+  /**
+   * VRChat's `status` — the person's *chosen* status (`active`, `join me`, `ask me`, `busy`), or
+   * `offline`. Passed through verbatim; null when unset.
+   *
+   * It is not a statement about whether they are here. Everybody in a roster is here — the game log
+   * says so — and VRChat will still answer `offline` for some of them. See `chosenStatus` in the
+   * UI's `format.ts` for what that means at the point of rendering.
+   */
+  status: string | null;
   platform: string | null;
   developerType: string | null;
 }

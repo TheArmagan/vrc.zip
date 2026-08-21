@@ -344,6 +344,17 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     always. A mutual friend is by definition one of this account's own friends, so presence is
     already holding a live answer and it costs no request. VRChat's own value still wins when there
     is one — it is from this instant.
+43. **The roster shows a chosen status, and never an offline one.** The instance roster had a
+    platform column that printed the literal word "offline" — `platformLabel` passes an
+    unrecognised value through so a platform VRChat invents next year still appears, and VRChat puts
+    `"offline"` in that field. The column is gone; the status it was accidentally reporting is now a
+    dot on the avatar, where it belongs. **Presence is not the question on this list**: the game log
+    has these people standing in a room, which is a better answer than VRChat's and arrives sooner,
+    so `chosenStatus` returns null for `offline`, for `""`, and for anything this build does not
+    recognise, and the badge is simply not drawn. What a status adds here is what somebody chose to
+    tell people — join me, ask me, busy — and nothing else. The friends screen deliberately does not
+    use it: there, offline *is* the answer, and a grey dot is right. The daemon passes VRChat's word
+    through untouched either way; it has no log to weigh it against, so it does not guess.
 
 29. **Notifications are backfilled over REST, not sourced from the socket alone.** The pipeline is
     the reason the screen is live; it is not, and cannot be, the reason it is *correct*. Both
@@ -415,6 +426,12 @@ Empirical notes. Add to this as you hit things — especially where the plan tur
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
 
+- **`platform` is another field VRChat answers `offline` in.** Not a platform, and not a rare edge:
+  it comes back that way for somebody the game log has standing in an instance, because the roster
+  answer and the log are two sources at two moments. A pass-through fallback meant to future-proof
+  the column against new device names printed it verbatim under a heading of device names. The
+  pattern is now three deep — `status`, `state`, `platform` — so treat *any* VRChat string field as
+  capable of returning a presence word instead of its own kind of value.
 - **`??` is the wrong operator against every optional string VRChat sends.** It writes `""` rather
   than omitting a field, and the empty string sails through `??` as if it were an answer. It was
   known for image URLs and written down as such; it is the same for `status` and

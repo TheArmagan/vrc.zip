@@ -869,6 +869,28 @@ describe("control deps: instance users", () => {
     return h.requests.filter((path) => path.includes("/instances/")).length;
   }
 
+  test("VRChat's `offline` for somebody standing in the room is passed through, not judged", async () => {
+    const h = harness({
+      instance: () =>
+        Response.json({
+          id: LOCATION,
+          n_users: 1,
+          // What VRChat answers about a person the game log has in the instance right now. The two
+          // come from different places at different times and this one is simply behind.
+          users: [instanceUserBody("usr_a", { status: "offline", platform: "offline" })],
+        }),
+    });
+    await resumeAll(h);
+
+    const roster = await h.deps.listInstanceUsers(TARGET, VIEWER);
+
+    // Verbatim. The UI has the log to weigh this against; the daemon does not, so it does not
+    // guess — see `chosenStatus` in the UI's `format.ts` for where the judgement is made.
+    expect(roster.users[0]?.status).toBe("offline");
+    expect(roster.users[0]?.platform).toBe("offline");
+    h.stop();
+  });
+
   test("one call yields the whole roster, with trust and age verification per head", async () => {
     const h = harness({
       instance: () =>
@@ -906,6 +928,7 @@ describe("control deps: instance users", () => {
         ageVerificationStatus: "18+",
         ageVerified: true,
         isFriend: false,
+        status: "active",
         platform: "standalonewindows",
         developerType: "none",
       },
@@ -922,6 +945,7 @@ describe("control deps: instance users", () => {
         ageVerificationStatus: "hidden",
         ageVerified: false,
         isFriend: false,
+        status: "active",
         platform: "standalonewindows",
         developerType: "none",
       },

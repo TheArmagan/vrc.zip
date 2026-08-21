@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { portFallbackWarnings, type RunningDaemon, startDaemon } from "./app.ts";
 import { generateSessionToken } from "./security/session-token.ts";
 import { writeStateFile } from "./security/state-file.ts";
+import { type PipelineFixture, startPipelineFixture } from "./testing/pipeline-fixture.ts";
 import { startVrchatFixture, type VrchatFixture } from "./testing/vrchat-fixture.ts";
 
 /**
@@ -36,10 +37,34 @@ const BOB = {
   displayName: "Bob",
   twoFactorMethods: ["totp"],
   twoFactorCode: "654321",
+  friends: [{ id: "usr_f3", displayName: "Friend Three", online: true }],
+} as const;
+
+/**
+ * One account per 2FA method. §1.10 names all three and only `totp` ever had a success path — the
+ * other two branches were reachable from the UI and asserted nowhere.
+ */
+const CAROL = {
+  username: "carol@somewhere.dev",
+  password: "carol-password",
+  userId: "usr_carol",
+  displayName: "Carol",
+  twoFactorMethods: ["emailOtp"],
+  twoFactorCode: "112233",
+} as const;
+
+const DAVE = {
+  username: "dave@somewhere.dev",
+  password: "dave-password",
+  userId: "usr_dave",
+  displayName: "Dave",
+  twoFactorMethods: ["otp"],
+  twoFactorCode: "445566",
 } as const;
 
 describe("daemon end to end", () => {
   let fixture: VrchatFixture;
+  let pipeline: PipelineFixture;
   let dir: string;
   let daemon: RunningDaemon | null = null;
 
@@ -64,6 +89,7 @@ describe("daemon end to end", () => {
     daemon = await startDaemon({
       env: { VRCZIP_STATE_DIR: dir, VRCZIP_KEY_BACKEND: "file" },
       baseUrl: fixture.baseUrl,
+      pipelineUrl: pipeline.url,
     });
     return daemon;
   }
@@ -81,13 +107,15 @@ describe("daemon end to end", () => {
   }
 
   beforeEach(async () => {
-    fixture = startVrchatFixture({ accounts: [ALICE, BOB] });
+    fixture = startVrchatFixture({ accounts: [ALICE, BOB, CAROL, DAVE] });
+    pipeline = startPipelineFixture();
     dir = await mkdtemp(join(tmpdir(), "vrczip-e2e-"));
   });
 
   afterEach(async () => {
     await daemon?.stop();
     daemon = null;
+    pipeline.stop();
     fixture.stop();
     await rm(dir, { recursive: true, force: true });
   });
@@ -173,27 +201,174 @@ describe("daemon end to end", () => {
     expect(friends[0]?.status).toBe("active");
   });
 
-  test("a 2FA login stops at the challenge and completes on verify", async () => {
-    const running = await boot();
+  // §1.10 names all three verifiers. Branching explicitly on the returned method is the whole
+  // reason `auth.ts` does not fire them in parallel, and until now two of the three branches were
+  // asserted by nothing at all.
+  for (const account of [BOB, CAROL, DAVE] as const) {
+    const method = account.twoFactorMethods[0];
 
-    const login = await json<{ status: string; accountId: string; methods: string[] }>(
+    test(`a ${method} login stops at the challenge and completes on verify`, async () => {
+      const running = await boot();
+
+      const login = await json<{ status: string; accountId: string; methods: string[] }>(
+        api(running, "/api/accounts/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: account.username, password: account.password }),
+        }),
+      );
+
+      expect(login.status).toBe("requires-2fa");
+      expect(login.methods).toEqual([method]);
+
+      const wrong = await json<{ status: string }>(
+        api(running, `/api/accounts/${login.accountId}/verify-2fa`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ method, code: "000000" }),
+        }),
+      );
+      expect(wrong.status).not.toBe("ok");
+
+      const verify = await api(running, `/api/accounts/${login.accountId}/verify-2fa`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ method, code: account.twoFactorCode }),
+      });
+      expect(verify.status).toBe(200);
+      expect((await json<{ account: { id: string } }>(verify)).account.id).toBe(account.userId);
+
+      // The verifier actually reached is the one the method named — the failure this guards against
+      // is a mapping that sends every method to `/totp/verify` and passes anyway.
+      expect(
+        fixture.requests.some(
+          (r) => r.path === `/auth/twofactorauth/${method.toLowerCase()}/verify`,
+        ),
+      ).toBe(true);
+    });
+  }
+
+  /** Signs Alice in (no 2FA) and Bob in (totp), leaving two accounts online. */
+  async function loginTwoAccounts(running: RunningDaemon): Promise<void> {
+    await api(running, "/api/accounts/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: ALICE.username, password: ALICE.password }),
+    });
+
+    const login = await json<{ accountId: string }>(
       api(running, "/api/accounts/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username: BOB.username, password: BOB.password }),
       }),
     );
-
-    expect(login.status).toBe("requires-2fa");
-    expect(login.methods).toEqual(["totp"]);
-
-    const verify = await api(running, `/api/accounts/${login.accountId}/verify-2fa`, {
+    await api(running, `/api/accounts/${login.accountId}/verify-2fa`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ method: "totp", code: BOB.twoFactorCode }),
     });
-    expect(verify.status).toBe(200);
-    expect((await json<{ account: { id: string } }>(verify)).account.id).toBe("usr_bob");
+  }
+
+  test("two accounts hold two independent pipeline sockets", async () => {
+    // Phase 1's definition of done, and nothing constructed two `PipelineClient`s until this test:
+    // two sockets, each carrying its *own* account's auth token. One socket shared between accounts
+    // — or two sockets on one token — is a cookie-bleed bug that presents as one account silently
+    // receiving the other's events.
+    const running = await boot();
+    await loginTwoAccounts(running);
+
+    const live = await pipeline.waitForConnections(2);
+    const tokens = live.map((connection) => connection.authToken).sort();
+
+    const alice = fixture.authTokenFor(ALICE.userId);
+    const bob = fixture.authTokenFor(BOB.userId);
+    expect(alice).not.toBeNull();
+    expect(bob).not.toBeNull();
+    expect(alice).not.toBe(bob);
+    expect(tokens).toEqual([alice, bob].sort() as string[]);
+
+    // A missing UA is a hard reject on the handshake too, not only on the REST API.
+    for (const connection of live) expect(connection.userAgent).toStartWith("vrc.zip/");
+  });
+
+  test("pipeline events land in the store under the account whose socket carried them", async () => {
+    // The end of the chain §1.10 asks for: socket → decode → bus → feed writer → SQLite, with two
+    // accounts live at once. Asserting the row rather than the bus event is deliberate — several
+    // bugs have shipped with a passing test that asserted the emit while nothing was written.
+    const running = await boot();
+    await loginTwoAccounts(running);
+    await pipeline.waitForConnections(2);
+
+    const aliceToken = fixture.authTokenFor(ALICE.userId) ?? "";
+    const bobToken = fixture.authTokenFor(BOB.userId) ?? "";
+
+    expect(
+      pipeline.send(aliceToken, "friend-online", {
+        userId: "usr_f1",
+        location: "wrld_alice:1~region(us)",
+        platform: "standalonewindows",
+      }),
+    ).toBe(true);
+    expect(
+      pipeline.send(bobToken, "friend-offline", { userId: "usr_f3", platform: "android" }),
+    ).toBe(true);
+    // Content is a bare id string here, not JSON — the decode path that the npm client swallows.
+    expect(pipeline.send(aliceToken, "see-notification", "not_01234567")).toBe(true);
+
+    await Bun.sleep(500);
+
+    const aliceEvents = await json<Array<{ kind: string; subjectId: string | null }>>(
+      api(running, `/api/events?accountId=${ALICE.userId}&limit=50`),
+    );
+    const bobEvents = await json<Array<{ kind: string; subjectId: string | null }>>(
+      api(running, `/api/events?accountId=${BOB.userId}&limit=50`),
+    );
+
+    expect(aliceEvents).toContainEqual(
+      expect.objectContaining({ kind: "friend.online", subjectId: "usr_f1" }),
+    );
+    expect(aliceEvents.some((event) => event.kind === "notification.seen")).toBe(true);
+    expect(bobEvents).toContainEqual(
+      expect.objectContaining({ kind: "friend.offline", subjectId: "usr_f3" }),
+    );
+
+    // Neither account may see the other's rows. This is the assertion that catches a shared socket.
+    expect(aliceEvents.some((event) => event.subjectId === "usr_f3")).toBe(false);
+    expect(bobEvents.some((event) => event.subjectId === "usr_f1")).toBe(false);
+  });
+
+  test("both accounts hold live presence at the same time", async () => {
+    const running = await boot();
+    await loginTwoAccounts(running);
+    await Bun.sleep(250);
+
+    const alice = await json<Array<{ id: string }>>(
+      api(running, `/api/friends?accountId=${ALICE.userId}`),
+    );
+    const bob = await json<Array<{ id: string }>>(
+      api(running, `/api/friends?accountId=${BOB.userId}`),
+    );
+
+    // The fixture keys its friends on the account precisely so a cross-account cache keyed on URL
+    // alone shows up here as one account's roster answering for both.
+    expect(alice.map((friend) => friend.id).sort()).toEqual(["usr_f1", "usr_f2"]);
+    expect(bob.map((friend) => friend.id)).toEqual(["usr_f3"]);
+  });
+
+  test("rejects a foreign Origin on the live UI port", async () => {
+    // The `Host` half of this has been asserted since 1.8; the `Origin` half never was on a real
+    // bound port. A present-but-wrong `Origin` is a genuine cross-site browser request.
+    const running = await boot();
+
+    const response = await fetch(`${running.servers.urls.uiUrl}/api/status`, {
+      headers: {
+        Authorization: `Bearer ${running.sessionToken}`,
+        Origin: "http://evil.example.com",
+      },
+    });
+    expect(response.status).toBe(403);
+    expect((await json<{ error: string }>(response)).error).toBe("forbidden_origin");
   });
 
   test("refuses to sign in before a contact is configured", async () => {

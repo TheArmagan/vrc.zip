@@ -33,6 +33,12 @@ export interface DaemonOptions {
   readonly env?: NodeJS.ProcessEnv;
   /** Overrides the VRChat base URL. Tests point this at the recorded fixture. */
   readonly baseUrl?: string;
+  /**
+   * Overrides the pipeline WebSocket endpoint. Tests point this at a local fixture socket — the
+   * only way "two accounts, two independent sockets" (PLAN.md §1.10) is testable at all, since
+   * nothing else in the daemon can stand two real sockets up against `pipeline.vrchat.cloud`.
+   */
+  readonly pipelineUrl?: string;
 }
 
 export interface RunningDaemon {
@@ -116,6 +122,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
 
     const client = new PipelineClient({
       userAgent,
+      ...(options.pipelineUrl !== undefined ? { url: options.pipelineUrl } : {}),
       // Re-read on every attempt rather than captured once: a reconnect after a re-auth must use
       // the new token, and the old one is exactly what a stale closure would hand it.
       getAuthToken: async () => accounts.get(accountId)?.authToken() ?? "",

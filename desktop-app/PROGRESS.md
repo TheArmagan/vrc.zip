@@ -5,10 +5,10 @@ the architecture and the reasoning. This file tracks only *state*: what exists, 
 was decided along the way.
 
 **Last updated:** 2026-08-21
-**Current phase:** Phase 1 — Foundation
-**Status:** Phase 1 built end to end — daemon + UI both run, 480 tests green. 1.10 verification
-audited: most items covered, five automatable gaps listed below, and the rest needs a human with a
-real VRChat account.
+**Current phase:** Phase 1 — Foundation (closing) → Phase 2 — Proxy + control plane
+**Status:** Phase 1 complete on the automatable side — daemon + UI both run, 501 tests green, and
+the five verification gaps from the 1.10 audit are closed. What remains of 1.10 needs a human with
+real VRChat accounts and a real game client. Phase 2 (proxy + control plane) starts next.
 
 ---
 
@@ -91,23 +91,15 @@ behind each line.
 - [x] **1.9 UI** (`ui/`) — Svelte 5 + shadcn-svelte. Account switcher, login (all three 2FA paths),
       friend list, feed, game log, notifications, settings. **Command palette + command registry ship
       in Phase 1** even though plugins don't — retrofitting a registry is worse than building it empty.
-- [ ] **1.10 Verification** — see `PLAN.md` §1.10. Audited item by item against the actual suite.
+- [x] **1.10 Verification** — the automatable half is done. See `PLAN.md` §1.10.
       **Covered:** cookie jar; rate limiter + backoff; the three malformed pipeline content types;
       log-parser golden files; retention rollup; fixture-server login, 401 re-auth and 429 backoff;
       feed rows carrying the right `account_id`; one session per log file; unmanaged accounts staying
-      unlinked; pre-auth events attributed retroactively.
-      **Automatable gaps, ranked:**
-      1. *Two independent pipeline sockets* — a Phase-1 definition-of-done clause with **zero**
-         coverage. Nothing ever constructs two `PipelineClient`s. Needs a `pipelineUrl` option
-         threaded into `app.ts` before it is testable at all.
-      2. *2FA branching is one-third done* — only `totp` has a success path. `emailOtp` appears only
-         in a negative test, `otp` in none, despite §1.10 naming all three. The fixture already
-         supports it; parametrize the existing test.
-      3. *Crash isolation is single-session only* — no test has two concurrent sessions where one
-         goes quiet and the other keeps running, which is §1.10's actual wording.
-      4. *A foreign `Origin` is never sent to the live UI port* (a foreign `Host` is). One line.
-      5. *No full pipeline sequence through to the store*, and no test of two accounts holding live
-         presence simultaneously through the API.
+      unlinked; pre-auth events attributed retroactively; **two independent pipeline sockets, each on
+      its own account's token**; **all three 2FA verifiers** (`totp`, `emailOtp`, `otp`) through to a
+      `CurrentUser`; **one client crashing while the other session stays live**; **a foreign `Origin`
+      rejected on a live port**; **a pipeline frame end to end — socket → decode → bus → SQLite —
+      with two accounts online and neither seeing the other's rows**.
       **Not automatable — needs the user:** two *real* accounts signed in at once (only a live run
       proves VRChat's session cap and the pipeline's IP binding); launching VRChat to confirm
       world-join and player-join/leave rows; the Linux/Proton repeat; a real abrupt kill; idle RSS at
@@ -426,6 +418,14 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     the same commit as the change it describes**. A `PROGRESS.md` edit deferred to a later pass is a
     `PROGRESS.md` edit that does not happen, and Gotchas is exactly the section with no failing test
     behind it.
+41. **The pipeline endpoint is injectable, and there is a fixture socket behind it.**
+    `startDaemon({ pipelineUrl })` joins `baseUrl` as a test seam, and
+    `daemon/src/testing/pipeline-fixture.ts` is a real `Bun.serve` WebSocket rather than an injected
+    `createSocket`. Same reasoning as the REST fixture: what goes wrong on this path is
+    handshake-level — the `?authToken=` query value and the mandatory UA on the upgrade — and a
+    stub that hands the client a socket object proves neither. It is also the only way the Phase-1
+    definition-of-done clause "two independent pipeline sockets" is testable at all; before this,
+    nothing in the suite ever constructed two `PipelineClient`s.
 
 ---
 

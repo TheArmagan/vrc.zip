@@ -52,6 +52,12 @@ export interface VrchatFixture {
   readonly requests: Array<{ method: string; path: string; headers: Headers }>;
   /** How many Basic-auth logins were performed — i.e. how many sessions were minted. */
   readonly sessionsMinted: () => number;
+  /**
+   * The newest `auth` cookie value issued to this account, or null if it never logged in. Tests
+   * need it to tell one account's pipeline socket from another's — the token is the only thing on
+   * that handshake that identifies who opened it.
+   */
+  readonly authTokenFor: (userId: string) => string | null;
   readonly setRateLimitNext: (count: number) => void;
   /** Makes the next login fail with VRChat's error envelope, for diagnostics tests. */
   readonly setNextLoginFailure: (status: number, message: string) => void;
@@ -65,6 +71,7 @@ export function startVrchatFixture(options: FixtureOptions): VrchatFixture {
   const trustedDevices = new Set<string>();
   const requests: VrchatFixture["requests"] = [];
 
+  const latestToken = new Map<string, string>();
   let sessionCounter = 0;
   let minted = 0;
   let rateLimitRemaining = options.rateLimitNext ?? 0;
@@ -109,6 +116,7 @@ export function startVrchatFixture(options: FixtureOptions): VrchatFixture {
     sessionCounter += 1;
     const token = `authcookie_${account.userId}_${String(sessionCounter)}`;
     sessions.set(token, { account, twoFactorSatisfied });
+    latestToken.set(account.userId, token);
     return token;
   }
 
@@ -294,6 +302,7 @@ export function startVrchatFixture(options: FixtureOptions): VrchatFixture {
     baseUrl: `http://127.0.0.1:${String(server.port)}/api/1`,
     requests,
     sessionsMinted: () => minted,
+    authTokenFor: (userId) => latestToken.get(userId) ?? null,
     setRateLimitNext: (count) => {
       rateLimitRemaining = count;
     },

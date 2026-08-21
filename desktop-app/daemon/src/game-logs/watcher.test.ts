@@ -301,6 +301,66 @@ test("a file that stops growing with no quit marker is a crash", async () => {
   await watcher.stop();
 });
 
+test("one client crashing leaves the other session live", async () => {
+  // §1.10's actual wording: kill one client without a clean quit and the *other* session stays
+  // live. Crash detection is per-file, and a single-session test cannot tell a correct
+  // implementation from one that ends every session the moment any file goes quiet.
+  const dir = tempDir();
+  const { sink, log } = recorder();
+  const time = clock();
+  const watcher = makeWatcher(dir, sink, time.now, 60_000);
+
+  const doomed = join(dir, "output_log_14-22-01.txt");
+  const survivor = join(dir, "output_log_14-30-00.txt");
+  writeFileSync(
+    doomed,
+    `${authLine("14:22:07", "Alice", ALICE)}
+${joinLine("14:22:18", "Alice", ALICE)}
+`,
+  );
+  writeFileSync(
+    survivor,
+    `${authLine("14:30:07", "Bob", BOB)}
+${joinLine("14:30:18", "Bob", BOB)}
+`,
+  );
+
+  await watcher.tick();
+  expect(log.starts).toHaveLength(2);
+  const doomedSession = log.starts.find((session) => session.logPath === doomed);
+  const survivorSession = log.starts.find((session) => session.logPath === survivor);
+  expect(doomedSession).toBeDefined();
+  expect(survivorSession).toBeDefined();
+
+  // Alice's client dies: no quit marker, no further growth. Bob's keeps writing.
+  time.advance(120_000);
+  appendFileSync(
+    survivor,
+    `${joinLine("14:32:00", "Someone", "usr_someone")}
+`,
+  );
+  await watcher.tick();
+
+  expect(log.ends).toHaveLength(1);
+  expect(log.ends[0]?.sessionId).toBe(doomedSession?.id as string);
+  expect(log.ends[0]?.exitKind).toBe("crash");
+
+  // And the survivor is still being read, not merely un-ended.
+  time.advance(1_000);
+  appendFileSync(
+    survivor,
+    `${joinLine("14:33:00", "Another", "usr_another")}
+`,
+  );
+  await watcher.tick();
+
+  expect(log.ends).toHaveLength(1);
+  expect(
+    log.events.filter((event) => event.sessionId === survivorSession?.id).length,
+  ).toBeGreaterThan(1);
+  await watcher.stop();
+});
+
 test("rotation starts a new session and never continues the old one", async () => {
   const dir = tempDir();
   const { sink, log } = recorder();

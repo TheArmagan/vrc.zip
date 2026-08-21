@@ -13,6 +13,7 @@ import {
   type FriendPresence,
   type GameSession,
   type LoginResult,
+  type NotificationItem,
   type SettingsPatch,
   type StatusSnapshot,
   type StreamEvent,
@@ -212,6 +213,29 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         platform: record.platform,
         lastSeenAt: record.lastSeenAt,
       }));
+    },
+
+    async listNotifications(accountId): Promise<NotificationItem[]> {
+      const ids = accountId === null ? accounts.list().map((s) => s.id) : [accountId];
+
+      return ids
+        .flatMap((id) => store.listNotifications(id))
+        .sort((a, b) => b.ts - a.ts)
+        .map((row) => ({
+          id: row.id,
+          accountId: row.account_id,
+          ts: row.ts,
+          type: row.type,
+          senderUserId: row.sender_user_id,
+          senderDisplayName: row.sender_display_name,
+          message: row.message,
+          seen: row.seen === 1,
+          data: row.data === null ? null : (JSON.parse(row.data) as NotificationItem["data"]),
+        }));
+    },
+
+    async markNotificationSeen(id): Promise<void> {
+      store.markNotificationSeen(id);
     },
 
     async getSettings(): Promise<WireSettings> {

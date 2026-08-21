@@ -114,6 +114,20 @@ export interface EventQuery {
   before?: number;
 }
 
+/** A pending or recent VRChat notification: an invite, a friend request, a group announcement. */
+export interface NotificationItem {
+  id: string;
+  accountId: string;
+  /** Unix milliseconds, integer. */
+  ts: number;
+  type: string;
+  senderUserId: string | null;
+  senderDisplayName: string | null;
+  message: string | null;
+  seen: boolean;
+  data: JsonValue;
+}
+
 export interface FriendPresence {
   id: string;
   displayName: string;
@@ -164,6 +178,9 @@ export interface ControlDeps {
   listEvents(query: EventQuery): Promise<FeedEvent[]>;
   /** `null` means every account. */
   listFriends(accountId: string | null): Promise<FriendPresence[]>;
+  /** `null` means every account. Notifications are state, not feed history — see the sink. */
+  listNotifications(accountId: string | null): Promise<NotificationItem[]>;
+  markNotificationSeen(id: string): Promise<void>;
 
   getSettings(): Promise<Settings>;
   /** Merges the patch and resolves to the settings as they now stand. */
@@ -263,6 +280,16 @@ export function createControlApp({ port, deps, token }: ControlAppOptions) {
     .get("/api/friends", async (c) => {
       const accountId = nonEmpty(c.req.query("accountId")) ?? null;
       return c.json(await deps.listFriends(accountId));
+    })
+
+    .get("/api/notifications", async (c) => {
+      const accountId = nonEmpty(c.req.query("accountId")) ?? null;
+      return c.json(await deps.listNotifications(accountId));
+    })
+
+    .post("/api/notifications/:id/seen", async (c) => {
+      await deps.markNotificationSeen(c.req.param("id"));
+      return c.body(null, 204);
     })
 
     .get("/api/settings", async (c) => c.json(await deps.getSettings()))

@@ -22,6 +22,8 @@ const deps: ControlDeps = {
   listSessions: async () => [],
   listEvents: async () => [],
   listFriends: async () => [],
+  listNotifications: async () => [],
+  markNotificationSeen: async () => {},
   getSettings: async () => ({}),
   updateSettings: async () => ({}),
   subscribeEvents: () => () => {},

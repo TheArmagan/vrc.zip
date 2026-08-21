@@ -27,6 +27,8 @@ const ACCOUNT: ControlAccount = {
 interface Recorder {
   eventQueries: EventQuery[];
   friendQueries: (string | null)[];
+  notificationQueries: (string | null)[];
+  notificationsSeen: string[];
   removed: string[];
   listeners: ((event: StreamEvent) => void)[];
   unsubscribed: number;
@@ -36,6 +38,8 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
   const seen: Recorder = {
     eventQueries: [],
     friendQueries: [],
+    notificationQueries: [],
+    notificationsSeen: [],
     removed: [],
     listeners: [],
     unsubscribed: 0,
@@ -77,6 +81,13 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     listFriends: async (accountId) => {
       seen.friendQueries.push(accountId);
       return [];
+    },
+    listNotifications: async (accountId) => {
+      seen.notificationQueries.push(accountId);
+      return [];
+    },
+    markNotificationSeen: async (id) => {
+      seen.notificationsSeen.push(id);
     },
     getSettings: async () => settings,
     updateSettings: async (patch) => {

@@ -16,6 +16,7 @@ import { type RetentionScheduler, Store, startRetentionScheduler } from "./store
 import { createControlDeps } from "./wiring/control-deps.ts";
 import { FeedWriter } from "./wiring/feed-writer.ts";
 import { createLogSink } from "./wiring/log-bridge.ts";
+import { NotificationSink } from "./wiring/notification-sink.ts";
 import { publishPipelineEvent } from "./wiring/pipeline-bridge.ts";
 
 /**
@@ -94,6 +95,11 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
 
   const feedWriter = new FeedWriter(store);
   feedWriter.attach(bus);
+
+  // Notifications are state rather than history — the UI needs the current set on a cold start,
+  // not a feed to replay. See NotificationSink.
+  const notifications = new NotificationSink(store);
+  notifications.attach(bus);
 
   // --- pipeline sockets, one per online account -----------------------------
   const pipelines = new Map<string, PipelineClient>();
@@ -211,6 +217,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
       retention.stop();
       for (const client of pipelines.values()) client.dispose();
       feedWriter.detach();
+      notifications.detach();
 
       await servers.stop();
       await removeStateFile(env).catch(() => undefined);

@@ -5,10 +5,11 @@ the architecture and the reasoning. This file tracks only *state*: what exists, 
 was decided along the way.
 
 **Last updated:** 2026-08-21
-**Current phase:** Phase 1 — Foundation (closing) → Phase 2 — Proxy + control plane
-**Status:** Phase 1 complete on the automatable side — daemon + UI both run, 501 tests green, and
-the five verification gaps from the 1.10 audit are closed. What remains of 1.10 needs a human with
-real VRChat accounts and a real game client. Phase 2 (proxy + control plane) starts next.
+**Current phase:** Phase 2 — Proxy + control plane
+**Status:** Phase 1 complete on the automatable side; what remains of 1.10 needs a human with real
+VRChat accounts and a real game client. Phase 2 has started from the bottom up: the grant store,
+the proxy's own credentials, and the egress filter are built and mounted on both `:7774` and
+`:7775`. 562 tests green. The handshake and the mirror routes are next.
 
 ---
 
@@ -110,6 +111,49 @@ behind each line.
 **Definition of done for Phase 1:** two accounts logged in simultaneously with independent pipeline
 sockets and zero cookie bleed, live presence in the UI, feed and game-log rows persisting with the
 right `account_id`, working on both Windows and Linux/Proton, idle RSS ≤80MB.
+
+---
+
+## Phase 2 checklist
+
+`PLAN.md` §Phase 2 for the detail. Built bottom-up: the pieces the handshake needs before the
+handshake, because the alternative is a login flow that mints credentials with nowhere to put them.
+
+- [x] **2.1 Grant store** (migration `003_proxy_grants`) — `grants` (one row per (app, account)),
+      `pairing_requests` (a login waiting at the consent sheet), `audit_log` (every mutating call,
+      attributed). Tokens and pairing codes are stored **hashed**; the plaintext is handed out once
+      and never written. Revocation is enforced in SQL, so code that forgets to check cannot honour
+      a revoked token.
+- [x] **2.2 Proxy credentials** (`security/proxy-tokens.ts`) — mints `authcookie_<uuid>_vrczip`,
+      hashes it for storage, and provides the shape predicates (`isProxyToken`,
+      `looksLikeRealAuthCookie`) the egress filter is built on. Six-digit pairing codes come from
+      the CSPRNG by rejection sampling, zero-padded.
+- [x] **2.3 Egress filter** (`proxy/egress-filter.ts`) — the hard invariant, enforced mechanically.
+      Strips `Set-Cookie` and the hop-by-hop headers unconditionally, scans every header and body
+      for an `authcookie_` without our suffix, and fails closed with an empty 500 and a loud log.
+      Mounted at the **binding layer** on both `:7774` and `:7775` — see decision 46.
+- [x] **2.4 Identity + scope parsing** (`proxy/identity.ts`) — the app's `User-Agent` parsed into
+      the `{name, version, contact}` triple the consent sheet names, and the scope request read out
+      of the Basic-auth password field. An unknown scope is a hard failure; a wildcard never reaches
+      a dangerous scope.
+- [ ] **2.5 The login handshake** — `GET /auth/user` with Basic auth on `:7774`: resolve the
+      username to an account, find or create a grant, and answer *now* with
+      `{"requiresTwoFactorAuth":["totp"]}` plus a half-authenticated cookie when consent is pending.
+      `/auth/twofactorauth/*/verify` completes the pairing; `GET /auth` validates and returns **our**
+      token; `PUT /logout` revokes only the grant.
+- [ ] **2.6 Consent UI** — the sheet showing app identity, requested scopes (delta only, on an
+      escalation), the account picker for the reserved username, and the six-digit code.
+- [ ] **2.7 Mirror routes** — one Hono route per operation from the generated route table, never a
+      catch-all, so an unknown path falls through to VRChat's real 404 and a route with no scope
+      mapping fails to register. `scopeGuard` off the route table, hard denials regardless of scope,
+      upstream `Response` passed through untouched.
+- [ ] **2.8 Rate budgets + audit + kill switch** — per-grant budgets on the abuse-adjacent scopes,
+      an audit row per mutating call, revoke per grant and globally, and the "Connected apps" page.
+- [ ] **2.9 Pipeline mirror** — `wss://…:7774/?authToken=<proxy token>` speaking VRChat's protocol,
+      filtered by the grant's scopes, fed from the daemon's single real socket per account. Frames
+      are scanned: VRChat's own `authToken` error frame is on the leak table.
+- [ ] **2.10 Control API** (`:7775`) — consent status, grant list/revoke, the enriched event stream
+      with `sessionId`/`accountId`/`displayName` on every `gamelog.*`, and webhook registration.
 
 ---
 
@@ -418,6 +462,30 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     the same commit as the change it describes**. A `PROGRESS.md` edit deferred to a later pass is a
     `PROGRESS.md` edit that does not happen, and Gotchas is exactly the section with no failing test
     behind it.
+45. **Grant tokens and pairing codes are stored hashed, not in plaintext.** The issued cookie is
+    `authcookie_<uuid>_vrczip` and the uuid *is* the secret, so a readable `grants` table would be a
+    table of live bearer credentials. Lookup hashes the presented value and selects on `token_hash`;
+    the plaintext is handed to the app once and never written. Plain SHA-256 rather than a password
+    KDF: it is a 122-bit random value, not a user-chosen secret, so there is nothing for a slow hash
+    to defend against and it would put a deliberate delay on the hot path of every proxied request.
+    A separate non-secret `id` is what the UI, the audit log, and revocation name.
+46. **The egress filter wraps the fetch handler; it is not Hono middleware.** PLAN.md §Phase 2 calls
+    it "the last middleware in the chain", and that turns out to be unimplementable in Hono — see
+    Gotchas. Wrapping the handler in `bindServer` puts it outside the framework, where nothing can
+    merge headers back onto its response, and it covers Hono's own 404 and error responses, which
+    never run a route's middleware at all. It is mounted on **both** `:7774` and `:7775`, since the
+    invariant names both ports. A successful WebSocket upgrade passes through untouched: Bun has
+    taken the socket over by then and the returned response is a formality. Frames get their own
+    scan in the pipeline mirror, which has to look at them anyway.
+47. **Revocation is enforced in SQL, not by the caller.** `getGrantByTokenHash` carries
+    `AND revoked_at IS NULL`, so a revoked token resolves to nothing rather than to a row with a
+    flag some future call site forgets to read. Revoked rows are kept rather than deleted — the
+    audit log references them, and "this app had access between these two times" is exactly the
+    question a user asks after something goes wrong.
+48. **Reads are not audited; mutations are.** Recording every proxied `GET` would bury the rows that
+    matter under roster polling, and a read is not the thing anyone needs evidence of. `grant_id` on
+    `audit_log` is deliberately not a foreign key: a denied call may have no grant at all, and a
+    revoked grant must not take its history with it.
 41. **The pipeline endpoint is injectable, and there is a fixture socket behind it.**
     `startDaemon({ pipelineUrl })` joins `baseUrl` as a test seam, and
     `daemon/src/testing/pipeline-fixture.ts` is a real `Bun.serve` WebSocket rather than an injected
@@ -434,6 +502,14 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **Assigning `c.res` in Hono copies the previous response's headers onto the new one — including
+  `Set-Cookie`, by name.** So an egress filter written the obvious way, as the last middleware,
+  strips the upstream cookie and then hands back a response that still carries it. The test that
+  caught this asserted the client-visible header rather than the middleware's return value, which
+  is the only reason it was caught at all: every intermediate value was correct. Anything whose job
+  is to *remove* something from a response cannot live in a Hono middleware; it has to wrap the
+  fetch handler. See decision 46.
 
 - **`platform` is another field VRChat answers `offline` in.** Not a platform, and not a rare edge:
   it comes back that way for somebody the game log has standing in an instance, because the roster

@@ -130,3 +130,71 @@ export type EventQuery = {
   kinds: readonly string[] | null;
   limit: number;
 };
+
+// ---------------------------------------------------------------------------
+// proxy grants (Phase 2)
+// ---------------------------------------------------------------------------
+
+/**
+ * One app's access to one account. `token_hash` is a hash of the issued
+ * `authcookie_<uuid>_vrczip` value — the plaintext is handed to the app once and never stored.
+ */
+export type GrantRow = {
+  id: string;
+  account_id: string;
+  app_name: string;
+  app_version: string;
+  app_contact: string;
+  /** JSON array of scope strings, exactly as granted. */
+  scopes: string;
+  token_hash: string;
+  two_factor_hash: string | null;
+  created_at: number;
+  last_used_at: number | null;
+  revoked_at: number | null;
+};
+
+export type NewGrant = Omit<GrantRow, "last_used_at" | "revoked_at">;
+
+/** A login sitting at the consent sheet, waiting for its pairing code to be typed into the app. */
+export type PairingRequestRow = {
+  id: string;
+  /** Null when the app asked the user to choose, or named an account not in vrc.zip yet. */
+  account_id: string | null;
+  requested_username: string;
+  app_name: string;
+  app_version: string;
+  app_contact: string;
+  scopes: string;
+  half_token_hash: string;
+  code_hash: string;
+  created_at: number;
+  expires_at: number;
+  attempts: number;
+  resolved_at: number | null;
+  /** `approved` | `denied` | `expired`; null while pending. */
+  outcome: string | null;
+  grant_id: string | null;
+};
+
+export type NewPairingRequest = Omit<
+  PairingRequestRow,
+  "attempts" | "resolved_at" | "outcome" | "grant_id"
+>;
+
+/** One mutating proxy call, attributed to the app that made it. Reads are not recorded. */
+export type AuditRow = {
+  id: number;
+  ts: number;
+  grant_id: string | null;
+  account_id: string | null;
+  app_name: string;
+  method: string;
+  path: string;
+  operation_id: string | null;
+  scope: string | null;
+  outcome: string;
+  status: number | null;
+};
+
+export type NewAuditEntry = Omit<AuditRow, "id">;

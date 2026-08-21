@@ -31,15 +31,18 @@ describe("migrate", () => {
 
     expect(tableNames(db)).toEqual([
       "accounts",
+      "audit_log",
       "avatar_cache",
       "avatar_history",
       "events",
       "events_daily",
       "friend_log",
       "friend_log_history",
+      "grants",
       "meta",
       "notes",
       "notifications",
+      "pairing_requests",
       "retention_config",
       "sessions",
       "user_cache",

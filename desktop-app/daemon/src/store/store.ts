@@ -4,18 +4,24 @@ import { SQL } from "./queries.ts";
 import type { Migration } from "./schema/index.ts";
 import type {
   AccountRow,
+  AuditRow,
   AvatarHistoryRow,
   CacheRow,
   EventRow,
   EventsDailyRow,
   FriendLogHistoryRow,
   FriendLogRow,
+  GrantRow,
   KindCount,
+  NewAuditEntry,
   NewEvent,
   NewFriendLogHistory,
+  NewGrant,
+  NewPairingRequest,
   NewSession,
   NoteRow,
   NotificationRow,
+  PairingRequestRow,
   RetentionConfigRow,
   SessionRow,
 } from "./types.ts";
@@ -423,6 +429,148 @@ export class Store {
     this.stmts.deleteRetentionConfig.run(kind);
   }
 
+  // -- proxy grants (Phase 2) -----------------------------------------------
+
+  /**
+   * Files a new grant. `token_hash` and `two_factor_hash` are hashes — this method never sees, and
+   * must never be handed, the plaintext cookie value. See `security/proxy-tokens.ts`.
+   */
+  insertGrant(grant: NewGrant): void {
+    this.stmts.insertGrant.run(
+      grant.id,
+      grant.account_id,
+      grant.app_name,
+      grant.app_version,
+      grant.app_contact,
+      grant.scopes,
+      grant.token_hash,
+      grant.two_factor_hash,
+      grant.created_at,
+    );
+  }
+
+  /** The live grant for a presented token hash, or null. Revoked grants are never returned. */
+  grantByTokenHash(tokenHash: string): GrantRow | null {
+    return this.stmts.getGrantByTokenHash.get(tokenHash) ?? null;
+  }
+
+  grantByTwoFactorHash(hash: string): GrantRow | null {
+    return this.stmts.getGrantByTwoFactorHash.get(hash) ?? null;
+  }
+
+  getGrant(id: string): GrantRow | null {
+    return this.stmts.getGrant.get(id) ?? null;
+  }
+
+  /** The live grant this app already holds for this account, if any. Drives scope escalation. */
+  findGrantForApp(accountId: string, appName: string, appContact: string): GrantRow | null {
+    return this.stmts.findGrantForApp.get(accountId, appName, appContact) ?? null;
+  }
+
+  listGrants(accountId?: string): GrantRow[] {
+    return accountId === undefined
+      ? this.stmts.listGrants.all()
+      : this.stmts.listGrantsForAccount.all(accountId);
+  }
+
+  touchGrant(id: string, at: number): void {
+    this.stmts.touchGrant.run(at, id);
+  }
+
+  setGrantTwoFactorHash(id: string, hash: string | null): void {
+    this.stmts.setGrantTwoFactorHash.run(hash, id);
+  }
+
+  /** Revokes one grant. Idempotent: revoking an already-revoked grant changes nothing. */
+  revokeGrant(id: string, at: number): void {
+    this.stmts.revokeGrant.run(at, id);
+  }
+
+  /** The kill switch, per account or global. Returns how many live grants it closed. */
+  revokeGrants(at: number, accountId?: string): number {
+    const closed = this.listGrants(accountId).filter((g) => g.revoked_at === null).length;
+    if (accountId === undefined) this.stmts.revokeAllGrants.run(at);
+    else this.stmts.revokeGrantsForAccount.run(at, accountId);
+    return closed;
+  }
+
+  insertPairingRequest(request: NewPairingRequest): void {
+    this.stmts.insertPairingRequest.run(
+      request.id,
+      request.account_id,
+      request.requested_username,
+      request.app_name,
+      request.app_version,
+      request.app_contact,
+      request.scopes,
+      request.half_token_hash,
+      request.code_hash,
+      request.created_at,
+      request.expires_at,
+    );
+  }
+
+  getPairingRequest(id: string): PairingRequestRow | null {
+    return this.stmts.getPairingRequest.get(id) ?? null;
+  }
+
+  /** The pending request an app's half-authenticated cookie belongs to. Expired rows never match. */
+  pairingByHalfToken(halfTokenHash: string, now: number): PairingRequestRow | null {
+    return this.stmts.getPairingByHalfToken.get(halfTokenHash, now) ?? null;
+  }
+
+  listPendingPairings(now: number): PairingRequestRow[] {
+    return this.stmts.listPendingPairings.all(now);
+  }
+
+  /** Wrong-code attempts by this app identity since `since`. The brute-force brake. */
+  countPairingAttempts(appName: string, appContact: string, since: number): number {
+    return this.stmts.countPairingAttemptsSince.get(appName, appContact, since)?.count ?? 0;
+  }
+
+  bumpPairingAttempts(id: string): void {
+    this.stmts.bumpPairingAttempts.run(id);
+  }
+
+  setPairingAccount(id: string, accountId: string): void {
+    this.stmts.setPairingAccount.run(accountId, id);
+  }
+
+  resolvePairing(id: string, at: number, outcome: string, grantId: string | null): void {
+    this.stmts.resolvePairing.run(at, outcome, grantId, id);
+  }
+
+  /** Marks every lapsed pending request expired. Returns how many. */
+  expirePairings(now: number): number {
+    const stale = this.stmts.listPendingPairings.all(0).filter((row) => row.expires_at <= now);
+    this.stmts.expirePairings.run(now, now);
+    return stale.length;
+  }
+
+  /** Records one mutating proxy call. Reads are deliberately not audited — see 003. */
+  appendAudit(entry: NewAuditEntry): void {
+    this.stmts.insertAudit.run(
+      entry.ts,
+      entry.grant_id,
+      entry.account_id,
+      entry.app_name,
+      entry.method,
+      entry.path,
+      entry.operation_id,
+      entry.scope,
+      entry.outcome,
+      entry.status,
+    );
+  }
+
+  listAudit(options: { grantId?: string; before?: number; limit?: number } = {}): AuditRow[] {
+    const before = options.before ?? Date.now() + 1;
+    const limit = options.limit ?? 100;
+    return options.grantId === undefined
+      ? this.stmts.listAudit.all(before, limit)
+      : this.stmts.listAuditForGrant.all(options.grantId, before, limit);
+  }
+
   // -- meta / housekeeping --------------------------------------------------
 
   getMeta(key: string): string | null {
@@ -569,6 +717,67 @@ function prepareAll(db: Database) {
     listRetentionConfig: q<RetentionConfigRow, []>(SQL.listRetentionConfig),
     setRetentionConfig: q<void, [string, number, number]>(SQL.setRetentionConfig),
     deleteRetentionConfig: q<void, [string]>(SQL.deleteRetentionConfig),
+
+    insertGrant: q<
+      void,
+      [string, string, string, string, string, string, string, string | null, number]
+    >(SQL.insertGrant),
+    getGrantByTokenHash: q<GrantRow, [string]>(SQL.getGrantByTokenHash),
+    getGrantByTwoFactorHash: q<GrantRow, [string]>(SQL.getGrantByTwoFactorHash),
+    getGrant: q<GrantRow, [string]>(SQL.getGrant),
+    findGrantForApp: q<GrantRow, [string, string, string]>(SQL.findGrantForApp),
+    listGrants: q<GrantRow, []>(SQL.listGrants),
+    listGrantsForAccount: q<GrantRow, [string]>(SQL.listGrantsForAccount),
+    touchGrant: q<void, [number, string]>(SQL.touchGrant),
+    setGrantTwoFactorHash: q<void, [string | null, string]>(SQL.setGrantTwoFactorHash),
+    revokeGrant: q<void, [number, string]>(SQL.revokeGrant),
+    revokeGrantsForAccount: q<void, [number, string]>(SQL.revokeGrantsForAccount),
+    revokeAllGrants: q<void, [number]>(SQL.revokeAllGrants),
+
+    insertPairingRequest: q<
+      void,
+      [
+        string,
+        string | null,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        number,
+        number,
+      ]
+    >(SQL.insertPairingRequest),
+    getPairingRequest: q<PairingRequestRow, [string]>(SQL.getPairingRequest),
+    getPairingByHalfToken: q<PairingRequestRow, [string, number]>(SQL.getPairingByHalfToken),
+    listPendingPairings: q<PairingRequestRow, [number]>(SQL.listPendingPairings),
+    countPairingAttemptsSince: q<{ count: number }, [string, string, number]>(
+      SQL.countPairingAttemptsSince,
+    ),
+    bumpPairingAttempts: q<void, [string]>(SQL.bumpPairingAttempts),
+    setPairingAccount: q<void, [string, string]>(SQL.setPairingAccount),
+    resolvePairing: q<void, [number, string, string | null, string]>(SQL.resolvePairing),
+    expirePairings: q<void, [number, number]>(SQL.expirePairings),
+
+    insertAudit: q<
+      void,
+      [
+        number,
+        string | null,
+        string | null,
+        string,
+        string,
+        string,
+        string | null,
+        string | null,
+        string,
+        number | null,
+      ]
+    >(SQL.insertAudit),
+    listAudit: q<AuditRow, [number, number]>(SQL.listAudit),
+    listAuditForGrant: q<AuditRow, [string, number, number]>(SQL.listAuditForGrant),
 
     getMeta: q<{ value: string }, [string]>(SQL.getMeta),
     setMeta: q<void, [string, string]>(SQL.setMeta),

@@ -1,5 +1,6 @@
 import init001 from "./001_init.sql" with { type: "text" };
 import userCache002 from "./002_user_cache_per_account.sql" with { type: "text" };
+import grants003 from "./003_proxy_grants.sql" with { type: "text" };
 
 /** One numbered migration. `version` must be unique, contiguous from 1, and ascending. */
 export type Migration = {
@@ -15,4 +16,5 @@ export type Migration = {
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: "001_init", sql: init001 },
   { version: 2, name: "002_user_cache_per_account", sql: userCache002 },
+  { version: 3, name: "003_proxy_grants", sql: grants003 },
 ];

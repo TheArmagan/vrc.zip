@@ -244,6 +244,78 @@ export const SQL = {
       retain_days = excluded.retain_days, updated_at = excluded.updated_at`,
   deleteRetentionConfig: `DELETE FROM retention_config WHERE kind = ?`,
 
+  // -- proxy grants (Phase 2) -----------------------------------------------
+  insertGrant: `
+    INSERT INTO grants
+      (id, account_id, app_name, app_version, app_contact, scopes,
+       token_hash, two_factor_hash, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  /*
+   * The hot path: one lookup per proxied request. Revoked grants are excluded *in SQL* rather than
+   * checked afterwards, so a caller that forgets the check cannot accidentally honour a revoked
+   * token — the row simply is not there.
+   */
+  getGrantByTokenHash: `SELECT * FROM grants WHERE token_hash = ? AND revoked_at IS NULL`,
+  getGrantByTwoFactorHash: `
+    SELECT * FROM grants WHERE two_factor_hash = ? AND revoked_at IS NULL`,
+  getGrant: `SELECT * FROM grants WHERE id = ?`,
+  /*
+   * Escalation looks for an existing grant for the same app and account. Matched on the identity
+   * triple rather than the raw UA string: a version bump must not silently orphan a grant and
+   * raise a fresh consent sheet, and the contact is what distinguishes two apps that picked the
+   * same name.
+   */
+  findGrantForApp: `
+    SELECT * FROM grants
+    WHERE account_id = ? AND app_name = ? AND app_contact = ? AND revoked_at IS NULL
+    ORDER BY created_at DESC LIMIT 1`,
+  listGrants: `SELECT * FROM grants ORDER BY created_at DESC`,
+  listGrantsForAccount: `
+    SELECT * FROM grants WHERE account_id = ? ORDER BY created_at DESC`,
+  touchGrant: `UPDATE grants SET last_used_at = ? WHERE id = ?`,
+  setGrantTwoFactorHash: `UPDATE grants SET two_factor_hash = ? WHERE id = ?`,
+  revokeGrant: `UPDATE grants SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`,
+  revokeGrantsForAccount: `
+    UPDATE grants SET revoked_at = ? WHERE account_id = ? AND revoked_at IS NULL`,
+  revokeAllGrants: `UPDATE grants SET revoked_at = ? WHERE revoked_at IS NULL`,
+
+  insertPairingRequest: `
+    INSERT INTO pairing_requests
+      (id, account_id, requested_username, app_name, app_version, app_contact, scopes,
+       half_token_hash, code_hash, created_at, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  getPairingRequest: `SELECT * FROM pairing_requests WHERE id = ?`,
+  getPairingByHalfToken: `
+    SELECT * FROM pairing_requests
+    WHERE half_token_hash = ? AND resolved_at IS NULL AND expires_at > ?`,
+  listPendingPairings: `
+    SELECT * FROM pairing_requests
+    WHERE resolved_at IS NULL AND expires_at > ?
+    ORDER BY created_at ASC`,
+  countPairingAttemptsSince: `
+    SELECT COALESCE(SUM(attempts), 0) AS count FROM pairing_requests
+    WHERE app_name = ? AND app_contact = ? AND created_at > ?`,
+  bumpPairingAttempts: `UPDATE pairing_requests SET attempts = attempts + 1 WHERE id = ?`,
+  setPairingAccount: `UPDATE pairing_requests SET account_id = ? WHERE id = ?`,
+  resolvePairing: `
+    UPDATE pairing_requests SET resolved_at = ?, outcome = ?, grant_id = ?
+    WHERE id = ? AND resolved_at IS NULL`,
+  /*
+   * Housekeeping for codes nobody ever typed. Marked expired rather than deleted, so a user who
+   * comes back to the UI sees what an app asked for and when, instead of an empty list.
+   */
+  expirePairings: `
+    UPDATE pairing_requests SET resolved_at = ?, outcome = 'expired'
+    WHERE resolved_at IS NULL AND expires_at <= ?`,
+
+  insertAudit: `
+    INSERT INTO audit_log
+      (ts, grant_id, account_id, app_name, method, path, operation_id, scope, outcome, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  listAudit: `SELECT * FROM audit_log WHERE ts < ? ORDER BY ts DESC LIMIT ?`,
+  listAuditForGrant: `
+    SELECT * FROM audit_log WHERE grant_id = ? AND ts < ? ORDER BY ts DESC LIMIT ?`,
+
   // -- meta / housekeeping --------------------------------------------------
   getMeta: `SELECT value FROM meta WHERE key = ?`,
   setMeta: `

@@ -1,4 +1,5 @@
 import type { Server, WebSocketHandler } from "bun";
+import { type EgressViolation, filterResponse } from "../proxy/egress-filter.ts";
 import type { TokenSource } from "../security/guards.ts";
 import { type ControlDeps, controlWebSocketHandler, createControlApp } from "./control.ts";
 import { createProxyApp } from "./proxy.ts";
@@ -103,6 +104,57 @@ function isAddressInUse(error: unknown): boolean {
   return code === "EADDRINUSE" || code === "WSAEADDRINUSE";
 }
 
+/**
+ * Wraps an app so every response it produces passes the egress filter. PLAN.md §Phase 2 states the
+ * invariant for **both** `:7774` and `:7775`, so both are wrapped here rather than at one of them.
+ *
+ * Deliberately at the binding layer rather than as Hono middleware: assigning `c.res` makes Hono
+ * copy the previous response's headers onto the new one, `Set-Cookie` included by name, so a
+ * middleware that strips a cookie hands back a response that still carries it. Out here nothing can
+ * merge anything back, and Hono's own 404 and error responses — which never run a route's
+ * middleware — are covered too.
+ *
+ * A successful WebSocket upgrade is passed through untouched. By then Bun has taken the socket over
+ * and the returned response is a formality; rebuilding it is at best pointless and at worst breaks
+ * the upgrade. Frames on that socket are filtered by the pipeline mirror itself, which has to scan
+ * them anyway — VRChat's `{"err":…,"authToken":…}` frame is on PLAN.md's leak table.
+ */
+function egressGuarded(app: FetchApp): FetchApp {
+  return {
+    async fetch(request: Request, server: BunServer): Promise<Response> {
+      const response = await app.fetch(request, server);
+      if (response.status === 101 || request.headers.get("upgrade") !== null) return response;
+
+      let path = request.url;
+      try {
+        path = new URL(request.url).pathname;
+      } catch {
+        // An unparseable request line still produced a response worth scanning.
+      }
+      return filterResponse(
+        response,
+        { method: request.method, path },
+        { onViolation: reportEgressViolation },
+      );
+    },
+  };
+}
+
+/**
+ * The loud half of failing closed. Never receives credential material — a logger that printed the
+ * offending value would recreate the leak in the log file.
+ */
+function reportEgressViolation(
+  violation: EgressViolation,
+  request: { method: string; path: string },
+): void {
+  console.error(
+    `[vrc.zip] EGRESS FILTER BLOCKED A RESPONSE: a real VRChat credential appeared in the ` +
+      `${violation.where} (${violation.detail}) of ${request.method} ${request.path}. ` +
+      `The client received an empty 500. This is a bug in the proxy path — see PLAN.md §Phase 2.`,
+  );
+}
+
 export interface BindServersOptions {
   deps: ControlDeps;
   /** Resolves the session token every port accepts for this run. */
@@ -133,7 +185,7 @@ export async function bindServers(options: BindServersOptions): Promise<BoundSer
   const control = bindServer({
     port: ports?.control ?? DEFAULT_CONTROL_PORT,
     hostname,
-    createApp: (port) => createControlApp({ port, deps, token }),
+    createApp: (port) => egressGuarded(createControlApp({ port, deps, token })),
     // Hono's Bun adapter parameterises the socket on its own `BunWebSocketData`, which it sets
     // during the upgrade. Bun's own handler type is parameterised on the caller's data, and the two
     // only meet through a cast.
@@ -143,7 +195,7 @@ export async function bindServers(options: BindServersOptions): Promise<BoundSer
   const proxy = bindServer({
     port: ports?.proxy ?? DEFAULT_PROXY_PORT,
     hostname,
-    createApp: (port) => createProxyApp({ port, token }),
+    createApp: (port) => egressGuarded(createProxyApp({ port, token })),
   });
 
   const ui = bindServer({

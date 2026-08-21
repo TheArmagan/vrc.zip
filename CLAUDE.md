@@ -60,6 +60,8 @@ is no CI workflow yet (it would live in the repo root, shared ground with `backe
 - **Commit after every noticeable change** — a finished feature, fix, refactor, or doc update —
   without being asked. Don't batch unrelated work into one commit, and don't leave a session's work
   sitting uncommitted. A half-finished edit or a scratch file is not a noticeable change.
+- **Push once a group of commits is done** — when the task finishes or a coherent batch has landed.
+  Push the group, not every individual commit.
 - **Commits are authored solely by the user.** No `Co-Authored-By: Claude`, no `Claude-Session:`
   trailer, no other Claude attribution. The repo's configured user is already correct — don't pass
   `--author`.

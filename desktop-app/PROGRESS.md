@@ -6,7 +6,7 @@ was decided along the way.
 
 **Last updated:** 2026-08-21
 **Current phase:** Phase 1 — Foundation
-**Status:** 1.0 Workspace done. Next: 1.1 Codegen.
+**Status:** 1.0-1.8 done; the daemon runs. 1.9 (UI) in progress.
 
 ---
 
@@ -46,7 +46,9 @@ vrc.zip/
 └─ LICENSE
 ```
 
-`bun install`, `bun run typecheck`, `bun test`, and `bun run lint` are all green. Git is on `main`
+`bun install`, `bun run typecheck`, `bun test` (310 tests), and `bun run lint` are all green.
+`bun daemon/src/index.ts` starts the daemon, binds three ports, writes `state.json`, and serves a
+working control API. Git is on `main`
 with one commit (`Initial commit`); `backend/` and `desktop-app/` are still untracked.
 
 ---
@@ -61,27 +63,27 @@ behind each line.
       extends it; Biome does lint *and* format; `bun test` runs with one real assertion behind it.
       Bun pinned to **1.4.0** in `packageManager`, `engines.bun`, and `.bun-version` — it is bundled
       and shipped, so it is a build input, not a developer prerequisite. See decisions 15–18 below.
-- [ ] **1.1 Codegen** (`packages/api`) — commit pinned `openapi.json` v1.20.8; `@hey-api/openapi-ts`
+- [x] **1.1 Codegen** (`packages/api`) — commit pinned `openapi.json` v1.20.8; `@hey-api/openapi-ts`
       → typed fetch client; **also emit the route table** `{method, pathTemplate, operationId, tag,
       security, scope}[]` that the Phase 2 proxy needs. Test: every operation maps to exactly one scope.
-- [ ] **1.2 Secrets** (`daemon/src/security/secrets.ts`) — 32-byte master key in Windows Credential
+- [x] **1.2 Secrets** (`daemon/src/security/secrets.ts`) — 32-byte master key in Windows Credential
       Manager / libsecret via a CLI shim; AES-256-GCM `secrets.enc`; file-key fallback at `0600` with a
       loud UI warning when libsecret is missing.
-- [ ] **1.3 Account + auth** (`daemon/src/accounts/`) — per-account `CookieJar`, the exact login flow,
+- [x] **1.3 Account + auth** (`daemon/src/accounts/`) — per-account `CookieJar`, the exact login flow,
       explicit branching on `totp` / `emailOtp` / `otp`, re-auth mutex.
-- [ ] **1.4 Network** (`daemon/src/net/`) — mandatory UA, per-account token bucket, 429 backoff,
+- [x] **1.4 Network** (`daemon/src/net/`) — mandatory UA, per-account token bucket, 429 backoff,
       jittered non-clock-aligned polling.
-- [ ] **1.5 Pipeline** (`daemon/src/pipeline/`) — one WS per account, reconnect + heartbeat, **defensive
+- [x] **1.5 Pipeline** (`daemon/src/pipeline/`) — one WS per account, reconnect + heartbeat, **defensive
       per-event-type decoding**, typed event map, `{"err":...}` handling.
-- [ ] **1.6 Store** (`daemon/src/store/`) — single SQLite DB, WAL, `account_id` column (not table
+- [x] **1.6 Store** (`daemon/src/store/`) — single SQLite DB, WAL, `account_id` column (not table
       prefixes), integer ms timestamps, numbered migrations, retention rollup job.
-- [ ] **1.7 Log watcher** (`daemon/src/logs/`) — offset-based tail (**never `fs.watch` on Windows**),
+- [x] **1.7 Log watcher** (`daemon/src/logs/`) — offset-based tail (**never `fs.watch` on Windows**),
       cross-platform path discovery incl. Proton/Flatpak/Deck, substring-marker parser, golden tests.
       **Tails every live log file concurrently** — several VRChat clients can run at once on different
       accounts. `User Authenticated: <name> (usr_…)` attributes a file to an account; `sessions` is the
       unit, not `accounts`. Pre-auth events buffer and attribute retroactively; unmanaged accounts stay
       as unlinked sessions rather than being misattributed.
-- [ ] **1.8 Servers** (`daemon/src/servers/`, `security/`) — three ports, Host + Origin validation,
+- [x] **1.8 Servers** (`daemon/src/servers/`, `security/`) — three ports, Host + Origin validation,
       session token, `state.json`. **Default URL is `http://127.0.0.1:PORT`**; `local.vrc.zip` is
       opt-in with a resolve check and silent fallback.
 - [ ] **1.9 UI** (`ui/`) — Svelte 5 + shadcn-svelte. Account switcher, login (all three 2FA paths),
@@ -194,13 +196,72 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     the mandatory User-Agent, so a silently stale value means traffic that misreports itself.
     `version.test.ts` asserts it against the workspace root manifest.
 
+
+19. **`daemon/src/logs/` is `daemon/src/game-logs/`.** Renamed after a bare `logs` pattern in the
+    repo-root `.gitignore` silently excluded the whole phase from git. The pattern is anchored now,
+    but the name is also simply more accurate: these are VRChat *game* logs, not app logs.
+20. **`registerUserAccount` is hard-denied on the proxy, alongside the two PLAN.md names.** Mass
+    account creation through the user's own daemon and IP is the most abuse-prone operation in the
+    spec and has no legitimate third-party use here.
+21. **Scope mapping is rule-first with an override list, not 297 hand-written lines.** Tag decides
+    the resource, method decides read/write, and an explicit override list covers every case where
+    the rule under-classifies risk (credentials, outbound social, group administration, single
+    destructive operations). A rule cannot go stale when the spec adds an endpoint; a hand table
+    silently would. Codegen fails hard if any operation maps to no scope.
+22. **The recorded-fixture VRChat server is a real `Bun.serve`, not a `fetch` stub.** The bugs most
+    likely to live in that layer are HTTP-level — multiple `Set-Cookie` headers folding into one,
+    header casing, an empty 401 body — and a stub papers over exactly those. It also models the
+    missing-UA 403 and counts minted sessions, which is how the session-frugality guarantee is
+    actually tested rather than asserted.
+23. **The EventBus fans out by prefix bucket, and `emit()` never awaits.** Async subscribers are
+    observed only to route rejections to `onError`. A slow subscriber must not stall the pipeline
+    reader, because a socket that stops draining is a socket VRChat eventually closes.
+
 ---
 
 ## Gotchas
 
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
-- *(none yet — nothing has been run)*
+Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **A bare `logs` pattern in the repo-root `.gitignore` matched `daemon/src/logs/` and excluded the
+  entire log watcher from git.** A bare `*.log` did the same to its fixtures. Both are fixed — the
+  pattern is anchored (`/logs`) and the directory is now `daemon/src/game-logs/`, fixtures are
+  `.txt` (which is also what VRChat actually writes). Check `git check-ignore -v <path>` before
+  assuming a new directory is tracked.
+- **Re-authentication deadlocks if the auth flow uses a context carrying the 401 hook.**
+  `reauthenticate()` returns one shared in-flight promise; the calls it makes to re-authenticate
+  also 401, re-enter `reauthenticate()`, get that same promise, and await it from inside itself.
+  The daemon hangs silently, exactly when a session expires. `Account.#baseContext()` exists solely
+  to prevent this — **authentication must never be able to trigger authentication.**
+- **`secrets.rename` is the wrong primitive for the pending -> real account rekey.** A 2FA login
+  persists twice: once pre-2FA under the pending id, once after verify under the real id. Renaming
+  moves the *older* row over the newer one, silently discarding the `twoFactorAuth` cookie, so 2FA
+  is demanded on every restart. Write the live account's own state instead.
+- **`events.account_id` must be nullable.** A game client signed into an account vrc.zip does not
+  manage is a normal state, and its events have no account. NOT NULL forces you to drop them or
+  invent an account, and both are wrong.
+- **`events` and `sessions` have foreign keys to `accounts`.** The account row must exist before
+  anything references it — the composition root upserts accounts *before* attaching the feed writer,
+  or the first batch of every cold start is lost.
+- **VRChat's 20 req/s is per IP, not per account.** Per-account buckets alone cannot see six
+  accounts each politely under their own limit adding up to 60/s. There is a global bucket at 80% of
+  the ceiling, and a contended call spends neither bucket (spending one while waiting on the other
+  leaks a token per contended call).
+- **`Date.parse("-5")` succeeds** — it reads as a year. Falling through from a rejected numeric
+  `Retry-After` to a date parse turns malformed input into a confident wrong answer.
+- **Windows Credential Manager needs a P/Invoke shim.** There is no built-in cmdlet for generic
+  credentials (`cmdkey` writes but cannot read the secret back), and the community module cannot be
+  assumed. `Add-Type` over advapi32 works, costs ~365ms per call, and is only called at startup.
+- **Biome cannot lint `.svelte`** — it reports every `$props()` binding as an unused variable. It
+  needs `css.parser.tailwindDirectives` for Tailwind v4. `svelte-check` is the gate for components.
+- **hey-api's generated runtime helpers do not compile under `exactOptionalPropertyTypes`.** They
+  get a scoped `@ts-nocheck` from codegen; the types and SDK stay fully checked.
+- The **spec facts in PLAN.md all verified**: 232 paths, 297 operations, 19 tags, no PATCH, no
+  `apiKey` query param. A test asserts them so a spec bump cannot quietly change them.
+
+Carried in from research, now confirmed against the fixture server rather than just believed:
 
 Carried in from research, not yet verified against running code:
 
@@ -243,6 +304,21 @@ Carried in from research, not yet verified against running code:
 
 ---
 
+## Running it
+
+```bash
+cd desktop-app
+bun install
+bun daemon/src/index.ts      # prints a launch URL carrying the session token
+```
+
+Set `VRCZIP_STATE_DIR` to redirect the whole state tree (secrets, DB, `state.json`) somewhere
+disposable — that is how the tests and any manual poking should run, so a smoke test never touches
+your real credential store.
+
+Verified live on Windows: three ports bound, `state.json` written, Credential Manager backend
+active, wrong `Host` 403, wrong `Origin` 403, missing token 401, proxy 501, UI 200.
+
 ## Open questions
 
 Unresolved; flag to the user rather than guessing.
@@ -250,4 +326,19 @@ Unresolved; flag to the user rather than guessing.
 - Whether `local.vrc.zip` DNS + the DNS-01 cert pipeline is stood up yet, and who owns the renewal
   endpoint that has to stay up for the life of the product. Not blocking — it is opt-in and
   `127.0.0.1` is the default — but the README documents it, so it should exist before release.
+- **Type hoisting into `packages/shared` has not happened.** All three Phase-1 agents flagged the
+  same candidates and none were moved, deliberately, to avoid concurrent edits to one file. Worth
+  doing before the UI and the Phase 2 stream both grow their own copies:
+  `JsonValue` (declared twice already — `pipeline/events.ts` and `servers/control.ts`), the
+  `gamelog.*` / bus `kind` taxonomy, `ExitKind` / `VrMode` / `SessionSnapshot` / `ParsedLocation`,
+  the control-API wire types (`ControlAccount`, `FeedEvent`, `GameSession`, `FriendPresence`,
+  `StreamEvent`), the retention config/plan types the settings UI renders verbatim, and the
+  token header/query-param constants plus default ports.
+- **`listFriends` returns stored rows with placeholder presence.** Nothing populates `friend_log`
+  yet — that needs the friends poller and the pipeline presence handlers writing through. The route
+  and the shape are real; the data is not.
+- **`rateLimit.remaining` and `queued` are approximations.** The limiter does not expose live token
+  counts. Either expose them or have the UI stop drawing a gauge that implies precision.
+- **No CI workflow.** It belongs at the repo root in `.github/`, which is shared ground with
+  `backend/` — a separate project. Needs a decision before it is added.
 - Nothing else open. (Retention → per-type, decided. Node-graph storage → shared store, decided.)

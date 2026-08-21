@@ -220,6 +220,69 @@ describe("log bridge", () => {
     store.close();
   });
 
+  test("retroactive attribution reaches the database, not just the bus", () => {
+    // The regression this exists for: `sessionUpdate` emitted a correct `session.update` event and
+    // wrote nothing to SQLite. The UI looked right until you reloaded, `GET /api/sessions` served
+    // `accountId: null` forever, and every session row in a months-old database was unattributed.
+    // Asserting the bus event alone is exactly what let it through — so assert the row.
+    const store = openStoreWithAccounts("usr_a");
+    const bus = new EventBus();
+    const seen: string[] = [];
+    bus.subscribe((e) => {
+      seen.push(e.kind);
+    });
+
+    const sink = createLogSink(store, bus);
+    sink.sessionStart(snapshot());
+    expect(store.listOpenSessions()[0]?.account_id).toBeNull();
+
+    // The `User Authenticated:` line lands seconds into the log.
+    sink.sessionUpdate("sess-1", {
+      accountId: "usr_a",
+      displayName: "Armagan",
+      userId: "usr_a",
+    });
+
+    const row = store.listOpenSessions()[0];
+    expect(row?.account_id).toBe("usr_a");
+    expect(row?.display_name).toBe("Armagan");
+    expect(seen).toEqual(["session.start", "session.update"]);
+    store.close();
+  });
+
+  test("a later patch cannot blank an attribution already known", () => {
+    // Identity only ever becomes more known. A vr-mode patch carries no account, and must not be
+    // read as "this session has no account".
+    const store = openStoreWithAccounts("usr_a");
+    const sink = createLogSink(store, new EventBus());
+    sink.sessionStart(snapshot());
+    sink.sessionUpdate("sess-1", { accountId: "usr_a", displayName: "Armagan" });
+    sink.sessionUpdate("sess-1", { vrMode: "vr" });
+
+    const row = store.listOpenSessions()[0];
+    expect(row?.account_id).toBe("usr_a");
+    expect(row?.display_name).toBe("Armagan");
+    expect(row?.vr_mode).toBe("vr");
+    store.close();
+  });
+
+  test("the world id is persisted alongside the location, not dropped", () => {
+    // `current_world_id` was hardcoded null at the call site while `current_location` held a real
+    // `wrld_…`. The two disagreeing in the live database is what exposed it.
+    const store = openStoreWithAccounts("usr_a");
+    const sink = createLogSink(store, new EventBus());
+    sink.sessionStart(snapshot());
+    sink.sessionUpdate("sess-1", {
+      currentLocation: "wrld_1234:5678~region(eu)",
+      currentWorldId: "wrld_1234",
+    });
+
+    const row = store.listOpenSessions()[0];
+    expect(row?.current_location).toBe("wrld_1234:5678~region(eu)");
+    expect(row?.current_world_id).toBe("wrld_1234");
+    store.close();
+  });
+
   test("gamelog events reach the bus with their session and subject", () => {
     const store = openStoreWithAccounts("usr_a");
     const bus = new EventBus();

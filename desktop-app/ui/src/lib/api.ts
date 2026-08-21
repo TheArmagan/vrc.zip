@@ -503,6 +503,21 @@ export const api = {
 
     remove: (accountId: string): Promise<void> =>
       request<void>(`/accounts/${encodeURIComponent(accountId)}`, { method: "DELETE" }),
+
+    /**
+     * Asks VRChat to invite this account to `location`, so the game client already signed into it
+     * can travel there by accepting the notification.
+     *
+     * This is the "a client is already running" half of joining; `launchLink()` is the other half.
+     * The daemon validates the location and answers 400 `invalid_location` for anything not
+     * joinable, 409 `account_offline` when the account has no live session, and 403
+     * `invite_forbidden` when VRChat will not let it in.
+     */
+    inviteSelf: (accountId: string, location: string): Promise<{ readonly status: "ok" }> =>
+      request<{ readonly status: "ok" }>(`/accounts/${encodeURIComponent(accountId)}/invite-self`, {
+        method: "POST",
+        body: { location },
+      }),
   },
 
   sessions: (signal?: AbortSignal): Promise<GameSession[]> =>

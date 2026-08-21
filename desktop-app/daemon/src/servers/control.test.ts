@@ -8,6 +8,8 @@ import {
   ControlError,
   createControlApp,
   type EventQuery,
+  type InviteTarget,
+  parseInviteLocation,
   type Settings,
   type StreamEvent,
 } from "./control.ts";
@@ -37,6 +39,7 @@ interface Recorder {
   notificationsSeen: string[];
   imageUrls: string[];
   removed: string[];
+  selfInvites: { accountId: string; target: InviteTarget }[];
   listeners: ((event: StreamEvent) => void)[];
   unsubscribed: number;
 }
@@ -49,6 +52,7 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     notificationsSeen: [],
     imageUrls: [],
     removed: [],
+    selfInvites: [],
     listeners: [],
     unsubscribed: 0,
   };
@@ -70,6 +74,10 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     removeAccount: async (id) => {
       if (id !== ACCOUNT.id) throw new ControlError(404, "no_such_account");
       seen.removed.push(id);
+    },
+    inviteSelfTo: async (accountId, target) => {
+      if (accountId !== ACCOUNT.id) throw new ControlError(404, "unknown_account");
+      seen.selfInvites.push({ accountId, target });
     },
     listSessions: async () => [
       {
@@ -295,6 +303,122 @@ describe("control API routes", () => {
     const { deps } = fakeDeps();
     const res = await call(deps, "/api/1/auth/user");
     expect(res.status).toBe(404);
+  });
+});
+
+describe("POST /api/accounts/:id/invite-self", () => {
+  const LOCATION = "wrld_ba913a96-fac4-4048-a062-9aa5db092812:12345~hidden(usr_1)~region(eu)";
+
+  function invite(deps: ControlDeps, id: string, body: unknown): Promise<Response> {
+    return call(deps, `/api/accounts/${id}/invite-self`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  test("splits the location and hands the account the instance to invite itself to", async () => {
+    const { deps, seen } = fakeDeps();
+    const res = await invite(deps, ACCOUNT.id, { location: LOCATION });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: "ok" });
+    expect(seen.selfInvites).toEqual([
+      {
+        accountId: ACCOUNT.id,
+        target: {
+          worldId: "wrld_ba913a96-fac4-4048-a062-9aa5db092812",
+          // The tags travel with the instance id. Without them VRChat cannot tell which closed
+          // instance is meant, and the invite is refused.
+          instanceId: "12345~hidden(usr_1)~region(eu)",
+        },
+      },
+    ]);
+  });
+
+  test("400s on a location that is missing, unjoinable, or malformed — without calling the daemon", async () => {
+    const { deps, seen } = fakeDeps();
+    for (const body of [
+      {},
+      { location: "" },
+      { location: "offline" },
+      { location: "private" },
+      { location: "traveling" },
+      { location: "traveling:traveling" },
+      { location: "wrld_ba913a96-fac4-4048-a062-9aa5db092812" },
+      { location: "notaworld:12345" },
+      // A second path segment smuggled through the instance id is the reason the tail is an
+      // allowlist rather than a "no colons" check.
+      { location: "wrld_ba913a96-fac4-4048-a062-9aa5db092812:../../auth/user" },
+      { location: "wrld_ba913a96-fac4-4048-a062-9aa5db092812:12345?x=1" },
+      { location: "wrld_ba913a96-fac4-4048-a062-9aa5db092812:" },
+      { location: 12_345 },
+    ]) {
+      const res = await invite(deps, ACCOUNT.id, body);
+      expect(res.status, JSON.stringify(body)).toBe(400);
+      expect(await res.json()).toMatchObject({ error: "invalid_location" });
+    }
+    expect(seen.selfInvites).toEqual([]);
+  });
+
+  test("a dependency's own error status survives the route", async () => {
+    const { deps } = fakeDeps();
+    const unknown = await invite(deps, "usr_nope", { location: LOCATION });
+    expect(unknown.status).toBe(404);
+    expect(await unknown.json()).toMatchObject({ error: "unknown_account" });
+
+    const { deps: offline } = fakeDeps({
+      inviteSelfTo: async () => {
+        throw new ControlError(409, "account_offline");
+      },
+    });
+    const res = await invite(offline, ACCOUNT.id, { location: LOCATION });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: "account_offline" });
+  });
+});
+
+describe("parseInviteLocation", () => {
+  test("accepts every instance shape VRChat actually issues", () => {
+    const world = "wrld_ba913a96-fac4-4048-a062-9aa5db092812";
+    for (const instance of [
+      "12345",
+      "12345~region(us)",
+      "12345~friends(usr_1)~region(use)~nonce(6d4a1e1f-0b2c-4c1e-9a1e-8f0b2c4c1e9a)",
+      "12345~private(usr_1)~canRequestInvite~region(jp)",
+      "12345~group(grp_1)~groupAccessType(public)~region(eu)",
+    ]) {
+      expect(parseInviteLocation(`${world}:${instance}`)).toEqual({
+        worldId: world,
+        instanceId: instance,
+      });
+    }
+  });
+
+  test("rejects rather than forwarding, and always with the same code", () => {
+    for (const raw of [
+      undefined,
+      "",
+      "offline",
+      "private",
+      "traveling",
+      "traveling:wrld_ba913a96-fac4-4048-a062-9aa5db092812:12345",
+      "wrld_ba913a96-fac4-4048-a062-9aa5db092812",
+      "usr_1:12345",
+      "wrld_ba913a96-fac4-4048-a062-9aa5db092812:~region(us)",
+      "wrld_ba913a96-fac4-4048-a062-9aa5db092812:12345/response",
+      "wrld_ba913a96-fac4-4048-a062-9aa5db092812:12345%2f",
+      `wrld_ba913a96-fac4-4048-a062-9aa5db092812:${"9".repeat(300)}`,
+    ]) {
+      let thrown: unknown;
+      try {
+        parseInviteLocation(raw);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown, String(raw)).toBeInstanceOf(ControlError);
+      expect((thrown as ControlError).status).toBe(400);
+      expect((thrown as ControlError).code).toBe("invalid_location");
+    }
   });
 });
 

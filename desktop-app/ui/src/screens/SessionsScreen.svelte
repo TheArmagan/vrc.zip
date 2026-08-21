@@ -112,7 +112,17 @@ const loading = $derived(app.phase === "loading" || app.phase === "idle");
                 No instance yet. The client is at the menu or still loading.
               </p>
             {:else}
-              <LocationLine location={session.currentLocation} worldName={entry.worldName} />
+              <!--
+                This client is already standing here, so `planJoin` shows no affordance at all
+                for it — the old "Jump" link launched a second client into the instance the
+                first one was already in. With a second client running, the affordance comes
+                back as "Invite me" and moves that one here instead.
+              -->
+              <LocationLine
+                location={session.currentLocation}
+                worldName={entry.worldName}
+                accountId={session.accountId}
+              />
             {/if}
           </Card.Content>
 

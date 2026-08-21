@@ -4,7 +4,13 @@
  * one place decides that `friend.location` reads "moved instance" and `otp` reads "recovery code".
  */
 
-import type { AccountConnection, EventKind, FriendStatus, TwoFactorMethod } from "./api.ts";
+import type {
+  AccountConnection,
+  EventKind,
+  FriendStatus,
+  GameSession,
+  TwoFactorMethod,
+} from "./api.ts";
 
 const relative = new Intl.RelativeTimeFormat(undefined, { numeric: "auto", style: "narrow" });
 const clock = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" });
@@ -164,6 +170,79 @@ export function launchLink(location: string | null): string | null {
   const parsed = parseLocation(location);
   if (parsed.opaque || location === null) return null;
   return `vrchat://launch?ref=vrchat.com&id=${encodeURIComponent(location)}`;
+}
+
+/**
+ * What clicking "join" should actually do.
+ *
+ * The deep link is only ever right when **no game client is running**. Fire it at a machine that
+ * already has VRChat open and Windows starts a *second* client, which then fights the first one
+ * over the same account. With a client running, the thing that works is a self-invite: the daemon
+ * asks VRChat to send the account an invite, and the running client shows it as a notification the
+ * user clicks to travel. That is what VRCX's "Invite Me" does, and it is the only path that moves
+ * the client you already have rather than making another one.
+ */
+export type JoinPlan =
+  /** A client is running; invite this account so its client can travel. */
+  | { readonly kind: "invite"; readonly accountId: string }
+  /** Nothing is running; `vrchat://` is exactly right. */
+  | { readonly kind: "launch"; readonly href: string }
+  /** A client is already standing in this instance. There is nothing to do. */
+  | { readonly kind: "here" }
+  /** Clients are running but none of them can be sent. Never silently launch a second one. */
+  | { readonly kind: "blocked"; readonly reason: string };
+
+/** The only two fields of a live session the decision depends on. */
+type JoinSession = Pick<GameSession, "accountId" | "currentLocation">;
+
+/**
+ * Decides between "invite me" and the deep link.
+ *
+ * `contextAccountId` is the account the location was *seen through* — the friend list's account
+ * filter, or a session card's own account. It is preferred when it has a client running, because
+ * when two clients are up "which one travels?" has no correct answer the app can infer, and the
+ * account that surfaced the location is the one the user was looking at when they clicked.
+ *
+ * Order matters and each branch earns its place:
+ *  1. nothing joinable in the location at all — no affordance.
+ *  2. no client running — launch, the one case the deep link is for.
+ *  3. every running client is already here — nothing to do (this is the session card's own row).
+ *  4. the context account has a client elsewhere — invite it.
+ *  5. exactly one other client is linked to a known account — invite that one; it is unambiguous.
+ *  6. otherwise refuse and say why. Two linked clients with no hint, or a client signed into an
+ *     account vrc.zip does not manage (which has no credentials to invite with) both land here,
+ *     and launching a second client would be precisely the bug this function exists to avoid.
+ */
+export function planJoin(
+  location: string | null,
+  sessions: readonly JoinSession[],
+  contextAccountId: string | null = null,
+): JoinPlan | null {
+  const href = launchLink(location);
+  if (href === null) return null;
+  if (sessions.length === 0) return { kind: "launch", href };
+
+  const elsewhere = sessions.filter((session) => session.currentLocation !== location);
+  if (elsewhere.length === 0) return { kind: "here" };
+
+  if (
+    contextAccountId !== null &&
+    elsewhere.some((session) => session.accountId === contextAccountId)
+  ) {
+    return { kind: "invite", accountId: contextAccountId };
+  }
+
+  const linked = elsewhere.filter((session) => session.accountId !== null);
+  const only = linked.length === 1 ? linked[0]?.accountId : undefined;
+  if (only != null) return { kind: "invite", accountId: only };
+
+  return {
+    kind: "blocked",
+    reason:
+      linked.length === 0
+        ? "VRChat is running under an account vrc.zip does not manage, so there is nobody to invite. Add that account, or travel from inside the game."
+        : "More than one client is running and none of them belongs to this view, so vrc.zip will not guess which one to move. Use the Live sessions screen.",
+  };
 }
 
 /** Worlds are only ever identified by id until a name arrives; `wrld_1234abcd…` -> `wrld_1234ab`. */

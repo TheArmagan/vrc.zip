@@ -87,11 +87,37 @@ export function createLogSink(store: Store, bus: EventBus): LogSink {
       if (rowId === undefined) return;
 
       if (patch.currentLocation !== undefined) {
-        store.updateSessionLocation(rowId, patch.currentLocation ?? null, null);
+        // The world id travels in the same patch. Passing a hardcoded null here left
+        // `current_world_id` empty on every session ever recorded, while `current_location`
+        // held a perfectly good `wrld_…` — the two disagreeing is what gave it away.
+        store.updateSessionLocation(
+          rowId,
+          patch.currentLocation ?? null,
+          patch.currentWorldId ?? null,
+        );
       }
+
       // Retroactive attribution arrives here: the `User Authenticated:` line lands seconds into a
-      // log, after events have already been emitted. The watcher re-attributes them; we update the
-      // row so the UI stops showing the session as unlinked.
+      // log, after events have already been emitted. The watcher re-attributes those events; this
+      // writes the row so the UI stops showing the session as unlinked.
+      //
+      // This write was missing entirely. The comment below it claimed it happened, the bus event
+      // carried the right data, and the UI reacted correctly to the stream — but nothing ever
+      // reached SQLite, so `GET /api/sessions` served `accountId: null` forever and a reload put
+      // the session straight back to "unlinked". Every session row in a months-old database was
+      // unattributed for this one reason.
+      if (
+        patch.accountId !== undefined ||
+        patch.displayName !== undefined ||
+        patch.vrMode !== undefined
+      ) {
+        store.updateSessionIdentity(rowId, {
+          account_id: patch.accountId ?? null,
+          display_name: patch.displayName ?? null,
+          vr_mode: patch.vrMode ?? null,
+        });
+      }
+
       bus.emit({
         kind: "session.update",
         accountId: patch.accountId ?? null,

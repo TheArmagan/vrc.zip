@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExitKind, LogSink, SessionEvent, SessionPatch, SessionSnapshot } from "./sessions.ts";
@@ -98,6 +98,124 @@ test("tails two concurrent clients on different accounts as separate sessions", 
   // Two files, two sessions — the player lists must not be interleaved.
   expect(new Set(log.events.map((event) => event.sessionId)).size).toBe(2);
   await watcher.stop();
+});
+
+test("a client already running when the daemon starts is still attributed", async () => {
+  // The daemon restarts while VRChat keeps running. Tailing from EOF is right for events — the
+  // previous run already recorded that history — but it skips the `User Authenticated:` line,
+  // which sits near the top and is the *only* link between a log file and an account. Without a
+  // head scan the session stays unlinked for the rest of the client's life, which is exactly what
+  // a `bun --watch` session looks like from the UI: an unlinked client whose account is signed in.
+  const dir = tempDir();
+  const path = join(dir, "output_log_14-22-01.txt");
+  const { sink, log } = recorder();
+  const time = clock();
+  const watcher = new LogWatcher({
+    directories: [dir],
+    sink,
+    now: time.now,
+    staleAfterMs: 60_000,
+    scanIntervalMs: 0,
+    activeIntervalMs: 0,
+    idleIntervalMs: 0,
+    jitterRatio: 0,
+    // The daemon's real posture for a file that already exists at startup.
+    backfill: false,
+    resolveAccountId: (userId) => (userId === ALICE ? "acct_alice" : null),
+  });
+
+  // History from before the daemon started, auth line included.
+  writeFileSync(
+    path,
+    `${authLine("14:22:07", "Alice", ALICE)}
+${joinLine("14:22:18", "Alice", ALICE)}
+`,
+  );
+
+  await watcher.tick();
+
+  // The account is known from the head scan...
+  expect(log.updates.at(-1)?.patch.accountId).toBe("acct_alice");
+  expect(log.updates.at(-1)?.patch.displayName).toBe("Alice");
+  // ...without replaying the history as events. Re-emitting that join would double every row the
+  // previous run already wrote.
+  expect(log.events.filter((event) => event.kind === "player-join")).toHaveLength(0);
+
+  // And a line written after we started watching is attributed, not buffered as unlinked.
+  appendFileSync(
+    path,
+    `${joinLine("14:25:00", "Carol", BOB)}
+`,
+  );
+  await watcher.tick();
+
+  const joins = log.events.filter((event) => event.kind === "player-join");
+  expect(joins).toHaveLength(1);
+  expect(joins[0]?.accountId).toBe("acct_alice");
+  await watcher.stop();
+});
+
+test("a log whose client exited long ago is not resurrected as a live session", async () => {
+  // Restarting the daemon must not give a dead client a fresh lease on life. Staleness runs from
+  // the file's last write; seeding it with "now" made every restart show hours-old logs as live
+  // for another staleAfterMs, which under `bun --watch` never expires.
+  const dir = tempDir();
+  const path = join(dir, "output_log_14-22-01.txt");
+  writeFileSync(
+    path,
+    `${authLine("14:22:07", "Alice", ALICE)}
+`,
+  );
+
+  // The file was last written well beyond the stale window, as a log from a previous run is.
+  const past = 1_700_000_000_000;
+  utimesSync(path, new Date(past), new Date(past));
+
+  const { sink, log } = recorder();
+  const time = clock(past + 3_600_000);
+  const watcher = makeWatcher(dir, sink, time.now);
+
+  await watcher.tick();
+
+  // Adopted (so its history is still attributed), then immediately aged out — not left live.
+  expect(log.starts).toHaveLength(1);
+  expect(log.ends).toHaveLength(1);
+  expect(log.ends[0]?.exitKind).toBe("crash");
+  await watcher.stop();
+});
+
+test("a live file keeps one stable start time across re-adoption", async () => {
+  // `startedAt` used to come from the file's mtime, which for a growing log is "a moment ago" —
+  // so every daemon restart computed a different start for the same running client. The store
+  // keys sessions on (log_path, started_at), so each restart forked a second row and orphaned the
+  // first with `ended_at` never set: one ghost live session per restart.
+  const dir = tempDir();
+  const path = join(dir, "output_log_14-22-01.txt");
+  writeFileSync(
+    path,
+    `${authLine("14:22:07", "Alice", ALICE)}
+`,
+  );
+
+  const first = recorder();
+  const timeA = clock();
+  const watcherA = makeWatcher(dir, first.sink, timeA.now);
+  await watcherA.tick();
+  await watcherA.stop();
+
+  // The client keeps writing, so the mtime moves on. A second daemon adopts the same file.
+  appendFileSync(
+    path,
+    `${joinLine("14:25:00", "Carol", BOB)}
+`,
+  );
+  const second = recorder();
+  const timeB = clock(1_700_000_600_000);
+  const watcherB = makeWatcher(dir, second.sink, timeB.now);
+  await watcherB.tick();
+  await watcherB.stop();
+
+  expect(second.log.starts[0]?.startedAt).toBe(first.log.starts[0]?.startedAt);
 });
 
 test("attributes pre-auth events retroactively once the auth line arrives", async () => {

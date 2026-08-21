@@ -184,6 +184,51 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       store.deleteAccount(accountId);
     },
 
+    async inviteSelfTo(accountId, target): Promise<void> {
+      const account = accounts.get(accountId);
+      if (!account) throw new ControlError(404, "unknown_account");
+
+      // A self-invite needs a live auth cookie, and an account that is signed out or sitting on a
+      // 2FA challenge has none. Saying so is better than letting `vrcFetch` discover it as a 401
+      // and re-auth into a challenge nobody is watching.
+      if (account.snapshot().state !== "online") {
+        throw new ControlError(
+          409,
+          "account_offline",
+          "That account is not signed in, so VRChat has nobody to send the invite to.",
+        );
+      }
+
+      // Interpolated, not encoded: `parseInviteLocation` has already restricted both halves to
+      // characters percent-encoding leaves alone, so encoding here would be a no-op that only
+      // makes the path harder to read against VRChat's own spec.
+      const path = `/invite/myself/to/${target.worldId}:${target.instanceId}`;
+      const response = await vrcFetch(account.context(), path, { method: "POST" });
+
+      // Drained either way — an undrained body holds the connection open, and nothing here wants
+      // VRChat's notification object back. The UI's success signal is the HTTP status.
+      const body = await response.text().catch(() => "");
+      if (response.ok) return;
+
+      // Three upstream answers mean genuinely different things to the person who clicked, so they
+      // keep their own codes rather than collapsing into one "it failed".
+      if (response.status === 403) {
+        throw new ControlError(
+          403,
+          "invite_forbidden",
+          "VRChat will not let this account into that instance.",
+        );
+      }
+      if (response.status === 404) {
+        throw new ControlError(404, "unknown_instance", "That instance no longer exists.");
+      }
+      throw new ControlError(
+        502,
+        "invite_failed",
+        `VRChat returned ${String(response.status)}${body === "" ? "" : `: ${body.slice(0, 200)}`}`,
+      );
+    },
+
     async listSessions(): Promise<GameSession[]> {
       return store.listOpenSessions().map((row) => ({
         id: row.id,

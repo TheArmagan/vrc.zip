@@ -2,15 +2,16 @@
  * The commands the shell itself owns: navigation, appearance, connection, and the four instant
  * actions from the plan.
  *
- * The instant actions are registered even though three of the four have no daemon endpoint behind
- * them yet. That is deliberate and is the whole reason the registry exists in Phase 1: a command
+ * The instant actions are registered even though two of the four still have no daemon endpoint
+ * behind them. That is deliberate and is the whole reason the registry exists in Phase 1: a command
  * that appears the day its endpoint lands is a command nobody discovers, and retrofitting a
  * registry onto screens that already grew their own buttons costs far more than carrying a few
  * stubs. A stub says so out loud when it is run — it never silently does nothing.
  */
 
 import { registerCommands } from "../commands.svelte.ts";
-import { launchLink } from "../format.ts";
+import { planJoin } from "../format.ts";
+import { requestJoin } from "../join.ts";
 import { navigate, ROUTE_IDS, type RouteId } from "../router.ts";
 import { app } from "../state/app.svelte.ts";
 import { theme } from "../state/theme.svelte.ts";
@@ -41,6 +42,21 @@ const NAV_SUBTITLES: Record<RouteId, string> = {
 export interface CommandHost {
   readonly notImplemented: (title: string, why: string) => void;
   readonly openPalette: () => void;
+}
+
+/**
+ * The first running client whose instance another client could be sent to.
+ *
+ * Locations only ever come from running clients here — the palette has no target picker — so the
+ * plan is an invite or nothing. `planJoin` returns `here` for the client that is already there.
+ */
+function firstJoinable(): { currentLocation: string | null; accountId: string | null } | null {
+  return (
+    app.sessions.find(
+      (session) =>
+        planJoin(session.currentLocation, app.sessions, session.accountId)?.kind === "invite",
+    ) ?? null
+  );
 }
 
 export function registerBuiltinCommands(host: CommandHost): () => void {
@@ -99,23 +115,23 @@ export function registerBuiltinCommands(host: CommandHost): () => void {
     },
 
     // --- instant actions -----------------------------------------------------
-    // The plan's four. Only "jump to instance" can be honoured entirely in the browser today,
-    // because a `vrchat://` link needs no daemon; the other three need endpoints that do not
-    // exist yet, so they stay listed, stay disabled when there is nothing to act on, and say
-    // exactly what is missing when they are run.
+    // The plan's four. "Jump to instance" and self-invite are real now; the other two still need
+    // endpoints that do not exist, so they stay listed, stay disabled when there is nothing to act
+    // on, and say exactly what is missing when they are run.
     {
       id: "instant.jump",
-      title: "Jump to a running client's instance",
-      subtitle: "Opens VRChat on the instance the first running client is in",
+      title: "Bring another client to a running client's instance",
+      subtitle: "Invites one running client to where another one already is",
       group: "Instant actions",
-      keywords: ["join", "launch", "instance", "world"],
-      enabled: (): boolean =>
-        app.sessions.some((session) => launchLink(session.currentLocation) !== null),
+      keywords: ["join", "jump", "invite me", "instance", "world"],
+      // Enabled only when some client is somewhere another client could be sent. With a single
+      // client running, the answer to "jump to its instance" is "you are already in it" — the old
+      // command launched a *second* client into it, which is exactly the bug this replaces.
+      enabled: (): boolean => firstJoinable() !== null,
       run: (): void => {
-        const target = app.sessions.find((session) => launchLink(session.currentLocation) !== null);
-        const link = launchLink(target?.currentLocation ?? null);
-        if (link === null) return;
-        window.location.href = link;
+        const target = firstJoinable();
+        if (target === null) return;
+        void requestJoin(target.currentLocation, target.accountId);
       },
     },
     {

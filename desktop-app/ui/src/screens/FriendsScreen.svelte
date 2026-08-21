@@ -173,7 +173,16 @@ const onlineCount = $derived(friends.filter((friend) => friend.status !== "offli
                 {/if}
               </p>
             {:else}
-              <LocationLine location={friend.location} />
+              <!--
+                The account filter is the only thing that says which of your accounts this
+                friend was seen through, and that is what decides which running client gets
+                invited when more than one is up. Empty filter means "all accounts", so there
+                is no context and `planJoin` falls back to the single running client.
+              -->
+              <LocationLine
+                location={friend.location}
+                accountId={accountFilter === "" ? null : accountFilter}
+              />
             {/if}
           </div>
 

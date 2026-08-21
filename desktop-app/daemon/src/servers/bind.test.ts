@@ -19,6 +19,7 @@ const deps: ControlDeps = {
     throw new Error("unused");
   },
   removeAccount: async () => {},
+  inviteSelfTo: async () => {},
   listSessions: async () => [],
   listEvents: async () => [],
   listFriends: async () => [],

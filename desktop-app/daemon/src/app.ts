@@ -9,8 +9,8 @@ import { databasePath, ensureStateDir } from "./paths.ts";
 import { PipelineClient } from "./pipeline/index.ts";
 import { loadOrCreateMasterKey } from "./security/keychain.ts";
 import { SecretsStore } from "./security/secrets.ts";
-import { generateSessionToken } from "./security/session-token.ts";
-import { removeStateFile, writeStateFile } from "./security/state-file.ts";
+import { resolveSessionToken } from "./security/session-token.ts";
+import { readStateFile, removeStateFile, writeStateFile } from "./security/state-file.ts";
 import { type BoundServers, bindServers } from "./servers/index.ts";
 import { loadSettings, needsFirstRun, type Settings, saveSettings } from "./settings.ts";
 import { type RetentionScheduler, Store, startRetentionScheduler } from "./store/index.ts";
@@ -175,7 +175,20 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
   const retention: RetentionScheduler = startRetentionScheduler(store);
 
   // --- servers --------------------------------------------------------------
-  const sessionToken = generateSessionToken();
+  // Must read `state.json` before `writeStateFile` below overwrites it. Fresh token by default;
+  // the previous run's only under `--watch` / `--hot` / `VRCZIP_STABLE_TOKEN=1`.
+  const session = await resolveSessionToken(env !== undefined ? { env } : {});
+  const sessionToken = session.token;
+  if (session.stable) {
+    // Loud on purpose. A stable credential that appears without saying so is how one ends up in a
+    // production build unnoticed — this line is the thing that makes that visible in a log.
+    console.warn(
+      session.reused
+        ? "[vrc.zip] dev mode: reusing the session token from state.json — it does NOT rotate on restart."
+        : "[vrc.zip] dev mode: session token will be stable across restarts (none stored yet, minting one).",
+    );
+  }
+
   const deps = createControlDeps({
     accounts,
     store,
@@ -197,6 +210,24 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     // daemon then silently serves the "UI not built" placeholder while the bundle sits right there.
     uiDistDir: resolve(import.meta.dir, "..", "..", "ui", "dist"),
   });
+
+  // `bindServer` has always returned `fellBack` and nothing has ever read it, which is why a daemon
+  // orphaned by an earlier `bun --watch` could hold 7773-7775 while every later start quietly moved
+  // to a random ephemeral port — breaking the bookmarked URL, the saved `curl`, and the open tab
+  // with no message anywhere. Falling back is still the right behaviour; it just has to be audible.
+  // Must run before `writeStateFile` below, which overwrites the very evidence it reads.
+  for (const line of await portFallbackWarnings(
+    [
+      { name: "UI", server: servers.ui, wanted: settings.ports.ui },
+      { name: "proxy", server: servers.proxy, wanted: settings.ports.proxy },
+      { name: "control", server: servers.control, wanted: settings.ports.control },
+    ]
+      .filter((entry) => entry.server.fellBack)
+      .map(({ name, server, wanted }) => ({ name, wanted, bound: server.port })),
+    env,
+  )) {
+    console.warn(line);
+  }
 
   await writeStateFile(
     {
@@ -229,7 +260,15 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
       notifications.detach();
 
       await servers.stop();
-      await removeStateFile(env).catch(() => undefined);
+
+      // In dev mode the file is deliberately left behind, because it is the only place the token
+      // survives to. `bun --watch` does not hard-kill: it sends SIGTERM to the outgoing process and
+      // that handler runs to completion (verified on Bun 1.4.0/Windows — the old pid logs its
+      // shutdown before the new pid boots), so deleting here would erase the token a fraction of a
+      // second before the reload tries to read it and reuse could never work. The cost is a stale
+      // `state.json` pointing at a dead pid between a Ctrl-C and the next start, which is a
+      // dev-only annoyance; `readStateFile` callers already have to tolerate a dead daemon.
+      if (!session.stable) await removeStateFile(env).catch(() => undefined);
 
       // Deliberately `goOffline`, never `PUT /logout`: cookies survive so the next start resumes
       // instead of minting a session. PLAN.md §Guardrails.
@@ -237,4 +276,84 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
       store.close();
     },
   };
+}
+
+// --- port fallback diagnostics ----------------------------------------------
+
+/** One server that did not get the port it asked for. */
+export interface PortFallback {
+  /** How the server is named to the user: "UI", "proxy", "control". */
+  readonly name: string;
+  readonly wanted: number;
+  readonly bound: number;
+}
+
+/**
+ * The warning lines for servers that fell back to an ephemeral port.
+ *
+ * Returns strings rather than logging, so the wording is assertable without binding a real port.
+ * Empty in the normal case, and it does no I/O at all then — the `state.json` read only happens
+ * when there is actually something to explain.
+ *
+ * The blame is deliberately conservative: a previous run's pid is only named when that run's own
+ * `state.json` recorded it on the very port now contested *and* the pid is still alive. Anything
+ * short of both gets the generic line, because "pid 4812 holds your port" is worse than useless if
+ * pid 4812 is actually an unrelated process that inherited a recycled id.
+ */
+export async function portFallbackWarnings(
+  fallbacks: readonly PortFallback[],
+  env?: NodeJS.ProcessEnv,
+): Promise<string[]> {
+  if (fallbacks.length === 0) return [];
+
+  const previous = await previousDaemon(env);
+  return fallbacks.map(({ name, wanted, bound }) => {
+    // `=== true` rather than a truthiness check: it is what narrows `previous` to non-null for the
+    // `.pid` read below, and it keeps Biome from asking for an optional chain that would not.
+    const cause =
+      previous?.ports.has(wanted) === true
+        ? `port ${wanted} is held by an existing vrc.zip daemon (pid ${previous.pid}) still running from an earlier start`
+        : `port ${wanted} was already taken — an orphaned vrc.zip daemon from an earlier \`bun --watch\` run is the usual cause`;
+    return `[vrc.zip] ${name} server fell back to port ${bound}: ${cause}. Bookmarked URLs and saved tokens on ${wanted} will not reach this daemon.`;
+  });
+}
+
+/** The still-running daemon described by `state.json`, or null if there isn't one. */
+async function previousDaemon(
+  env?: NodeJS.ProcessEnv,
+): Promise<{ pid: number; ports: Set<number> } | null> {
+  const state = await readStateFile(env);
+  // Never blame ourselves: in dev mode `state.json` survives shutdown, so a stale file naming a
+  // recycled pid is a real possibility and this process is the one pid we know isn't the culprit.
+  if (state === null || state.pid === process.pid || !isProcessAlive(state.pid)) return null;
+
+  const ports = new Set<number>();
+  for (const url of [state.uiUrl, state.proxyUrl, state.controlUrl]) {
+    const port = portOf(url);
+    if (port !== null) ports.add(port);
+  }
+  return { pid: state.pid, ports };
+}
+
+/**
+ * Signal 0 sends nothing and only asks whether the pid can be signalled. Portable to Windows, where
+ * Bun maps it onto a process-handle lookup. `EPERM` means the process exists but belongs to someone
+ * else, which still counts as alive; only `ESRCH` means gone.
+ */
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as { code?: unknown }).code === "EPERM";
+  }
+}
+
+function portOf(url: string): number | null {
+  try {
+    const port = Number.parseInt(new URL(url).port, 10);
+    return Number.isInteger(port) ? port : null;
+  } catch {
+    return null;
+  }
 }

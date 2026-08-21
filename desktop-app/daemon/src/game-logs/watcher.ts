@@ -56,10 +56,20 @@ interface WatchedFile {
   nextDueAt: number;
   /** True once the tracker has been ended; the file is no longer read. */
   finished: boolean;
+  /**
+   * False until this file has been read once. The first read drains whatever was already on disk,
+   * which is history rather than live growth — see the staleness note in `poll`.
+   */
+  primed: boolean;
 }
 
 const DEFAULT_SCAN_INTERVAL_MS = 5_000;
 const DEFAULT_STALE_AFTER_MS = 300_000;
+/**
+ * How much of an already-running client's log to scan for its auth line. VRChat writes it within
+ * the first few hundred lines; 256KB is generous cover for that without reading a 200MB log.
+ */
+const ATTRIBUTION_HEAD_BYTES = 256 * 1024;
 
 /**
  * Filesystem identity of a log file. `dev:ino` where the platform provides it; Windows commonly
@@ -82,6 +92,34 @@ async function fileSize(path: string): Promise<number> {
   } catch {
     return 0;
   }
+}
+
+/**
+ * When this log file's client started, as a stable value.
+ *
+ * **Birth time, not mtime.** A live log is appended to constantly, so its mtime is "a moment ago"
+ * for as long as the client runs — meaning every daemon restart computed a *different* start time
+ * for the same still-running session. The store keys sessions on `(log_path, started_at)`, so each
+ * restart inserted a second row for one client and orphaned the first with `ended_at` never set:
+ * one ghost "live" session per restart, which under `bun --watch` is one per code edit.
+ *
+ * Birth time is not universally available — some Linux filesystems report 0 — so the old
+ * computation stays as the fallback. It is wrong in the same way it always was, but only where
+ * there is nothing better.
+ *
+ * Note it is **not** clamped to `now`, unlike the mtime fallback. Clamping is what makes a value
+ * unstable: `Math.min(birth, now)` returns a moving `now` whenever the two disagree, which is the
+ * exact failure being fixed. A birth time in the future means a broken filesystem clock, and
+ * honouring it is better than substituting a number that changes on every restart.
+ */
+async function fileStartedAt(path: string, modifiedAt: number, now: number): Promise<number> {
+  try {
+    const birth = Math.trunc((await stat(path)).birthtimeMs);
+    if (birth > 0) return birth;
+  } catch {
+    // Fall through: a file we cannot stat is one the tail will fail on anyway.
+  }
+  return Math.min(modifiedAt, now);
 }
 
 export class LogWatcher {
@@ -204,22 +242,75 @@ export class LogWatcher {
   /** Builds the watched-file record for a newly seen file, including its fresh session. */
   private async adopt(path: string, key: string, modifiedAt: number): Promise<WatchedFile> {
     const startOffset = this.backfill ? 0 : await fileSize(path);
-    return this.makeFile(path, key, modifiedAt, new FileTail({ path, startOffset }));
+    const startedAt = await fileStartedAt(path, modifiedAt, this.now());
+    const file = this.makeFile(path, key, startedAt, new FileTail({ path, startOffset }));
+
+    // Staleness is measured from the file's last write, not from when we happened to adopt it.
+    // Seeding `lastGrowthAt` with `now` gives every long-dead log a fresh lease: the daemon
+    // restarts, re-adopts a log whose client exited hours ago, and presents it as a live session
+    // for a further `staleAfterMs` before deciding it crashed. Under `bun --watch` that is a dead
+    // client showing as live, permanently, because the timer resets faster than it expires.
+    file.lastGrowthAt = Math.min(modifiedAt, this.now());
+
+    // Tailing from EOF skips the whole head of the file — including the `User Authenticated:`
+    // line, which sits a couple of hundred lines in and is the *only* link between a log file and
+    // an account. A client already running when the daemon starts would otherwise stay unlinked
+    // for its entire remaining life. Reading just the head for that one line costs one small read
+    // and does not replay any history as events.
+    if (startOffset > 0) await this.attributeFromHead(file);
+    return file;
   }
 
-  private makeFile(path: string, key: string, modifiedAt: number, tail: FileTail): WatchedFile {
+  /**
+   * Reads the head of an already-running client's log looking for its `User Authenticated:` line,
+   * and feeds only that line to the tracker.
+   *
+   * Deliberately narrow: it ingests the auth event and nothing else. The rest of the head is
+   * history that was already live before we started watching, and replaying it as events would
+   * duplicate every world join and player join the previous run already recorded.
+   */
+  private async attributeFromHead(file: WatchedFile): Promise<void> {
+    let head: string;
+    try {
+      const handle = Bun.file(file.path);
+      head = await handle.slice(0, ATTRIBUTION_HEAD_BYTES).text();
+    } catch {
+      return;
+    }
+
+    for (const line of head.split("\n")) {
+      // Substring-gate before parsing, the same way the parser does: this runs over a few thousand
+      // lines and all but one of them are irrelevant.
+      if (!line.includes("User Authenticated: ")) continue;
+      const event = parseLine(line);
+      if (event?.kind === "authenticated") {
+        file.tracker.ingest(event);
+        return;
+      }
+    }
+  }
+
+  private makeFile(path: string, key: string, startedAt: number, tail: FileTail): WatchedFile {
     const now = this.now();
     const tracker = new SessionTracker({
       id: randomUUID(),
       logPath: path,
       logKey: key,
-      // For a backfilled historical file the mtime is a far better start than "now".
-      startedAt: Math.min(modifiedAt, now),
+      startedAt,
       sink: this.sink,
       ...(this.resolveAccountId === null ? {} : { resolveAccountId: this.resolveAccountId }),
     });
     tracker.start();
-    return { path, key, tail, tracker, lastGrowthAt: now, nextDueAt: 0, finished: false };
+    return {
+      path,
+      key,
+      tail,
+      tracker,
+      lastGrowthAt: now,
+      nextDueAt: 0,
+      finished: false,
+      primed: false,
+    };
   }
 
   private async poll(watched: WatchedFile): Promise<void> {
@@ -245,7 +336,12 @@ export class LogWatcher {
     }
 
     const now = this.now();
-    if (result.grew) file.lastGrowthAt = now;
+    // The **first** read of a newly adopted file is catch-up on history that predates us, not the
+    // client writing. Counting it as growth restarts the staleness clock, which is what let a log
+    // whose client exited hours ago look live for another `staleAfterMs` after every daemon
+    // restart. The seeded value — the file's own mtime — is the truth about when it last grew.
+    if (result.grew && file.primed) file.lastGrowthAt = now;
+    file.primed = true;
     file.nextDueAt = now + nextPollDelay(this.schedule, now - file.lastGrowthAt, result.hasMore);
   }
 

@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type RunningDaemon, startDaemon } from "./app.ts";
+import { portFallbackWarnings, type RunningDaemon, startDaemon } from "./app.ts";
+import { generateSessionToken } from "./security/session-token.ts";
+import { writeStateFile } from "./security/state-file.ts";
 import { startVrchatFixture, type VrchatFixture } from "./testing/vrchat-fixture.ts";
 
 /**
@@ -41,14 +43,17 @@ describe("daemon end to end", () => {
   let dir: string;
   let daemon: RunningDaemon | null = null;
 
-  async function boot(contact = "tests@somewhere.dev"): Promise<RunningDaemon> {
+  async function boot(
+    contact = "tests@somewhere.dev",
     // Port 0 asks the OS for a free one — a fixed port would make the suite flaky against a real
-    // daemon running on the same machine.
+    // daemon running on the same machine. Only the fallback test overrides this.
+    ports: { ui: number; proxy: number; control: number } = { ui: 0, proxy: 0, control: 0 },
+  ): Promise<RunningDaemon> {
     await writeFile(
       join(dir, "settings.json"),
       JSON.stringify({
         contact,
-        ports: { ui: 0, proxy: 0, control: 0 },
+        ports,
         useLocalDomain: false,
         logDirectories: [join(dir, "no-logs-here")],
         openBrowserOnStart: false,
@@ -258,6 +263,43 @@ describe("daemon end to end", () => {
     expect(fixture.requests.some((r) => r.path === "/logout")).toBe(false);
   });
 
+  test("says so out loud when a wanted port is taken", async () => {
+    // The regression this exists for: `bindServer` reported `fellBack` and nobody read it, so the
+    // daemon moved to a random port in silence. A squatter on an OS-chosen port reproduces that
+    // without needing 7773 to be free on the machine running the suite.
+    const squatter = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () => new Response("busy"),
+    });
+    const taken = squatter.port;
+    expect(taken).toBeNumber();
+
+    const warnings: string[] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]): void => {
+      warnings.push(args.map(String).join(" "));
+    };
+
+    try {
+      const running = await boot("tests@somewhere.dev", {
+        ui: taken as number,
+        proxy: 0,
+        control: 0,
+      });
+      expect(running.servers.ui.fellBack).toBe(true);
+      expect(running.servers.ui.port).not.toBe(taken);
+      expect(
+        warnings.some((line) =>
+          line.includes(`UI server fell back to port ${running.servers.ui.port}`),
+        ),
+      ).toBe(true);
+    } finally {
+      console.warn = realWarn;
+      await squatter.stop(true);
+    }
+  });
+
   test("stop() releases the ports", async () => {
     const running = await boot();
     const url = running.servers.urls.controlUrl;
@@ -265,5 +307,123 @@ describe("daemon end to end", () => {
     daemon = null;
 
     await expect(fetch(`${url}/api/status`)).rejects.toThrow();
+  });
+});
+
+/**
+ * The port-fallback warning. `bindServer` has always reported `fellBack` and nothing read it, so a
+ * daemon orphaned by an earlier `bun --watch` could sit on 7773-7775 while every later start moved
+ * silently to an ephemeral port. These assert the wording, because the wording is the whole feature.
+ *
+ * No ports are bound here — `portFallbackWarnings` takes plain numbers precisely so the diagnostic
+ * can be tested without racing a real EADDRINUSE.
+ */
+describe("port fallback warnings", () => {
+  let dir: string;
+  let env: NodeJS.ProcessEnv;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "vrcz-ports-"));
+    env = { VRCZIP_STATE_DIR: dir };
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  async function writePreviousRun(pid: number, uiPort: number): Promise<void> {
+    await writeStateFile(
+      {
+        uiUrl: `http://127.0.0.1:${uiPort}`,
+        proxyUrl: `http://127.0.0.1:${uiPort + 1}`,
+        controlUrl: `http://127.0.0.1:${uiPort + 2}`,
+        sessionToken: generateSessionToken(),
+        pid,
+        startedAt: Date.now(),
+      },
+      env,
+    );
+  }
+
+  /** A pid that is certainly gone: spawn something trivial and wait for it to exit. */
+  async function deadPid(): Promise<number> {
+    const child = Bun.spawn([process.execPath, "-e", ""], { stdout: "ignore", stderr: "ignore" });
+    await child.exited;
+    return child.pid;
+  }
+
+  test("says nothing when every server got the port it asked for", async () => {
+    expect(await portFallbackWarnings([], env)).toEqual([]);
+  });
+
+  test("names the live daemon holding the wanted port", async () => {
+    // A real, live, *foreign* pid — the helper deliberately refuses to blame `process.pid`.
+    const child = Bun.spawn([process.execPath, "-e", "setTimeout(() => {}, 60_000)"], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    try {
+      await writePreviousRun(child.pid, 7773);
+
+      const [line] = await portFallbackWarnings([{ name: "UI", wanted: 7773, bound: 54339 }], env);
+      expect(line).toContain("UI server fell back to port 54339");
+      expect(line).toContain(`existing vrc.zip daemon (pid ${child.pid})`);
+    } finally {
+      child.kill();
+      await child.exited;
+    }
+  });
+
+  test("refuses to blame itself", async () => {
+    // In dev mode `state.json` outlives shutdown, so the file can name this very process.
+    await writePreviousRun(process.pid, 7773);
+
+    const [line] = await portFallbackWarnings([{ name: "UI", wanted: 7773, bound: 54339 }], env);
+    expect(line).toContain("was already taken");
+    expect(line).not.toContain(`pid ${process.pid}`);
+  });
+
+  test("falls back to the generic cause when the recorded daemon is gone", async () => {
+    await writePreviousRun(await deadPid(), 7773);
+
+    const [line] = await portFallbackWarnings([{ name: "UI", wanted: 7773, bound: 54339 }], env);
+    expect(line).toContain("UI server fell back to port 54339");
+    expect(line).toContain("port 7773 was already taken");
+    expect(line).toContain("orphaned vrc.zip daemon");
+    expect(line).not.toContain("pid");
+  });
+
+  test("stays generic when a live daemon is on other ports entirely", async () => {
+    const child = Bun.spawn([process.execPath, "-e", "setTimeout(() => {}, 60_000)"], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    try {
+      await writePreviousRun(child.pid, 8100);
+
+      const [line] = await portFallbackWarnings(
+        [{ name: "control", wanted: 7775, bound: 54341 }],
+        env,
+      );
+      expect(line).toContain("control server fell back to port 54341");
+      expect(line).toContain("port 7775 was already taken");
+      expect(line).not.toContain(`pid ${child.pid}`);
+    } finally {
+      child.kill();
+      await child.exited;
+    }
+  });
+
+  test("warns once per server that fell back", async () => {
+    const lines = await portFallbackWarnings(
+      [
+        { name: "UI", wanted: 7773, bound: 64072 },
+        { name: "control", wanted: 7775, bound: 64074 },
+      ],
+      env,
+    );
+    expect(lines).toHaveLength(2);
+    // The user's actual symptom: a bookmark on the wanted port that no longer reaches the daemon.
+    for (const line of lines) expect(line).toContain("will not reach this daemon");
   });
 });

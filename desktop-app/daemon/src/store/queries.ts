@@ -26,9 +26,37 @@ export const SQL = {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(log_path, started_at) DO UPDATE SET
       account_id = excluded.account_id,
-      log_inode  = excluded.log_inode
+      log_inode  = excluded.log_inode,
+      -- Re-adopting a file that is still being written resumes its session rather than starting
+      -- a second one. This pairs with closeOrphanedSessions: startup closes everything, and the
+      -- watcher immediately reopens whichever sessions are genuinely still live.
+      ended_at   = NULL,
+      exit_kind  = NULL
     RETURNING id`,
   endSession: `UPDATE sessions SET ended_at = ?, exit_kind = ? WHERE id = ?`,
+  /*
+   * Retroactive attribution. `COALESCE(?, col)` so a patch that knows only one field cannot blank
+   * the others — identity on a session only ever becomes *more* known, never less. The
+   * `User Authenticated:` line lands seconds into a log, long after the row exists.
+   */
+  updateSessionIdentity: `
+    UPDATE sessions SET
+      account_id   = COALESCE(?, account_id),
+      display_name = COALESCE(?, display_name),
+      vr_mode      = COALESCE(?, vr_mode)
+    WHERE id = ?`,
+  /*
+   * Closes sessions left open by a previous process. Anything still open when the database is
+   * first opened cannot belong to this run, because this run has only just started. The end time
+   * is the last event we actually saw on that session, falling back to its start — inventing
+   * `now` would stretch a session across however long the daemon was down.
+   */
+  closeOrphanedSessions: `
+    UPDATE sessions SET
+      ended_at  = COALESCE((SELECT MAX(ts) FROM events WHERE events.session_id = sessions.id),
+                           started_at),
+      exit_kind = 'unknown'
+    WHERE ended_at IS NULL`,
   updateSessionLocation: `
     UPDATE sessions SET current_location = ?, current_world_id = ? WHERE id = ?`,
   getSession: `SELECT * FROM sessions WHERE id = ?`,

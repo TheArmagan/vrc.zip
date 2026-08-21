@@ -9,16 +9,46 @@
 <script lang="ts">
 import ChevronRightIcon from "@lucide/svelte/icons/chevron-right";
 import { Badge } from "$lib/components/ui/badge/index.js";
-import { accessLabel, launchLink, parseLocation, shortId } from "$lib/format.ts";
+import { accessLabel, parseLocation, planJoin, shortId } from "$lib/format.ts";
+import { requestJoin } from "$lib/join.ts";
+import { app } from "$lib/state/app.svelte.ts";
 
 let {
   location,
   worldName = null,
   showJump = true,
-}: { location: string | null; worldName?: string | null; showJump?: boolean } = $props();
+  accountId = null,
+}: {
+  location: string | null;
+  worldName?: string | null;
+  showJump?: boolean;
+  /**
+   * The account this location was seen through — a session's own account, or the friend list's
+   * account filter. It decides which running client gets moved when several are up; see
+   * `planJoin`.
+   */
+  accountId?: string | null;
+} = $props();
 
 const parsed = $derived(parseLocation(location));
-const jump = $derived(showJump ? launchLink(location) : null);
+
+/*
+ * Not a link any more, except in the one case where a link is correct.
+ *
+ * With a client already running, `vrchat://launch` starts a second one instead of moving the
+ * first, so the affordance becomes a self-invite and says so on its face — the user should know
+ * before they click that this puts a notification in the game rather than opening a window.
+ */
+const plan = $derived(showJump ? planJoin(location, app.sessions, accountId) : null);
+
+const JUMP_CLASS =
+  "inline-flex items-center text-muted-foreground underline underline-offset-4 hover:text-foreground";
+const INVITE_TITLE =
+  "VRChat is already running — this sends you an invite to accept in the game, instead of opening a second client";
+
+function onJoin(): void {
+  void requestJoin(location, accountId);
+}
 </script>
 
 <div class="flex min-w-0 flex-wrap items-center gap-2 text-xs">
@@ -35,15 +65,25 @@ const jump = $derived(showJump ? launchLink(location) : null);
     {#if parsed.region}
       <span class="tracking-wide text-muted-foreground uppercase">{parsed.region}</span>
     {/if}
-    {#if jump}
+    {#if plan?.kind === "launch"}
       <a
-        href={jump}
-        class="inline-flex items-center text-muted-foreground underline underline-offset-4 hover:text-foreground"
-        title="Open this instance in VRChat"
+        href={plan.href}
+        class={JUMP_CLASS}
+        title="No client is running, so this launches VRChat into the instance"
       >
         Jump
         <ChevronRightIcon class="size-3.5" />
       </a>
+    {:else if plan?.kind === "invite"}
+      <button type="button" class={JUMP_CLASS} title={INVITE_TITLE} onclick={onJoin}>
+        Invite me
+        <ChevronRightIcon class="size-3.5" />
+      </button>
+    {:else if plan?.kind === "blocked"}
+      <button type="button" class={JUMP_CLASS} title={plan.reason} onclick={onJoin}>
+        Jump
+        <ChevronRightIcon class="size-3.5" />
+      </button>
     {/if}
   {/if}
 </div>

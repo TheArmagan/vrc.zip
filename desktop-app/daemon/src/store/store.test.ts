@@ -1,8 +1,16 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { MEMORY, Store } from "./store.ts";
 
 const ACCOUNT = "usr_test";
 const T0 = 1_700_000_000_000;
+
+/** A disposable directory, because the orphan sweep needs a real file reopened by a second Store. */
+function tempDir(): string {
+  return mkdtempSync(join(tmpdir(), "vrcz-store-"));
+}
 
 function seed(): Store {
   const store = Store.open(MEMORY);
@@ -112,6 +120,80 @@ describe("sessions", () => {
 
     expect(store.startSession(session)).toBe(store.startSession(session));
     store.close();
+  });
+
+  test("re-adopting a still-live log file reopens its session rather than forking a new one", () => {
+    // The daemon restarts (constantly, under `bun --watch`) while a client keeps running. The
+    // watcher re-adopts the same file and must land on the same row — reopened, not duplicated.
+    const store = seed();
+    const session = {
+      account_id: ACCOUNT,
+      display_name: "Tester",
+      log_path: "C:/logs/output_log_1.txt",
+      log_inode: null,
+      started_at: T0,
+      vr_mode: null,
+      current_location: null,
+      current_world_id: null,
+    };
+    const id = store.startSession(session);
+    store.endSession(id, T0 + 1000, "unknown");
+    expect(store.listOpenSessions()).toHaveLength(0);
+
+    expect(store.startSession(session)).toBe(id);
+    expect(store.listOpenSessions()).toHaveLength(1);
+    expect(store.getSession(id)?.exit_kind).toBeNull();
+    store.close();
+  });
+
+  test("sessions left open by a previous process are closed when the database is opened", () => {
+    // "The game closed but it still shows as live." A row open at open-time belongs to a process
+    // that is gone; nothing else in the system would ever close it.
+    const dir = tempDir();
+    const path = join(dir, "orphans.sqlite");
+
+    const first = Store.open(path);
+    first.upsertAccount({
+      id: ACCOUNT,
+      display_name: "Tester",
+      added_at: T0,
+      enabled: 1,
+      last_seen_at: null,
+    });
+    const id = first.startSession({
+      account_id: ACCOUNT,
+      display_name: "Tester",
+      log_path: "C:/logs/output_log_1.txt",
+      log_inode: null,
+      started_at: T0,
+      vr_mode: null,
+      current_location: null,
+      current_world_id: null,
+    });
+    first.insertEvents([
+      {
+        account_id: ACCOUNT,
+        ts: T0 + 4000,
+        session_id: id,
+        kind: "gamelog.player_join",
+        subject_id: null,
+        location: null,
+        payload: null,
+      },
+    ]);
+    expect(first.listOpenSessions()).toHaveLength(1);
+    first.close();
+
+    // A new process opens the same database.
+    const second = Store.open(path);
+    expect(second.orphanedSessionsClosed).toBe(1);
+    expect(second.listOpenSessions()).toHaveLength(0);
+    // Ended at the last event actually observed, not at "now" — the daemon may have been down for
+    // hours, and stretching the session over that gap would be a fabricated fact.
+    expect(second.getSession(id)?.ended_at).toBe(T0 + 4000);
+    expect(second.getSession(id)?.exit_kind).toBe("unknown");
+    second.close();
+    rmSync(dir, { recursive: true, force: true });
   });
 });
 

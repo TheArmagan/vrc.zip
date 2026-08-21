@@ -6,7 +6,7 @@ was decided along the way.
 
 **Last updated:** 2026-08-21
 **Current phase:** Phase 1 — Foundation
-**Status:** Phase 1 built end to end — daemon + UI both run, 372 tests green. 1.10 verification
+**Status:** Phase 1 built end to end — daemon + UI both run, 398 tests green. 1.10 verification
 audited: most items covered, five automatable gaps listed below, and the rest needs a human with a
 real VRChat account.
 
@@ -245,6 +245,22 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     charged to the file rate tier, cached on disk by URL hash, and de-duplicated in flight. The
     upside beyond "it works at all" is that the browser never talks to VRChat directly, so no page
     load leaks the user's presence to VRChat outside the daemon's own honest traffic.
+26. **Joining an instance uses a self-invite when a client is running, and `vrchat://` only when
+    none is.** The deep link always launches a *new* client, which on a machine already running
+    VRChat is the wrong action. `POST /invite/myself/to/{worldId}:{instanceId}` puts an invite
+    inside the running game instead. When two linked clients are up and nothing indicates which
+    should travel, the UI **refuses and says so** rather than falling back to the deep link — that
+    fallback is the bug being fixed.
+27. **The session token is stable in dev mode, and only in dev mode.** Rotating per boot is a real
+    security property worth keeping shipped; under `bun --watch` it invalidates the developer's
+    browser tab on every save. Reuse is gated on `process.execArgv` containing `--watch`/`--hot`,
+    or an explicit `VRCZIP_STABLE_TOKEN=1`, and announces itself in the log — a stable credential
+    that appears silently is how one reaches production.
+28. **Sessions are the store's business, not just the watcher's.** Retroactive attribution, the
+    orphan sweep, and re-adoption all write through the store, because the UI reads sessions back
+    over HTTP rather than from the live watcher. Anything the API re-reads has to be persisted, not
+    merely broadcast — see §Gotchas.
+
 25. **Scope creep declined: the friends list is not virtualized yet.** bits-ui preloads avatars
     eagerly (see Gotchas), so a very large friends list front-loads its icon fetches. The file rate
     tier absorbs it and the disk cache makes it once-ever, so this is a real but bounded cost — and
@@ -347,6 +363,52 @@ Found while fixing the avatar and status-dot bugs (1.9 follow-up):
   cache hit into a disk write. The cost is that a long-cached, still-displayed icon is occasionally
   re-fetched. **404s are not negatively cached** — a deleted image is re-requested on every page
   load. Cheap to add; it currently spends file budget.
+Found by debugging the *running* daemon against a real VRChat client — none of these had a failing
+test, and three of them had a passing one asserting the wrong layer:
+
+- **Every session row ever written was unattributed, because the write did not exist.**
+  `sessionUpdate` in `wiring/log-bridge.ts` emitted a correct `session.update` bus event and wrote
+  nothing to SQLite; there was no `updateSessionIdentity` on the store at all. The UI reacted
+  correctly to the stream, so it looked right until a reload, and `GET /api/sessions` served
+  `accountId: null` forever. **The existing test asserted the bus event.** That is the lesson: for
+  anything the API re-reads later, assert the row, not the event.
+- **`current_world_id` was hardcoded `null`** at that same call site while `current_location` held a
+  real `wrld_…`. Two columns disagreeing in the live database is what exposed it.
+- **A session's `started_at` came from the log file's mtime.** A live log is appended to constantly,
+  so its mtime is "a moment ago" for as long as the client runs — every daemon restart therefore
+  computed a *different* start for the same session. Sessions are keyed `(log_path, started_at)`,
+  so each restart forked a row and orphaned the previous one with `ended_at` never set. Birth time
+  is the stable answer, and it must **not** be clamped to `now`: `Math.min(birth, now)` reintroduces
+  exactly the moving value being fixed.
+- **Staleness was measured from adoption, and then reset by reading history.** A dead client's log
+  got a fresh `staleAfterMs` lease on every restart, and the initial catch-up read counted as
+  "growth" and restarted the clock again. Under `bun --watch` that is a dead client showing as live
+  forever. The first read of a newly adopted file is history, not growth.
+- **Tailing from EOF skips the `User Authenticated:` line.** A client already running when the
+  daemon starts stays unlinked for the rest of its life. The head of the file is now scanned for
+  that one line — and only that line, since replaying the rest would duplicate every row the
+  previous run already wrote.
+- **Sessions open in the database at startup belong to a dead process.** Nothing ever closed them.
+  They are swept at open and ended at `MAX(ts)` of their own events, never at `now` — the daemon may
+  have been down for hours and stretching a session over that gap fabricates a fact. `startSession`'s
+  upsert clears `ended_at`, so the watcher immediately reopens whichever clients are genuinely live.
+- **`bindServer` computed `fellBack` and nothing ever read it.** A taken port silently became an
+  ephemeral one, so a bookmarked URL, a saved token, and an open tab all broke with no explanation.
+  The usual cause is an orphaned daemon from an earlier `bun --watch` run still holding the port —
+  which the warning now names by pid, conservatively: only when the previous `state.json` recorded
+  that pid on *that* port and `process.kill(pid, 0)` says it is alive.
+- **`bun --watch` reloads with SIGTERM and lets the handler finish.** Not a hard kill. The outgoing
+  process was deleting `state.json` moments before the incoming one read it, so token reuse would
+  have looked like a flaky race rather than a broken design. `stop()` skips the delete in dev mode.
+- **`process.execArgv` is how you detect watch mode** (`["--watch"]` / `["--hot"]`), and it survives
+  every reload despite the new pid. `Bun.argv` and `process.argv` carry nothing, and Bun sets no
+  `BUN_*` variable for it — anything keyed off argv would be wrong.
+- **The generated API client is locale-contaminated.** `packages/api/src/generated/` holds 47
+  identifiers like `İnviteMyselfToData` and `İnstanceId` — U+0130, capital I with a dot. Codegen ran
+  under a Turkish locale, so `toUpperCase` on a leading `i` produced `İ` rather than `I`. It
+  compiles, but regenerating on any other machine produces a large spurious diff. The codegen step
+  needs a fixed locale. **Not yet fixed.**
+
 - **`Number.MAX_SAFE_INTEGER + 1` is a silent no-op as a sentinel.** It equals
   `Number.MAX_SAFE_INTEGER`. The cache's sweep-on-first-write counter initialises to `evictEvery`
   instead — and that behaviour is load-bearing, since a daemon restarted more often than it writes
@@ -427,8 +489,10 @@ Unresolved; flag to the user rather than guessing.
   token header/query-param constants plus default ports.
 - **No retention control on the API.** The retention job runs and is configurable in the database,
   but nothing exposes it, so the Settings screen explains it rather than offering a control.
-- **No endpoints for invite / invite-request / boop.** Those three are registered in the command
-  palette as stubs that name the missing route when run.
+- **No endpoints for invite-request / boop.** Both are registered in the command palette as stubs
+  that name the missing route when run. *Self-invite is now real* — `POST
+  /api/accounts/:id/invite-self` — because `vrchat://launch` starts a *second* game client instead
+  of moving the running one.
 - **`favicon.ico` 404s** on every page load. Cosmetic, but it is a console error on first
   impression.
 - **`rateLimit.remaining` and `queued` are approximations, and the snapshot is now also

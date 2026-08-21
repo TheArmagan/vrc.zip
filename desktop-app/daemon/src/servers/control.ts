@@ -94,6 +94,19 @@ export interface GameSession {
   currentWorldId: string | null;
 }
 
+/**
+ * An instance a self-invite can be aimed at, split the way VRChat's path template wants it:
+ * `POST /invite/myself/to/{worldId}:{instanceId}`.
+ *
+ * Split rather than passed as one location string on purpose — the route validates and the
+ * dependency interpolates, so a caller cannot smuggle a second path segment past the validator by
+ * handing the implementation a raw string it would have to re-check.
+ */
+export interface InviteTarget {
+  readonly worldId: string;
+  readonly instanceId: string;
+}
+
 /** One row of the unified feed. */
 export interface FeedEvent {
   id: number;
@@ -184,6 +197,20 @@ export interface ControlDeps {
   verifyTwoFactor(accountId: string, input: VerifyTwoFactorInput): Promise<ControlAccount>;
   /** Removes the account, its secrets, and its rows. Throws `ControlError(404)` if unknown. */
   removeAccount(accountId: string): Promise<void>;
+
+  /**
+   * Sends this account an invite to `target`, so a game client already signed into it can travel
+   * there by accepting a notification.
+   *
+   * This exists because `vrchat://launch?id=…` is the wrong tool once a client is running: the URI
+   * starts a *second* client, and two clients on one account fight over it. A self-invite is what
+   * the running client can act on, and it is what VRCX's "Invite Me" does. The deep link stays
+   * correct for the case where nothing is running — that decision is the UI's, not the daemon's.
+   *
+   * `target` has already been validated by `parseInviteLocation`; the implementation interpolates
+   * it into a path and must not accept an unvalidated one.
+   */
+  inviteSelfTo(accountId: string, target: InviteTarget): Promise<void>;
 
   /** Live game-client sessions — the ones with no `ended_at`. */
   listSessions(): Promise<GameSession[]>;
@@ -317,6 +344,67 @@ function matchesETag(header: string | undefined, etag: string): boolean {
     .includes(etag);
 }
 
+/**
+ * The words VRChat uses for "nowhere you can follow". `/api/friends` and the log both pass these
+ * through raw, so they reach the UI and would reach here if nothing stopped them.
+ */
+const UNJOINABLE_LOCATIONS: ReadonlySet<string> = new Set(["", "offline", "private", "traveling"]);
+
+/** `wrld_` plus the id body. Length-capped so a pathological string cannot become a huge path. */
+const WORLD_ID_PATTERN = /^wrld_[0-9A-Za-z_-]{1,64}$/;
+
+/**
+ * An instance id *with its tags* — `12345~hidden(usr_…)~region(eu)~nonce(…)`.
+ *
+ * The whole tail is sent, not just the number before the first `~`: the tags carry the access
+ * level and the nonce, and VRChat rejects a self-invite to a closed instance quoted without them.
+ * Every character this allows is left alone by percent-encoding, which is what makes it safe to
+ * interpolate into a path directly — and the pattern is an allowlist precisely so `/`, `?`, `#`
+ * and `%` cannot appear and turn one path segment into several.
+ */
+const INSTANCE_ID_PATTERN = /^[0-9A-Za-z][0-9A-Za-z_.~()-]{0,255}$/;
+
+/**
+ * Validates a VRChat location string and splits it for `POST /invite/myself/to/{world}:{instance}`.
+ *
+ * Server-side and strict, rather than trusting the caller: the UI is a web page, and the only
+ * thing standing between a wrong location and a malformed VRChat request is this function. Every
+ * rejection is a 400 with `invalid_location` so the UI branches on a code, not on a sentence.
+ */
+export function parseInviteLocation(raw: string | undefined): InviteTarget {
+  if (raw === undefined) {
+    throw new ControlError(400, "invalid_location", "location is required");
+  }
+  // `traveling:wrld_…` is a destination the client is mid-hop to. It has no instance to be invited
+  // into yet, and by the time an invite arrived the client would be somewhere else.
+  if (UNJOINABLE_LOCATIONS.has(raw) || raw.startsWith("traveling")) {
+    throw new ControlError(
+      400,
+      "invalid_location",
+      `${raw || "an empty location"} is not joinable`,
+    );
+  }
+
+  // `indexOf`, not `split(":", 2)`: the instance id is everything after the *first* colon, and
+  // splitting would silently discard anything after a second one instead of rejecting it.
+  const separator = raw.indexOf(":");
+  if (separator === -1) {
+    throw new ControlError(400, "invalid_location", "location names no instance");
+  }
+
+  const worldId = raw.slice(0, separator);
+  const instanceId = raw.slice(separator + 1);
+
+  if (!WORLD_ID_PATTERN.test(worldId)) {
+    throw new ControlError(400, "invalid_location", `${worldId} is not a world id`);
+  }
+  if (!INSTANCE_ID_PATTERN.test(instanceId)) {
+    throw new ControlError(400, "invalid_location", "instance id contains something unexpected");
+  }
+
+  return { worldId, instanceId };
+}
+
 const { upgradeWebSocket, websocket } = createBunWebSocket<ServerWebSocket>();
 
 /** The Bun websocket handler for this app. `bind.ts` hands it to `Bun.serve`. */
@@ -358,6 +446,21 @@ export function createControlApp({ port, deps, token }: ControlAppOptions) {
 
     .delete("/api/accounts/:id", async (c) => {
       await deps.removeAccount(c.req.param("id"));
+      return c.json({ status: "ok" as const });
+    })
+
+    /*
+     * "Take the client I already have running to this instance."
+     *
+     * The account is in the path because *which* account travels is the whole question when two
+     * clients are running — the caller decides, the daemon does not guess. The location arrives as
+     * one string because that is the shape everything upstream of here already has (a friend's
+     * `location`, a session's `currentLocation`); splitting it is this route's job.
+     */
+    .post("/api/accounts/:id/invite-self", async (c) => {
+      const body = await readJsonObject(c.req.raw);
+      const target = parseInviteLocation(stringField(body, "location"));
+      await deps.inviteSelfTo(c.req.param("id"), target);
       return c.json({ status: "ok" as const });
     })
 

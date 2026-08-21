@@ -56,7 +56,18 @@ export class Store {
     this.schemaVersion =
       options.migrations === undefined ? migrate(this.db) : migrate(this.db, options.migrations);
     this.stmts = prepareAll(this.db);
+
+    // Before anything else touches sessions: a row still open here belongs to a process that is
+    // no longer running. See `closeOrphanedSessions`.
+    this.orphanedSessionsClosed = this.closeOrphanedSessions();
   }
+
+  /**
+   * How many stale open sessions the constructor closed. Surfaced so the composition root can log
+   * it — a daemon that silently inherits ghost sessions is how "the game closed but it still shows
+   * as live" goes unnoticed.
+   */
+  readonly orphanedSessionsClosed: number;
 
   /** Opens (creating if absent) the database at `path` and brings its schema up to date. */
   static open(path: string, options: StoreOptions = {}): Store {
@@ -128,6 +139,44 @@ export class Store {
 
   updateSessionLocation(id: number, location: string | null, worldId: string | null): void {
     this.stmts.updateSessionLocation.run(location, worldId, id);
+  }
+
+  /**
+   * Writes retroactive attribution onto a session: which account owns this log file, its display
+   * name, and the VR mode. All three arrive *after* the row exists — the `User Authenticated:`
+   * line is seconds into the log — so without this the row keeps the nulls it was created with and
+   * every session shows as unlinked forever.
+   *
+   * `undefined` means "not in this patch" and leaves the column alone. `null` means the same, by
+   * design: identity only ever becomes more known. See `SQL.updateSessionIdentity`.
+   */
+  updateSessionIdentity(
+    id: number,
+    patch: {
+      account_id?: string | null;
+      display_name?: string | null;
+      vr_mode?: string | null;
+    },
+  ): void {
+    this.stmts.updateSessionIdentity.run(
+      patch.account_id ?? null,
+      patch.display_name ?? null,
+      patch.vr_mode ?? null,
+      id,
+    );
+  }
+
+  /**
+   * Closes every session left open by a previous process. Returns how many were closed.
+   *
+   * Called once at open. A row still open at that moment cannot belong to this run, and leaving it
+   * would show a game client that exited hours ago as live — one ghost card per daemon restart,
+   * which under `bun --watch` is one per code edit. The watcher immediately re-adopts whichever
+   * files are genuinely still being written, and `startSession`'s upsert clears `ended_at` again
+   * for those, so a real live session survives this sweep.
+   */
+  closeOrphanedSessions(): number {
+    return this.db.run(SQL.closeOrphanedSessions).changes;
   }
 
   getSession(id: number): SessionRow | null {
@@ -391,6 +440,9 @@ function prepareAll(db: Database) {
       ]
     >(SQL.insertSession),
     endSession: q<void, [number, string | null, number]>(SQL.endSession),
+    updateSessionIdentity: q<void, [string | null, string | null, string | null, number]>(
+      SQL.updateSessionIdentity,
+    ),
     updateSessionLocation: q<void, [string | null, string | null, number]>(
       SQL.updateSessionLocation,
     ),

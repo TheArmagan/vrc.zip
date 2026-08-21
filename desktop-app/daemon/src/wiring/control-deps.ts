@@ -43,6 +43,20 @@ export interface ControlDepsOptions {
   readonly onSettingsSaved: (settings: Settings) => Promise<void>;
 }
 
+/**
+ * Maps an upstream failure onto a status the control API is allowed to return.
+ *
+ * Only the ones a sign-in can legitimately produce pass through; anything else becomes a 401 rather
+ * than inventing a code the UI has no branch for.
+ */
+function loginStatusOf(error: unknown): 401 | 403 | 429 | 502 {
+  const status = (error as { status?: unknown }).status;
+  if (status === 403) return 403;
+  if (status === 429) return 429;
+  if (typeof status === "number" && status >= 500) return 502;
+  return 401;
+}
+
 /** `AccountState` → the four states the UI's status dot knows about. */
 function connectionOf(snapshot: AccountSnapshot): ControlAccount["connection"] {
   switch (snapshot.state) {
@@ -131,9 +145,12 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
           account: toControlAccount(account.snapshot(), accountRowAddedAt(account.id)),
         };
       } catch (error) {
-        // A wrong password is a 401, not a 500 — the UI shows it inline on the form.
+        // A wrong password is a 401, not a 500 — the UI shows it inline on the form. The upstream
+        // status is preserved rather than flattened, because 401 and 403 mean different things to
+        // the person reading the message: one is "that password is wrong", the other is "VRChat
+        // will not let this sign-in through", and only the second needs action outside vrc.zip.
         const message = error instanceof Error ? error.message : "Sign-in failed.";
-        throw new ControlError(401, "login_failed", message);
+        throw new ControlError(loginStatusOf(error), "login_failed", message);
       }
     },
 

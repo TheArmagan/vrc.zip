@@ -74,7 +74,10 @@ describe("account authentication", () => {
 
   test("rejects a wrong password without leaving a half-added account behind", async () => {
     const accounts = await manager();
-    await expect(accounts.add(ALICE.username, "wrong")).rejects.toThrow(/Incorrect username/);
+    // VRChat's own wording, not ours. A status code is not something a user can act on.
+    await expect(accounts.add(ALICE.username, "wrong")).rejects.toThrow(
+      /Invalid Username or Password/,
+    );
     expect(accounts.list()).toEqual([]);
     expect(secrets.accountIds()).toEqual([]);
   });
@@ -172,6 +175,27 @@ describe("account authentication", () => {
     const aliceRequest = fixture.requests.at(-1);
     expect(aliceRequest?.headers.get("Cookie")).toContain(alice.jar.get("auth") ?? "");
     expect(aliceRequest?.headers.get("Cookie")).not.toContain("usr_bob");
+  });
+
+  test("surfaces VRChat's explanation for a 403 instead of a bare status", async () => {
+    // A 403 from VRChat is never self-explanatory — it can be the User-Agent WAF, an unverified
+    // email, a sign-in from an unrecognised place, or a temporary block. Swallowing the message
+    // leaves the user with "Login failed (403)" and nothing to act on.
+    const accounts = await manager();
+    fixture.setNextLoginFailure(403, "You are required to verify this login. Check your email.");
+
+    await expect(accounts.add(ALICE.username, ALICE.password)).rejects.toThrow(
+      /verify this login. Check your email/,
+    );
+  });
+
+  test("unwraps VRChat's double-encoded error message", async () => {
+    // The wire literally carries `"\"...\""` — the message is JSON-encoded a second time.
+    const accounts = await manager();
+    fixture.setNextLoginFailure(403, 'quoted "inner" text');
+    await expect(accounts.add(ALICE.username, ALICE.password)).rejects.toThrow(
+      /quoted "inner" text/,
+    );
   });
 
   test("backs off and recovers through a 429", async () => {

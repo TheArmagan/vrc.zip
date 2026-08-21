@@ -52,6 +52,45 @@ function isCurrentUser(body: unknown): body is CurrentUser {
   return typeof body === "object" && body !== null && "id" in body && "displayName" in body;
 }
 
+/**
+ * Pulls VRChat's own explanation out of an error response.
+ *
+ * VRChat's envelope is `{error: {message, status_code, waf_code?}}`, and `message` is **JSON-encoded
+ * a second time** — the wire literally carries `"\"Invalid Username/Email or Password\""`. Showing
+ * that to a user verbatim is nearly as unhelpful as showing nothing, so the outer quotes come off.
+ *
+ * This matters more than it looks. Without it every non-2xx becomes "Login failed (403)", and a 403
+ * from VRChat is never self-explanatory: it might be the User-Agent WAF, an unverified email, a
+ * login from an unrecognised place, or a temporary block. The user cannot act on a status code, and
+ * they can act on VRChat's sentence.
+ */
+async function vrchatErrorMessage(response: Response): Promise<string | null> {
+  const text = await response.text().catch(() => "");
+  if (text === "") return null;
+
+  try {
+    const body = JSON.parse(text) as { error?: { message?: unknown; waf_code?: unknown } };
+    const raw = body.error?.message;
+    if (typeof raw !== "string") return null;
+
+    let message = raw;
+    if (message.startsWith('"') && message.endsWith('"')) {
+      try {
+        message = JSON.parse(message) as string;
+      } catch {
+        message = message.slice(1, -1);
+      }
+    }
+
+    const waf = body.error?.waf_code;
+    return typeof waf === "number" ? `${message} (waf_code ${String(waf)})` : message;
+  } catch {
+    // A non-JSON error body is usually an infrastructure page (Cloudflare, a proxy). Keep a short
+    // prefix rather than the whole HTML document.
+    return text.slice(0, 200);
+  }
+}
+
 async function readJson(response: Response): Promise<unknown> {
   const text = await response.text();
   try {
@@ -79,11 +118,20 @@ export async function loginWithPassword(
     basicAuth: { username, password },
   });
 
-  if (response.status === 401) {
-    throw new AuthError("Incorrect username or password.", 401);
-  }
   if (!response.ok) {
-    throw new AuthError(`Login failed (${response.status}).`, response.status);
+    const upstream = await vrchatErrorMessage(response);
+
+    if (response.status === 401) {
+      throw new AuthError(upstream ?? "Incorrect username or password.", 401);
+    }
+    // Everything else keeps VRChat's own wording. A 403 in particular is never self-explanatory,
+    // and the sentence VRChat sends is the only thing that tells the user what to do next.
+    throw new AuthError(
+      upstream === null
+        ? `VRChat rejected the sign-in (${String(response.status)}).`
+        : `VRChat says: ${upstream}`,
+      response.status,
+    );
   }
 
   const body = await readJson(response);
@@ -126,7 +174,13 @@ export async function verifyTwoFactor(
   });
 
   if (!response.ok) {
-    throw new AuthError(`That code was not accepted (${response.status}).`, response.status);
+    const upstream = await vrchatErrorMessage(response);
+    throw new AuthError(
+      upstream === null
+        ? `That code was not accepted (${String(response.status)}).`
+        : `VRChat says: ${upstream}`,
+      response.status,
+    );
   }
 
   const body = (await readJson(response)) as { verified?: boolean };

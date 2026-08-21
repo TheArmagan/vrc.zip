@@ -51,6 +51,8 @@ export interface VrchatFixture {
   /** How many Basic-auth logins were performed — i.e. how many sessions were minted. */
   readonly sessionsMinted: () => number;
   readonly setRateLimitNext: (count: number) => void;
+  /** Makes the next login fail with VRChat's error envelope, for diagnostics tests. */
+  readonly setNextLoginFailure: (status: number, message: string) => void;
   /** Invalidates every issued session, so the next call 401s. */
   readonly expireAllSessions: () => void;
   readonly stop: () => void;
@@ -64,6 +66,7 @@ export function startVrchatFixture(options: FixtureOptions): VrchatFixture {
   let sessionCounter = 0;
   let minted = 0;
   let rateLimitRemaining = options.rateLimitNext ?? 0;
+  let nextLoginFailure: { status: number; message: string } | null = null;
 
   function json(body: unknown, init: ResponseInit = {}): Response {
     return new Response(JSON.stringify(body), {
@@ -141,6 +144,15 @@ export function startVrchatFixture(options: FixtureOptions): VrchatFixture {
         const authorization = request.headers.get("Authorization");
 
         if (authorization?.startsWith("Basic ")) {
+          if (nextLoginFailure !== null) {
+            const failure = nextLoginFailure;
+            nextLoginFailure = null;
+            // VRChat double-encodes `message`: the wire carries a JSON string *inside* the JSON.
+            return json(
+              { error: { message: JSON.stringify(failure.message), status_code: failure.status } },
+              { status: failure.status },
+            );
+          }
           minted += 1;
           const decoded = Buffer.from(authorization.slice(6), "base64").toString("utf8");
           const split = decoded.indexOf(":");
@@ -277,6 +289,9 @@ export function startVrchatFixture(options: FixtureOptions): VrchatFixture {
     sessionsMinted: () => minted,
     setRateLimitNext: (count) => {
       rateLimitRemaining = count;
+    },
+    setNextLoginFailure: (status, message) => {
+      nextLoginFailure = { status, message };
     },
     expireAllSessions: () => sessions.clear(),
     stop: () => {

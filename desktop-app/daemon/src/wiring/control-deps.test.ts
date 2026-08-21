@@ -136,6 +136,8 @@ function harness(
     represented?: () => Response;
     /** What `GET /users/{id}/groups` answers with. Defaults to an empty list. */
     groups?: () => Response;
+    /** What `GET /groups/{id}` answers with — the group modal's own route. */
+    group?: () => Response;
     /** What `GET /users/{id}/mutuals/friends` answers with, given the paging it was asked for. */
     mutuals?: (n: number, offset: number) => Response;
     /** What `GET /worlds/{id}` answers with. */
@@ -178,6 +180,11 @@ function harness(
     if (path.endsWith("/auth/user")) {
       // `#adoptUser` takes the id from this body, so it must be the asker's own.
       return Response.json({ id: asker, displayName: asker, currentAvatarImageUrl: "" });
+    }
+    // `GET /groups/{id}` is not under `/users/` at all, and it is matched on the id rather than
+    // on the segment so that it cannot be confused with `/users/{id}/groups` below.
+    if (path.includes("/groups/grp_")) {
+      return options.group?.() ?? Response.json({});
     }
     // Ordered before the profile branch below: these are all `/users/…` paths too, and a
     // `includes("/users/")` test would otherwise answer a user body for every one of them.
@@ -637,6 +644,141 @@ describe("control deps: groups and mutual friends", () => {
     h.stop();
   });
 
+  test("one group is normalised, and its live fields survive the trip", async () => {
+    const h = harness({
+      group: () =>
+        Response.json({
+          // `Group` names the group's own id `id`, where `LimitedUserGroups` calls it `groupId`
+          // and uses `id` for the membership row. Getting that backwards is what this asserts.
+          id: GROUP_ID,
+          name: "A Group",
+          shortCode: "ABCD",
+          discriminator: "1234",
+          memberCount: 42,
+          onlineMemberCount: 7,
+          memberCountSyncedAt: "2023-11-14T22:13:20.000Z",
+          createdAt: "2021-09-13T00:00:00.000Z",
+          rules: "Be kind.",
+          links: ["https://example.invalid", ""],
+          languages: ["eng"],
+          tags: ["system_verified"],
+          isVerified: true,
+          joinState: "open",
+          membershipStatus: "member",
+          privacy: "default",
+          ownerId: "usr_owner",
+          // Never taken at face value: fetching a group is not evidence anybody represents it.
+          isRepresenting: true,
+        }),
+    });
+    await resumeAll(h);
+
+    const group = await h.deps.getGroup(GROUP_ID, VIEWER);
+
+    expect(group).toMatchObject({
+      id: GROUP_ID,
+      name: "A Group",
+      memberCount: 42,
+      onlineMemberCount: 7,
+      isVerified: true,
+      joinState: "open",
+      membershipStatus: "member",
+      isRepresenting: false,
+    });
+    // Integer unix ms, never the ISO string VRChat sent.
+    expect(group.createdAt).toBe(Date.parse("2021-09-13T00:00:00.000Z"));
+    expect(group.memberCountSyncedAt).toBe(Date.parse("2023-11-14T22:13:20.000Z"));
+    // The empty link is dropped rather than rendered as a link to nowhere.
+    expect(group.links).toEqual(["https://example.invalid"]);
+    h.stop();
+  });
+
+  test("a group with no id is a 502, not a card with nothing to key on", async () => {
+    // Every field of VRChat's `Group` is optional, so this is a legal response and an unrenderable
+    // one — there is no link, no copy button, and nothing to identify it by.
+    const h = harness({ group: () => Response.json({ name: "A group with no id" }) });
+    await resumeAll(h);
+    await expect(h.deps.getGroup(GROUP_ID, VIEWER)).rejects.toMatchObject({
+      status: 502,
+      code: "group_fetch_failed",
+    });
+    h.stop();
+  });
+
+  test("a 404 on a group is unknown_group, not unknown_user", async () => {
+    // The distinction is load-bearing: the modal branches on the code, and "VRChat does not know
+    // that user" in front of a group is the wrong sentence for a group that is merely private.
+    const h = harness({ group: () => new Response("{}", { status: 404 }) });
+    await resumeAll(h);
+    await expect(h.deps.getGroup(GROUP_ID, VIEWER)).rejects.toMatchObject({
+      status: 404,
+      code: "unknown_group",
+    });
+    h.stop();
+
+    const offline = harness();
+    await expect(offline.deps.getGroup(GROUP_ID, VIEWER)).rejects.toMatchObject({
+      status: 503,
+      code: "no_account",
+    });
+    offline.stop();
+  });
+
+  test("the user batch is cache-first, sequential, and leaves the unreadable out", async () => {
+    const h = harness();
+    await resumeAll(h);
+
+    // Warms `user_cache` for SUBJECT through the modal's own path.
+    await h.deps.getUser(SUBJECT, VIEWER);
+    const afterWarm = h.requests.filter((path) => path.includes("/users/")).length;
+
+    const batch = await h.deps.listUsers([SUBJECT, "usr_other_one"], VIEWER);
+
+    expect(batch.users.map((user) => user.id)).toEqual([SUBJECT, "usr_other_one"]);
+    // The cached one cost nothing; only the second was fetched. One call, not two.
+    expect(h.requests.filter((path) => path.endsWith(`/users/${SUBJECT}`)).length).toBe(1);
+    expect(h.requests.filter((path) => path.includes("/users/")).length).toBe(afterWarm + 1);
+    // And no represented-group fetch per head: that would double the most expensive path in the
+    // app for a badge no roster row draws.
+    expect(h.requests.filter((path) => path.endsWith("/groups/represented")).length).toBe(1);
+
+    // The second call is served entirely from what the first wrote.
+    const before = h.requests.length;
+    const again = await h.deps.listUsers([SUBJECT, "usr_other_one"], VIEWER);
+    expect(again.users).toHaveLength(2);
+    expect(h.requests.length).toBe(before);
+    h.stop();
+  });
+
+  test("the user batch never throws — a dead id and no account are both just absences", async () => {
+    // One unreadable stranger must not take a room of eighty people's chips down with them.
+    const dead = harness({ userStatus: 404 });
+    await resumeAll(dead);
+    expect(await dead.deps.listUsers([SUBJECT], VIEWER)).toEqual({ users: [] });
+    dead.stop();
+
+    // No `resumeAll`, so nothing is signed in. Unlike every other VRChat-backed route this answers
+    // 200 with whatever the cache holds — which here is nothing — rather than a 503.
+    const offline = harness();
+    expect(await offline.deps.listUsers([SUBJECT], VIEWER)).toEqual({ users: [] });
+    expect(offline.requests.filter((path) => path.includes("/users/"))).toEqual([]);
+    offline.stop();
+  });
+
+  test("batched friendship comes from local presence, exactly as the roster's does", async () => {
+    // The body the *other* account gets back says `isFriend: false` — it is a stranger's view of
+    // the subject. Presence is what can say otherwise, and it is the same source the roster path
+    // reads, so the two can never disagree about who is a friend.
+    const h = harness({ friends: [SUBJECT] });
+    await resumeAll(h);
+
+    const { users } = await h.deps.listUsers([SUBJECT], OTHER);
+    expect(users[0]?.isFriend).toBe(true);
+    // Not one profile lookup was spent working that out.
+    expect(h.requests.filter((path) => path.endsWith("/friends"))).toEqual([]);
+    h.stop();
+  });
+
   test("both routes 404 an unknown user and 503 with nobody signed in", async () => {
     const missing = harness({
       groups: () => new Response("{}", { status: 404 }),
@@ -777,8 +919,9 @@ describe("control deps: instance users", () => {
   });
 
   test("an absent users array is source unavailable, not a failure", async () => {
-    // VRChat populates `users` only for an account that is *in* the instance. Every other instance
-    // answers a perfectly valid body without it.
+    // VRChat populates `users` only for an instance the asking account **created** — being in the
+    // room is not enough, which is why this is the common answer rather than the edge case. Every
+    // other instance answers a perfectly valid body without it.
     const h = harness({ instance: () => Response.json({ id: LOCATION, n_users: 12 }) });
     await resumeAll(h);
 

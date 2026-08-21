@@ -9,38 +9,55 @@
   Most users represent nothing. There is no placeholder for that case: the caller simply does not
   render this, and the badge row closes up around the gap.
 
-  Clicking opens the group on vrchat.com. vrc.zip has no group screen and is not growing one for
-  three fields it already shows here, so the honest destination is the page that has the rest.
+  Clicking opens the group card. It used to open vrchat.com in a browser tab, which was the honest
+  answer while the daemon knew three fields about a group; `GroupModal` exists now, and the badge
+  already holds a whole `UserGroup`, so it is handed over as the hint and the dialog paints its
+  name, icon and banner before the fetch lands. vrchat.com is still one click further on, in the
+  card's footer, for the members and posts vrc.zip does not hold.
 -->
 <script lang="ts">
 import UsersIcon from "@lucide/svelte/icons/users";
 import { imageUrl, type UserGroup } from "$lib/api.ts";
-import { Badge } from "$lib/components/ui/badge/index.js";
-import { groupLink, groupTag } from "$lib/format.ts";
+import { badgeVariants } from "$lib/components/ui/badge/index.js";
+import { groupTag } from "$lib/format.ts";
+import { groupModal } from "$lib/state/group-modal.svelte.ts";
 import { cn } from "$lib/utils.js";
 
 let {
   group,
+  accountId = null,
   class: className,
 }: {
   group: UserGroup;
+  /** The account this was seen through; it decides `membershipStatus` and what is visible at all. */
+  accountId?: string | null;
   class?: string;
 } = $props();
 
 const tag = $derived(groupTag(group.shortCode, group.discriminator));
 const icon = $derived(imageUrl(group.iconUrl));
-const title = $derived(
-  `Represents ${group.name}${tag === null ? "" : ` (${tag})`} — opens on vrchat.com`,
-);
+const title = $derived(`Represents ${group.name}${tag === null ? "" : ` (${tag})`}`);
 </script>
 
-<Badge
-  variant="outline"
-  href={groupLink(group.id)}
-  target="_blank"
-  rel="noreferrer noopener"
+<!--
+  A real `<button>` wearing the badge's own classes rather than a `<Badge>` with a click handler:
+  the badge component renders a `<span>` (or an `<a>`, given an `href`), and a `<span onclick>` is
+  invisible to the keyboard and announced as text. `badgeVariants` is exported for exactly this.
+-->
+<button
+  type="button"
   {title}
-  class={cn("max-w-[18rem] gap-1.5 pl-1", className)}
+  class={cn(
+    badgeVariants({ variant: "outline" }),
+    "max-w-[18rem] cursor-pointer gap-1.5 pl-1 hover:bg-muted hover:text-muted-foreground",
+    className,
+  )}
+  onclick={(event) => {
+    // These badges sit inside rows that are themselves clickable in places, and opening the group
+    // is the whole intent of the click, so it stops here.
+    event.stopPropagation();
+    groupModal.openGroup(group.id, { hint: group, accountId });
+  }}
 >
   {#if icon !== undefined}
     <!-- Decorative: the group is named in the same badge, one element to the right. -->
@@ -61,4 +78,4 @@ const title = $derived(
   {#if tag !== null}
     <span class="shrink-0 font-mono text-muted-foreground">{tag}</span>
   {/if}
-</Badge>
+</button>

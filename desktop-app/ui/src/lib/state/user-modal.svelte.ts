@@ -7,13 +7,15 @@
  * and this module is the only thing that decides what it shows. Callers say `userModal.open(id)`
  * and nothing else.
  *
- * Three states matter more than the happy path and each is modelled rather than caught:
+ * The abort/generation machinery, the phase and failure vocabulary, and the dedup helper live in
+ * `entity-modal.svelte.ts`, shared with the world and group modals — see that file for why a
+ * re-targetable singleton dialog needs all three. What stays here is what is true about a *user*:
+ *
  *  - **no account online** (503). Not an error. A profile can only be read through somebody's
  *    credentials and vrc.zip may hold none that are signed in; the modal says so in a sentence.
  *  - **unknown user** (404). VRChat looked and found nobody.
- *  - **closed and reopened faster than the network**. Every load carries an `AbortSignal` that is
- *    aborted the moment the target changes or the dialog closes, and a resolved response for a
- *    target that is no longer current is dropped rather than rendered over the new one.
+ *  - **a shorter profile for a non-friend.** VRChat's answer genuinely carries fewer fields, which
+ *    is why `accountId` — whose eyes this was looked up through — is threaded everywhere.
  */
 
 import {
@@ -21,15 +23,19 @@ import {
   describeError,
   type FeedEvent,
   isAbort,
-  isNoAccountOnline,
-  isNotFound,
-  isOffline,
   type MutualFriend,
   type MutualFriendPage,
   type UserGroup,
   type UserProfile,
 } from "../api.ts";
 import { app } from "./app.svelte.ts";
+import {
+  classifyFailure,
+  dedupeById,
+  EntityModalState,
+  type LoadFailure,
+  type LoadPhase,
+} from "./entity-modal.svelte.ts";
 
 /** How many history rows a page holds. The list is dense, so this is roughly three screens. */
 const HISTORY_PAGE = 50;
@@ -43,14 +49,6 @@ const HISTORY_PAGE = 50;
  * silent minute of fetching.
  */
 const MUTUALS_PAGE = 50;
-
-export type UserLoadPhase = "idle" | "loading" | "ready" | "error";
-
-/**
- * Why the profile could not be shown. `no-account` and `not-found` are ordinary outcomes with
- * their own words; `offline` is the daemon being gone, which the shell already narrates.
- */
-export type UserLoadFailure = "no-account" | "not-found" | "offline" | "other";
 
 /**
  * The modal's tabs.
@@ -88,18 +86,13 @@ export interface OpenUserOptions {
   readonly accountId?: string | null | undefined;
 }
 
-class UserModalState {
-  open = $state(false);
+class UserModalState extends EntityModalState {
   /** The user currently being shown. Null only before the first open. */
   userId = $state<string | null>(null);
   /** The caller's name for them, held so the header has something to say while loading. */
   hintName = $state<string | null>(null);
-  accountId = $state<string | null>(null);
 
   profile = $state<UserProfile | null>(null);
-  phase = $state<UserLoadPhase>("idle");
-  failure = $state<UserLoadFailure | null>(null);
-  error = $state<string | null>(null);
 
   /** Which tab is showing. Always reset to `overview` when the dialog moves to a new user. */
   tab = $state<UserTab>("overview");
@@ -108,24 +101,24 @@ class UserModalState {
   groups = $state<UserGroup[]>([]);
   /** Free-text filter for the Groups tab. Matches name and short code. */
   groupQuery = $state("");
-  groupsPhase = $state<UserLoadPhase>("idle");
+  groupsPhase = $state<LoadPhase>("idle");
   groupsError = $state<string | null>(null);
   /** `no-account` is the 503, and it is an ordinary outcome with its own sentence, not a fault. */
-  groupsFailure = $state<UserLoadFailure | null>(null);
+  groupsFailure = $state<LoadFailure | null>(null);
 
   mutuals = $state<MutualFriend[]>([]);
   /** Free-text filter for the Mutual friends tab. Matches display name. */
   mutualQuery = $state("");
-  mutualsPhase = $state<UserLoadPhase>("idle");
+  mutualsPhase = $state<LoadPhase>("idle");
   mutualsError = $state<string | null>(null);
-  mutualsFailure = $state<UserLoadFailure | null>(null);
+  mutualsFailure = $state<LoadFailure | null>(null);
   /** The daemon's word on whether another page exists. Never inferred from a page length. */
   mutualsHasMore = $state(false);
   mutualsLoadingMore = $state(false);
 
   /** Local history, newest first. Stored rows only — this is what vrc.zip recorded, not a live tail. */
   history = $state<FeedEvent[]>([]);
-  historyPhase = $state<UserLoadPhase>("idle");
+  historyPhase = $state<LoadPhase>("idle");
   historyError = $state<string | null>(null);
   historyExhausted = $state(false);
   loadingMore = $state(false);
@@ -135,10 +128,6 @@ class UserModalState {
   savedNote = $state("");
   savingNote = $state(false);
   noteError = $state<string | null>(null);
-
-  #controller: AbortController | null = null;
-  /** Guards against a slow response for a user the dialog has already moved off. */
-  #generation = 0;
 
   /** True when the id being shown is one of the accounts vrc.zip signs in as. */
   isOwnAccount = $derived(
@@ -283,11 +272,6 @@ class UserModalState {
     }
   }
 
-  close(): void {
-    this.open = false;
-    this.#abort();
-  }
-
   /** Re-reads the profile and the first page of history. The error state's retry button. */
   retry(): void {
     if (this.userId !== null) void this.#load(this.userId);
@@ -297,15 +281,8 @@ class UserModalState {
     return app.accounts.find((account) => account.id === userId)?.id;
   }
 
-  #abort(): void {
-    this.#controller?.abort();
-    this.#controller = null;
-  }
-
-  #reset(): void {
+  protected resetPayload(): void {
     this.profile = null;
-    this.failure = null;
-    this.error = null;
     this.groups = [];
     this.groupQuery = "";
     this.groupsPhase = "idle";
@@ -328,14 +305,7 @@ class UserModalState {
   }
 
   async #load(userId: string): Promise<void> {
-    this.#abort();
-    this.#reset();
-    this.#generation += 1;
-    const generation = this.#generation;
-    const controller = new AbortController();
-    this.#controller = controller;
-
-    this.phase = "loading";
+    const { generation, signal } = this.beginLoad();
     this.historyPhase = "loading";
 
     /*
@@ -348,8 +318,8 @@ class UserModalState {
      * mutual friends in particular cost the daemon a walk over a friend list.
      */
     await Promise.all([
-      this.#loadProfile(userId, generation, controller.signal),
-      this.#loadHistory(userId, generation, controller.signal),
+      this.#loadProfile(userId, generation, signal),
+      this.#loadHistory(userId, generation, signal),
     ]);
   }
 
@@ -357,21 +327,17 @@ class UserModalState {
   async ensureGroups(): Promise<void> {
     const userId = this.userId;
     if (userId === null || this.groupsPhase !== "idle") return;
-    const generation = this.#generation;
+    const generation = this.generation;
     this.groupsPhase = "loading";
     try {
-      const groups = await api.users.groups(
-        userId,
-        this.accountId ?? undefined,
-        this.#controller?.signal,
-      );
-      if (generation !== this.#generation) return;
+      const groups = await api.users.groups(userId, this.accountId ?? undefined, this.signal);
+      if (!this.isCurrent(generation)) return;
       this.groups = groups;
       this.groupsPhase = "ready";
     } catch (cause) {
-      // A superseded generation owns nothing: `#reset()` has already put the new target's phase
+      // A superseded generation owns nothing: `beginLoad()` has already put the new target's phase
       // back to "idle", and writing here would corrupt it.
-      if (generation !== this.#generation) return;
+      if (!this.isCurrent(generation)) return;
       /*
        * An abort must fall back to "idle", not stay "loading".
        *
@@ -386,7 +352,7 @@ class UserModalState {
         this.groupsPhase = "idle";
         return;
       }
-      this.groupsFailure = classify(cause);
+      this.groupsFailure = classifyFailure(cause);
       this.groupsError = describeError(cause);
       this.groupsPhase = "error";
     }
@@ -405,11 +371,11 @@ class UserModalState {
   async ensureMutuals(): Promise<void> {
     const userId = this.userId;
     if (userId === null || this.mutualsPhase !== "idle") return;
-    const generation = this.#generation;
+    const generation = this.generation;
     this.mutualsPhase = "loading";
     try {
       const page = await this.#fetchMutuals(userId, 0);
-      if (generation !== this.#generation) return;
+      if (!this.isCurrent(generation)) return;
       // Deduplicated on arrival, for the same reason `groupList` is: the rows are keyed on
       // `friend.id`, and a repeated key kills the tab. `loadMoreMutuals` already dedupes what it
       // appends; the first page was the gap.
@@ -417,13 +383,13 @@ class UserModalState {
       this.mutualsHasMore = page.hasMore;
       this.mutualsPhase = "ready";
     } catch (cause) {
-      if (generation !== this.#generation) return;
+      if (!this.isCurrent(generation)) return;
       // Same wedge as `ensureGroups`, same fix — both are lazy, so nothing else ever re-runs them.
       if (isAbort(cause)) {
         this.mutualsPhase = "idle";
         return;
       }
-      this.mutualsFailure = classify(cause);
+      this.mutualsFailure = classifyFailure(cause);
       this.mutualsError = describeError(cause);
       this.mutualsPhase = "error";
     }
@@ -439,19 +405,19 @@ class UserModalState {
   async loadMoreMutuals(): Promise<void> {
     const userId = this.userId;
     if (userId === null || this.mutualsLoadingMore || !this.mutualsHasMore) return;
-    const generation = this.#generation;
+    const generation = this.generation;
     this.mutualsLoadingMore = true;
     this.mutualsError = null;
     try {
       const page = await this.#fetchMutuals(userId, this.mutuals.length);
-      if (generation !== this.#generation) return;
+      if (!this.isCurrent(generation)) return;
       const seen = new Set(this.mutuals.map((friend) => friend.id));
       const fresh = page.users.filter((friend) => !seen.has(friend.id));
       this.mutuals = [...this.mutuals, ...fresh];
       // A page of nothing but rows we already had would otherwise loop the button forever.
       this.mutualsHasMore = page.hasMore && fresh.length > 0;
     } catch (cause) {
-      if (isAbort(cause) || generation !== this.#generation) return;
+      if (isAbort(cause) || !this.isCurrent(generation)) return;
       this.mutualsError = describeError(cause);
     } finally {
       this.mutualsLoadingMore = false;
@@ -473,7 +439,7 @@ class UserModalState {
     return api.users.mutualFriends(
       userId,
       { accountId: this.accountId ?? undefined, n: MUTUALS_PAGE, offset },
-      this.#controller?.signal,
+      this.signal,
     );
   }
 
@@ -487,28 +453,26 @@ class UserModalState {
   async #loadProfile(userId: string, generation: number, signal: AbortSignal): Promise<void> {
     try {
       const profile = await api.users.get(userId, this.accountId ?? undefined, signal);
-      if (generation !== this.#generation) return;
+      if (!this.isCurrent(generation)) return;
       this.profile = profile;
       this.savedNote = profile.note ?? "";
       this.noteDraft = profile.note ?? "";
       this.phase = "ready";
     } catch (cause) {
-      if (isAbort(cause) || generation !== this.#generation) return;
-      this.failure = classify(cause);
-      this.error = describeError(cause);
-      this.phase = "error";
+      // Aborted or superseded loads are not failures; see `EntityModalState.recordFailure`.
+      this.recordFailure(cause, generation);
     }
   }
 
   async #loadHistory(userId: string, generation: number, signal: AbortSignal): Promise<void> {
     try {
       const rows = await api.events({ subjectId: userId, limit: HISTORY_PAGE }, signal);
-      if (generation !== this.#generation) return;
+      if (!this.isCurrent(generation)) return;
       this.history = rows;
       this.historyExhausted = rows.length < HISTORY_PAGE;
       this.historyPhase = "ready";
     } catch (cause) {
-      if (isAbort(cause) || generation !== this.#generation) return;
+      if (isAbort(cause) || !this.isCurrent(generation)) return;
       this.historyError = describeError(cause);
       this.historyPhase = "error";
     }
@@ -521,18 +485,18 @@ class UserModalState {
     if (userId === null || oldest === undefined || this.loadingMore || this.historyExhausted) {
       return;
     }
-    const generation = this.#generation;
+    const generation = this.generation;
     this.loadingMore = true;
     try {
       const rows = await api.events(
         { subjectId: userId, limit: HISTORY_PAGE, before: oldest.ts },
-        this.#controller?.signal,
+        this.signal,
       );
-      if (generation !== this.#generation) return;
+      if (!this.isCurrent(generation)) return;
       this.history = [...this.history, ...rows];
       this.historyExhausted = rows.length < HISTORY_PAGE;
     } catch (cause) {
-      if (isAbort(cause) || generation !== this.#generation) return;
+      if (isAbort(cause) || !this.isCurrent(generation)) return;
       this.historyError = describeError(cause);
     } finally {
       this.loadingMore = false;
@@ -543,13 +507,13 @@ class UserModalState {
   async saveNote(): Promise<void> {
     const userId = this.userId;
     if (userId === null || this.savingNote) return;
-    const generation = this.#generation;
+    const generation = this.generation;
     const value = this.noteDraft;
     this.savingNote = true;
     this.noteError = null;
     try {
       const saved = await api.users.setNote(userId, value, this.accountId ?? undefined);
-      if (generation !== this.#generation) return;
+      if (!this.isCurrent(generation)) return;
       // The daemon's answer wins over the draft: an empty note is stored as a deletion and comes
       // back as null, and the note is per-account, so this is also where a mismatch would show.
       this.savedNote = saved.note ?? "";
@@ -558,32 +522,12 @@ class UserModalState {
         this.profile = { ...this.profile, note: saved.note, noteUpdatedAt: saved.updatedAt };
       }
     } catch (cause) {
-      if (isAbort(cause) || generation !== this.#generation) return;
+      if (isAbort(cause) || !this.isCurrent(generation)) return;
       this.noteError = describeError(cause);
     } finally {
       this.savingNote = false;
     }
   }
-}
-
-/**
- * First-wins deduplication by `id`.
- *
- * Shared by both places that put rows into a keyed `{#each}`. Svelte 5 treats a duplicate key as a
- * hard error rather than a warning, so "the server would never send the same id twice" is not a
- * safe assumption to render on.
- */
-function dedupeById<T extends { readonly id: string }>(rows: readonly T[]): T[] {
-  const byId = new Map<string, T>();
-  for (const row of rows) if (!byId.has(row.id)) byId.set(row.id, row);
-  return [...byId.values()];
-}
-
-function classify(error: unknown): UserLoadFailure {
-  if (isNoAccountOnline(error)) return "no-account";
-  if (isNotFound(error)) return "not-found";
-  if (isOffline(error)) return "offline";
-  return "other";
 }
 
 export const userModal = new UserModalState();

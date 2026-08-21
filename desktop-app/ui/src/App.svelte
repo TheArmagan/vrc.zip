@@ -13,6 +13,7 @@ import AppShell from "$lib/components/AppShell.svelte";
 import CommandPalette from "$lib/components/CommandPalette.svelte";
 import DaemonOffline from "$lib/components/DaemonOffline.svelte";
 import ErrorNote from "$lib/components/ErrorNote.svelte";
+import GroupModal from "$lib/components/GroupModal.svelte";
 import UserModal from "$lib/components/UserModal.svelte";
 import WorldModal from "$lib/components/WorldModal.svelte";
 import { Toaster } from "$lib/components/ui/sonner/index.js";
@@ -145,3 +146,10 @@ const offline = $derived(!app.reachable);
   a world already in the daemon's cache still has a name to show when VRChat cannot be reached.
 -->
 <WorldModal />
+
+<!--
+  The third of the three, on the same terms. A group badge appears wherever a user does, so this is
+  a singleton too — and it is mounted here rather than inside the user modal because the two are
+  peers: opening a group from a profile must not depend on that profile staying open.
+-->
+<GroupModal />

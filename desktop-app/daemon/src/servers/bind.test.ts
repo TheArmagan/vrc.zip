@@ -43,6 +43,10 @@ const deps: ControlDeps = {
     throw new Error("unused");
   },
   listUserGroups: async () => ({ groups: [] }),
+  listUsers: async () => ({ users: [] }),
+  getGroup: async () => {
+    throw new Error("unused");
+  },
   listMutualFriends: async () => ({ users: [], hasMore: false }),
   getSettings: async () => ({}),
   updateSettings: async () => ({}),

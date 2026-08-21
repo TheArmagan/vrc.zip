@@ -8,8 +8,10 @@ import {
   ControlError,
   createControlApp,
   type EventQuery,
+  type GroupDetail,
   type InstanceInfo,
   type InviteTarget,
+  MAX_USER_IDS,
   MAX_WORLD_IDS,
   type PageQuery,
   parseInviteLocation,
@@ -18,6 +20,7 @@ import {
   parseWorldIds,
   type Settings,
   type StreamEvent,
+  type UserBatch,
   type UserDetail,
   type WorldDetail,
   type WorldSummary,
@@ -103,8 +106,34 @@ const INSTANCE_USER = {
   developerType: "none",
 };
 
+/** One roster-shaped record per id, so a batch answer is checkable without a fixture per user. */
+function instanceUserFor(id: string) {
+  return { ...INSTANCE_USER, id, displayName: id.toUpperCase() };
+}
+
 /** The same normalised group shape the represented group uses — one type, one renderer. */
 const GROUP = USER_DETAIL.representedGroup as NonNullable<UserDetail["representedGroup"]>;
+
+const GROUP_ID = "grp_2c8e5f1a-4a3d-4b6e-8f0c-1d2e3f4a5b6c";
+/** A group VRChat will not hand over — deleted, or private to this account. */
+const MISSING_GROUP_ID = "grp_00000000-0000-0000-0000-000000000000";
+
+const GROUP_DETAIL: GroupDetail = {
+  ...GROUP,
+  // Fetching a group is not evidence that anybody represents it; only the endpoints carrying the
+  // flag may set it. See `ControlDeps.getGroup`.
+  isRepresenting: false,
+  createdAt: 1_600_000_000_000,
+  onlineMemberCount: 12,
+  memberCountSyncedAt: 1_700_000_000_000,
+  rules: "Be kind.",
+  links: ["https://example.invalid/pug"],
+  languages: ["eng"],
+  tags: ["system_verified"],
+  isVerified: true,
+  joinState: "open",
+  membershipStatus: "member",
+};
 
 const MUTUAL = {
   id: "usr_mutual",
@@ -179,6 +208,8 @@ interface Recorder {
   imageUrls: string[];
   userLookups: { userId: string; accountId: string | null }[];
   groupLookups: { userId: string; accountId: string | null }[];
+  groupFetches: { groupId: string; accountId: string | null }[];
+  userBatches: { userIds: string[]; accountId: string | null }[];
   mutualLookups: { userId: string; accountId: string | null; page: PageQuery }[];
   noteWrites: { userId: string; accountId: string | null; note: string }[];
   removed: string[];
@@ -199,6 +230,8 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     imageUrls: [],
     userLookups: [],
     groupLookups: [],
+    groupFetches: [],
+    userBatches: [],
     mutualLookups: [],
     noteWrites: [],
     removed: [],
@@ -305,11 +338,25 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
         instance: { ...INSTANCE_INFO, worldId: target.worldId, instanceId: target.instanceId },
       };
     },
+    listUsers: async (userIds, accountId) => {
+      seen.userBatches.push({ userIds: [...userIds], accountId });
+      // Unresolvable ids are absent rather than an error — the batch contract, not a shortcut.
+      return { users: userIds.filter((id) => id !== "usr_missing").map(instanceUserFor) };
+    },
     listUserGroups: async (userId, accountId) => {
       seen.groupLookups.push({ userId, accountId });
       if (userId === "usr_missing") throw new ControlError(404, "unknown_user");
       // A user in no visible group is a 200 with an empty list — see `UserGroups.groups`.
       return { groups: userId === "usr_loner" ? [] : [GROUP] };
+    },
+    getGroup: async (groupId, accountId) => {
+      seen.groupFetches.push({ groupId, accountId });
+      // A 404 here is both "gone" and "you may not see it" — the daemon cannot tell them apart,
+      // and the route must pass whichever one VRChat meant through unchanged.
+      if (groupId === MISSING_GROUP_ID) {
+        throw new ControlError(404, "unknown_group");
+      }
+      return GROUP_DETAIL;
     },
     listMutualFriends: async (userId, accountId, page) => {
       seen.mutualLookups.push({ userId, accountId, page });
@@ -564,6 +611,68 @@ describe("control API routes", () => {
       { userId: "usr_subject", accountId: ACCOUNT.id },
       { userId: "usr_loner", accountId: null },
     ]);
+  });
+
+  test("GET /api/users batches, dedupes, drops junk ids, and caps the list", async () => {
+    const { deps, seen } = fakeDeps();
+    const res = await call(
+      deps,
+      `/api/users?ids=usr_a,usr_a,%20usr_b%20,not/an/id&accountId=${ACCOUNT.id}`,
+    );
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as UserBatch).users.map((user) => user.id)).toEqual([
+      "usr_a",
+      "usr_b",
+    ]);
+    // Deduped and filtered before the dependency sees them: every id past the cache is one
+    // upstream call, so asking for the same person twice is one call's worth of waste.
+    expect(seen.userBatches).toEqual([{ userIds: ["usr_a", "usr_b"], accountId: ACCOUNT.id }]);
+
+    // An id VRChat will not resolve is absent from the answer, not a failure for the other rows.
+    const partial = await call(deps, "/api/users?ids=usr_a,usr_missing");
+    expect(((await partial.json()) as UserBatch).users.map((user) => user.id)).toEqual(["usr_a"]);
+
+    // A cap is about upstream spend, so it is refused rather than truncated — truncating serves a
+    // partial answer that looks complete.
+    const tooMany = await call(
+      deps,
+      `/api/users?ids=${Array.from({ length: MAX_USER_IDS + 1 }, (_, i) => `usr_${String(i)}`).join(",")}`,
+    );
+    expect(tooMany.status).toBe(400);
+    expect(await tooMany.json()).toMatchObject({ error: "too_many_ids" });
+
+    expect((await call(deps, "/api/users")).status).toBe(400);
+  });
+
+  test("GET /api/groups/:id serves the group and threads the account", async () => {
+    const { deps, seen } = fakeDeps();
+    const res = await call(deps, `/api/groups/${GROUP_ID}?accountId=${ACCOUNT.id}`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(GROUP_DETAIL);
+
+    // Omitted, the account is `null` and the daemon picks one — `membershipStatus` is a statement
+    // about whoever asked, so which account that was has to reach the dependency either way.
+    await call(deps, `/api/groups/${GROUP_ID}`);
+    expect(seen.groupFetches).toEqual([
+      { groupId: GROUP_ID, accountId: ACCOUNT.id },
+      { groupId: GROUP_ID, accountId: null },
+    ]);
+  });
+
+  test("GET /api/groups/:id validates the id and surfaces a 404", async () => {
+    const { deps, seen } = fakeDeps();
+    for (const path of [
+      "/api/groups/usr_notagroup",
+      "/api/groups/grp_1%2fmembers",
+      "/api/groups/",
+    ]) {
+      expect((await call(deps, path)).status, path).not.toBe(200);
+    }
+    expect(seen.groupFetches).toEqual([]);
+
+    const missing = await call(deps, `/api/groups/${MISSING_GROUP_ID}`);
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toMatchObject({ error: "unknown_group" });
   });
 
   test("GET /api/users/:id/mutual-friends pages, defaults, and clamps", async () => {

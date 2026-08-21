@@ -244,12 +244,24 @@ export function groupTag(
 /**
  * The vrchat.com page for a group.
  *
- * This is a link out of the app on purpose. vrc.zip has no group screen and inventing a group
- * modal to hold three fields it already shows would be a worse answer than handing the user to the
- * page that has everything — the description, the members, the join button.
+ * No longer the *only* thing a group offers — `GroupModal` reads the record the daemon fetches —
+ * but still the footer link on it, for the same reason the world modal has one: the members, the
+ * posts, the galleries and the join button live on that page and vrc.zip does not hold them. An
+ * app that quietly omits what it cannot show is worse than one that says where the rest is.
  */
 export function groupLink(groupId: string): string {
   return `https://vrchat.com/home/group/${encodeURIComponent(groupId)}`;
+}
+
+/**
+ * True for a VRChat group id, and only for one.
+ *
+ * The same guard as {@link isUserId} and for the same reason: an id that reached the UI from a bus
+ * event or a log line is whatever its payload carried, and anything offering to open a *group* has
+ * to check rather than assume.
+ */
+export function isGroupId(id: string | null | undefined): id is string {
+  return typeof id === "string" && id.startsWith("grp_");
 }
 
 // ---------------------------------------------------------------------------

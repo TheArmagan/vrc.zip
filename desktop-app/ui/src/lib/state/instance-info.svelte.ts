@@ -2,7 +2,7 @@
  * One instance's own record — occupancy, access type, region, queue, whether it is still open.
  *
  * The sibling of `instance-roster.svelte.ts` and deliberately separate from it: the roster answers
- * "who is in there", needs an account *standing in the instance*, and is invalidated by every join
+ * "who is in there", needs an account that *created* the instance, and is invalidated by every join
  * and leave; this answers "what is that instance", is readable by any signed-in account, and is
  * stable for as long as a snapshot is worth anything. One cache with two invalidation rules would
  * be one of them being wrong.

@@ -8,10 +8,19 @@
 <script lang="ts">
 import type { EventFamily } from "$lib/api.ts";
 import { familyOf } from "$lib/api.ts";
+import GroupName from "$lib/components/GroupName.svelte";
 import LocationLine from "$lib/components/LocationLine.svelte";
 import UserName from "$lib/components/UserName.svelte";
 import type { LiveEvent } from "$lib/events.ts";
-import { eventLabel, isUserId, payloadText, shortId, subjectName, timeOfDay } from "$lib/format.ts";
+import {
+  eventLabel,
+  isGroupId,
+  isUserId,
+  payloadText,
+  shortId,
+  subjectName,
+  timeOfDay,
+} from "$lib/format.ts";
 
 let { event, dense = false }: { event: LiveEvent; dense?: boolean } = $props();
 
@@ -43,11 +52,12 @@ const subjectFallback = $derived(
  *
  * `subjectOf` in the daemon's bridges files whatever id the payload carried: a user for
  * `friend.*` and `gamelog.player_*`, but a world for `gamelog.world_enter`, a group for
- * `group.*`, and a notification id for `notification.seen`. Only a `usr_…` gets a control — and
- * a `gamelog.player_join` whose payload has a name but no id (VRChat has shipped it both ways)
- * keeps its plain-text name.
+ * `group.*`, and a notification id for `notification.seen`. A `usr_…` and a `grp_…` each get a
+ * control that opens their own card; everything else — a notification id, a `gamelog.player_join`
+ * whose payload has a name but no id (VRChat has shipped it both ways) — stays plain text.
  */
 const subjectUserId = $derived(isUserId(event.subjectId) ? event.subjectId : null);
+const subjectGroupId = $derived(isGroupId(event.subjectId) ? event.subjectId : null);
 </script>
 
 <li
@@ -62,20 +72,24 @@ const subjectUserId = $derived(isUserId(event.subjectId) ? event.subjectId : nul
   <div class="min-w-0 flex-1">
     <p class="flex flex-wrap items-baseline gap-2 text-sm">
       <span class="font-medium">{eventLabel(event.kind)}</span>
-      {#if who}
-        <UserName
-          userId={subjectUserId}
-          name={who}
-          accountId={event.accountId}
-          class="text-muted-foreground"
-        />
-      {:else if subjectFallback}
-        <UserName
-          userId={subjectUserId}
-          name={subjectFallback}
-          accountId={event.accountId}
-          class="font-mono text-xs text-muted-foreground"
-        />
+      {#if who || subjectFallback}
+        {@const label = who ?? subjectFallback ?? ""}
+        {@const plain = who === null}
+        {#if subjectGroupId !== null}
+          <GroupName
+            groupId={subjectGroupId}
+            name={label}
+            accountId={event.accountId}
+            class={plain ? "font-mono text-xs text-muted-foreground" : "text-muted-foreground"}
+          />
+        {:else}
+          <UserName
+            userId={subjectUserId}
+            name={label}
+            accountId={event.accountId}
+            class={plain ? "font-mono text-xs text-muted-foreground" : "text-muted-foreground"}
+          />
+        {/if}
       {/if}
       {#if event.live}
         <span class="text-xs tracking-wide text-status-online uppercase">live</span>

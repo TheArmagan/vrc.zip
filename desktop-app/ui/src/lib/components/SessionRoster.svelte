@@ -7,8 +7,10 @@
   reading this file is that no branch below can add or remove a person, only decorate one.
 
   The screen therefore has three honest shapes rather than one shape and an error: attributes
-  present, attributes unavailable (a normal outcome — VRChat only describes an instance to an
-  account standing inside it), and a genuine fault. Only the third is drawn as a problem.
+  present, attributes unavailable (the *common* outcome — VRChat sends a roster only for an
+  instance the account itself created, so a group or public room you walked into has none, and the
+  store then falls back to reading the observed players one at a time), and a genuine fault. Only
+  the third is drawn as a problem.
 -->
 <script lang="ts">
 import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
@@ -85,12 +87,31 @@ const askable = $derived(!parsed.opaque && session.currentLocation !== null);
  * a join or a leave is the event that reliably invalidates an otherwise fine snapshot, and
  * `ensure` rate-limits the rest. Everything else on this screen reads state and starts nothing.
  */
+/**
+ * The ids the log recovered, which are the fallback's only possible input.
+ *
+ * Sorted and joined into a string rather than passed as an array, because this feeds the `$effect`
+ * below: a fresh array every render would re-run it on every frame, where a string only changes
+ * when the *set* of identified players does.
+ */
+const observedKey = $derived(
+  (players ?? [])
+    .map((player) => player.userId)
+    .filter((id): id is string => id !== null)
+    .toSorted()
+    .join(","),
+);
+
 $effect(() => {
   const location = session.currentLocation;
   const accountId = session.accountId;
+  const ids = observedKey === "" ? [] : observedKey.split(",");
+  // Both dependencies earn their place: `observedKey` changes when the set of *identifiable*
+  // players does, and the raw count catches a join or leave the log gave no id for — which still
+  // invalidates an otherwise fine snapshot even though it can never be looked up individually.
   void players?.length;
   if (!askable) return;
-  instanceRoster.ensure(location, accountId);
+  instanceRoster.ensure(location, accountId, ids);
 });
 
 $effect(() => clock.subscribe());
@@ -176,7 +197,12 @@ const refreshing = $derived(entry?.status === "loading");
             size="icon-sm"
             class="text-muted-foreground"
             disabled={refreshing}
-            onclick={() => instanceRoster.refresh(session.currentLocation, session.accountId)}
+            onclick={() =>
+              instanceRoster.refresh(
+                session.currentLocation,
+                session.accountId,
+                observedKey === "" ? [] : observedKey.split(","),
+              )}
             aria-label="Re-read trust, age and friendship from VRChat"
             title="Re-read trust, age and friendship from VRChat"
           >
@@ -197,7 +223,7 @@ const refreshing = $derived(entry?.status === "loading");
       </p>
     {:else if entry?.status === "unavailable" && entry.reason !== null}
       <p class="shrink-0 border-b border-border bg-muted/40 px-4 py-2 text-xs text-muted-foreground">
-        {rosterUnavailableText(entry.reason)}
+        {rosterUnavailableText(entry.reason, entry.filledIndividually)}
       </p>
     {:else if entry?.status === "error" && entry.error !== null}
       <div class="shrink-0 px-4 py-2">

@@ -328,10 +328,27 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     sentence names both causes — deleted, or private to this account — because VRChat answers them
     identically and guessing in front of a user who can see the group on their own screen would be a
     confident wrong answer.
-34. **The hero banner's scrim is opaque under the header, not merely tinted.** The header rides up
-    into the band by design, which put the display name where the old gradient was still half
-    transparent, so a bright banner showed through the text and cut it apart. The bottom two-fifths
-    are now flat popover: a fade that starts at the text is a texture behind the text, not a scrim.
+34. **The header outranks the banner's scrim, and that is a z-index fact, not a colour one.** The
+    display name was being sliced in half horizontally. First diagnosis was contrast, and the fix
+    was a near-opaque scrim — which worked and ate most of a world's hero image in gray. The real
+    cause: the scrim is an `absolute` child and the header was static, and absolutely-positioned
+    elements paint over static in-flow content **whatever the DOM order**. `EntityModal` gives the
+    header `relative z-10` and the scrim went back to being a gentle fade.
+35. **`GET /instances/{id}` returns `users` only for instances the account *created*.** Not for
+    instances it is standing in — which is what the code, its comments, and the sentence shown to
+    the user all claimed. Verified against a live group-public instance the account was sitting in:
+    `userCount: 16`, no `users` array, matching the spec's one-line note on `Instance.users`. That
+    makes `source: "unavailable"` the answer for essentially every room anyone looks at rather than
+    an edge case, so the roster's fallback below is not an optimisation — without it the chips are
+    permanently empty.
+36. **The roster falls back to one lookup per person, and only as a fallback.** `GET /api/users?ids=`
+    reads the log's observed players individually, cache-first, sequentially, capped at 80. It runs
+    only after the one-request path has said it has nothing, only for ids the log recovered, and
+    only for people not already described — which is the whole of decision 30's argument still
+    standing: forty per-user calls is the wrong *default*, not the wrong last resort. It never
+    throws for an unreadable user and never 503s: absent from the list is the contract, as with the
+    world batch. The screen says which way the chips were filled rather than implying VRChat
+    answered.
 
 28. **Sessions are the store's business, not just the watcher's.** Retroactive attribution, the
     orphan sweep, and re-adoption all write through the store, because the UI reads sessions back
@@ -650,6 +667,12 @@ Unresolved; flag to the user rather than guessing.
   token header/query-param constants plus default ports.
 - **No retention control on the API.** The retention job runs and is configurable in the database,
   but nothing exposes it, so the Settings screen explains it rather than offering a control.
+- **The per-user roster fallback spends real rate budget.** A room of eighty strangers nobody has
+  looked at is up to eighty `GET /users/{id}` on first sight of it, sequentially through the
+  limiter. The daemon's `user_cache` absorbs the repeat cost and the UI holds an answer for 15s, so
+  a room you sit in settles quickly — but a user hopping public instances is a genuinely heavier
+  traffic pattern than before, and it is worth measuring against the 20/s per-account ceiling before
+  deciding whether it needs its own budget.
 - **The group modal is a card, not a group screen.** `GET /api/groups/:id` and `GroupModal` landed:
   a represented badge and a row in a user's Groups tab both open it, and it shows the description,
   the rules, the links, both member counts with the age of the live one, the owner, the join state

@@ -4,9 +4,11 @@
   Mounted exactly once, by `App.svelte`, and driven entirely by `worldModal`; see that module for
   why there is one instance rather than one per call site.
 
-  The layout is one column rather than the user modal's tabs, because a world is one document: what
-  it is, who made it, how big it is, and what VRChat's own counters say. The instance sits at the
-  top because it is the only live thing on the page and usually the reason the dialog was opened.
+  Built on `EntityModal`, the shell the user and group cards share, so the banner, the header and
+  the scroll behaviour are identical in all three. The body is one column rather than the user
+  modal's tabs, because a world is one document: what it is, who made it, how big it is, and what
+  VRChat's own counters say. The instance sits at the top because it is the only live thing on the
+  page and usually the reason the dialog was opened.
 
   **Every number here is one VRChat sent.** There is no vrc.zip score, rank, or "popularity out of
   ten" anywhere in this file, and adding one would be worse than showing nothing: a derived number
@@ -14,21 +16,21 @@
 -->
 <script lang="ts">
 import CalendarIcon from "@lucide/svelte/icons/calendar";
-import ExternalLinkIcon from "@lucide/svelte/icons/external-link";
 import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
 import UsersIcon from "@lucide/svelte/icons/users";
-import HeroBanner from "$lib/components/HeroBanner.svelte";
+import DetailGrid from "$lib/components/DetailGrid.svelte";
+import EntityFooter from "$lib/components/EntityFooter.svelte";
+import EntityModal from "$lib/components/EntityModal.svelte";
+import FailureNote from "$lib/components/FailureNote.svelte";
 import JoinAffordance from "$lib/components/JoinAffordance.svelte";
 import RelativeTime from "$lib/components/RelativeTime.svelte";
 import UserName from "$lib/components/UserName.svelte";
 import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
-import * as Dialog from "$lib/components/ui/dialog/index.js";
 import { Separator } from "$lib/components/ui/separator/index.js";
 import { Skeleton } from "$lib/components/ui/skeleton/index.js";
 import { accessLabel, calendarDay } from "$lib/format.ts";
 import { worldModal } from "$lib/state/world-modal.svelte.ts";
-import { copyText } from "$lib/user-actions.ts";
 
 const world = $derived(worldModal.world);
 const instance = $derived(worldModal.instance);
@@ -97,286 +99,243 @@ const INSTANCE_BODIES: Record<string, string> = {
 };
 </script>
 
-<Dialog.Root
+<EntityModal
   open={worldModal.open}
-  onOpenChange={(open) => {
-    if (!open) worldModal.close();
-  }}
+  onClose={() => worldModal.close()}
+  bannerUrl={heroUrl}
+  bannerClass="h-40"
+  title={worldModal.title}
+  titleClass="break-words"
+  headerClass="-mt-6"
 >
-  <!--
-    Same shell as the user card: banner, header, scrolling body. The banner is a sibling of the
-    header rather than a child of it, so both modals lay out identically and a change to one is
-    visible as a change to the other.
-  -->
-  <Dialog.Content
-    class="grid max-h-[85vh] grid-rows-[auto_auto_minmax(0,1fr)] gap-4 p-0 sm:max-w-2xl"
-  >
-    <!--
-      The same band as the user card, at world height.
-
-      It used to be `h-40` with an image and `h-16` without, so the title and everything under it
-      sat at two different heights depending on whether a world had a usable image — and the
-      no-image case is common. `HeroBanner` draws the plate unconditionally, fades the image in
-      over it, and leaves the plate untouched when the VRChat file host 403s, which it does often
-      enough to matter. Nothing below ever moves.
-    -->
-    <HeroBanner url={heroUrl} class="h-40" />
-
-    <Dialog.Header class="-mt-6 gap-3 px-6 pr-12">
-      <div class="space-y-2">
-        <Dialog.Title class="text-base leading-snug break-words">{worldModal.title}</Dialog.Title>
-        <Dialog.Description class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
-          {#if world !== null}
-            {#if world.authorName}
-              <span>
-                by
-                <!-- A real `UserName`, so the author is one click from their own profile. -->
-                <UserName
-                  userId={world.authorId}
-                  name={world.authorName}
-                  accountId={worldModal.accountId}
-                />
-              </span>
-            {/if}
-            {#if world.capacity !== null}
-              <span aria-hidden="true">·</span>
-              <span class="tabular">holds {world.capacity}</span>
-            {/if}
-            {#if world.recommendedCapacity !== null && world.recommendedCapacity !== world.capacity}
-              <span class="tabular">({world.recommendedCapacity} recommended)</span>
-            {/if}
-          {:else if worldModal.phase === "loading"}
-            <span>Reading the world…</span>
-          {:else}
-            <span class="font-mono">{worldModal.worldId ?? ""}</span>
-          {/if}
-        </Dialog.Description>
-
-        <div class="flex flex-wrap items-center gap-2">
-          {#if world?.releaseStatus === "private"}
-            <!--
-              A real statement about the world, not a warning: a private world is only reachable by
-              its author and people they let in, which is why it can be missing everywhere else.
-            -->
-            <Badge variant="outline" title="Only the author and people they invite can find this">
-              Private world
-            </Badge>
-          {:else if world?.releaseStatus}
-            <Badge variant="outline" title="VRChat release status">{world.releaseStatus}</Badge>
-          {/if}
-          {#if world?.cached}
-            <Badge variant="secondary" title="Served from vrc.zip's world cache, not a live fetch">
-              Cached <RelativeTime ts={world.fetchedAt} />
-            </Badge>
-          {/if}
-        </div>
-      </div>
-    </Dialog.Header>
-
-    <div class="min-h-0 space-y-4 overflow-y-auto px-6 pt-4 pb-6">
-      {#if worldModal.phase === "loading"}
-        <div class="space-y-2">
-          <Skeleton class="h-4 w-2/3" />
-          <Skeleton class="h-4 w-1/2" />
-          <Skeleton class="h-4 w-1/3" />
-        </div>
-      {:else if worldModal.phase === "error" && worldModal.failure !== null}
-        {@const failure = worldModal.failure}
-        <div class="space-y-2 border border-border bg-muted/40 px-3 py-3">
-          <p class="text-sm font-medium">{FAILURE_TITLES[failure] ?? FAILURE_TITLES.other}</p>
-          <p class="text-xs text-muted-foreground">
-            {FAILURE_BODIES[failure] === "" ? worldModal.error : FAILURE_BODIES[failure]}
-          </p>
-          <Button variant="outline" size="sm" onclick={() => worldModal.retry()}>Try again</Button>
-        </div>
+  {#snippet subtitle()}
+    {#if world !== null}
+      {#if world.authorName}
+        <span>
+          by
+          <!-- A real `UserName`, so the author is one click from their own profile. -->
+          <UserName
+            userId={world.authorId}
+            name={world.authorName}
+            accountId={worldModal.accountId}
+          />
+        </span>
       {/if}
-
-      <!-- The instance ---------------------------------------------------- -->
-      {#if worldModal.hasInstance}
-        <section class="space-y-2 border border-border bg-muted/30 px-3 py-3">
-          <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
-            <p class="text-xs tracking-wide text-muted-foreground uppercase">This instance</p>
-            <span class="tabular text-sm font-medium">{parsed.label}</span>
-            <Badge variant="outline" class="tracking-wide uppercase">
-              {accessLabel(parsed.access)}
-            </Badge>
-            {#if parsed.region}
-              <span class="text-xs tracking-wide text-muted-foreground uppercase">
-                {parsed.region}
-              </span>
-            {/if}
-
-            <div class="ml-auto flex items-center gap-2">
-              <!--
-                The same join decision as every other location in the app, through the one
-                component that owns it: a self-invite when a client is running, the deep link only
-                when none is.
-              -->
-              <JoinAffordance
-                location={worldModal.location}
-                accountId={worldModal.accountId}
-                class="text-xs"
-              />
-              <Button
-                variant="ghost"
-                size="xs"
-                class="text-muted-foreground"
-                disabled={worldModal.instancePhase === "loading"}
-                onclick={() => worldModal.refreshInstance()}
-              >
-                <RefreshCwIcon />
-                Refresh
-              </Button>
-            </div>
-          </div>
-
-          {#if worldModal.instancePhase === "loading"}
-            <Skeleton class="h-4 w-40" />
-          {:else if instance !== null}
-            <p class="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
-              <span class="inline-flex items-center gap-1.5">
-                <UsersIcon class="size-3.5 text-muted-foreground" />
-                <span class="tabular">
-                  {instance.userCount === null ? "not reported" : instance.userCount}
-                  {#if instance.capacity !== null}<span class="text-muted-foreground">
-                      / {instance.capacity}
-                    </span>{/if}
-                </span>
-              </span>
-              {#if instance.full}
-                <Badge variant="outline">Full</Badge>
-              {/if}
-              {#if instance.queueEnabled}
-                <Badge variant="outline">
-                  Queue{instance.queueSize === null ? "" : ` · ${instance.queueSize}`}
-                </Badge>
-              {/if}
-              {#if instance.closedAt !== null}
-                <Badge variant="outline" title={instance.hardClose === true ? "Hard close" : ""}>
-                  Closed <RelativeTime ts={instance.closedAt} />
-                </Badge>
-              {/if}
-              {#if !instance.active}
-                <Badge variant="outline">Not active</Badge>
-              {/if}
-            </p>
-            {#if instance.nUsers !== null && instance.nUsers !== instance.userCount}
-              <!--
-                VRChat sends both counts and they can disagree. Showing the difference rather than
-                picking a winner: which one is right is VRChat's business, not this app's.
-              -->
-              <p class="text-xs text-muted-foreground">
-                VRChat's second count for this instance says {instance.nUsers}.
-              </p>
-            {/if}
-            {#if worldModal.instanceFetchedAt !== null}
-              <p class="text-xs text-muted-foreground">
-                Read <RelativeTime ts={worldModal.instanceFetchedAt} />
-              </p>
-            {/if}
-          {:else if worldModal.instanceFailure !== null}
-            {@const failure = worldModal.instanceFailure}
-            <p class="text-xs text-muted-foreground">
-              {INSTANCE_BODIES[failure] === "" ? worldModal.instanceError : INSTANCE_BODIES[failure]}
-            </p>
-          {/if}
-        </section>
+      {#if world.capacity !== null}
+        <span aria-hidden="true">·</span>
+        <span class="tabular">holds {world.capacity}</span>
       {/if}
-
-      {#if world !== null}
-        {#if world.description}
-          <!-- Author-written, and it carries its own line breaks. -->
-          <p class="text-sm whitespace-pre-wrap">{world.description}</p>
-        {/if}
-
-        {#if tags.length > 0}
-          <div class="flex flex-wrap gap-1.5">
-            <!--
-              Keyed by index. VRChat's tag array is not guaranteed unique, and a repeated key is a
-              hard runtime error in Svelte 5 rather than a duplicate chip — it would take the whole
-              tab down. The list is static for a given world, so the index is stable.
-            -->
-            {#each tags as tag, index (index)}
-              <Badge variant="secondary" class="font-normal">{tag}</Badge>
-            {/each}
-          </div>
-        {/if}
-
-        {#if counters.length > 0}
-          <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-xs">
-            {#each counters as [label, value] (label)}
-              <dt class="text-muted-foreground">{label}</dt>
-              <dd class="tabular">{value.toLocaleString()}</dd>
-            {/each}
-          </dl>
-          <p class="text-xs text-muted-foreground">
-            VRChat's own counters, passed through unchanged. Heat and popularity are VRChat's
-            internal scales — vrc.zip does not know what they are out of, and does not guess.
-          </p>
-        {/if}
-
-        {#if world.publicationDate !== null || world.labsPublicationDate !== null || world.createdAt !== null || world.updatedAt !== null || world.version !== null}
-          <Separator />
-          <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-xs">
-            {#if world.publicationDate !== null}
-              <dt class="flex items-center gap-1.5 text-muted-foreground">
-                <CalendarIcon class="size-3.5" />
-                Published
-              </dt>
-              <dd class="tabular">{calendarDay(world.publicationDate)}</dd>
-            {/if}
-            {#if world.labsPublicationDate !== null}
-              <dt class="text-muted-foreground">In Labs since</dt>
-              <dd class="tabular">{calendarDay(world.labsPublicationDate)}</dd>
-            {/if}
-            {#if world.createdAt !== null}
-              <dt class="text-muted-foreground">Created</dt>
-              <dd class="tabular">{calendarDay(world.createdAt)}</dd>
-            {/if}
-            {#if world.updatedAt !== null}
-              <dt class="text-muted-foreground">Last updated</dt>
-              <dd><RelativeTime ts={world.updatedAt} /></dd>
-            {/if}
-            {#if world.version !== null}
-              <dt class="text-muted-foreground">Version</dt>
-              <dd class="tabular">{world.version}</dd>
-            {/if}
-          </dl>
-        {/if}
+      {#if world.recommendedCapacity !== null && world.recommendedCapacity !== world.capacity}
+        <span class="tabular">({world.recommendedCapacity} recommended)</span>
       {/if}
+    {:else if worldModal.phase === "loading"}
+      <span>Reading the world…</span>
+    {:else}
+      <span class="font-mono">{worldModal.worldId ?? ""}</span>
+    {/if}
+  {/snippet}
 
-      <Separator />
+  {#snippet badges()}
+    {#if world?.releaseStatus === "private"}
+      <!--
+        A real statement about the world, not a warning: a private world is only reachable by its
+        author and people they let in, which is why it can be missing everywhere else.
+      -->
+      <Badge variant="outline" title="Only the author and people they invite can find this">
+        Private world
+      </Badge>
+    {:else if world?.releaseStatus}
+      <Badge variant="outline" title="VRChat release status">{world.releaseStatus}</Badge>
+    {/if}
+    {#if world?.cached}
+      <Badge variant="secondary" title="Served from vrc.zip's world cache, not a live fetch">
+        Cached <RelativeTime ts={world.fetchedAt} />
+      </Badge>
+    {/if}
+  {/snippet}
 
-      <div class="flex flex-wrap items-center gap-2">
-        {#if worldModal.worldId !== null}
-          <Button
-            variant="outline"
-            size="sm"
-            href={`https://vrchat.com/home/world/${encodeURIComponent(worldModal.worldId)}`}
-            target="_blank"
-            rel="noreferrer noopener"
-          >
-            <ExternalLinkIcon />
-            Open on vrchat.com
-          </Button>
+  {#if worldModal.phase === "loading"}
+    <div class="space-y-2">
+      <Skeleton class="h-4 w-2/3" />
+      <Skeleton class="h-4 w-1/2" />
+      <Skeleton class="h-4 w-1/3" />
+    </div>
+  {:else if worldModal.phase === "error" && worldModal.failure !== null}
+    <FailureNote
+      failure={worldModal.failure}
+      titles={FAILURE_TITLES}
+      bodies={FAILURE_BODIES}
+      message={worldModal.error}
+      onRetry={() => worldModal.retry()}
+    />
+  {/if}
+
+  <!-- The instance ------------------------------------------------------------ -->
+  {#if worldModal.hasInstance}
+    <section class="space-y-2 border border-border bg-muted/30 px-3 py-3">
+      <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <p class="text-xs tracking-wide text-muted-foreground uppercase">This instance</p>
+        <span class="tabular text-sm font-medium">{parsed.label}</span>
+        <Badge variant="outline" class="tracking-wide uppercase">
+          {accessLabel(parsed.access)}
+        </Badge>
+        {#if parsed.region}
+          <span class="text-xs tracking-wide text-muted-foreground uppercase">
+            {parsed.region}
+          </span>
+        {/if}
+
+        <div class="ml-auto flex items-center gap-2">
+          <!--
+            The same join decision as every other location in the app, through the one component
+            that owns it: a self-invite when a client is running, the deep link only when none is.
+          -->
+          <JoinAffordance
+            location={worldModal.location}
+            accountId={worldModal.accountId}
+            class="text-xs"
+          />
           <Button
             variant="ghost"
-            size="sm"
+            size="xs"
             class="text-muted-foreground"
-            onclick={() => void copyText("World id", worldModal.worldId ?? "")}
+            disabled={worldModal.instancePhase === "loading"}
+            onclick={() => worldModal.refreshInstance()}
           >
-            Copy id
+            <RefreshCwIcon />
+            Refresh
           </Button>
-        {/if}
-        <Button
-          variant="ghost"
-          size="sm"
-          class="ml-auto text-muted-foreground"
-          onclick={() => void copyText("World details", raw)}
-        >
-          Copy JSON
-        </Button>
+        </div>
       </div>
-    </div>
-  </Dialog.Content>
-</Dialog.Root>
+
+      {#if worldModal.instancePhase === "loading"}
+        <Skeleton class="h-4 w-40" />
+      {:else if instance !== null}
+        <p class="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+          <span class="inline-flex items-center gap-1.5">
+            <UsersIcon class="size-3.5 text-muted-foreground" />
+            <span class="tabular">
+              {instance.userCount === null ? "not reported" : instance.userCount}
+              {#if instance.capacity !== null}<span class="text-muted-foreground">
+                  / {instance.capacity}
+                </span>{/if}
+            </span>
+          </span>
+          {#if instance.full}
+            <Badge variant="outline">Full</Badge>
+          {/if}
+          {#if instance.queueEnabled}
+            <Badge variant="outline">
+              Queue{instance.queueSize === null ? "" : ` · ${instance.queueSize}`}
+            </Badge>
+          {/if}
+          {#if instance.closedAt !== null}
+            <Badge variant="outline" title={instance.hardClose === true ? "Hard close" : ""}>
+              Closed <RelativeTime ts={instance.closedAt} />
+            </Badge>
+          {/if}
+          {#if !instance.active}
+            <Badge variant="outline">Not active</Badge>
+          {/if}
+        </p>
+        {#if instance.nUsers !== null && instance.nUsers !== instance.userCount}
+          <!--
+            VRChat sends both counts and they can disagree. Showing the difference rather than
+            picking a winner: which one is right is VRChat's business, not this app's.
+          -->
+          <p class="text-xs text-muted-foreground">
+            VRChat's second count for this instance says {instance.nUsers}.
+          </p>
+        {/if}
+        {#if worldModal.instanceFetchedAt !== null}
+          <p class="text-xs text-muted-foreground">
+            Read <RelativeTime ts={worldModal.instanceFetchedAt} />
+          </p>
+        {/if}
+      {:else if worldModal.instanceFailure !== null}
+        {@const failure = worldModal.instanceFailure}
+        <!--
+          A sentence, not a `FailureNote`: none of these is a fault, there is nothing to retry that
+          the Refresh button above does not already offer, and a bordered error box inside a
+          bordered section would read as the world itself having failed.
+        -->
+        <p class="text-xs text-muted-foreground">
+          {INSTANCE_BODIES[failure] === "" ? worldModal.instanceError : INSTANCE_BODIES[failure]}
+        </p>
+      {/if}
+    </section>
+  {/if}
+
+  {#if world !== null}
+    {#if world.description}
+      <!-- Author-written, and it carries its own line breaks. -->
+      <p class="text-sm whitespace-pre-wrap">{world.description}</p>
+    {/if}
+
+    {#if tags.length > 0}
+      <div class="flex flex-wrap gap-1.5">
+        <!--
+          Keyed by index. VRChat's tag array is not guaranteed unique, and a repeated key is a hard
+          runtime error in Svelte 5 rather than a duplicate chip — it would take the card down. The
+          list is static for a given world, so the index is stable.
+        -->
+        {#each tags as tag, index (index)}
+          <Badge variant="secondary" class="font-normal">{tag}</Badge>
+        {/each}
+      </div>
+    {/if}
+
+    {#if counters.length > 0}
+      <DetailGrid>
+        {#each counters as [label, value] (label)}
+          <dt class="text-muted-foreground">{label}</dt>
+          <dd class="tabular">{value.toLocaleString()}</dd>
+        {/each}
+      </DetailGrid>
+      <p class="text-xs text-muted-foreground">
+        VRChat's own counters, passed through unchanged. Heat and popularity are VRChat's internal
+        scales — vrc.zip does not know what they are out of, and does not guess.
+      </p>
+    {/if}
+
+    {#if world.publicationDate !== null || world.labsPublicationDate !== null || world.createdAt !== null || world.updatedAt !== null || world.version !== null}
+      <Separator />
+      <DetailGrid>
+        {#if world.publicationDate !== null}
+          <dt class="flex items-center gap-1.5 text-muted-foreground">
+            <CalendarIcon class="size-3.5" />
+            Published
+          </dt>
+          <dd class="tabular">{calendarDay(world.publicationDate)}</dd>
+        {/if}
+        {#if world.labsPublicationDate !== null}
+          <dt class="text-muted-foreground">In Labs since</dt>
+          <dd class="tabular">{calendarDay(world.labsPublicationDate)}</dd>
+        {/if}
+        {#if world.createdAt !== null}
+          <dt class="text-muted-foreground">Created</dt>
+          <dd class="tabular">{calendarDay(world.createdAt)}</dd>
+        {/if}
+        {#if world.updatedAt !== null}
+          <dt class="text-muted-foreground">Last updated</dt>
+          <dd><RelativeTime ts={world.updatedAt} /></dd>
+        {/if}
+        {#if world.version !== null}
+          <dt class="text-muted-foreground">Version</dt>
+          <dd class="tabular">{world.version}</dd>
+        {/if}
+      </DetailGrid>
+    {/if}
+  {/if}
+
+  <EntityFooter
+    id={worldModal.worldId}
+    href={worldModal.worldId === null
+      ? null
+      : `https://vrchat.com/home/world/${encodeURIComponent(worldModal.worldId)}`}
+    openLabel="Open on vrchat.com"
+    idLabel="World id"
+    jsonLabel="World details"
+    json={raw}
+  />
+</EntityModal>

@@ -227,6 +227,52 @@ export interface GroupSummary {
   isRepresenting: boolean;
 }
 
+/**
+ * One VRChat group in full, for the group modal — a `GroupSummary` plus the fields only
+ * `GET /groups/{groupId}` carries.
+ *
+ * It extends the summary rather than restating it so the modal can render a group it already has a
+ * summary of — a represented badge, a row in a user's Groups tab — the instant the dialog opens,
+ * and let the fetch fill in the rest. Two shapes that overlapped by nine fields would guarantee
+ * they eventually disagreed about one.
+ *
+ * Everything here is nullable for the same reason every field of `GroupSummary` is: **VRChat's
+ * `Group` has no required fields at all**. A missing `memberCount` and a `memberCount` of zero are
+ * different claims, so the absent one stays null and the UI drops the row rather than printing a
+ * confident nought.
+ */
+export interface GroupDetail extends GroupSummary {
+  /** Unix milliseconds, or null. VRChat sends an ISO string; the daemon converts, as everywhere. */
+  createdAt: number | null;
+  /**
+   * How many members are online *now*, as against `memberCount`.
+   *
+   * VRChat computes this on its own schedule and stamps `memberCountSyncedAt` with when — which is
+   * why that timestamp is passed through rather than dropped. A live-looking number with no age on
+   * it is the kind of thing a reader trusts more than it deserves.
+   */
+  onlineMemberCount: number | null;
+  memberCountSyncedAt: number | null;
+  /** The group's own rules text, author-written, newlines and all. */
+  rules: string | null;
+  /** URLs the group put on its page. Rendered as links, never followed by the daemon. */
+  links: string[];
+  /** Three-letter language codes, as VRChat stores them. */
+  languages: string[];
+  /** VRChat's own tags, including its `system_` bookkeeping ones. Passed through unfiltered. */
+  tags: string[];
+  isVerified: boolean;
+  /** `open`, `invite`, `request`, `closed` — how someone would join, in VRChat's own word. */
+  joinState: string | null;
+  /**
+   * The *asking account's* standing in this group: `member`, `requested`, `invited`, `userblocked`,
+   * or null when VRChat said nothing.
+   *
+   * A statement about the viewer, not about the group, which is why it moves when `accountId` does.
+   */
+  membershipStatus: string | null;
+}
+
 /** The answer to `GET /api/users/:id/groups`. */
 export interface UserGroups {
   /**
@@ -517,11 +563,18 @@ export interface InstanceUser {
 /**
  * The answer to `GET /api/instance-users`.
  *
- * `source` is the honest part. VRChat populates `users` only when the asking account is itself in
- * that instance, and omits it otherwise — that is a normal, correct state, not a failure, so it
- * answers `200` with `source: "unavailable"` and an empty roster. The screen then falls back to the
- * names it already has from the game log rather than showing an error for something working as
- * designed.
+ * `source` is the honest part, and what it is honest *about* was wrong here until someone checked.
+ *
+ * **VRChat returns `users` only on instances the asking account created.** Not "instances it is
+ * standing in" — that is what this said, and it is false: an account sitting in a group-public
+ * instance with sixteen people in it gets `userCount: 16` and no `users` array at all. The spec
+ * says so in one line (`Instance.users`: *"present on instances created by the requesting user"*),
+ * and the observed behaviour matches it exactly.
+ *
+ * That makes `source: "unavailable"` the **normal** answer for almost every instance anyone
+ * actually looks at, rather than the edge case the old wording implied. It is a correct 200 with an
+ * empty roster, and the screen falls back to the names the game log already gave it — which is why
+ * the log is the source of truth for *who is present* and this endpoint only ever decorates.
  */
 export interface InstanceRoster {
   /** Echoed back so a late response can be matched to the instance the screen is still showing. */
@@ -531,6 +584,32 @@ export interface InstanceRoster {
   source: "instance" | "unavailable";
   users: InstanceUser[];
 }
+
+/**
+ * The answer to `GET /api/users?ids=…` — the roster's fallback, one entry per user it could read.
+ *
+ * Shaped as `InstanceUser[]` on purpose, not as a new type: this exists precisely so a screen that
+ * asked for a roster and got `source: "unavailable"` can fill the same chips from a different
+ * source, and a second shape would mean a second render path that could drift from the first.
+ *
+ * **An id that could not be read is absent from the list**, exactly as in the world batch, and for
+ * the same reason: this is asked for a room of eighty strangers, and one deleted account must not
+ * take the other seventy-nine down with it. Absent does not mean "deleted" either — with nobody
+ * signed in the daemon answers from cache alone, so everything it has never read is missing too.
+ */
+export interface UserBatch {
+  users: InstanceUser[];
+}
+
+/**
+ * The most ids `GET /api/users` will take at once.
+ *
+ * A VRChat instance holds at most 80 and the busiest rooms are near that, so this covers a full
+ * room in one request. It is a ceiling on **upstream spend**, not a paging convenience: every id
+ * past the cache is one `GET /users/{id}`, which is why the route rejects a longer list rather than
+ * truncating it and serving a partial answer that looks complete.
+ */
+export const MAX_USER_IDS = 80;
 
 /**
  * Settings are deliberately opaque here. The control API's job is to hand them to the UI and hand
@@ -586,9 +665,9 @@ export interface ControlDeps {
    * {@link inviteSelfTo} takes one: the location is interpolated into a VRChat path, so the
    * implementation must never receive a string it would have to re-check.
    *
-   * `accountId` chooses whose eyes, exactly as {@link getUser} does — VRChat only fills in `users`
-   * for an account that is *in* that instance, and `isFriend` is per account. `null` means "any
-   * online account".
+   * `accountId` chooses whose eyes, exactly as {@link getUser} does — `isFriend` is per account, and
+   * whether `users` comes back at all depends on whether that account *created* the instance (see
+   * {@link InstanceRoster}). `null` means "any online account".
    *
    * Throws `ControlError(404, "unknown_account")` for a named account that does not exist, and
    * `ControlError(503, "no_account")` when nobody is signed in. A missing roster is **not** an
@@ -618,12 +697,47 @@ export interface ControlDeps {
   getUser(userId: string, accountId: string | null): Promise<UserDetail>;
 
   /**
+   * Attributes for many users at once — the roster's fallback path.
+   *
+   * `listInstanceUsers` is the cheap way to learn what a room full of people are like: one request
+   * for the lot. It only answers for an instance the account **created** (see {@link
+   * InstanceRoster}), which is almost never, so without this the chips would be permanently empty
+   * for every group and public room anyone actually sits in.
+   *
+   * So: one `GET /users/{id}` per person, cache-first, and deliberately not the default. It is the
+   * expensive path and the caller is expected to ask only for the people it still has nothing
+   * about.
+   *
+   * **Never throws for an unresolvable user, and never throws `no_account`.** Cache hits are served
+   * whatever else fails; misses are fetched only if an account is online, and anything still
+   * unresolved is simply left out — same contract as {@link listWorlds}, for the same reason.
+   */
+  listUsers(userIds: readonly string[], accountId: string | null): Promise<UserBatch>;
+
+  /**
    * The groups this user is in, as far as `accountId` is permitted to see them.
    *
    * Same account-resolution and error codes as {@link getUser}. An empty list is a 200 — see
    * {@link UserGroups.groups}.
    */
   listUserGroups(userId: string, accountId: string | null): Promise<UserGroups>;
+
+  /**
+   * One group in full, for the group modal.
+   *
+   * Not cached, unlike a world, and the difference is not an oversight: a group's live figures —
+   * the online member count, and the viewer's own membership status — are the reason to open the
+   * dialog, and a cached one would show yesterday's. Worlds are the same record whoever asks and
+   * change on a release cadence; groups are neither.
+   *
+   * `accountId` chooses whose eyes, as everywhere: `membershipStatus` and `myMember` are statements
+   * about the *asking* account, and a private group answers 404 to an account that cannot see it.
+   *
+   * Throws `ControlError(404, "unknown_group")` when VRChat 404s, `ControlError(404,
+   * "unknown_account")` for a named account that does not exist, and `ControlError(503,
+   * "no_account")` when nobody is signed in.
+   */
+  getGroup(groupId: string, accountId: string | null): Promise<GroupDetail>;
 
   /**
    * One world, cached.
@@ -932,6 +1046,34 @@ export function parseWorldIds(raw: string | undefined): string[] {
   return [...new Set(requested.filter((id) => WORLD_ID_PATTERN.test(id)))];
 }
 
+/**
+ * Splits and filters the `ids` query parameter of the user batch.
+ *
+ * Malformed ids are **dropped, not rejected**, while too many is a 400 — the same asymmetry as
+ * `parseWorldIds`, and the same contract: an unresolvable id is absent from the answer, and an id
+ * that cannot even be a user id is the most unresolvable kind there is. A cap, by contrast, is
+ * about what this endpoint is willing to spend upstream, and silently truncating it would serve a
+ * partial answer that looks complete.
+ */
+export function parseUserIds(raw: string | undefined): string[] {
+  if (raw === undefined) {
+    throw new ControlError(400, "invalid_query", "ids is required");
+  }
+
+  const requested = raw.split(",").map((id) => id.trim());
+  if (requested.length > MAX_USER_IDS) {
+    throw new ControlError(
+      400,
+      "too_many_ids",
+      `at most ${String(MAX_USER_IDS)} user ids per request`,
+    );
+  }
+
+  // De-duplicated: the caller is a roster, and a roster can name the same person twice while the
+  // log and the endpoint disagree for a second about who has left.
+  return [...new Set(requested.filter((id) => USER_ID_PATTERN.test(id)))];
+}
+
 /** Validates the `:id` path parameter of the user routes. */
 export function parseUserId(raw: string | undefined): string {
   if (raw === undefined || raw === "") {
@@ -942,6 +1084,26 @@ export function parseUserId(raw: string | undefined): string {
   }
   return raw;
 }
+
+/**
+ * Validates a group id, for the route that interpolates one into `GET /groups/{groupId}`.
+ *
+ * Stricter than `parseUserId` because it can afford to be: every group id VRChat has ever issued is
+ * a `grp_` prefix and a UUID, with none of the legacy shapes that make user ids a character
+ * allowlist rather than a pattern. What matters either way is that `/`, `?`, `#`, and `%` cannot
+ * appear and turn one path segment into several.
+ */
+export function parseGroupId(raw: string | undefined): string {
+  if (raw === undefined || raw === "") {
+    throw new ControlError(400, "invalid_group_id", "a group id is required");
+  }
+  if (!GROUP_ID_PATTERN.test(raw)) {
+    throw new ControlError(400, "invalid_group_id", "that is not a VRChat group id");
+  }
+  return raw;
+}
+
+const GROUP_ID_PATTERN = /^grp_[0-9A-Za-z_-]{1,64}$/;
 
 /**
  * The longest note accepted. VRChat's own `/userNotes` caps at 256 characters, and a local note
@@ -1072,6 +1234,17 @@ export function createControlApp({ port, deps, token }: ControlAppOptions) {
     })
 
     /*
+     * Attributes for many users in one request — the roster's fallback when VRChat will not
+     * describe an instance, which is nearly always. Registered before `/api/users/:id` for
+     * readability only; Hono matches the literal path and the parameterised one as distinct routes.
+     */
+    .get("/api/users", async (c) => {
+      const ids = parseUserIds(c.req.query("ids"));
+      const accountId = nonEmpty(c.req.query("accountId")) ?? null;
+      return c.json(await deps.listUsers(ids, accountId));
+    })
+
+    /*
      * The user modal's payload: VRChat's own record merged with the friend log and the local note.
      * `?accountId=` picks whose eyes; omitted, the daemon uses any online account.
      */
@@ -1105,6 +1278,16 @@ export function createControlApp({ port, deps, token }: ControlAppOptions) {
           offset: parseOffset(c.req.query("offset")),
         }),
       );
+    })
+
+    /*
+     * One group, for the group modal. Live every time — see {@link ControlDeps.getGroup} for why a
+     * group is not cached the way a world is.
+     */
+    .get("/api/groups/:id", async (c) => {
+      const groupId = parseGroupId(c.req.param("id"));
+      const accountId = nonEmpty(c.req.query("accountId")) ?? null;
+      return c.json(await deps.getGroup(groupId, accountId));
     })
 
     /*

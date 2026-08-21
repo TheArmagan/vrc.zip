@@ -316,7 +316,45 @@ export interface UserGroup {
   readonly bannerUrl: string | null;
   /** VRChat's group privacy string — `default` or `private`. Null when it did not say. */
   readonly privacy: string | null;
+  /** The owner's `usr_…`, or null. VRChat sends no display name with it — see `GroupModal`. */
+  readonly ownerId: string | null;
   readonly isRepresenting: boolean;
+}
+
+/**
+ * One group in full — a `UserGroup` plus everything only `GET /groups/{id}` carries.
+ *
+ * It extends the summary rather than restating it, which is what lets the modal paint from a badge
+ * or a list row the instant it opens and fill the rest in when the fetch lands. Two shapes
+ * overlapping by nine fields would eventually disagree about one of them.
+ */
+export interface GroupDetail extends UserGroup {
+  /** Integer unix ms, or null. The daemon converts; VRChat's own ISO string never reaches here. */
+  readonly createdAt: number | null;
+  /**
+   * Members online now, against `memberCount` for the total.
+   *
+   * VRChat recomputes this on its own schedule and says when in `memberCountSyncedAt`, which is why
+   * the modal prints the age beside it — a live-looking number with no age reads as this second's.
+   */
+  readonly onlineMemberCount: number | null;
+  readonly memberCountSyncedAt: number | null;
+  /** The group's rules, author-written, newlines and all. */
+  readonly rules: string | null;
+  readonly links: readonly string[];
+  /** Three-letter language codes, as VRChat stores them. */
+  readonly languages: readonly string[];
+  /** VRChat's own tags, its `system_` bookkeeping ones included. */
+  readonly tags: readonly string[];
+  readonly isVerified: boolean;
+  /** `open`, `invite`, `request`, `closed` — how one would join, in VRChat's word. */
+  readonly joinState: string | null;
+  /**
+   * The *asking account's* standing: `member`, `requested`, `invited`, `userblocked`, or null.
+   *
+   * A statement about the viewer rather than about the group, so it moves when `accountId` does.
+   */
+  readonly membershipStatus: string | null;
 }
 
 /** A friend the asking account and the viewed user have in common. */
@@ -1012,6 +1050,32 @@ export const api = {
       }),
 
     /**
+     * Attributes for many users in one request — the roster's fallback path.
+     *
+     * `instanceUsers` is the cheap way to learn what a room full of people are like, and it almost
+     * never answers: VRChat sends a roster only for an instance the account *created*. This is the
+     * expensive way — one lookup per person, served from the daemon's user cache where it can be —
+     * so callers ask only for the people they still have nothing about.
+     *
+     * **An id that could not be read is absent from the list**, never an error and never a null
+     * entry, so one deleted account cannot cost a room of eighty their chips. It never throws
+     * `no_account` either: with nobody signed in it answers with whatever the cache holds.
+     */
+    batch: async (
+      ids: readonly string[],
+      accountId?: string | null,
+      signal?: AbortSignal,
+    ): Promise<InstanceUser[]> =>
+      ids.length === 0
+        ? []
+        : (
+            await request<{ readonly users: readonly InstanceUser[] }>("/users", {
+              query: { ids: ids.join(","), accountId },
+              ...withSignal(signal),
+            })
+          ).users.slice(),
+
+    /**
      * The groups a user is in, with the represented one flagged.
      *
      * VRChat only returns the memberships the *asking* account is allowed to see, so a short list
@@ -1057,6 +1121,25 @@ export const api = {
         method: "PUT",
         query: { accountId },
         body: { note },
+      }),
+  },
+
+  groups: {
+    /**
+     * One group in full, for the group modal.
+     *
+     * Live every time — a group is not cached the way a world is, because the two numbers worth
+     * opening the dialog for are the online member count and this account's own membership status,
+     * and a cached answer would be neither.
+     *
+     * A 404 covers two cases the daemon cannot tell apart: the group is gone, or it is private to
+     * this account. The modal says both rather than picking one. 503 when no account is signed in
+     * — see `isNoAccountOnline`.
+     */
+    get: (groupId: string, accountId?: string | null, signal?: AbortSignal): Promise<GroupDetail> =>
+      request<GroupDetail>(`/groups/${encodeURIComponent(groupId)}`, {
+        query: { accountId },
+        ...withSignal(signal),
       }),
   },
 
@@ -1119,13 +1202,13 @@ export const api = {
   /**
    * Attributes for everyone VRChat believes is in `location`, seen through `accountId`.
    *
-   * `accountId` is not decoration: `isFriend` is a statement about the asking account, and VRChat
-   * only fills the roster at all for an account standing in that instance. Omit it and the daemon
-   * picks an online account itself.
+   * `accountId` is not decoration: `isFriend` is a statement about the asking account. Omit it and
+   * the daemon picks an online account itself.
    *
-   * A well-formed `source: "unavailable"` is the **normal** answer for an instance nobody signed
-   * in is standing in — the design working, not a failure. Callers render the log-derived roster
-   * with a plain sentence rather than an error state.
+   * A well-formed `source: "unavailable"` is the **normal** answer for nearly every instance:
+   * VRChat sends `users` only for an instance the asking account *created*, not for one it is
+   * standing in. The design working, not a failure — callers render the log-derived roster with a
+   * plain sentence rather than an error state.
    */
   instanceUsers: async (
     location: string,

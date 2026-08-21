@@ -79,9 +79,15 @@ $effect(() => {
   {/if}
 
   <!--
-    The scrim. The avatar and the dialog's close button overlap the bottom of this band, and a
-    user-supplied image can be any colour at all, so the fade to the popover surface is what keeps
-    both legible without dimming the whole picture.
+    The scrim. The avatar, the title and the dialog's close button all overlap the bottom of this
+    band, and a user-supplied image can be any colour at all, so the fade to the popover surface is
+    what keeps them legible without dimming the whole picture.
+
+    It stays a gentle fade on purpose. An earlier pass made the bottom two-fifths near-opaque to
+    stop the header text being cut apart — which worked, and cost most of a world's hero image to
+    do it. The cutting was never an opacity problem: this element is `absolute` and the header is
+    static, so the scrim painted *over* the text no matter what colour it was. `EntityModal` gives
+    the header a stacking position instead, and the image gets to be an image again.
   -->
   <div
     class="absolute inset-0 bg-gradient-to-t from-popover via-popover/50 to-transparent"

@@ -10,14 +10,19 @@ import Trash2Icon from "@lucide/svelte/icons/trash-2";
 import UserPlusIcon from "@lucide/svelte/icons/user-plus";
 import UsersRoundIcon from "@lucide/svelte/icons/users-round";
 import { toast } from "svelte-sonner";
-import { api, describeError } from "$lib/api.ts";
+import { api, describeError, imageUrl } from "$lib/api.ts";
 import ConnectionDot from "$lib/components/ConnectionDot.svelte";
 import EmptyState from "$lib/components/EmptyState.svelte";
 import ErrorNote from "$lib/components/ErrorNote.svelte";
 import RelativeTime from "$lib/components/RelativeTime.svelte";
 import SectionHeader from "$lib/components/SectionHeader.svelte";
 import * as Alert from "$lib/components/ui/alert/index.js";
-import { Avatar, AvatarFallback } from "$lib/components/ui/avatar/index.js";
+import {
+  Avatar,
+  AvatarBadge,
+  AvatarFallback,
+  AvatarImage,
+} from "$lib/components/ui/avatar/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
 import * as Dialog from "$lib/components/ui/dialog/index.js";
 import { Separator } from "$lib/components/ui/separator/index.js";
@@ -105,14 +110,18 @@ async function confirmRemove(): Promise<void> {
           (session) => session.accountId === account.id,
         )}
         <li class="flex items-center gap-3 px-4 py-3">
-          <div class="relative shrink-0">
-            <Avatar class="size-9">
-              <AvatarFallback class="text-xs">{initials(account.displayName)}</AvatarFallback>
-            </Avatar>
-            <span class="absolute -right-0.5 -bottom-0.5 rounded-full bg-background p-0.5">
-              <ConnectionDot connection={account.connection} size={9} />
-            </span>
-          </div>
+          <!--
+            alt="" on purpose: the display name is the very next element, so announcing the icon
+            too would read the name twice. The dot stays aria-hidden — `connectionLabel()` spells
+            the same state out in words directly under the name.
+          -->
+          <Avatar class="size-9">
+            <AvatarImage src={imageUrl(account.iconUrl)} alt="" loading="lazy" />
+            <AvatarFallback class="text-xs">{initials(account.displayName)}</AvatarFallback>
+            <AvatarBadge class="bg-transparent ring-background">
+              <ConnectionDot connection={account.connection} size={null} class="size-full" />
+            </AvatarBadge>
+          </Avatar>
 
           <div class="min-w-0 flex-1">
             <p class="truncate text-sm font-medium">{account.displayName}</p>

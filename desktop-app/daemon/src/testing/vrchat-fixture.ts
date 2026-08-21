@@ -31,6 +31,8 @@ export interface FixtureFriend {
   readonly location?: string;
   readonly tags?: readonly string[];
   readonly platform?: string;
+  /** Absent means the friend has no icon, which VRChat reports as `""`, not by omission. */
+  readonly userIcon?: string;
 }
 
 export interface FixtureOptions {
@@ -274,6 +276,11 @@ export function startVrchatFixture(options: FixtureOptions): VrchatFixture {
             location: f.location ?? (f.online ? "wrld_example:12345" : "offline"),
             tags: f.tags ?? [],
             platform: f.platform ?? "standalonewindows",
+            // VRChat sends empty strings for unset images rather than omitting the field. Modelled
+            // faithfully, because a `??` chain over these looks correct right up until it hands the
+            // UI a blank `src`.
+            userIcon: f.userIcon ?? "",
+            profilePicOverride: "",
             currentAvatarImageUrl: "",
           })),
         );

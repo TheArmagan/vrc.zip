@@ -15,6 +15,11 @@ import {
 const PORT = 7775;
 const TOKEN = generateSessionToken();
 
+/** A one-pixel PNG's worth of leading bytes — enough for anything that sniffs magic numbers. */
+const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01]);
+
+const ICON_URL = "https://api.vrchat.cloud/api/1/file/file_icon/1/256";
+
 const ACCOUNT: ControlAccount = {
   id: "usr_00000000-0000-0000-0000-000000000000",
   displayName: "Tester",
@@ -22,6 +27,7 @@ const ACCOUNT: ControlAccount = {
   enabled: true,
   lastSeenAt: null,
   connection: "connected",
+  iconUrl: ICON_URL,
 };
 
 interface Recorder {
@@ -29,6 +35,7 @@ interface Recorder {
   friendQueries: (string | null)[];
   notificationQueries: (string | null)[];
   notificationsSeen: string[];
+  imageUrls: string[];
   removed: string[];
   listeners: ((event: StreamEvent) => void)[];
   unsubscribed: number;
@@ -40,6 +47,7 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     friendQueries: [],
     notificationQueries: [],
     notificationsSeen: [],
+    imageUrls: [],
     removed: [],
     listeners: [],
     unsubscribed: 0,
@@ -88,6 +96,11 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     },
     markNotificationSeen: async (id) => {
       seen.notificationsSeen.push(id);
+    },
+    fetchImage: async (url) => {
+      seen.imageUrls.push(url);
+      if (url.includes("missing")) return null;
+      return { bytes: PNG_BYTES, contentType: "image/png" };
     },
     getSettings: async () => settings,
     updateSettings: async (patch) => {
@@ -330,5 +343,97 @@ describe("GET /api/stream", () => {
     await Bun.sleep(50);
     expect(seen.unsubscribed).toBe(1);
     server.stop(true);
+  });
+});
+
+describe("GET /api/image", () => {
+  function imagePath(url: string): string {
+    return `/api/image?url=${encodeURIComponent(url)}`;
+  }
+
+  test("serves the bytes with a sniffable content type, an ETag, and a long private max-age", async () => {
+    const { deps, seen } = fakeDeps();
+    const res = await call(deps, imagePath(ICON_URL));
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("image/png");
+    expect(res.headers.get("Cache-Control")).toBe("private, max-age=604800, immutable");
+    expect(res.headers.get("ETag")).toMatch(/^"[0-9a-f]{32}"$/);
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(PNG_BYTES);
+    expect(seen.imageUrls).toEqual([ICON_URL]);
+  });
+
+  test("If-None-Match is answered 304 without ever reaching the daemon", async () => {
+    const { deps, seen } = fakeDeps();
+    const first = await call(deps, imagePath(ICON_URL));
+    const etag = first.headers.get("ETag") ?? "";
+
+    const second = await call(deps, imagePath(ICON_URL), {
+      headers: { "if-none-match": etag },
+    });
+    expect(second.status).toBe(304);
+    expect(second.headers.get("ETag")).toBe(etag);
+    // The whole point of hashing the URL rather than the bytes: no upstream fetch on a revalidate.
+    expect(seen.imageUrls).toEqual([ICON_URL]);
+
+    // A weak validator and a list both still match.
+    const weak = await call(deps, imagePath(ICON_URL), {
+      headers: { "if-none-match": `W/${etag}, "something-else"` },
+    });
+    expect(weak.status).toBe(304);
+  });
+
+  test("400s on a missing, unparseable, or non-https url", async () => {
+    const { deps } = fakeDeps();
+    for (const path of [
+      "/api/image",
+      "/api/image?url=",
+      `/api/image?url=${encodeURIComponent("not a url")}`,
+      `/api/image?url=${encodeURIComponent("http://api.vrchat.cloud/api/1/file/x")}`,
+      `/api/image?url=${encodeURIComponent("file:///C:/Windows/win.ini")}`,
+    ]) {
+      const res = await call(deps, path);
+      expect(res.status, path).toBe(400);
+      expect(await res.json()).toMatchObject({ error: "invalid_url" });
+    }
+  });
+
+  test("the host allowlist is an exact match, so a suffix attack fails", async () => {
+    const { deps, seen } = fakeDeps();
+    for (const host of [
+      "evil-api.vrchat.cloud.attacker.tld",
+      "api.vrchat.cloud.attacker.tld",
+      "attacker.tld",
+      "127.0.0.1",
+      "169.254.169.254",
+      "vrchat.cloud",
+    ]) {
+      const res = await call(deps, imagePath(`https://${host}/api/1/file/x`));
+      expect(res.status, host).toBe(400);
+    }
+    // Not one of them was handed to the daemon to fetch.
+    expect(seen.imageUrls).toEqual([]);
+
+    for (const host of ["api.vrchat.cloud", "assets.vrchat.com", "files.vrchat.cloud"]) {
+      expect((await call(deps, imagePath(`https://${host}/x.png`))).status).toBe(200);
+    }
+  });
+
+  test("404s when upstream has no such image", async () => {
+    const { deps } = fakeDeps();
+    const res = await call(deps, imagePath("https://api.vrchat.cloud/api/1/file/missing"));
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ error: "image_not_found" });
+  });
+
+  test("503s when no account is online", async () => {
+    const { deps } = fakeDeps({
+      fetchImage: async () => {
+        throw new ControlError(503, "no_account");
+      },
+    });
+    const res = await call(deps, imagePath(ICON_URL));
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ error: "no_account" });
   });
 });

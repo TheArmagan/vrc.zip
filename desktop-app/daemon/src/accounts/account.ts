@@ -3,6 +3,7 @@ import type { EventBus } from "../bus/event-bus.ts";
 import type { RateLimiter } from "../net/rate-limiter.ts";
 import type { RequestContext } from "../net/request.ts";
 import { vrcFetch } from "../net/request.ts";
+import { pickUserImageUrl } from "../net/user-image.ts";
 import type { AccountSecret } from "../security/secrets.ts";
 import {
   AuthError,
@@ -37,6 +38,12 @@ export interface AccountSnapshot {
   readonly state: AccountState;
   readonly lastError: string | null;
   readonly pendingTwoFactorMethods: readonly TwoFactorAuthType[];
+  /**
+   * The account's own icon as an absolute VRChat image URL, or null. Null until `#user` is
+   * populated, which is only after a successful sign-in — a snapshot taken mid-2FA has no user yet.
+   * The URL needs the auth cookie and the mandatory UA, so it is loaded through `GET /api/image`.
+   */
+  readonly iconUrl: string | null;
 }
 
 export interface AccountDeps {
@@ -104,6 +111,7 @@ export class Account {
       state: this.#state,
       lastError: this.#lastError,
       pendingTwoFactorMethods: [...this.#pending2fa],
+      iconUrl: pickUserImageUrl(this.#user),
     };
   }
 

@@ -23,6 +23,7 @@ const deps: ControlDeps = {
   listEvents: async () => [],
   listFriends: async () => [],
   listNotifications: async () => [],
+  fetchImage: async () => null,
   markNotificationSeen: async () => {},
   getSettings: async () => ({}),
   updateSettings: async () => ({}),

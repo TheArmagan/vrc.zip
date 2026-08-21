@@ -9,7 +9,7 @@
 <script lang="ts">
 import SearchIcon from "@lucide/svelte/icons/search";
 import UsersIcon from "@lucide/svelte/icons/users";
-import { api, describeError, type Friend, isAbort } from "$lib/api.ts";
+import { api, describeError, type Friend, imageUrl, isAbort } from "$lib/api.ts";
 import AccountFilter from "$lib/components/AccountFilter.svelte";
 import EmptyState from "$lib/components/EmptyState.svelte";
 import ErrorNote from "$lib/components/ErrorNote.svelte";
@@ -17,7 +17,12 @@ import LocationLine from "$lib/components/LocationLine.svelte";
 import RelativeTime from "$lib/components/RelativeTime.svelte";
 import SectionHeader from "$lib/components/SectionHeader.svelte";
 import StatusDot from "$lib/components/StatusDot.svelte";
-import { Avatar, AvatarFallback } from "$lib/components/ui/avatar/index.js";
+import {
+  Avatar,
+  AvatarBadge,
+  AvatarFallback,
+  AvatarImage,
+} from "$lib/components/ui/avatar/index.js";
 import * as InputGroup from "$lib/components/ui/input-group/index.js";
 import { Skeleton } from "$lib/components/ui/skeleton/index.js";
 import { initials, platformLabel, statusLabel } from "$lib/format.ts";
@@ -137,14 +142,19 @@ const onlineCount = $derived(friends.filter((friend) => friend.status !== "offli
       {#each visible as friend (friend.id)}
         {@const platform = platformLabel(friend.platform)}
         <li class="flex items-center gap-3 px-4 py-3">
-          <div class="relative shrink-0">
-            <Avatar class="size-9">
-              <AvatarFallback class="text-xs">{initials(friend.displayName)}</AvatarFallback>
-            </Avatar>
-            <span class="absolute -right-0.5 -bottom-0.5 rounded-full bg-background p-0.5">
-              <StatusDot status={friend.status} size={9} />
-            </span>
-          </div>
+          <!--
+            alt="" on purpose: the display name is right there in the next column, so a screen
+            reader announcing the icon as well would just read the name twice. The presence dot
+            is aria-hidden for the same reason — the status word is spelled out further along
+            the row, so colour is never the only signal.
+          -->
+          <Avatar class="size-9">
+            <AvatarImage src={imageUrl(friend.iconUrl)} alt="" loading="lazy" />
+            <AvatarFallback class="text-xs">{initials(friend.displayName)}</AvatarFallback>
+            <AvatarBadge class="bg-transparent ring-background">
+              <StatusDot status={friend.status} size={null} class="size-full" />
+            </AvatarBadge>
+          </Avatar>
 
           <div class="min-w-0 flex-1">
             <p class="truncate text-sm">{friend.displayName}</p>

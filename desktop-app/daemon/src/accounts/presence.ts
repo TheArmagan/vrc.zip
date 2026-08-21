@@ -2,6 +2,7 @@ import type { LimitedUserFriend } from "@vrcz/api/types";
 import type { EventBus, Subscription } from "../bus/event-bus.ts";
 import { JitteredInterval } from "../net/jitter.ts";
 import { vrcFetch } from "../net/request.ts";
+import { pickUserImageUrl } from "../net/user-image.ts";
 import type { Store } from "../store/index.ts";
 import type { AccountManager } from "./manager.ts";
 
@@ -54,6 +55,12 @@ export interface FriendPresenceRecord {
   readonly platform: string | null;
   readonly trustLevel: string;
   readonly isOnline: boolean;
+  /**
+   * An absolute VRChat image URL, or null when the friend has no image at all. It is *not* loadable
+   * by a browser: those URLs need the account's auth cookie and the mandatory User-Agent, so the UI
+   * goes through the daemon's `GET /api/image` proxy.
+   */
+  readonly iconUrl: string | null;
   /** Unix ms this record was last updated from any source. */
   readonly lastSeenAt: number;
 }
@@ -185,6 +192,7 @@ export class PresenceService {
       platform: friend.platform ?? null,
       trustLevel: trustLevelOf(friend.tags),
       isOnline,
+      iconUrl: pickUserImageUrl(friend),
       lastSeenAt: now,
     };
   }
@@ -258,6 +266,10 @@ export class PresenceService {
       platform: user?.platform ?? existing?.platform ?? null,
       trustLevel: user?.tags ? trustLevelOf(user.tags) : (existing?.trustLevel ?? "visitor"),
       isOnline,
+      // A pipeline frame carries a *partial* user, and several frame types carry none of the image
+      // fields at all. Falling back to what we already have is the difference between an icon that
+      // stays put and one that blinks out the moment a friend changes status.
+      iconUrl: pickUserImageUrl(user) ?? existing?.iconUrl ?? null,
       lastSeenAt: now,
     });
   }

@@ -38,6 +38,12 @@ export interface ControlAccount {
   lastSeenAt: number | null;
   /** Pipeline/login state, as the UI's status dot renders it. */
   connection: "connected" | "connecting" | "disconnected" | "needs-2fa";
+  /**
+   * An absolute VRChat image URL, or null. **The UI must load it through `GET /api/image`, never
+   * directly** — `api.vrchat.cloud` image URLs require the account's auth cookie and the mandatory
+   * User-Agent, neither of which a browser can supply, so a bare `<img src>` gets a 403.
+   */
+  iconUrl: string | null;
 }
 
 export interface RateLimitSnapshot {
@@ -137,6 +143,12 @@ export interface FriendPresence {
   location: string | null;
   worldId: string | null;
   platform: string | null;
+  /**
+   * An absolute VRChat image URL, or null. **The UI must load it through `GET /api/image`, never
+   * directly** — `api.vrchat.cloud` image URLs require the account's auth cookie and the mandatory
+   * User-Agent, neither of which a browser can supply, so a bare `<img src>` gets a 403.
+   */
+  iconUrl: string | null;
   /** Unix milliseconds, integer, or null when unknown. */
   lastSeenAt: number | null;
 }
@@ -182,6 +194,17 @@ export interface ControlDeps {
   listNotifications(accountId: string | null): Promise<NotificationItem[]>;
   markNotificationSeen(id: string): Promise<void>;
 
+  /**
+   * Fetches one VRChat image through an online account, cached.
+   *
+   * `null` means upstream said the image does not exist (a 404), which the route turns into a 404.
+   * No online account is a `ControlError(503, "no_account")` from the implementation — the daemon
+   * has no cookie to fetch with, and pretending otherwise would return a broken image forever.
+   *
+   * The URL arriving here has **already passed the host allowlist**; see `parseImageUrl`.
+   */
+  fetchImage(url: string): Promise<{ bytes: Uint8Array; contentType: string } | null>;
+
   getSettings(): Promise<Settings>;
   /** Merges the patch and resolves to the settings as they now stand. */
   updateSettings(patch: SettingsPatch): Promise<Settings>;
@@ -219,6 +242,80 @@ export interface ControlAppOptions {
 
 const DEFAULT_EVENT_LIMIT = 100;
 const MAX_EVENT_LIMIT = 500;
+
+/**
+ * The only hosts `GET /api/image` will fetch from.
+ *
+ * **This is the daemon's SSRF boundary.** Every other outbound request the daemon makes goes to a
+ * path it chose itself against `api.vrchat.cloud`; this is the one route where the *caller* names
+ * the URL, and the caller is a web page. Without this list, anything that can reach the control
+ * port — a malicious plugin's UI, a stored URL in a friend record VRChat let someone set — could
+ * make the daemon fetch `http://169.254.169.254/`, `http://127.0.0.1:<proxy port>/`, or any
+ * intranet host, and read the response back.
+ */
+const IMAGE_HOSTS: ReadonlySet<string> = new Set([
+  "api.vrchat.cloud",
+  "assets.vrchat.com",
+  "files.vrchat.cloud",
+]);
+
+/** How long a browser may keep an image without revalidating. Icons change on the order of months. */
+const IMAGE_CACHE_CONTROL = "private, max-age=604800, immutable";
+
+/**
+ * Validates and normalises the `url` query parameter of `GET /api/image`.
+ *
+ * Throws `ControlError(400, "invalid_url")` for anything the daemon must not fetch. The host match
+ * is **exact** — deliberately not a suffix test, because `evil-api.vrchat.cloud.attacker.tld` ends
+ * with nothing useful and `api.vrchat.cloud.attacker.tld` ends with `.attacker.tld`, yet a
+ * `endsWith("vrchat.cloud")` check passes the first and a naive `includes` passes both.
+ */
+export function parseImageUrl(raw: string | undefined): string {
+  if (raw === undefined || raw === "") {
+    throw new ControlError(400, "invalid_url", "url is required");
+  }
+
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new ControlError(400, "invalid_url", "url is not a URL");
+  }
+
+  // Plain http is refused rather than upgraded: an upgrade would hide a caller that meant to reach
+  // something local, and VRChat serves every image over https anyway.
+  if (url.protocol !== "https:") {
+    throw new ControlError(400, "invalid_url", "url must be https");
+  }
+
+  // `URL` has already lowercased and punycoded the host, so this compares normalised forms.
+  if (!IMAGE_HOSTS.has(url.hostname)) {
+    throw new ControlError(400, "invalid_url", `host ${url.hostname} is not a VRChat image host`);
+  }
+
+  return url.toString();
+}
+
+/**
+ * The ETag for an image URL: a hash of the (normalised) URL, not of the bytes.
+ *
+ * Hashing the URL means a conditional request is answered without fetching or even reading the
+ * image — which is the entire point, since the expensive part is the upstream request. VRChat's
+ * image URLs carry a file *version* in the path, so new bytes arrive under a new URL.
+ */
+export function imageETag(url: string): string {
+  return `"${new Bun.CryptoHasher("sha256").update(url, "utf8").digest("hex").slice(0, 32)}"`;
+}
+
+/** `If-None-Match` is a comma-separated list, and may weaken each entry with a `W/` prefix. */
+function matchesETag(header: string | undefined, etag: string): boolean {
+  if (header === undefined) return false;
+  if (header.trim() === "*") return true;
+  return header
+    .split(",")
+    .map((entry) => entry.trim().replace(/^W\//, ""))
+    .includes(etag);
+}
 
 const { upgradeWebSocket, websocket } = createBunWebSocket<ServerWebSocket>();
 
@@ -290,6 +387,39 @@ export function createControlApp({ port, deps, token }: ControlAppOptions) {
     .post("/api/notifications/:id/seen", async (c) => {
       await deps.markNotificationSeen(c.req.param("id"));
       return c.body(null, 204);
+    })
+
+    /*
+     * The image proxy. `GET /api/image?url=<encodeURIComponent(absolute url)>`.
+     *
+     * A browser cannot load a VRChat image URL itself — they require the account's auth cookie and
+     * the mandatory User-Agent — so every avatar in the UI comes through here. The route stays a
+     * thin translation: validation, caching headers, and a call into `deps`.
+     */
+    .get("/api/image", async (c) => {
+      const url = parseImageUrl(c.req.query("url"));
+      const etag = imageETag(url);
+
+      // Answered before touching `deps`: the whole value of an ETag here is skipping the upstream
+      // fetch, and the tag is derived from the URL alone precisely so that is possible.
+      if (matchesETag(c.req.header("If-None-Match"), etag)) {
+        return new Response(null, {
+          status: 304,
+          headers: { ETag: etag, "Cache-Control": IMAGE_CACHE_CONTROL },
+        });
+      }
+
+      const image = await deps.fetchImage(url);
+      if (image === null) throw new ControlError(404, "image_not_found");
+
+      return new Response(image.bytes, {
+        status: 200,
+        headers: {
+          "Content-Type": image.contentType,
+          "Cache-Control": IMAGE_CACHE_CONTROL,
+          ETag: etag,
+        },
+      });
     })
 
     .get("/api/settings", async (c) => c.json(await deps.getSettings()))

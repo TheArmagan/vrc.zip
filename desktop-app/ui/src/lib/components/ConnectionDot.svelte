@@ -7,8 +7,18 @@
 <script lang="ts">
 import type { AccountConnection } from "$lib/api.ts";
 import { connectionLabel } from "$lib/format.ts";
+import { cn } from "$lib/utils.js";
 
-let { connection, size = 8 }: { connection: AccountConnection; size?: number } = $props();
+let {
+  connection,
+  size = 8,
+  class: className,
+}: {
+  connection: AccountConnection;
+  /** Edge length in px. Pass `null` to size the dot from `class` instead (e.g. `size-full`). */
+  size?: number | null;
+  class?: string;
+} = $props();
 
 const CLASSES: Record<AccountConnection, string> = {
   connected: "bg-status-online",
@@ -19,8 +29,8 @@ const CLASSES: Record<AccountConnection, string> = {
 </script>
 
 <span
-  class="inline-block shrink-0 rounded-full {CLASSES[connection]}"
-  style="width: {size}px; height: {size}px"
+  class={cn("inline-block shrink-0 rounded-full", CLASSES[connection], className)}
+  style={size === null ? undefined : `width: ${String(size)}px; height: ${String(size)}px`}
   title={connectionLabel(connection)}
   aria-hidden="true"
 ></span>

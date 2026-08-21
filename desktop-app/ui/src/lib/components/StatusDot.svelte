@@ -8,8 +8,18 @@
 <script lang="ts">
 import type { FriendStatus } from "$lib/api.ts";
 import { statusLabel } from "$lib/format.ts";
+import { cn } from "$lib/utils.js";
 
-let { status, size = 8 }: { status: FriendStatus; size?: number } = $props();
+let {
+  status,
+  size = 8,
+  class: className,
+}: {
+  status: FriendStatus;
+  /** Edge length in px. Pass `null` to size the dot from `class` instead (e.g. `size-full`). */
+  size?: number | null;
+  class?: string;
+} = $props();
 
 const CLASSES: Readonly<Record<string, string>> = {
   active: "bg-status-online",
@@ -23,8 +33,8 @@ const dotClass = $derived(CLASSES[status] ?? "bg-status-offline");
 </script>
 
 <span
-  class="inline-block shrink-0 rounded-full {dotClass}"
-  style="width: {size}px; height: {size}px"
+  class={cn("inline-block shrink-0 rounded-full", dotClass, className)}
+  style={size === null ? undefined : `width: ${String(size)}px; height: ${String(size)}px`}
   title={statusLabel(status)}
   aria-hidden="true"
 ></span>

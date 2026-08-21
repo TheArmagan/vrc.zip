@@ -2,7 +2,9 @@ import type { AccountSnapshot } from "../accounts/account.ts";
 import type { AccountManager } from "../accounts/manager.ts";
 import type { PresenceService } from "../accounts/presence.ts";
 import type { EventBus } from "../bus/event-bus.ts";
+import { ImageCache } from "../net/image-cache.ts";
 import type { RateLimiter } from "../net/rate-limiter.ts";
+import { vrcFetch } from "../net/request.ts";
 import type { SecretsStore } from "../security/secrets.ts";
 import {
   type ControlAccount,
@@ -79,12 +81,17 @@ function toControlAccount(snapshot: AccountSnapshot, addedAt: number): ControlAc
     enabled: true,
     lastSeenAt: snapshot.state === "online" ? Date.now() : null,
     connection: connectionOf(snapshot),
+    iconUrl: snapshot.iconUrl,
   };
 }
 
 export function createControlDeps(options: ControlDepsOptions): ControlDeps {
   const { accounts, store, bus, limiter, secrets, presence, connectPipeline } = options;
   let settings = options.settings;
+
+  // One cache for the whole daemon. Its de-duplication only works if every caller shares it, and a
+  // per-request instance would also re-run the eviction sweep on every avatar.
+  const images = new ImageCache(options.env === undefined ? {} : { env: options.env });
 
   function accountRowAddedAt(id: string): number {
     return store.getAccount(id)?.added_at ?? Date.now();
@@ -228,6 +235,7 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         location: record.location,
         worldId: record.worldId,
         platform: record.platform,
+        iconUrl: record.iconUrl,
         lastSeenAt: record.lastSeenAt,
       }));
     },
@@ -253,6 +261,53 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
 
     async markNotificationSeen(id): Promise<void> {
       store.markNotificationSeen(id);
+    },
+
+    async fetchImage(url) {
+      // The URL has already cleared the host allowlist in `control.ts`. Everything below still goes
+      // through an `Account` and therefore through `vrcFetch` — the rate limiter, the mandatory
+      // User-Agent, and one account's cookies are all structural here, not optional. `vrcFetch`
+      // passes an absolute URL through untouched, which is what makes an image URL usable at all.
+      return await images.load(url, async (absolute) => {
+        const online = accounts.list().find((snapshot) => snapshot.state === "online");
+        const account = online ? accounts.get(online.id) : undefined;
+        if (!account) {
+          throw new ControlError(
+            503,
+            "no_account",
+            "No account is online, and VRChat images cannot be fetched without one.",
+          );
+        }
+
+        // Charged to the file tier, not the API tier: VRChat meters files separately at 300/s
+        // per IP, and a friends screen is a few hundred icons. Billing those to the 100/s API
+        // budget would queue presence polling behind pictures on every cold start.
+        const response = await vrcFetch(account.context(), absolute, {
+          headers: { Accept: "image/*" },
+          rateClass: "file",
+        });
+
+        if (response.status === 404) {
+          await response.arrayBuffer().catch(() => undefined);
+          return null;
+        }
+        if (!response.ok) {
+          await response.arrayBuffer().catch(() => undefined);
+          throw new ControlError(502, "image_fetch_failed", `VRChat returned ${response.status}`);
+        }
+
+        // Refuse an oversized body before buffering it. A wrong or hostile URL that still cleared
+        // the allowlist should not be able to pull hundreds of megabytes into memory on its way to
+        // being rejected by the cache's own cap.
+        const declared = Number(response.headers.get("Content-Length") ?? "");
+        if (Number.isFinite(declared) && declared > images.maxImageBytes) {
+          await response.arrayBuffer().catch(() => undefined);
+          throw new ControlError(502, "image_too_large", "VRChat image exceeds the size cap");
+        }
+
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        return { bytes, contentType: response.headers.get("Content-Type") };
+      });
     },
 
     async getSettings(): Promise<WireSettings> {

@@ -6,7 +6,9 @@ was decided along the way.
 
 **Last updated:** 2026-08-21
 **Current phase:** Phase 1 — Foundation
-**Status:** Phase 1 built end to end — daemon + UI both run. 1.10 verification is partly done.
+**Status:** Phase 1 built end to end — daemon + UI both run, 372 tests green. 1.10 verification
+audited: most items covered, five automatable gaps listed below, and the rest needs a human with a
+real VRChat account.
 
 ---
 
@@ -89,8 +91,29 @@ behind each line.
 - [x] **1.9 UI** (`ui/`) — Svelte 5 + shadcn-svelte. Account switcher, login (all three 2FA paths),
       friend list, feed, game log, notifications, settings. **Command palette + command registry ship
       in Phase 1** even though plugins don't — retrofitting a registry is worse than building it empty.
-- [ ] **1.10 Verification** — see `PLAN.md` §1.10. Recorded-fixture server for CI; two real accounts
-      manually; RSS at 1h and 24h.
+- [ ] **1.10 Verification** — see `PLAN.md` §1.10. Audited item by item against the actual suite.
+      **Covered:** cookie jar; rate limiter + backoff; the three malformed pipeline content types;
+      log-parser golden files; retention rollup; fixture-server login, 401 re-auth and 429 backoff;
+      feed rows carrying the right `account_id`; one session per log file; unmanaged accounts staying
+      unlinked; pre-auth events attributed retroactively.
+      **Automatable gaps, ranked:**
+      1. *Two independent pipeline sockets* — a Phase-1 definition-of-done clause with **zero**
+         coverage. Nothing ever constructs two `PipelineClient`s. Needs a `pipelineUrl` option
+         threaded into `app.ts` before it is testable at all.
+      2. *2FA branching is one-third done* — only `totp` has a success path. `emailOtp` appears only
+         in a negative test, `otp` in none, despite §1.10 naming all three. The fixture already
+         supports it; parametrize the existing test.
+      3. *Crash isolation is single-session only* — no test has two concurrent sessions where one
+         goes quiet and the other keeps running, which is §1.10's actual wording.
+      4. *A foreign `Origin` is never sent to the live UI port* (a foreign `Host` is). One line.
+      5. *No full pipeline sequence through to the store*, and no test of two accounts holding live
+         presence simultaneously through the API.
+      **Not automatable — needs the user:** two *real* accounts signed in at once (only a live run
+      proves VRChat's session cap and the pipeline's IP binding); launching VRChat to confirm
+      world-join and player-join/leave rows; the Linux/Proton repeat; a real abrupt kill; idle RSS at
+      1h and at 24h.
+      **Also unverified:** `ui/` has no test runner and no tests at all — which is exactly where the
+      four silent bugs in §Gotchas escaped from.
 
 **Definition of done for Phase 1:** two accounts logged in simultaneously with independent pipeline
 sockets and zero cookie bleed, live presence in the UI, feed and game-log rows persisting with the
@@ -213,6 +236,20 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     header casing, an empty 401 body — and a stub papers over exactly those. It also models the
     missing-UA 403 and counts minted sessions, which is how the session-frugality guarantee is
     actually tested rather than asserted.
+24. **User icons are fetched by the daemon and served from `GET /api/image`, never loaded directly
+    by the browser.** VRChat's image URLs need the account's auth cookie and the mandatory
+    User-Agent, so a plain `<img src>` from the UI origin gets a 401/403 — the page cannot load them
+    itself even in principle. The route is therefore the **one place the daemon fetches a URL its
+    caller chose**, which makes it an SSRF boundary: the host allowlist is exact-match (no suffix
+    matching, so `evil-api.vrchat.cloud.attacker.tld` fails), https-only, and size-capped. It is
+    charged to the file rate tier, cached on disk by URL hash, and de-duplicated in flight. The
+    upside beyond "it works at all" is that the browser never talks to VRChat directly, so no page
+    load leaks the user's presence to VRChat outside the daemon's own honest traffic.
+25. **Scope creep declined: the friends list is not virtualized yet.** bits-ui preloads avatars
+    eagerly (see Gotchas), so a very large friends list front-loads its icon fetches. The file rate
+    tier absorbs it and the disk cache makes it once-ever, so this is a real but bounded cost — and
+    virtualizing a list is a change worth making against a measurement rather than a guess.
+
 23. **The EventBus fans out by prefix bucket, and `emit()` never awaits.** Async subscribers are
     observed only to route rejections to `onError`. A slow subscriber must not stall the pipeline
     reader, because a socket that stops draining is a socket VRChat eventually closes.
@@ -245,10 +282,21 @@ Found by running code. Each of these contradicted an assumption, and most were s
 - **`events` and `sessions` have foreign keys to `accounts`.** The account row must exist before
   anything references it — the composition root upserts accounts *before* attaching the feed writer,
   or the first batch of every cold start is lost.
-- **VRChat's 20 req/s is per IP, not per account.** Per-account buckets alone cannot see six
-  accounts each politely under their own limit adding up to 60/s. There is a global bucket at 80% of
-  the ceiling, and a contended call spends neither bucket (spending one while waiting on the other
-  leaks a token per contended call).
+- **VRChat enforces three rate limits, not one: 20 req/s per account, 100 req/s per IP, and 300
+  req/s per IP for file requests.** An earlier draft of this file recorded a single 20/s figure and
+  called it per-IP, which was wrong in both directions at once — it throttled the whole machine to
+  a fifth of the real API budget while leaving the actual per-account ceiling unrecorded, and it
+  had no concept of the file tier at all. Per-account buckets alone still cannot see six accounts
+  each politely under their own 20/s adding up to 120/s, so all three buckets stay. Each defaults
+  to 80% of its own ceiling (16/s, 80/s, 240/s).
+  - A contended API call spends **neither** the account nor the global bucket — spending one while
+    waiting on the other leaks a token per contended call.
+  - The **file bucket has no per-account partner**, deliberately. The per-account bucket exists to
+    stop one account starving the others under a *shared* ceiling; the file tier's ceiling is three
+    times the API one, so that problem barely exists, while charging icons to a 16/s per-account
+    bucket would make a 200-friend screen take twelve seconds to paint.
+  - The **429 breaker is shared across all three**. VRChat may throttle the tiers independently,
+    but pausing more than strictly necessary is the safe direction to be wrong in.
 - **`Date.parse("-5")` succeeds** — it reads as a year. Falling through from a rejected numeric
   `Retry-After` to a date parse turns malformed input into a confident wrong answer.
 - **Windows Credential Manager needs a P/Invoke shim.** There is no built-in cmdlet for generic
@@ -272,6 +320,37 @@ Found by running code. Each of these contradicted an assumption, and most were s
   after. This is a general Hono footgun, not a UI-server quirk.
 - **Test setup can hide a first-run bug.** The smoke tests all `mkdir`'d the state directory before
   starting, so the crash-on-fresh-install never appeared until someone ran it for real.
+
+Found while fixing the avatar and status-dot bugs (1.9 follow-up):
+
+- **An inline `<span>` with padding is not a circle.** The status badge was a `rounded-full`,
+  `p-0.5` *inline* span wrapping an `inline-block` dot; line-height leading inflated it into a tall
+  dark rectangle sitting behind the dot. The fix is the vendored shadcn `AvatarBadge` (an
+  `inline-flex` with `ring-2` instead of a padded fill) with the dot at `size-full`. Note the
+  surface token was **not** the bug — both lists sit directly on `AppShell`'s `bg-background`, so
+  `ring-background` was right all along. Worth recording because "wrong colour token" was the
+  obvious-looking diagnosis and it was wrong.
+- **`AvatarBadge` needs `bg-transparent` when its child paints the fill**, or the preset's default
+  `bg-primary` shows as a sliver at the rounded edge.
+- **`loading="lazy"` does almost nothing on a bits-ui `AvatarImage`.** bits-ui preloads through
+  `new Image()` before the rendered `<img>` ever exists, so a 200-friend list fires 200 proxy
+  fetches on first paint rather than on scroll. The disk cache makes that a one-time cost per icon,
+  and the file rate tier (above) is what keeps it from starving presence polling — but virtualizing
+  the friends list is the real fix if it ever bites.
+- **VRChat returns `""`, not `undefined`, for unset image fields.** `userIcon ?? profilePicOverride`
+  therefore picks the empty string and renders nothing. Every one of these needs an emptiness check,
+  not a nullish coalesce — `pickUserImageUrl` is the single place that does it.
+- **A cached image has no upstream `Content-Type`.** Sniffing magic bytes has to *win* over the
+  upstream header rather than the reverse, or the same URL answers differently depending on whether
+  it was a cache hit.
+- **The image cache evicts by mtime, not LRU**, on purpose: touching a file on read turns every
+  cache hit into a disk write. The cost is that a long-cached, still-displayed icon is occasionally
+  re-fetched. **404s are not negatively cached** — a deleted image is re-requested on every page
+  load. Cheap to add; it currently spends file budget.
+- **`Number.MAX_SAFE_INTEGER + 1` is a silent no-op as a sentinel.** It equals
+  `Number.MAX_SAFE_INTEGER`. The cache's sweep-on-first-write counter initialises to `evictEvery`
+  instead — and that behaviour is load-bearing, since a daemon restarted more often than it writes
+  32 images would otherwise never evict and the size cap would be decorative.
 
 Carried in from research, now confirmed against the fixture server rather than just believed:
 
@@ -352,8 +431,12 @@ Unresolved; flag to the user rather than guessing.
   palette as stubs that name the missing route when run.
 - **`favicon.ico` 404s** on every page load. Cosmetic, but it is a console error on first
   impression.
-- **`rateLimit.remaining` and `queued` are approximations.** The limiter does not expose live token
-  counts. Either expose them or have the UI stop drawing a gauge that implies precision.
+- **`rateLimit.remaining` and `queued` are approximations, and the snapshot is now also
+  incomplete.** The limiter does not expose live token counts, and `StatusSnapshot.rateLimit` still
+  describes a single ceiling when there are three (per-account 20/s, per-IP 100/s, files 300/s).
+  `ratePerSecond` / `globalRatePerSecond` / `fileRatePerSecond` are all readable off the limiter
+  now, so the settings screen can show three honest numbers — but `remaining` and `queued` should
+  either become real or stop being drawn as a gauge that implies precision.
 - **No CI workflow.** It belongs at the repo root in `.github/`, which is shared ground with
   `backend/` — a separate project. Needs a decision before it is added.
 - Nothing else open. (Retention → per-type, decided. Node-graph storage → shared store, decided.)

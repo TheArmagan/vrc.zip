@@ -16,6 +16,7 @@ import { AccountManager } from "./manager.ts";
 import { PresenceService, trustLevelOf } from "./presence.ts";
 
 const UA = "vrc.zip/0.1.0 (tests@somewhere.dev)";
+const ICON_URL = "https://api.vrchat.cloud/api/1/file/file_icon/1/256";
 
 function friends(count: number, online: boolean, prefix: string): FixtureFriend[] {
   return Array.from({ length: count }, (_, i) => ({
@@ -198,6 +199,41 @@ describe("PresenceService", () => {
     });
 
     expect(presence.list("usr_alice")[0]?.isOnline).toBe(true);
+    presence.stop();
+  });
+
+  test('iconUrl is picked from the friend record, and "" means no icon', async () => {
+    const presence = await setup([
+      { id: "usr_on_0", displayName: "Iconed", online: true, userIcon: ICON_URL },
+      { id: "usr_on_1", displayName: "Plain", online: true },
+    ]);
+    presence.start();
+    await presence.refresh("usr_alice");
+
+    const byName = new Map(presence.list("usr_alice").map((r) => [r.displayName, r.iconUrl]));
+    expect(byName.get("Iconed")).toBe(ICON_URL);
+    // Every image field on this one is `""`. Absent, not blank.
+    expect(byName.get("Plain")).toBeNull();
+    presence.stop();
+  });
+
+  test("a partial pipeline user never blanks an icon we already have", async () => {
+    const presence = await setup([
+      { id: "usr_on_0", displayName: "Iconed", online: true, userIcon: ICON_URL },
+    ]);
+    presence.start();
+    await presence.refresh("usr_alice");
+
+    // `friend-update` frames carry a partial user with no image fields at all. Overwriting from it
+    // would make every icon blink out the moment its owner changed status.
+    bus.emit({
+      kind: "friend.update",
+      accountId: "usr_alice",
+      ts: Date.now(),
+      payload: { userId: "usr_on_0", user: { displayName: "Iconed", status: "busy" } },
+    });
+
+    expect(presence.list("usr_alice")[0]?.iconUrl).toBe(ICON_URL);
     presence.stop();
   });
 

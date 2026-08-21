@@ -34,6 +34,13 @@ export interface Account {
   /** Unix ms of the last pipeline frame attributed to this account, or null when never seen. */
   readonly lastSeenAt: number | null;
   readonly connection: AccountConnection;
+  /**
+   * Absolute VRChat user-icon URL, or null when the account has none cached yet. Never put this
+   * in an `<img src>` directly — VRChat's image host wants the account's auth cookie and a
+   * User-Agent the browser cannot set, and answers a bare request with 401/403. Run it through
+   * `imageUrl()` below, which points at the daemon's same-origin streaming proxy.
+   */
+  readonly iconUrl: string | null;
 }
 
 export interface RateLimitStatus {
@@ -208,6 +215,8 @@ export interface Friend {
   /** `standalonewindows`, `android`, … or null. */
   readonly platform: string | null;
   readonly lastSeenAt: number | null;
+  /** Absolute VRChat user-icon URL, or null. Load it through `imageUrl()`, never directly. */
+  readonly iconUrl: string | null;
 }
 
 /**
@@ -351,6 +360,22 @@ function buildUrl(path: string, query: RequestOptions["query"]): string {
   }
   const qs = params.toString();
   return qs === "" ? base : `${base}?${qs}`;
+}
+
+/**
+ * The same-origin path that serves a VRChat user icon.
+ *
+ * VRChat's image host requires the owning account's auth cookie and a User-Agent the browser is
+ * not allowed to set, so an `<img src={account.iconUrl}>` gets a 401/403 every time. The daemon
+ * fetches the bytes with those headers attached and streams them back from `GET /api/image`, which
+ * is same-origin and therefore carries the page's `vrcz_session` cookie automatically.
+ *
+ * Returns `undefined` for a missing icon so the value can be handed straight to `<AvatarImage>` —
+ * bits-ui treats a falsy `src` as a load error and leaves the initials fallback in place.
+ */
+export function imageUrl(iconUrl: string | null | undefined): string | undefined {
+  if (iconUrl === null || iconUrl === undefined || iconUrl === "") return undefined;
+  return buildUrl("/image", { url: iconUrl });
 }
 
 /** The daemon's error body is `{ error: <code>, message: <sentence> }`. */

@@ -1,10 +1,20 @@
-import type { AccountSnapshot } from "../accounts/account.ts";
+import type {
+  Instance,
+  LimitedUserGroups,
+  LimitedUserInstance,
+  MutualFriend,
+  RepresentedGroup,
+  User,
+  World,
+} from "@vrcz/api/types";
+import type { Account, AccountSnapshot } from "../accounts/account.ts";
 import type { AccountManager } from "../accounts/manager.ts";
-import type { PresenceService } from "../accounts/presence.ts";
+import { type PresenceService, trustLevelOf } from "../accounts/presence.ts";
 import type { EventBus } from "../bus/event-bus.ts";
 import { ImageCache } from "../net/image-cache.ts";
 import type { RateLimiter } from "../net/rate-limiter.ts";
 import { vrcFetch } from "../net/request.ts";
+import { pickUserImageUrl, pickUserImageUrlFull } from "../net/user-image.ts";
 import type { SecretsStore } from "../security/secrets.ts";
 import {
   type ControlAccount,
@@ -14,12 +24,25 @@ import {
   type FeedEvent,
   type FriendPresence,
   type GameSession,
+  type GroupSummary,
+  type InstanceDetail,
+  type InstanceInfo,
+  type InstanceRoster,
+  type InstanceUser,
   type LoginResult,
+  type MutualFriendPage,
+  type MutualFriendSummary,
   type NotificationItem,
   type SettingsPatch,
   type StatusSnapshot,
   type StreamEvent,
+  type UserDetail,
+  type UserGroups,
+  type UserNote,
   type Settings as WireSettings,
+  type WorldBatch,
+  type WorldDetail,
+  type WorldSummary,
 } from "../servers/control.ts";
 import type { Settings } from "../settings.ts";
 import type { Store } from "../store/index.ts";
@@ -73,6 +96,316 @@ function connectionOf(snapshot: AccountSnapshot): ControlAccount["connection"] {
   }
 }
 
+/**
+ * How long a cached `GET /users/{id}` body stays fresh.
+ *
+ * Ten minutes. The fields this cache actually holds are slow-moving — bio, bio links, pronouns,
+ * tags and therefore trust level, date joined — and a friend changes those on the order of weeks.
+ * The two fields that *do* move minute to minute, `status` and `location`, already arrive live on
+ * the pipeline and are what the friends list renders; the modal is a profile view, not a presence
+ * view. Ten minutes is long enough that opening a profile, closing it, and opening it again costs
+ * nothing, and short enough that an edit made while the app is open shows up in the same sitting.
+ */
+const USER_CACHE_TTL_MS = 10 * 60_000;
+
+/**
+ * How long an instance roster stays fresh.
+ *
+ * **Twenty seconds**, which is far shorter than any other cache here and deliberately so: a roster
+ * is the one thing in this app that changes while you watch it. People walk through a portal every
+ * few seconds in a busy public instance, so a minutes-long TTL — right for a profile, right for an
+ * icon — would draw a room that emptied out five minutes ago.
+ *
+ * It is not shorter than twenty seconds because the *cheap* half of the screen is already live: the
+ * game log delivers joins and leaves instantly, and this call only adds the per-person facts (rank,
+ * age verification, friendship) which do not change at all while someone stands there. So the TTL
+ * only has to bound how long a *newly arrived* person waits for their icons, and twenty seconds
+ * caps that at three upstream calls per minute per instance no matter how fast the screen polls or
+ * how many viewers it has — against a 16/s per-account budget shared with presence polling.
+ */
+const INSTANCE_ROSTER_TTL_MS = 20_000;
+
+/**
+ * How long a cached world stays fresh. **Twenty-four hours.**
+ *
+ * A world is the most static object VRChat serves: its name, author, capacity and thumbnail change
+ * only when the author uploads a new version, which is a thing that happens on the order of months
+ * for the worlds people actually sit in. The whole reason this cache exists is that a feed page is
+ * a hundred rows naming a dozen worlds, and a name is not worth a request twice in one day.
+ *
+ * Two and a half hours of `USER_CACHE_TTL_MS` would be defensible and is still wrong: a user's
+ * status moves minute to minute, which is why that one is ten minutes, and a world's does not move
+ * at all. The one field that *does* drift, `occupants`, is documented on `WorldDetail` as being as
+ * old as `fetchedAt` — anything wanting live occupancy asks about an *instance*, not a world.
+ */
+const WORLD_CACHE_TTL_MS = 24 * 60 * 60_000;
+
+/**
+ * One instance response as fetched, before either route reads its half.
+ *
+ * `instance: null` covers both "VRChat 404'd" and "VRChat answered a literal `null`" — from here
+ * down they mean the same thing, and neither is an error.
+ */
+interface CachedInstance {
+  readonly fetchedAt: number;
+  readonly instance: Partial<Instance> | null;
+}
+
+/** VRChat sends `""` for an unset text field, not `null`. `??` alone would keep the empty string. */
+function emptyToNull(value: string | null | undefined): string | null {
+  return typeof value === "string" && value !== "" ? value : null;
+}
+
+/**
+ * A VRChat date string as integer unix ms, or null.
+ *
+ * The date-shaped guard is not decoration: `Date.parse("-5")` succeeds — it reads as a year — so
+ * falling straight through to `Date.parse` turns VRChat's `""` and any other junk into a
+ * confident wrong timestamp. `date_joined` is `YYYY-MM-DD` and `last_login` is a full ISO
+ * date-time, so both start with the same ten characters, and nothing else is accepted.
+ */
+function unixMsFromDate(value: string | null | undefined): number | null {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}/.test(value)) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/** VRChat's arrays arrive as `Array<string>` but a defensive filter costs nothing. */
+function stringArray(value: readonly unknown[] | undefined): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is string => typeof entry === "string" && entry !== "");
+}
+
+/**
+ * One entry of an instance's `users` array as the wire shape, or `null` for an entry we cannot
+ * name.
+ *
+ * Defensive about every field including the required ones: this array is the only place in the app
+ * where a *whole list* of strangers' records arrives at once, so one malformed entry must cost that
+ * entry rather than the roster. An entry with no id is dropped — the UI keys rows by it, and the
+ * log-derived name is a better answer than a row that cannot be clicked.
+ *
+ * `ageVerificationStatus` is passed through **verbatim**, never collapsed into a boolean. VRChat's
+ * `hidden` means *verified but not published*, not unverified, so folding it in with an absent
+ * status would turn "we were told nothing" into an implied claim that a real person is not age
+ * verified. That distinction is the UI's to draw, and it can only draw it if this layer keeps it.
+ */
+function toInstanceUser(raw: Partial<LimitedUserInstance>, isFriend: boolean): InstanceUser | null {
+  if (typeof raw.id !== "string" || raw.id === "") return null;
+
+  return {
+    id: raw.id,
+    displayName:
+      typeof raw.displayName === "string" && raw.displayName !== "" ? raw.displayName : raw.id,
+    iconUrl: pickUserImageUrl(raw),
+    // Free: the same roster response carries the full-size fields alongside the thumbnails.
+    iconUrlFull: pickUserImageUrlFull(raw),
+    // Reused, never re-derived — the trust ladder has one definition, in `presence.ts`.
+    trustLevel: trustLevelOf(stringArray(raw.tags)),
+    ageVerificationStatus: emptyToNull(raw.ageVerificationStatus),
+    ageVerified: raw.ageVerified === true,
+    isFriend,
+    platform: emptyToNull(raw.platform),
+    developerType: emptyToNull(raw.developerType),
+  };
+}
+
+/**
+ * A VRChat group as the wire shape, or `null` when it cannot be identified.
+ *
+ * **Every field of both `RepresentedGroup` and `LimitedUserGroups` is optional upstream**, which is
+ * why this is defensive to the point of tedium: without an id the UI has nothing to key a row on or
+ * link to, so such an entry is dropped rather than rendered as a group with no identity. The name
+ * falls back through the short code to the id so a row always has something to print.
+ *
+ * The parameter is a structural subset rather than `RepresentedGroup & LimitedUserGroups`, because
+ * those two genuinely conflict: `memberVisibility` is a three-way union on one and a bare `string`
+ * on the other, so under `exactOptionalPropertyTypes` their intersection is a type neither can
+ * satisfy. Naming the fields actually read is narrower *and* honest about what this needs — the
+ * same reasoning as `UserImageFields`.
+ */
+interface GroupFields {
+  readonly groupId?: string | undefined;
+  readonly name?: string | undefined;
+  readonly shortCode?: string | undefined;
+  readonly discriminator?: string | undefined;
+  readonly iconUrl?: string | null | undefined;
+  readonly bannerUrl?: string | null | undefined;
+  readonly memberCount?: number | undefined;
+  readonly privacy?: string | undefined;
+  readonly ownerId?: string | undefined;
+  readonly description?: string | undefined;
+  readonly isRepresenting?: boolean | undefined;
+}
+
+function toGroupSummary(raw: GroupFields): GroupSummary | null {
+  const id = emptyToNull(raw.groupId);
+  if (id === null) return null;
+
+  const shortCode = emptyToNull(raw.shortCode);
+
+  return {
+    id,
+    name: emptyToNull(raw.name) ?? shortCode ?? id,
+    shortCode,
+    discriminator: emptyToNull(raw.discriminator),
+    iconUrl: emptyToNull(raw.iconUrl),
+    bannerUrl: emptyToNull(raw.bannerUrl),
+    memberCount: typeof raw.memberCount === "number" ? raw.memberCount : null,
+    privacy: emptyToNull(raw.privacy),
+    ownerId: emptyToNull(raw.ownerId),
+    description: emptyToNull(raw.description),
+    // Passed through, never inferred from which endpoint answered. `/groups/represented` returning
+    // a group is not itself proof of representation — VRChat owns that flag, and a UI that draws a
+    // "representing" badge should be drawing VRChat's answer rather than ours.
+    isRepresenting: raw.isRepresenting === true,
+  };
+}
+
+/**
+ * One mutual friend as the wire shape, or `null` when it has no id.
+ *
+ * `trustLevel` cannot come from the payload: **`MutualFriend` carries no `tags`**, and
+ * `trustLevelOf(undefined)` is `"visitor"` — so deriving it from the response would confidently
+ * label every mutual friend a visitor. It comes from `trustLevel` instead, which the caller reads
+ * out of local state: a mutual friend is by definition one of *your* friends, so presence and
+ * `friend_log` both already know their rank, for free.
+ */
+function toMutualFriend(
+  raw: Partial<MutualFriend>,
+  trustLevel: string,
+): MutualFriendSummary | null {
+  if (typeof raw.id !== "string" || raw.id === "") return null;
+
+  return {
+    id: raw.id,
+    displayName:
+      typeof raw.displayName === "string" && raw.displayName !== "" ? raw.displayName : raw.id,
+    iconUrl: pickUserImageUrl(raw),
+    trustLevel,
+    status: emptyToNull(raw.status) ?? "offline",
+  };
+}
+
+/**
+ * A world as the batch resolver serves it, or `null` when it has no id.
+ *
+ * The name falls back to the id rather than to `""`, because the entire point of this endpoint is
+ * that the UI stops printing `wrld_0ae3e886-52e…` — an empty label would be a worse answer than the
+ * id the UI already had.
+ */
+function toWorldSummary(raw: Partial<World> | null | undefined): WorldSummary | null {
+  if (!raw || typeof raw.id !== "string" || raw.id === "") return null;
+
+  return {
+    id: raw.id,
+    name: emptyToNull(raw.name) ?? raw.id,
+    thumbnailImageUrl: emptyToNull(raw.thumbnailImageUrl),
+    authorName: emptyToNull(raw.authorName),
+    capacity: numberOrNull(raw.capacity),
+  };
+}
+
+/** The full world record. `cached` and `fetchedAt` carry the same meaning as on `UserDetail`. */
+function toWorldDetail(raw: World, fetchedAt: number, cached: boolean): WorldDetail {
+  const summary = toWorldSummary(raw);
+
+  return {
+    id: summary?.id ?? raw.id,
+    name: summary?.name ?? raw.id,
+    thumbnailImageUrl: summary?.thumbnailImageUrl ?? null,
+    authorName: summary?.authorName ?? null,
+    capacity: summary?.capacity ?? null,
+
+    description: emptyToNull(raw.description),
+    authorId: emptyToNull(raw.authorId),
+    imageUrl: emptyToNull(raw.imageUrl),
+    recommendedCapacity: numberOrNull(raw.recommendedCapacity),
+    tags: stringArray(raw.tags),
+    releaseStatus: emptyToNull(raw.releaseStatus),
+    visits: numberOrNull(raw.visits),
+    favorites: numberOrNull(raw.favorites),
+    heat: numberOrNull(raw.heat),
+    popularity: numberOrNull(raw.popularity),
+    occupants: numberOrNull(raw.occupants),
+    // VRChat sends the literal string `"none"` for an unpublished world, and `Date.parse("-5")`
+    // succeeds as a *year* — so the date-shaped guard is what stands between "not published" and a
+    // confident wrong timestamp. Same function, same reason, as `dateJoined`.
+    publicationDate: unixMsFromDate(raw.publicationDate),
+    labsPublicationDate: unixMsFromDate(raw.labsPublicationDate),
+    createdAt: unixMsFromDate(raw.created_at),
+    updatedAt: unixMsFromDate(raw.updated_at),
+    version: numberOrNull(raw.version),
+
+    fetchedAt,
+    cached,
+  };
+}
+
+/** One instance record as the wire shape. The two ids come from the *validated* location. */
+function toInstanceInfo(raw: Partial<Instance>, worldId: string, instanceId: string): InstanceInfo {
+  return {
+    // Taken from the location the caller asked about rather than echoed from the body: those two
+    // halves have already been through the allowlist, and the body's have not.
+    worldId,
+    instanceId,
+    type: emptyToNull(raw.type),
+    ownerId: emptyToNull(raw.ownerId),
+    region: emptyToNull(raw.region),
+    capacity: numberOrNull(raw.capacity),
+    userCount: numberOrNull(raw.userCount),
+    // Both, because they can disagree: `n_users` and `userCount` are computed differently upstream
+    // and picking one silently would make the header argue with the roster underneath it.
+    nUsers: numberOrNull(raw.n_users),
+    full: raw.full === true,
+    canRequestInvite: raw.canRequestInvite === true,
+    closedAt: unixMsFromDate(raw.closedAt),
+    hardClose: typeof raw.hardClose === "boolean" ? raw.hardClose : null,
+    queueEnabled: raw.queueEnabled === true,
+    queueSize: numberOrNull(raw.queueSize),
+    tags: stringArray(raw.tags),
+    active: raw.active === true,
+    world: toWorldSummary(raw.world),
+  };
+}
+
+/** A finite number, or null. Guards against VRChat's occasional `null` in a numeric field. */
+function numberOrNull(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * What one `user_cache` row holds.
+ *
+ * The row used to be VRChat's `/users/{id}` body verbatim. The represented group is a *second*
+ * upstream call with the same staleness profile, so it belongs in the same row under the same TTL
+ * rather than in a second cache that could disagree with the first — hence an envelope. `v` is what
+ * tells a new daemon that a row written by an old one is a bare user body; those rows simply lack
+ * the group and are rewritten with it on their next miss, within one TTL of the upgrade.
+ */
+interface UserCacheEnvelope {
+  v: 2;
+  user: User;
+  representedGroup: GroupSummary | null;
+}
+
+function readUserCache(data: string): { user: User; representedGroup: GroupSummary | null } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+
+  if ((parsed as Partial<UserCacheEnvelope>).v === 2) {
+    const envelope = parsed as UserCacheEnvelope;
+    return { user: envelope.user, representedGroup: envelope.representedGroup };
+  }
+  // A pre-envelope row. Legible, just missing the group.
+  return { user: parsed as User, representedGroup: null };
+}
+
 function toControlAccount(snapshot: AccountSnapshot, addedAt: number): ControlAccount {
   return {
     id: snapshot.id,
@@ -93,8 +426,316 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
   // per-request instance would also re-run the eviction sweep on every avatar.
   const images = new ImageCache(options.env === undefined ? {} : { env: options.env });
 
+  /**
+   * Instance records, keyed `accountId\nlocation`, serving both the roster and the header.
+   *
+   * The account is **in the key**, not just in the value. VRChat fills in `users` only for an
+   * account that is itself in the instance, and `isFriend` is one account's fact about another
+   * person — so a record read through one account is not an answer for a different one, exactly as
+   * `user_cache` is keyed per viewer (migration 002). In memory rather than in SQLite because it is
+   * stale within a minute; persisting it would only serve a dead room to the next cold start.
+   */
+  const instances = new Map<string, CachedInstance>();
+  /**
+   * The single fetch currently in flight per key, so a polling screen with three viewers open makes
+   * one upstream call rather than three. Cleared in a `finally` — same shape, and the same reason,
+   * as `ImageCache`'s in-flight map: a failure must not pin a rejected promise that every later
+   * caller inherits.
+   */
+  const instancesInFlight = new Map<string, Promise<CachedInstance>>();
+  /** The same de-duplication for worlds, keyed by world id alone. See {@link loadWorld}. */
+  const worldsInFlight = new Map<string, Promise<{ world: World; fetchedAt: number } | null>>();
+
   function accountRowAddedAt(id: string): number {
     return store.getAccount(id)?.added_at ?? Date.now();
+  }
+
+  /**
+   * Resolves "whose eyes" for the per-account user routes.
+   *
+   * A named account must exist — a 404 rather than a silent fall back to a different account,
+   * because "the app acted as the wrong account" is the worst failure mode this system has
+   * (decision 7). With no name, an online account is preferred and any configured account will
+   * do: the note routes need no network, and a fresh cache row can be served by an account that
+   * has since gone offline.
+   */
+  function pickAccount(accountId: string | null): Account {
+    if (accountId !== null) {
+      const named = accounts.get(accountId);
+      if (!named) throw new ControlError(404, "unknown_account");
+      return named;
+    }
+
+    const snapshots = accounts.list();
+    const chosen = snapshots.find((s) => s.state === "online") ?? snapshots[0];
+    const account = chosen ? accounts.get(chosen.id) : undefined;
+    if (!account) {
+      throw new ControlError(503, "no_account", "No account is configured.");
+    }
+    return account;
+  }
+
+  /**
+   * The account for a user route, guaranteed to be signed in.
+   *
+   * Split out because all four user routes want the same two sentences: a named account must exist
+   * (404, never a silent fall back to someone else's eyes), and a live fetch needs a live cookie.
+   * Saying so beats letting `vrcFetch` discover it as a 401 and re-auth into a 2FA challenge that
+   * nobody is watching.
+   */
+  function onlineAccount(accountId: string | null): Account {
+    const account = pickAccount(accountId);
+    if (account.snapshot().state !== "online") {
+      throw new ControlError(
+        503,
+        "no_account",
+        "No account is signed in, so VRChat has nobody to ask about this user.",
+      );
+    }
+    return account;
+  }
+
+  /**
+   * One GET against VRChat, parsed, with the error mapping every user route shares.
+   *
+   * `code` names the failure for the UI to branch on; a 404 is always `unknown_user` because on
+   * every one of these paths that is what a 404 means.
+   */
+  async function vrcJson(account: Account, path: string, code: string): Promise<unknown> {
+    const response = await vrcFetch(account.context(), path);
+    const body = await response.text();
+
+    if (response.status === 404) {
+      throw new ControlError(404, "unknown_user", "VRChat has no such user.");
+    }
+    if (!response.ok) {
+      throw new ControlError(502, code, `VRChat returned ${String(response.status)}`);
+    }
+
+    try {
+      return JSON.parse(body);
+    } catch {
+      throw new ControlError(502, code, "VRChat returned a non-JSON body");
+    }
+  }
+
+  /**
+   * The group this user represents, or null — and null is the *common* case.
+   *
+   * VRChat answers this endpoint `200 {}` for someone representing nothing, so an empty object is
+   * a normal answer rather than a broken one. A genuine failure is swallowed too, deliberately: the
+   * represented group is one badge on a modal, and letting it fail the whole profile would trade a
+   * missing badge for a missing person.
+   */
+  async function fetchRepresentedGroup(
+    account: Account,
+    userId: string,
+  ): Promise<GroupSummary | null> {
+    let raw: unknown;
+    try {
+      raw = await vrcJson(account, `/users/${userId}/groups/represented`, "group_fetch_failed");
+    } catch {
+      return null;
+    }
+    if (typeof raw !== "object" || raw === null) return null;
+    return toGroupSummary(raw as Partial<RepresentedGroup>);
+  }
+
+  /**
+   * The one upstream call behind both `GET /api/instance-users` and `GET /api/instances`.
+   *
+   * `location` has already been through `parseInviteLocation`, so every character in it is one
+   * percent-encoding leaves alone — which is what makes interpolating it into the path safe, and
+   * is the same argument as `inviteSelfTo`'s.
+   *
+   * Returns the raw record rather than either wire shape, because the two routes read *different
+   * halves of the same response*: the roster wants `users`, the header wants the counts and the
+   * region. Mapping here would mean fetching twice for one answer.
+   */
+  async function fetchInstance(account: Account, location: string): Promise<CachedInstance> {
+    const fetchedAt = Date.now();
+
+    const response = await vrcFetch(account.context(), `/instances/${location}`);
+    const body = await response.text();
+
+    // A 404 is an instance that has closed, which is the ordinary end of every instance rather
+    // than a fault. The screen keeps the names the game log gave it instead of showing an error
+    // for a room everybody left.
+    if (response.status === 404) return { fetchedAt, instance: null };
+    if (!response.ok) {
+      throw new ControlError(
+        502,
+        "instance_fetch_failed",
+        `VRChat returned ${String(response.status)}`,
+      );
+    }
+
+    let instance: Partial<Instance> | null;
+    try {
+      instance = JSON.parse(body) as Partial<Instance> | null;
+    } catch {
+      throw new ControlError(502, "instance_fetch_failed", "VRChat returned a non-JSON body");
+    }
+
+    // `getInstance` answers a bare `null` — with a 200! — for an instance id it does not like.
+    // Documented upstream, and a `TypeError` here if it were not checked.
+    if (instance === null || typeof instance !== "object") return { fetchedAt, instance: null };
+
+    // The instance response embeds the *whole* world record, so the world cache gets warmed for
+    // free. A feed row naming this world resolves without ever asking `/worlds/{id}`.
+    const world = instance.world;
+    if (world && typeof world.id === "string" && world.id !== "") {
+      store.putWorldCache(world.id, fetchedAt, JSON.stringify(world));
+    }
+
+    return { fetchedAt, instance };
+  }
+
+  /**
+   * A cached instance record, or a fresh one.
+   *
+   * `requireUsers` is what keeps the two routes honest about a shared cache. VRChat fills in
+   * `users` only for an account that is *in* the instance, so a record fetched for the header is a
+   * perfectly good header and no roster at all — the roster path therefore refuses to be answered
+   * from one, and refetches. It does *not* refetch when the cached answer is "there is no such
+   * instance": that is a complete answer to both questions, and a closed instance under a polling
+   * screen would otherwise be re-asked every tick for as long as the screen is open.
+   */
+  async function loadInstance(
+    account: Account,
+    location: string,
+    requireUsers: boolean,
+  ): Promise<CachedInstance> {
+    const key = `${account.id}\n${location}`;
+    const now = Date.now();
+
+    // Swept on every call. The map is one entry per instance a screen is watching — a handful — so
+    // this is cheaper than any scheduled sweep, and it keeps a daemon left open for a week from
+    // holding every room its user ever looked at.
+    for (const [cachedKey, cached] of instances) {
+      if (now - cached.fetchedAt >= INSTANCE_ROSTER_TTL_MS) instances.delete(cachedKey);
+    }
+
+    const fresh = instances.get(key);
+    if (
+      fresh !== undefined &&
+      (!requireUsers || fresh.instance === null || Array.isArray(fresh.instance.users))
+    ) {
+      return fresh;
+    }
+
+    const pending = instancesInFlight.get(key);
+    if (pending !== undefined) return await pending;
+
+    const work = fetchInstance(account, location)
+      .then((entry) => {
+        instances.set(key, entry);
+        return entry;
+      })
+      .finally(() => {
+        instancesInFlight.delete(key);
+      });
+
+    instancesInFlight.set(key, work);
+    return await work;
+  }
+
+  /**
+   * One world, from `world_cache` if it is fresh there.
+   *
+   * The de-duplication is per world id and **not** per account, matching the cache: two screens
+   * asking for the same world at once share one fetch even through different accounts, because a
+   * world is the same object whoever asked.
+   */
+  async function loadWorld(
+    account: Account,
+    worldId: string,
+  ): Promise<{ world: World; fetchedAt: number } | null> {
+    const pending = worldsInFlight.get(worldId);
+    if (pending !== undefined) return await pending;
+
+    const work = (async (): Promise<{ world: World; fetchedAt: number } | null> => {
+      const response = await vrcFetch(account.context(), `/worlds/${worldId}`);
+      const body = await response.text();
+
+      // A deleted or private world. Null rather than a throw: the batch turns it into an absent
+      // key, and only the single-world route calls it a 404.
+      if (response.status === 404) return null;
+      if (!response.ok) {
+        throw new ControlError(
+          502,
+          "world_fetch_failed",
+          `VRChat returned ${String(response.status)}`,
+        );
+      }
+
+      let world: World;
+      try {
+        world = JSON.parse(body) as World;
+      } catch {
+        throw new ControlError(502, "world_fetch_failed", "VRChat returned a non-JSON body");
+      }
+      if (typeof world !== "object" || world === null) return null;
+
+      const fetchedAt = Date.now();
+      // Stored verbatim and **not** keyed by account: unlike `user_cache`, VRChat answers the same
+      // world record to everyone, which is why migration 002 left this table global.
+      store.putWorldCache(worldId, fetchedAt, body);
+      return { world, fetchedAt };
+    })().finally(() => {
+      worldsInFlight.delete(worldId);
+    });
+
+    worldsInFlight.set(worldId, work);
+    return await work;
+  }
+
+  /** A fresh `world_cache` row, or null. Never throws on a corrupt row — it is treated as a miss. */
+  function cachedWorld(worldId: string, now: number): { world: World; fetchedAt: number } | null {
+    const row = store.getWorldCache(worldId);
+    if (row === null || now - row.fetched_at >= WORLD_CACHE_TTL_MS) return null;
+    try {
+      const world = JSON.parse(row.data) as World;
+      if (typeof world !== "object" || world === null) return null;
+      return { world, fetchedAt: row.fetched_at };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * An account to fetch with, or null when none is signed in.
+   *
+   * The 404 for a named-but-unknown account stays — that is a caller bug, not a degraded state —
+   * but "nobody is online" is answered with null rather than a throw, so the batch resolver can
+   * serve its cache hits instead of failing a hundred rows over a sign-in.
+   */
+  /**
+   * The signed-in account both instance routes need, or a 503.
+   *
+   * Saying so beats letting `vrcFetch` discover it as a 401 and re-auth into a 2FA challenge that
+   * nobody is watching.
+   */
+  function onlineInstanceAccount(accountId: string | null): Account {
+    const account = availableAccount(accountId);
+    if (account === null) {
+      throw new ControlError(
+        503,
+        "no_account",
+        "No account is signed in, so VRChat has nobody to ask about that instance.",
+      );
+    }
+    return account;
+  }
+
+  function availableAccount(accountId: string | null): Account | null {
+    if (accountId !== null) {
+      const named = accounts.get(accountId);
+      if (!named) throw new ControlError(404, "unknown_account");
+      return named.snapshot().state === "online" ? named : null;
+    }
+    const online = accounts.list().find((snapshot) => snapshot.state === "online");
+    return online ? (accounts.get(online.id) ?? null) : null;
   }
 
   /** Makes sure an account has a row before anything references it by foreign key. */
@@ -229,6 +870,130 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       );
     },
 
+    async listInstanceUsers(target, accountId): Promise<InstanceRoster> {
+      // Always a live fetch — there is no offline path worth serving, because a roster older than
+      // the TTL is a list of people who have left.
+      const account = onlineInstanceAccount(accountId);
+      // Reassembled rather than carried alongside the split halves: `parseInviteLocation` cut the
+      // raw string at its *first* colon, so this is character-for-character what the caller sent,
+      // and there is only one validated copy of it in play.
+      const location = `${target.worldId}:${target.instanceId}`;
+
+      const entry = await loadInstance(account, location, true);
+      const raw = entry.instance;
+
+      // `users` is *optional* upstream: VRChat fills it in only for an account that is in the
+      // instance, so a roster for somewhere you are not is simply absent. Not an error — see
+      // `InstanceRoster.source`.
+      if (raw === null || !Array.isArray(raw.users)) {
+        return { location, fetchedAt: entry.fetchedAt, source: "unavailable", users: [] };
+      }
+
+      /*
+       * Friendship comes from the presence service — the friend list this account already holds in
+       * memory — and therefore costs nothing. Asking VRChat per head would be exactly the forty
+       * requests this whole route exists to avoid.
+       *
+       * The instance record's own `isFriend` is OR'd in rather than ignored: it rode along in the
+       * response that was already being made, so it is free too, and it is the only answer
+       * available in the seconds before an account's first friends poll lands.
+       */
+      const friends = new Set(presence.list(account.id).map((record) => record.id));
+
+      const users = raw.users
+        .map((entryUser: Partial<LimitedUserInstance>) =>
+          toInstanceUser(
+            entryUser,
+            (typeof entryUser.id === "string" && friends.has(entryUser.id)) ||
+              entryUser.isFriend === true,
+          ),
+        )
+        .filter((user): user is InstanceUser => user !== null);
+
+      return { location, fetchedAt: entry.fetchedAt, source: "instance", users };
+    },
+
+    async getInstance(target, accountId): Promise<InstanceDetail> {
+      const account = onlineInstanceAccount(accountId);
+      const location = `${target.worldId}:${target.instanceId}`;
+
+      // `false`: unlike the roster, this route reads only fields VRChat sends whether or not the
+      // account is in the instance, so a record cached by either route answers it.
+      const entry = await loadInstance(account, location, false);
+
+      if (entry.instance === null) {
+        return { location, fetchedAt: entry.fetchedAt, source: "unavailable", instance: null };
+      }
+
+      return {
+        location,
+        fetchedAt: entry.fetchedAt,
+        source: "instance",
+        instance: toInstanceInfo(entry.instance, target.worldId, target.instanceId),
+      };
+    },
+
+    async getWorld(worldId, accountId): Promise<WorldDetail> {
+      // The cache is consulted **before** any account is resolved, because it is not per account:
+      // a world is the same record whoever asks, so a warm cache answers with nobody signed in at
+      // all. That is what lets a feed render world names on a laptop that just woke up.
+      const hit = cachedWorld(worldId, Date.now());
+      if (hit !== null) return toWorldDetail(hit.world, hit.fetchedAt, true);
+
+      const account = availableAccount(accountId);
+      if (account === null) {
+        throw new ControlError(
+          503,
+          "no_account",
+          "No account is signed in, so VRChat has nobody to ask about this world.",
+        );
+      }
+
+      const fetched = await loadWorld(account, worldId);
+      if (fetched === null) {
+        throw new ControlError(404, "unknown_world", "VRChat has no such world.");
+      }
+      return toWorldDetail(fetched.world, fetched.fetchedAt, false);
+    },
+
+    async listWorlds(worldIds, accountId): Promise<WorldBatch> {
+      const now = Date.now();
+      const worlds: Record<string, WorldSummary> = {};
+      const misses: string[] = [];
+
+      for (const worldId of worldIds) {
+        const hit = cachedWorld(worldId, now);
+        const summary = hit === null ? null : toWorldSummary(hit.world);
+        if (summary === null) misses.push(worldId);
+        else worlds[worldId] = summary;
+      }
+
+      // Cache hits are already in hand, so a signed-out daemon still answers with them. Misses
+      // simply stay absent — see `WorldBatch`.
+      const account = misses.length === 0 ? null : availableAccount(accountId);
+
+      if (account !== null) {
+        const fetched = await Promise.all(
+          // Each miss fails on its own: a 404 or a 502 on one world leaves the other forty-nine
+          // alone, which is the entire reason this endpoint exists rather than the UI looping.
+          misses.map(async (worldId) => {
+            try {
+              return await loadWorld(account, worldId);
+            } catch {
+              return null;
+            }
+          }),
+        );
+
+        for (const entry of fetched) {
+          const summary = entry === null ? null : toWorldSummary(entry.world);
+          if (summary !== null) worlds[summary.id] = summary;
+        }
+      }
+
+      return { worlds };
+    },
+
     async listSessions(): Promise<GameSession[]> {
       return store.listOpenSessions().map((row) => ({
         id: row.id,
@@ -244,27 +1009,37 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
     async listEvents(query: EventQuery): Promise<FeedEvent[]> {
       const before = query.before ?? Date.now() + 1;
       const limit = query.limit ?? 100;
+      const kind = query.kind ?? null;
 
-      const rows = query.accountId
-        ? store.listEvents(query.accountId, before, limit)
-        : accounts
-            .list()
-            .flatMap((s) => store.listEvents(s.id, before, limit))
-            .sort((a, b) => b.ts - a.ts)
-            .slice(0, limit);
+      /*
+       * One SQL query per selector, chosen here. The route has already guaranteed at most one of
+       * the three is set.
+       *
+       * The no-selector branch is `store.listAllEvents`, not a fan-out over `accounts.list()`.
+       * The fan-out this replaces could not see rows with `account_id IS NULL` — a game client
+       * signed into an account vrc.zip does not manage (PLAN.md §1.7) — so the unified feed
+       * silently omitted exactly the rows the game log exists to show. It also merged N pages of
+       * `limit` rows and sliced, which spends N× the work to return one page.
+       */
+      const rows =
+        query.sessionId !== undefined
+          ? store.listEventsBySession(query.sessionId, before, limit, kind)
+          : query.subjectId !== undefined
+            ? store.listEventsBySubject(query.subjectId, before, limit, kind)
+            : query.accountId !== undefined
+              ? store.listEvents(query.accountId, before, limit, kind)
+              : store.listAllEvents(before, limit, kind);
 
-      return rows
-        .filter((row) => (query.kind ? row.kind === query.kind : true))
-        .map((row) => ({
-          id: row.id,
-          accountId: row.account_id,
-          ts: row.ts,
-          sessionId: row.session_id,
-          kind: row.kind,
-          subjectId: row.subject_id,
-          location: row.location,
-          payload: row.payload === null ? null : (JSON.parse(row.payload) as FeedEvent["payload"]),
-        }));
+      return rows.map((row) => ({
+        id: row.id,
+        accountId: row.account_id,
+        ts: row.ts,
+        sessionId: row.session_id,
+        kind: row.kind,
+        subjectId: row.subject_id,
+        location: row.location,
+        payload: row.payload === null ? null : (JSON.parse(row.payload) as FeedEvent["payload"]),
+      }));
     },
 
     async listFriends(accountId): Promise<FriendPresence[]> {
@@ -306,6 +1081,185 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
 
     async markNotificationSeen(id): Promise<void> {
       store.markNotificationSeen(id);
+    },
+
+    async getUser(userId, accountId): Promise<UserDetail> {
+      const account = pickAccount(accountId);
+      // The cache row has a foreign key to `accounts`; a cold start that reads a profile before
+      // anything else has upserted the account would otherwise fail on the write, not the read.
+      ensureAccountRow(account.snapshot());
+
+      const now = Date.now();
+      const cached = store.getUserCache(account.id, userId);
+      const cachedEnvelope = cached === null ? null : readUserCache(cached.data);
+      const fresh =
+        cached !== null && cachedEnvelope !== null && now - cached.fetched_at < USER_CACHE_TTL_MS;
+
+      let user: User;
+      let representedGroup: GroupSummary | null;
+      let fetchedAt: number;
+
+      if (fresh && cached !== null && cachedEnvelope !== null) {
+        user = cachedEnvelope.user;
+        representedGroup = cachedEnvelope.representedGroup;
+        fetchedAt = cached.fetched_at;
+      } else {
+        // Only a live fetch needs a signed-in account; a fresh cache row can be served by an
+        // account that has since gone offline, which is what makes the modal usable on a laptop
+        // that just woke up.
+        if (account.snapshot().state !== "online") {
+          throw new ControlError(
+            503,
+            "no_account",
+            "No account is signed in, so VRChat has nobody to ask about this user.",
+          );
+        }
+
+        const response = await vrcFetch(account.context(), `/users/${userId}`);
+        const body = await response.text();
+
+        if (response.status === 404) {
+          throw new ControlError(404, "unknown_user", "VRChat has no such user.");
+        }
+        if (!response.ok) {
+          throw new ControlError(
+            502,
+            "user_fetch_failed",
+            `VRChat returned ${String(response.status)}`,
+          );
+        }
+
+        try {
+          user = JSON.parse(body) as User;
+        } catch {
+          throw new ControlError(502, "user_fetch_failed", "VRChat returned a non-JSON body");
+        }
+
+        // Sequential, not concurrent: two calls to the same account in the same tick would each
+        // take a token from a 16/s per-account bucket that presence polling also draws on, and the
+        // modal is not so urgent that it should elbow ahead of the friends list.
+        representedGroup = await fetchRepresentedGroup(account, userId);
+
+        fetchedAt = now;
+        // Keyed by the account that fetched it. See migration 002: the body itself differs per
+        // viewer, so the viewer belongs in the key. The envelope carries the group under the same
+        // TTL rather than giving it a second cache that could disagree with this one.
+        const envelope: UserCacheEnvelope = { v: 2, user, representedGroup };
+        store.putUserCache(account.id, userId, fetchedAt, JSON.stringify(envelope));
+      }
+
+      const friend = store.getFriend(account.id, userId);
+      const note = store.getNote(account.id, userId);
+
+      return {
+        id: user.id ?? userId,
+        displayName: user.displayName,
+        accountId: account.id,
+        fetchedAt,
+        cached: fresh,
+
+        bio: emptyToNull(user.bio),
+        bioLinks: stringArray(user.bioLinks),
+        pronouns: emptyToNull(user.pronouns),
+        status: user.status,
+        statusDescription: emptyToNull(user.statusDescription),
+        state: emptyToNull(user.state),
+        tags: stringArray(user.tags),
+        // Reused, never re-derived: the trust ladder has one definition and it lives in
+        // `presence.ts`, so the modal and the friends list can never disagree about a rank.
+        trustLevel: trustLevelOf(stringArray(user.tags)),
+        // Verbatim, never collapsed: `hidden` is *verified but not published*. See `UserDetail`.
+        ageVerificationStatus: emptyToNull(user.ageVerificationStatus),
+        ageVerified: user.ageVerified === true,
+        platform: emptyToNull(user.platform),
+        lastPlatform: emptyToNull(user.last_platform),
+        location: emptyToNull(user.location),
+        worldId: emptyToNull(user.worldId),
+        isFriend: user.isFriend === true,
+        dateJoined: unixMsFromDate(user.date_joined),
+        lastLogin: unixMsFromDate(user.last_login),
+        iconUrl: pickUserImageUrl(user),
+        // The non-thumbnail original, for "open image in a new tab". Null rather than a crop.
+        iconUrlFull: pickUserImageUrlFull(user),
+        // Plain fields on VRChat's `User`, so they cost nothing — they were simply never passed
+        // through. `""` is how VRChat spells "unset" here as everywhere else.
+        bannerUrl: emptyToNull(user.bannerUrl),
+        bannerType: emptyToNull(user.bannerType),
+        representedGroup,
+
+        friendedAt: friend?.friended_at ?? null,
+        note: note?.note ?? null,
+        noteUpdatedAt: note?.updated_at ?? null,
+      };
+    },
+
+    async listUserGroups(userId, accountId): Promise<UserGroups> {
+      const account = onlineAccount(accountId);
+      const raw = await vrcJson(account, `/users/${userId}/groups`, "groups_fetch_failed");
+
+      // Not an error, and not cached as one: VRChat filters this list by what the asking account
+      // is permitted to see, so `[]` is a correct answer about a user in a dozen groups. Anything
+      // that is not an array at all is treated the same way rather than thrown — a modal section
+      // that renders empty beats a modal that will not open.
+      if (!Array.isArray(raw)) return { groups: [] };
+
+      const groups = raw
+        .map((entry: LimitedUserGroups) => toGroupSummary(entry))
+        .filter((group): group is GroupSummary => group !== null);
+
+      return { groups };
+    },
+
+    async listMutualFriends(userId, accountId, page): Promise<MutualFriendPage> {
+      const account = onlineAccount(accountId);
+      const query = `?n=${String(page.n)}&offset=${String(page.offset)}`;
+      const raw = await vrcJson(
+        account,
+        `/users/${userId}/mutuals/friends${query}`,
+        "mutuals_fetch_failed",
+      );
+
+      if (!Array.isArray(raw)) return { users: [], hasMore: false };
+
+      /*
+       * Trust ranks come from local state, and they have to: **`MutualFriend` carries no `tags`**,
+       * so `trustLevelOf` on the response would rank every single row "visitor" — a wrong answer
+       * printed confidently, which is the failure mode this codebase keeps finding.
+       *
+       * A mutual friend is by definition one of this account's own friends, so presence already
+       * holds their rank. `friend_log` is the fallback for the window before the first friends poll
+       * lands, since it persists the rank from the last time it did. Neither costs a request.
+       */
+      const ranks = new Map(presence.list(account.id).map((r) => [r.id, r.trustLevel]));
+
+      const users = raw
+        .map((entry: Partial<MutualFriend>) => {
+          const id = typeof entry.id === "string" ? entry.id : "";
+          const rank = ranks.get(id) ?? store.getFriend(account.id, id)?.trust_level ?? "visitor";
+          return toMutualFriend(entry, rank);
+        })
+        .filter((user): user is MutualFriendSummary => user !== null);
+
+      // VRChat sends no total, so a full page is the only evidence another may exist. Measured on
+      // the raw array, not on `users`: a dropped malformed entry shortens the mapped list without
+      // meaning the page was short, and reading `hasMore` off it would end the scroll early.
+      return { users, hasMore: raw.length >= page.n };
+    },
+
+    async setUserNote(userId, accountId, note): Promise<UserNote> {
+      // No online check: the note is vrc.zip's own row, and refusing to let someone annotate a
+      // profile because VRChat is unreachable would be a rule with no reason behind it.
+      const account = pickAccount(accountId);
+      ensureAccountRow(account.snapshot());
+
+      if (note === "") {
+        store.deleteNote(account.id, userId);
+        return { accountId: account.id, userId, note: null, updatedAt: null };
+      }
+
+      const updatedAt = Date.now();
+      store.putNote(account.id, userId, note, updatedAt);
+      return { accountId: account.id, userId, note, updatedAt };
     },
 
     async fetchImage(url) {

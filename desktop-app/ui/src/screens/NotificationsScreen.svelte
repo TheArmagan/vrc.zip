@@ -13,6 +13,7 @@ import AccountFilter from "$lib/components/AccountFilter.svelte";
 import EmptyState from "$lib/components/EmptyState.svelte";
 import RelativeTime from "$lib/components/RelativeTime.svelte";
 import SectionHeader from "$lib/components/SectionHeader.svelte";
+import UserName from "$lib/components/UserName.svelte";
 import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
 import { Label } from "$lib/components/ui/label/index.js";
@@ -142,11 +143,20 @@ async function markAllSeen(): Promise<void> {
             <p class="flex flex-wrap items-baseline gap-2 text-sm">
               <span class="font-medium">{typeLabel(item.type)}</span>
               {#if item.senderDisplayName}
-                <span>{item.senderDisplayName}</span>
+                <!-- Group announcements have a sender name and no sender id; that degrades. -->
+                <UserName
+                  userId={item.senderUserId}
+                  name={item.senderDisplayName}
+                  accountId={item.accountId}
+                />
               {:else if item.senderUserId}
-                <span class="font-mono text-xs text-muted-foreground">
-                  {shortId(item.senderUserId, 12)}
-                </span>
+                <!-- An id and no name: still a person, and the modal is how you find out who. -->
+                <UserName
+                  userId={item.senderUserId}
+                  name={shortId(item.senderUserId, 12)}
+                  accountId={item.accountId}
+                  class="font-mono text-xs text-muted-foreground"
+                />
               {/if}
               <RelativeTime ts={item.ts} class="text-xs text-muted-foreground" />
             </p>
@@ -154,7 +164,9 @@ async function markAllSeen(): Promise<void> {
               <p class="text-sm text-muted-foreground">{item.message}</p>
             {/if}
             {#if account !== null && app.accounts.length > 1}
-              <Badge variant="outline">To {account.displayName}</Badge>
+              <Badge variant="outline">
+                To <UserName userId={account.id} name={account.displayName} accountId={account.id} />
+              </Badge>
             {/if}
           </div>
 

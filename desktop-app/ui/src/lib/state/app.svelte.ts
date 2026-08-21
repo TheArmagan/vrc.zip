@@ -294,6 +294,9 @@ class AppState {
       case "notification.updated":
       case "notification.deleted":
       case "notification.responded":
+      // The daemon finished backfilling a pending backlog straight into the store, deliberately
+      // without replaying it as live frames. One refetch is how the screen learns about all of it.
+      case "notification.synced":
         this.#debounce("notifications", () => {
           void this.refreshNotifications();
         });

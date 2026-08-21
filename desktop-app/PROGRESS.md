@@ -6,7 +6,7 @@ was decided along the way.
 
 **Last updated:** 2026-08-21
 **Current phase:** Phase 1 — Foundation
-**Status:** Phase 1 built end to end — daemon + UI both run, 398 tests green. 1.10 verification
+**Status:** Phase 1 built end to end — daemon + UI both run, 480 tests green. 1.10 verification
 audited: most items covered, five automatable gaps listed below, and the rest needs a human with a
 real VRChat account.
 
@@ -256,6 +256,39 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     browser tab on every save. Reuse is gated on `process.execArgv` containing `--watch`/`--hot`,
     or an explicit `VRCZIP_STABLE_TOKEN=1`, and announces itself in the log — a stable credential
     that appears silently is how one reaches production.
+32. **Users, worlds, and instances all get the same treatment: a small link with a tooltip that
+    opens one shared modal.** Every display name is a `UserName`, every world a `WorldLink`, every
+    instance an `InstanceLink`, and each modal is mounted exactly once at the root with a shared
+    state module rather than one dialog per call site. Before this, a location outside a live game
+    session rendered as `wrld_0ae3e886-52e…`, because a world name only ever arrived from the game
+    log's `Entering Room:` line.
+33. **World names resolve through a batching resolver, never per row.** A feed page is 100 rows over
+    maybe 20 worlds; ids are coalesced within a microtask, chunked at the daemon's 50-id cap, and
+    answered from one request. "Unresolvable" is a **cooldown, not a verdict** — the daemon answers
+    from cache alone when no account is online and simply omits misses, so a permanent verdict would
+    freeze every world name in the app for the session if the first page rendered before an account
+    connected.
+34. **The card banner is one shared component (`HeroBanner`) drawn unconditionally.** No-image is
+    the common case for both users and worlds, so a band that only appears when an image exists puts
+    the title and every row under it at two different heights and makes the common case read as the
+    broken one. The image fades in *onto* the plate, and a failed load — the VRChat file host 403s
+    often enough — leaves the plate exactly as it was. Nothing below ever moves.
+35. **A filter over a paged list says so.** The Groups tab holds everything, so its search is
+    complete; mutual friends are paged, so that search states how many are loaded. A search box that
+    quietly returns "no match" while an unloaded page holds the answer is worse than no search box.
+
+29. **Notifications are backfilled over REST, not sourced from the socket alone.** The pipeline is
+    the reason the screen is live; it is not, and cannot be, the reason it is *correct*. Both
+    generations are fetched because each carries categories the other does not — friend requests
+    and invites in v1, group announcements and boops in v2 — and fetching one leaves a whole
+    category permanently missing, which is indistinguishable from the bug this fixed.
+30. **Roster attributes come from the instance, not from N user lookups.** `GET /instances/{id}`
+    returns `users[]` with trust tags and age verification for everyone at once; forty per-user
+    calls per session would be the obvious implementation and the wrong one.
+31. **`hidden` age verification renders nothing, exactly like unknown.** VRChat's `hidden` means
+    *verified but not published*. Collapsing it into a boolean would make a missing badge look like
+    a claim that a real person is unverified — a claim we are not entitled to make.
+
 28. **Sessions are the store's business, not just the watcher's.** Retroactive attribution, the
     orphan sweep, and re-adoption all write through the store, because the UI reads sessions back
     over HTTP rather than from the live watcher. Anything the API re-reads has to be persisted, not
@@ -403,6 +436,79 @@ test, and three of them had a passing one asserting the wrong layer:
 - **`process.execArgv` is how you detect watch mode** (`["--watch"]` / `["--hot"]`), and it survives
   every reload despite the new pid. `Bun.argv` and `process.argv` carry nothing, and Bun sets no
   `BUN_*` variable for it — anything keyed off argv would be wrong.
+Found by using the app against a real account with real data:
+
+- **A socket carries deltas; it cannot tell you state.** Notifications were sourced *only* from the
+  pipeline, so vrc.zip knew about exactly those that arrived while it happened to be connected. An
+  account with 300 pending notifications showed an empty screen, and the database had zero
+  notification rows — ever. `accounts/notifications.ts` backfills over REST and reconciles on a
+  jittered poll, the same shape as `PresenceService` and for the same reason.
+- **VRChat's two notification generations do not page the same way.** v1
+  (`/auth/user/notifications`) takes `n` + `offset`. v2 (`/notifications`) takes **`limit` only —
+  there is no offset**. Sending one is accepted and silently ignored, so a paging loop re-reads the
+  same first page, the short-page check never fires, and it runs to the cap rewriting identical
+  rows on every poll. v2 is one request.
+- **`details` is a JSON-encoded *string* over REST and a real object over the socket.** The
+  generated types say so explicitly. One shared mapper (`toNotificationRow`) owns the difference;
+  two mappings would drift into two different sets of bugs.
+- **A backlog must not be replayed as live events.** Emitting 300 `notification.received` events
+  would raise 300 desktop notifications and bury the feed with years-old friend requests presented
+  as new. The backfill writes to the store and emits one summary event.
+- **`senderUsername` is deprecated and VRChat no longer returns it**, so a backfilled notification
+  usually has a null display name. The sender *id* is always there; the UI resolves the name.
+- **A `SvelteMap` makes structural change reactive and says nothing about the objects inside it.**
+  The live-sessions roster was plain objects in a `SvelteMap`: a client *appearing* re-rendered,
+  while every player join and leave inside it was invisible, so an instance's roster froze at
+  whatever it held when the session row appeared. The entries are `$state` now. Anything added to
+  them must stay inside that object or it silently stops updating.
+- **Two comments in the UI asserted the opposite of the truth, and both cost a feature.**
+  `GameLogScreen` said the feed writer stores `session_id` as null on every row, and therefore
+  discarded all stored lines when a client was selected — the column has *always* been populated
+  (9,288 player-join rows in a real database, zero nulls). What was actually null was `sessionId`
+  on live frames, hardcoded in `frameToEvent`. Separately, `live-sessions` said the daemon does not
+  publish the watcher-id → row-id mapping and correlated on start time within a tolerance;
+  `log-bridge` has always translated to the row id *before* emitting. A confident comment is not
+  evidence — check the column.
+- **`kind` was applied as a JS filter after `LIMIT`.** A filtered feed returned short pages and
+  then an empty one, which an infinite scroll reads as the end of history. It is a SQL predicate
+  now, in every statement.
+- **The unfiltered feed fanned out per account, so `account_id IS NULL` rows were unreachable** no
+  matter how far you scrolled — and an unmanaged game client's events are exactly those rows.
+- **`GET /instances/{id}` answers a bare `null` with a 200 for an invalid instance id.** VRChat's
+  own doc comment says so. Unchecked, that is a `TypeError` in the roster mapper rather than an
+  empty list — the failure lands nowhere near the cause.
+- **An instance roster is absent far more often than it is an error.** VRChat fills `users[]` only
+  for an account that is *in* that instance, and a closed instance 404s — both are the ordinary
+  course of events, not faults. They answer `200 source:"unavailable"` so the screen falls back to
+  the log-derived names, while a genuine upstream 5xx stays a `502`. Collapsing the two would hide
+  a real outage behind a screen that looks like it is working.
+- **`isFriend` is already on `LimitedUserInstance`**, riding along in a response we were paying for
+  anyway. It is still OR'd with local presence, which is the only answer available in the seconds
+  before an account's first friends poll lands.
+Found by clicking around the built UI against a real account:
+
+- **A duplicate key in a Svelte 5 `{#each}` is a hard runtime error, not a warning.** The component
+  stops rendering. So "the server would never send the same id twice" is not a safe assumption to
+  render on, and three lists here were making it: the Groups tab (VRChat can return the same group
+  twice when a user holds more than one membership row in it, and the represented group is merged
+  in from a *second* endpoint), the first page of mutual friends, and bio links — which were keyed
+  on the link text itself, so a user pasting the same URL twice would have taken down the whole
+  Overview tab. Anything keyed on wire data now dedupes; lists of plain strings are keyed by index.
+- **A wire contract that only the type system believes is not a contract.** The daemon sent a group
+  as `id`; `ui/src/lib/api.ts` declared `groupId`; the Groups tab keyed on `group.groupId`. Every
+  key was `undefined` and the tab died, while the network tab showed a perfectly good 200 with 85
+  groups in it. The tell was that Mutual friends worked — it used `id` on both sides. Note VRChat's
+  own payload is a trap here: `LimitedUserGroups` has `groupId` **and** a separate `id` meaning the
+  *membership row*.
+- **An aborted request must not leave a lazy tab's phase at `"loading"`.** Closing the modal aborts
+  in flight; the catch returned early without resetting, so `ensureGroups` short-circuited on
+  `phase !== "idle"` forever after and `retryGroups()` refused to run while it read `"loading"`.
+  Only the two lazy, tab-triggered loads wedged: nothing else ever re-runs them, so there was no
+  second chance to recover. Abandoned work is not failed work — it is work that has not started.
+  Note the order of the two guards: a **superseded generation** must still return without writing,
+  because `#reset()` already owns the new target's phase.
+- **`GET /notifications` (v2) takes `limit` and has no `offset`.** Covered above, and it is the same
+  class of bug as the two below: an endpoint that accepts a parameter it ignores.
 - **The generated API client is locale-contaminated.** `packages/api/src/generated/` holds 47
   identifiers like `İnviteMyselfToData` and `İnstanceId` — U+0130, capital I with a dot. Codegen ran
   under a Turkish locale, so `toUpperCase` on a leading `i` produced `İ` rather than `I`. It
@@ -489,6 +595,15 @@ Unresolved; flag to the user rather than guessing.
   token header/query-param constants plus default ports.
 - **No retention control on the API.** The retention job runs and is configurable in the database,
   but nothing exposes it, so the Settings screen explains it rather than offering a control.
+- **No group modal yet.** Users and worlds have one; groups are still only a badge and a list row
+  linking out to vrchat.com. The daemon already returns everything a group *card* needs; a real one
+  wants `GET /groups/{groupId}` plus members, posts, and instances.
+- **`mutualGroup` is on the wire and unused.** `LimitedUserGroups` carries it, so the "Mutual" badge
+  dropped from the Groups tab as uncomputable can be restored for free.
+- **The profile image/banner context-menu action is not built.** `UserDetail.iconUrlFull` now exists
+  on the daemon (the non-thumbnail original, null rather than falling back to a thumbnail), but
+  `ui/src/lib/api.ts` does not carry it yet and no menu item opens it.
+- **The JS bundle is ~550 kB**, past Vite's 500 kB warning. It builds fine; worth splitting.
 - **No endpoints for invite-request / boop.** Both are registered in the command palette as stubs
   that name the missing route when run. *Self-invite is now real* — `POST
   /api/accounts/:id/invite-self` — because `vrchat://launch` starts a *second* game client instead

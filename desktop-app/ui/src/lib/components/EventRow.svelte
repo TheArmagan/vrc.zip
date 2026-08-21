@@ -9,8 +9,9 @@
 import type { EventFamily } from "$lib/api.ts";
 import { familyOf } from "$lib/api.ts";
 import LocationLine from "$lib/components/LocationLine.svelte";
+import UserName from "$lib/components/UserName.svelte";
 import type { LiveEvent } from "$lib/events.ts";
-import { eventLabel, payloadText, shortId, subjectName, timeOfDay } from "$lib/format.ts";
+import { eventLabel, isUserId, payloadText, shortId, subjectName, timeOfDay } from "$lib/format.ts";
 
 let { event, dense = false }: { event: LiveEvent; dense?: boolean } = $props();
 
@@ -36,6 +37,17 @@ const detail = $derived(payloadText(event.payload));
 const subjectFallback = $derived(
   who === null && event.subjectId !== null ? shortId(event.subjectId, 12) : null,
 );
+
+/*
+ * A row's subject is only sometimes a person.
+ *
+ * `subjectOf` in the daemon's bridges files whatever id the payload carried: a user for
+ * `friend.*` and `gamelog.player_*`, but a world for `gamelog.world_enter`, a group for
+ * `group.*`, and a notification id for `notification.seen`. Only a `usr_…` gets a control — and
+ * a `gamelog.player_join` whose payload has a name but no id (VRChat has shipped it both ways)
+ * keeps its plain-text name.
+ */
+const subjectUserId = $derived(isUserId(event.subjectId) ? event.subjectId : null);
 </script>
 
 <li
@@ -51,9 +63,19 @@ const subjectFallback = $derived(
     <p class="flex flex-wrap items-baseline gap-2 text-sm">
       <span class="font-medium">{eventLabel(event.kind)}</span>
       {#if who}
-        <span class="text-muted-foreground">{who}</span>
+        <UserName
+          userId={subjectUserId}
+          name={who}
+          accountId={event.accountId}
+          class="text-muted-foreground"
+        />
       {:else if subjectFallback}
-        <span class="font-mono text-xs text-muted-foreground">{subjectFallback}</span>
+        <UserName
+          userId={subjectUserId}
+          name={subjectFallback}
+          accountId={event.accountId}
+          class="font-mono text-xs text-muted-foreground"
+        />
       {/if}
       {#if event.live}
         <span class="text-xs tracking-wide text-status-online uppercase">live</span>

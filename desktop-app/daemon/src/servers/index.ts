@@ -34,12 +34,16 @@ export {
   type JsonValue,
   type LoginInput,
   type LoginResult,
+  MAX_NOTE_LENGTH,
+  parseUserId,
   type RateLimitSnapshot,
   type Settings,
   type SettingsPatch,
   type StatusSnapshot,
   type StreamEvent,
   type TwoFactorMethod,
+  type UserDetail,
+  type UserNote,
   type VerifyTwoFactorInput,
 } from "./control.ts";
 export { createProxyApp, type ProxyApp, type ProxyAppOptions } from "./proxy.ts";

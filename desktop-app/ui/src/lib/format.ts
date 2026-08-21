@@ -70,6 +70,188 @@ export function duration(ms: number): string {
   return `${String(hours)}h ${String(minutes)}m`;
 }
 
+/** "1 April 2017". For dates far enough back that a relative time reads as noise. */
+const calendarDate = new Intl.DateTimeFormat(undefined, {
+  year: "numeric",
+  month: "long",
+  day: "numeric",
+});
+
+export function calendarDay(ts: number): string {
+  return calendarDate.format(ts);
+}
+
+/**
+ * True for a VRChat user id, and only for one.
+ *
+ * A bus event's `subjectId` is whatever identifier its payload carried — a user, but equally a
+ * world, a group, or a notification id. Anything that offers to open a *user* has to check, or a
+ * `wrld_…` row grows a clickable name that 404s.
+ */
+export function isUserId(id: string | null | undefined): id is string {
+  return typeof id === "string" && id.startsWith("usr_");
+}
+
+const TRUST_LABELS: Readonly<Record<string, string>> = {
+  trusted: "Trusted",
+  veteran: "Trusted",
+  known: "Known",
+  user: "User",
+  basic: "New user",
+  visitor: "Visitor",
+  nuisance: "Nuisance",
+  troll: "Nuisance",
+};
+
+/**
+ * The rank string, normalised. VRChat spells it three ways depending on where it came from: the
+ * daemon's resolved `trustLevel` (`trusted`), the raw tag (`system_trust_veteran`), and the odd
+ * capitalised variant out of an older payload. One key, so the label, the colour, the sentence and
+ * the sort order can never disagree about which rank they are describing.
+ */
+function trustKey(trustLevel: string | null | undefined): string {
+  if (trustLevel === null || trustLevel === undefined || trustLevel === "") return "";
+  return trustLevel.toLowerCase().replace(/^system_trust_/, "");
+}
+
+/** VRChat's trust rank, in the words the game uses. Unknown ranks pass through capitalised. */
+export function trustLabel(trustLevel: string | null): string | null {
+  if (trustLevel === null || trustLevel === "") return null;
+  const key = trustKey(trustLevel);
+  return TRUST_LABELS[key] ?? trustLevel.charAt(0).toUpperCase() + trustLevel.slice(1);
+}
+
+/**
+ * What the rank actually *means*, in a sentence.
+ *
+ * The roster shows rank as a coloured chip, and a colour plus a two-word label still assumes the
+ * reader already plays enough VRChat to know that "Known" outranks "User". The tooltip is where
+ * that assumption gets paid for, so every rank gets prose rather than only the ones that look
+ * alarming.
+ */
+const TRUST_DESCRIPTIONS: Readonly<Record<string, string>> = {
+  trusted:
+    "Trusted User — VRChat's highest public rank. Earned over a long time in the game, and the hardest to fake.",
+  veteran:
+    "Trusted User — VRChat's highest public rank. Earned over a long time in the game, and the hardest to fake.",
+  known: "Known User — has spent a substantial amount of time in VRChat.",
+  user: "User — past VRChat's new-account ranks, with a moderate amount of time in the game.",
+  basic: "New User — a recently created account with little time in VRChat so far.",
+  visitor: "Visitor — has not yet passed VRChat's first trust threshold. Everyone starts here.",
+  nuisance: "Nuisance — VRChat has flagged this account for abuse. Most people have it hidden.",
+  troll: "Nuisance — VRChat has flagged this account for abuse. Most people have it hidden.",
+};
+
+export function trustDescription(trustLevel: string | null): string {
+  const key = trustKey(trustLevel);
+  if (key === "") return "VRChat did not report a trust rank for this person.";
+  return (
+    TRUST_DESCRIPTIONS[key] ??
+    `VRChat reports this person's trust rank as "${trustLevel ?? ""}", which this build has no description for.`
+  );
+}
+
+/**
+ * Sort order, highest rank first. An unrecognised rank sorts after every known one rather than
+ * being silently folded into "Visitor" — a rank vrc.zip has not heard of is not evidence of a low
+ * one.
+ */
+const TRUST_ORDER: Readonly<Record<string, number>> = {
+  trusted: 0,
+  veteran: 0,
+  known: 1,
+  user: 2,
+  basic: 3,
+  visitor: 4,
+  nuisance: 5,
+  troll: 5,
+};
+
+export function trustRank(trustLevel: string | null): number {
+  const key = trustKey(trustLevel);
+  return TRUST_ORDER[key] ?? 6;
+}
+
+/**
+ * VRChat's own trust colours, written out in full.
+ *
+ * These are not this app's palette and deliberately so: the rank colours are how VRChat players
+ * read trust at a glance in-game, and re-tinting them to fit vrc.zip's tokens would mean showing
+ * someone a purple "Trusted" badge for a rank the game paints purple somewhere else. They are
+ * literal class strings for the same reason `StatusDot` writes its classes out — Tailwind scans
+ * source text, so a composed `text-[${hex}]` would never be generated.
+ */
+const TRUST_CLASSES: Readonly<Record<string, string>> = {
+  trusted: "border-[#8143e6]/40 bg-[#8143e6]/10 text-[#8143e6] dark:text-[#a97ff0]",
+  veteran: "border-[#8143e6]/40 bg-[#8143e6]/10 text-[#8143e6] dark:text-[#a97ff0]",
+  known: "border-[#ff7b42]/40 bg-[#ff7b42]/10 text-[#c4551f] dark:text-[#ff9c70]",
+  user: "border-[#2bcf5c]/40 bg-[#2bcf5c]/10 text-[#1d8f3f] dark:text-[#5fdd85]",
+  basic: "border-[#1778ff]/40 bg-[#1778ff]/10 text-[#1778ff] dark:text-[#6aa9ff]",
+  visitor: "border-border bg-muted text-muted-foreground",
+  nuisance: "border-destructive/40 bg-destructive/10 text-destructive",
+  troll: "border-destructive/40 bg-destructive/10 text-destructive",
+};
+
+/** The badge classes for a trust rank. An unknown rank gets the neutral outline, never a colour. */
+export function trustClass(trustLevel: string | null): string {
+  if (trustLevel === null || trustLevel === "") return "";
+  return TRUST_CLASSES[trustKey(trustLevel)] ?? "";
+}
+
+/**
+ * Whether VRChat says this user is age-verified, and in what words.
+ *
+ * Reads the two fields VRChat actually publishes and the daemon now carries verbatim:
+ * `ageVerificationStatus` for the specific claim, and the `ageVerified` boolean behind it. The
+ * `system_age_verified` tag is deliberately *not* consulted any more — it was a stand-in for
+ * fields the daemon did not send yet, and inferring from a tag when the field exists means two
+ * sources of truth that can disagree.
+ *
+ * `hidden` is the case that matters. It means the user *is* verified and has chosen not to publish
+ * it, so it must not read as "unverified" — it returns null and no badge is drawn, exactly as for
+ * a user VRChat said nothing about. **Absence of a badge is never a claim here**, and `hidden`
+ * short-circuits ahead of `verified` precisely so the boolean cannot re-publish what the user
+ * hid.
+ */
+export function ageVerifiedLabel(
+  status: string | null | undefined,
+  verified: boolean | undefined,
+): string | null {
+  const normalized = (status ?? "").toLowerCase();
+  if (normalized === "hidden") return null;
+  if (normalized === "18+") return "18+ verified";
+  if (normalized === "verified") return "Age verified";
+  if (verified === true) return "Age verified";
+  return null;
+}
+
+/**
+ * A VRChat group's handle: `SHORTCODE.1234`, the form the game itself shows.
+ *
+ * Both halves are optional in the payload and the discriminator is meaningless without the short
+ * code, so a group with only a discriminator gets no handle at all rather than a bare `.1234`.
+ */
+export function groupTag(
+  shortCode: string | null | undefined,
+  discriminator: string | null | undefined,
+): string | null {
+  if (shortCode === null || shortCode === undefined || shortCode === "") return null;
+  return discriminator === null || discriminator === undefined || discriminator === ""
+    ? shortCode
+    : `${shortCode}.${discriminator}`;
+}
+
+/**
+ * The vrchat.com page for a group.
+ *
+ * This is a link out of the app on purpose. vrc.zip has no group screen and inventing a group
+ * modal to hold three fields it already shows would be a worse answer than handing the user to the
+ * page that has everything — the description, the members, the join button.
+ */
+export function groupLink(groupId: string): string {
+  return `https://vrchat.com/home/group/${encodeURIComponent(groupId)}`;
+}
+
 // ---------------------------------------------------------------------------
 // VRChat locations
 // ---------------------------------------------------------------------------

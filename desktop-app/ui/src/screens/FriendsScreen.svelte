@@ -17,6 +17,7 @@ import LocationLine from "$lib/components/LocationLine.svelte";
 import RelativeTime from "$lib/components/RelativeTime.svelte";
 import SectionHeader from "$lib/components/SectionHeader.svelte";
 import StatusDot from "$lib/components/StatusDot.svelte";
+import UserName from "$lib/components/UserName.svelte";
 import {
   Avatar,
   AvatarBadge,
@@ -157,7 +158,14 @@ const onlineCount = $derived(friends.filter((friend) => friend.status !== "offli
           </Avatar>
 
           <div class="min-w-0 flex-1">
-            <p class="truncate text-sm">{friend.displayName}</p>
+            <p class="truncate text-sm">
+              <UserName
+                userId={friend.id}
+                name={friend.displayName}
+                accountId={accountFilter === "" ? null : accountFilter}
+                class="max-w-full truncate"
+              />
+            </p>
             {#if friend.statusDescription}
               <p class="truncate text-xs text-muted-foreground">{friend.statusDescription}</p>
             {/if}

@@ -218,13 +218,60 @@ export class Store {
     });
   }
 
-  /** Newest-first feed page. `before` is an exclusive upper bound on `ts`. */
-  listEvents(accountId: string, before: number, limit: number): EventRow[] {
-    return this.stmts.listEvents.all(accountId, before, limit);
+  /**
+   * Newest-first feed page for one account. `before` is an exclusive upper bound on `ts`;
+   * `kind` narrows to a single event kind, and `null` means every kind.
+   *
+   * The `kind` filter is a SQL predicate rather than a `.filter()` on the result, in every one of
+   * these four: filtering after `LIMIT` returns a page shorter than asked for and then an empty
+   * one, which the infinite scroll reads as the end of history.
+   */
+  listEvents(
+    accountId: string,
+    before: number,
+    limit: number,
+    kind: string | null = null,
+  ): EventRow[] {
+    return kind === null
+      ? this.stmts.listEvents.all(accountId, before, limit)
+      : this.stmts.listEventsOfKind.all(accountId, kind, before, limit);
   }
 
-  listEventsBySubject(subjectId: string, before: number, limit: number): EventRow[] {
-    return this.stmts.listEventsBySubject.all(subjectId, before, limit);
+  /**
+   * Newest-first feed page across *every* account, including rows with `account_id IS NULL`.
+   *
+   * Those nulls are the whole reason this exists as its own query. A game client signed into an
+   * account vrc.zip does not manage is a normal state (PLAN.md §1.7), and fanning `listEvents` out
+   * over the known accounts — the shape the control API used to have — can never return them.
+   */
+  listAllEvents(before: number, limit: number, kind: string | null = null): EventRow[] {
+    return kind === null
+      ? this.stmts.listAllEvents.all(before, limit)
+      : this.stmts.listAllEventsOfKind.all(kind, before, limit);
+  }
+
+  /** Newest-first page of one game client's events — `sessions.id`, not an account. */
+  listEventsBySession(
+    sessionId: number,
+    before: number,
+    limit: number,
+    kind: string | null = null,
+  ): EventRow[] {
+    return kind === null
+      ? this.stmts.listEventsBySession.all(sessionId, before, limit)
+      : this.stmts.listEventsBySessionOfKind.all(sessionId, kind, before, limit);
+  }
+
+  /** Newest-first page of everything ever recorded about one subject, across all accounts. */
+  listEventsBySubject(
+    subjectId: string,
+    before: number,
+    limit: number,
+    kind: string | null = null,
+  ): EventRow[] {
+    return kind === null
+      ? this.stmts.listEventsBySubject.all(subjectId, before, limit)
+      : this.stmts.listEventsBySubjectOfKind.all(subjectId, kind, before, limit);
   }
 
   /** Row count per event kind — the number Settings shows next to each retention window. */
@@ -280,12 +327,19 @@ export class Store {
 
   // -- caches ---------------------------------------------------------------
 
-  putUserCache(userId: string, fetchedAt: number, data: string): void {
-    this.stmts.putUserCache.run(userId, fetchedAt, data);
+  /**
+   * Caches one `GET /users/{id}` body **as seen by one account**.
+   *
+   * `accountId` is part of the key, not incidental: VRChat returns different fields to a friend
+   * than to a stranger, so a cache shared across accounts serves one account the other's view.
+   * See migration 002.
+   */
+  putUserCache(accountId: string, userId: string, fetchedAt: number, data: string): void {
+    this.stmts.putUserCache.run(accountId, userId, fetchedAt, data);
   }
 
-  getUserCache(userId: string): CacheRow | null {
-    return this.stmts.getUserCache.get(userId);
+  getUserCache(accountId: string, userId: string): CacheRow | null {
+    return this.stmts.getUserCache.get(accountId, userId);
   }
 
   putWorldCache(worldId: string, fetchedAt: number, data: string): void {
@@ -455,7 +509,17 @@ function prepareAll(db: Database) {
       [string | null, number, number | null, string, string | null, string | null, string | null]
     >(SQL.insertEvent),
     listEvents: q<EventRow, [string, number, number]>(SQL.listEvents),
+    listEventsOfKind: q<EventRow, [string, string, number, number]>(SQL.listEventsOfKind),
+    listAllEvents: q<EventRow, [number, number]>(SQL.listAllEvents),
+    listAllEventsOfKind: q<EventRow, [string, number, number]>(SQL.listAllEventsOfKind),
+    listEventsBySession: q<EventRow, [number, number, number]>(SQL.listEventsBySession),
+    listEventsBySessionOfKind: q<EventRow, [number, string, number, number]>(
+      SQL.listEventsBySessionOfKind,
+    ),
     listEventsBySubject: q<EventRow, [string, number, number]>(SQL.listEventsBySubject),
+    listEventsBySubjectOfKind: q<EventRow, [string, string, number, number]>(
+      SQL.listEventsBySubjectOfKind,
+    ),
     countEventsByKind: q<KindCount, []>(SQL.countEventsByKind),
     distinctEventKinds: q<{ kind: string }, []>(SQL.distinctEventKinds),
     listEventsDaily: q<EventsDailyRow, [string, number, number]>(SQL.listEventsDaily),
@@ -471,8 +535,8 @@ function prepareAll(db: Database) {
     >(SQL.insertFriendHistory),
     listFriendHistory: q<FriendLogHistoryRow, [string, number, number]>(SQL.listFriendHistory),
 
-    putUserCache: q<void, [string, number, string]>(SQL.putUserCache),
-    getUserCache: q<CacheRow, [string]>(SQL.getUserCache),
+    putUserCache: q<void, [string, string, number, string]>(SQL.putUserCache),
+    getUserCache: q<CacheRow, [string, string]>(SQL.getUserCache),
     putWorldCache: q<void, [string, number, string]>(SQL.putWorldCache),
     getWorldCache: q<CacheRow, [string]>(SQL.getWorldCache),
     putAvatarCache: q<void, [string, number, string]>(SQL.putAvatarCache),

@@ -258,6 +258,123 @@ describe("events", () => {
     expect(store.distinctEventKinds()).toEqual(["gamelog.player_join"]);
     store.close();
   });
+
+  /*
+   * The whole point of `listAllEvents`. A game client signed into an account vrc.zip does not
+   * manage writes `gamelog.*` rows with `account_id IS NULL` (PLAN.md §1.7), and the control API
+   * used to answer "no accountId" by fanning out over the known accounts — which can never see
+   * those rows no matter how far the user scrolls.
+   */
+  test("the all-accounts feed returns rows with a null account_id", () => {
+    const store = seed();
+    const sessionId = store.startSession({
+      account_id: null,
+      display_name: "Unmanaged",
+      log_path: "C:/logs/output_log_unmanaged.txt",
+      log_inode: null,
+      started_at: T0,
+      vr_mode: null,
+      current_location: null,
+      current_world_id: null,
+    });
+    store.insertEvent({
+      account_id: null,
+      ts: T0 + 1,
+      session_id: sessionId,
+      kind: "gamelog.player_join",
+      subject_id: "usr_stranger",
+      location: "wrld_x:1",
+      payload: null,
+    });
+    store.insertEvent({
+      account_id: ACCOUNT,
+      ts: T0,
+      session_id: null,
+      kind: "friend.online",
+      subject_id: "usr_a",
+      location: null,
+      payload: null,
+    });
+
+    const all = store.listAllEvents(T0 + 99, 10);
+    expect(all.map((e) => e.account_id)).toEqual([null, ACCOUNT]);
+    // And the per-account query still refuses to invent an owner for the unmanaged row.
+    expect(store.listEvents(ACCOUNT, T0 + 99, 10)).toHaveLength(1);
+    store.close();
+  });
+
+  test("session and kind filters page in SQL rather than after the limit", () => {
+    const store = seed();
+    const sessionId = store.startSession({
+      account_id: ACCOUNT,
+      display_name: "Tester",
+      log_path: "C:/logs/output_log_a.txt",
+      log_inode: null,
+      started_at: T0,
+      vr_mode: "desktop",
+      current_location: null,
+      current_world_id: null,
+    });
+    const otherSession = store.startSession({
+      account_id: ACCOUNT,
+      display_name: "Tester",
+      log_path: "C:/logs/output_log_b.txt",
+      log_inode: null,
+      started_at: T0,
+      vr_mode: "vr",
+      current_location: null,
+      current_world_id: null,
+    });
+
+    // Interleaved so a page of joins can only come out right if SQL did the filtering: a JS
+    // filter over `LIMIT 2` would see one join and one leave and return a single row.
+    for (let i = 0; i < 4; i += 1) {
+      store.insertEvent({
+        account_id: ACCOUNT,
+        ts: T0 + i * 2,
+        session_id: sessionId,
+        kind: "gamelog.player_join",
+        subject_id: `usr_${i}`,
+        location: null,
+        payload: null,
+      });
+      store.insertEvent({
+        account_id: ACCOUNT,
+        ts: T0 + i * 2 + 1,
+        session_id: sessionId,
+        kind: "gamelog.player_leave",
+        subject_id: `usr_${i}`,
+        location: null,
+        payload: null,
+      });
+    }
+    store.insertEvent({
+      account_id: ACCOUNT,
+      ts: T0 + 100,
+      session_id: otherSession,
+      kind: "gamelog.player_join",
+      subject_id: "usr_elsewhere",
+      location: null,
+      payload: null,
+    });
+
+    expect(store.listEventsBySession(sessionId, T0 + 999, 100)).toHaveLength(8);
+    expect(
+      store.listEventsBySession(sessionId, T0 + 999, 2, "gamelog.player_join").map((e) => e.ts),
+    ).toEqual([T0 + 6, T0 + 4]);
+    // Paging with `before` walks the same filtered sequence.
+    expect(
+      store.listEventsBySession(sessionId, T0 + 4, 2, "gamelog.player_join").map((e) => e.ts),
+    ).toEqual([T0 + 2, T0]);
+    expect(store.listEventsBySession(otherSession, T0 + 999, 100)).toHaveLength(1);
+
+    expect(store.listEvents(ACCOUNT, T0 + 999, 100, "gamelog.player_join")).toHaveLength(5);
+    expect(store.listAllEvents(T0 + 999, 100, "gamelog.player_leave")).toHaveLength(4);
+    expect(store.listEventsBySubject("usr_0", T0 + 999, 100, "gamelog.player_leave")).toHaveLength(
+      1,
+    );
+    store.close();
+  });
 });
 
 describe("friend log, caches, notes, notifications, avatars", () => {
@@ -302,19 +419,67 @@ describe("friend log, caches, notes, notifications, avatars", () => {
 
   test("caches replace on refetch", () => {
     const store = seed();
-    store.putUserCache("usr_a", T0, `{"v":1}`);
-    store.putUserCache("usr_a", T0 + 1, `{"v":2}`);
+    store.putUserCache(ACCOUNT, "usr_a", T0, `{"v":1}`);
+    store.putUserCache(ACCOUNT, "usr_a", T0 + 1, `{"v":2}`);
     store.putWorldCache("wrld_a", T0, `{}`);
     store.putAvatarCache("avtr_a", T0, `{}`);
 
-    expect(store.getUserCache("usr_a")).toEqual({
+    expect(store.getUserCache(ACCOUNT, "usr_a")).toEqual({
       id: "usr_a",
       fetched_at: T0 + 1,
       data: `{"v":2}`,
     });
     expect(store.getWorldCache("wrld_a")?.id).toBe("wrld_a");
     expect(store.getAvatarCache("avtr_a")?.id).toBe("avtr_a");
-    expect(store.getUserCache("usr_missing")).toBeNull();
+    expect(store.getUserCache(ACCOUNT, "usr_missing")).toBeNull();
+    store.close();
+  });
+
+  /*
+   * The reason migration 002 exists. `GET /users/{id}` shows a friend fields it hides from a
+   * stranger, so two accounts looking at the same person hold genuinely different bodies — and
+   * before this key change the second fetch overwrote the first.
+   */
+  test("the user cache is per (account, user), not per user", () => {
+    const store = seed();
+    const other = "usr_other_viewer";
+    store.upsertAccount({
+      id: other,
+      display_name: "Other",
+      added_at: T0,
+      enabled: 1,
+      last_seen_at: null,
+    });
+
+    store.putUserCache(ACCOUNT, "usr_a", T0, `{"isFriend":true,"location":"wrld_a:1"}`);
+    store.putUserCache(other, "usr_a", T0 + 1, `{"isFriend":false,"location":""}`);
+
+    expect(store.getUserCache(ACCOUNT, "usr_a")?.data).toBe(
+      `{"isFriend":true,"location":"wrld_a:1"}`,
+    );
+    expect(store.getUserCache(other, "usr_a")?.data).toBe(`{"isFriend":false,"location":""}`);
+    // A third account has never looked, and must not inherit either view.
+    expect(store.getUserCache("usr_nobody", "usr_a")).toBeNull();
+    store.close();
+  });
+
+  test("deleting an account drops only its own cached views", () => {
+    const store = seed();
+    const other = "usr_other_viewer";
+    store.upsertAccount({
+      id: other,
+      display_name: "Other",
+      added_at: T0,
+      enabled: 1,
+      last_seen_at: null,
+    });
+    store.putUserCache(ACCOUNT, "usr_a", T0, `{"v":1}`);
+    store.putUserCache(other, "usr_a", T0, `{"v":2}`);
+
+    store.deleteAccount(other);
+
+    expect(store.getUserCache(ACCOUNT, "usr_a")?.data).toBe(`{"v":1}`);
+    expect(store.getUserCache(other, "usr_a")).toBeNull();
     store.close();
   });
 

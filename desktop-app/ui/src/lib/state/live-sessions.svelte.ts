@@ -6,13 +6,16 @@
  * world is called, only ever arrive as `gamelog.*` frames on the socket. This class accumulates
  * those frames per client and hands the screen a merged view.
  *
- * The awkward part is identity, and it is worth being explicit about rather than papering over:
- * the socket identifies a client by the log watcher's **string** session id, while `/api/sessions`
- * identifies it by the store's **integer** row id, and the daemon does not currently publish the
- * mapping between them. So the two are correlated on start time — a client's `startedAt` comes
- * from the same log header on both sides, and two VRChat clients cannot start in the same
- * millisecond. When correlation fails the screen still renders the REST row; it just says the
- * player list has not been observed yet instead of inventing an empty one.
+ * Identity is simple, though an earlier version of this comment claimed otherwise: it said the
+ * socket used the log watcher's string session id while `/api/sessions` used the store's row id,
+ * with no published mapping, and correlated the two on start time within a tolerance. In fact
+ * `wiring/log-bridge.ts` translates to the **store row id before emitting**, so both sides already
+ * name a client the same way and the frame id only needs stringifying. Correlation is now an exact
+ * lookup; the heuristic could mismatch two clients started close together, and silently found
+ * nothing whenever the start times disagreed at all.
+ *
+ * When no frames have arrived for a client yet the screen still renders the REST row — it just
+ * says the player list has not been observed rather than inventing an empty one.
  */
 
 import { SvelteMap } from "svelte/reactivity";
@@ -47,9 +50,6 @@ export interface MergedSession {
   readonly lastEventAt: number | null;
 }
 
-/** Correlation window for start times, in ms. Log headers are second-resolution on some builds. */
-const START_TOLERANCE_MS = 2_000;
-
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -80,7 +80,18 @@ export class LiveSessionsState {
       existing.lastEventAt = Math.max(existing.lastEventAt, ts);
       return existing;
     }
-    const created: LogSession = {
+    /*
+     * `$state`, and it is load-bearing rather than stylistic.
+     *
+     * `#byStreamId` being a `SvelteMap` makes *structural* change reactive — a client appearing or
+     * going away. It says nothing about the objects inside it. Almost everything this class does is
+     * mutate an entry that is already in the map (`entry.players = [...]` on a player join, the
+     * world name, the location), and on a plain object those writes are invisible to Svelte: the
+     * screen's `$derived(liveSessions.merge(...))` never re-runs, so a live instance's roster is
+     * frozen at whatever it held when the session row first appeared. Only a reload or a new
+     * session refreshed it.
+     */
+    const created: LogSession = $state({
       streamId,
       accountId: null,
       displayName: null,
@@ -91,7 +102,7 @@ export class LiveSessionsState {
       players: [],
       lastEventAt: ts,
       ended: false,
-    };
+    });
     this.#byStreamId.set(streamId, created);
     return created;
   }
@@ -176,26 +187,9 @@ export class LiveSessionsState {
     }
   }
 
-  /** The observed record for a REST session, correlated on start time then display name. */
+  /** The observed record for a REST session. An exact id match — see the note at the top. */
   #correlate(session: GameSession): LogSession | null {
-    let fallback: LogSession | null = null;
-    for (const entry of this.#byStreamId.values()) {
-      if (entry.ended) continue;
-      if (
-        entry.startedAt !== null &&
-        Math.abs(entry.startedAt - session.startedAt) <= START_TOLERANCE_MS
-      ) {
-        return entry;
-      }
-      if (
-        fallback === null &&
-        session.displayName !== null &&
-        entry.displayName === session.displayName
-      ) {
-        fallback = entry;
-      }
-    }
-    return fallback;
+    return this.#byStreamId.get(String(session.id)) ?? null;
   }
 
   /**

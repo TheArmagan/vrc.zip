@@ -201,7 +201,7 @@ describe("runRetention", () => {
     });
     store.putNote(ACCOUNT, "usr_a", "met in 2016", old);
     store.recordAvatarSeen(ACCOUNT, "avtr_a", old);
-    store.putUserCache("usr_a", old, `{"id":"usr_a"}`);
+    store.putUserCache(ACCOUNT, "usr_a", old, `{"id":"usr_a"}`);
     // Configure an absurdly short window to prove config cannot reach these tables.
     store.setRetentionConfig(GLOBAL_DEFAULT_KIND, 1, NOW);
     addEvent(store, "gamelog.player_join", old);

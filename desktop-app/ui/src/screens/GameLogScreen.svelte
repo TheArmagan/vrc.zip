@@ -1,15 +1,19 @@
 <!--
   The game log: parsed lines from the VRChat clients' own log files.
 
-  One caveat is written into the screen rather than hidden, because it changes what the filter can
-  do. The daemon's feed writer stores `session_id` as null on every row, so a stored `gamelog.*`
-  event does not know which client produced it. Live frames do carry the log watcher's session id.
-  Filtering to one client therefore narrows to what has arrived over the socket, and the screen
-  says so instead of quietly showing a short list.
+  Live lines and stored rows identify their client the same way — by the store's session row id —
+  so filtering to one client narrows *all* of it, history included.
+
+  That was not always true, and the previous version of this comment asserted the opposite: it
+  claimed the feed writer stored `session_id` as null on every row, and the filter therefore threw
+  away every stored line whenever a client was selected. The claim was simply false — the column
+  has always been populated (9,288 player-join rows in a real database, not one null). What was
+  actually null was `sessionId` on *live* frames, which `frameToEvent` hardcoded. Fixing that one
+  field is what lets the two be filtered together.
 -->
 <script lang="ts">
   import ScrollTextIcon from "@lucide/svelte/icons/scroll-text";
-  import { api, describeError, isAbort } from "$lib/api.ts";
+  import { api, describeError, type EventQuery, isAbort } from "$lib/api.ts";
   import EmptyState from "$lib/components/EmptyState.svelte";
   import ErrorNote from "$lib/components/ErrorNote.svelte";
   import EventRow from "$lib/components/EventRow.svelte";
@@ -29,7 +33,6 @@
   } from "$lib/format.ts";
   import { hrefFor } from "$lib/router.ts";
   import { app } from "$lib/state/app.svelte.ts";
-  import { liveSessions } from "$lib/state/live-sessions.svelte.ts";
   import { prefs } from "$lib/state/prefs.svelte.ts";
 
   let { sessionId = null }: { sessionId?: string | null } = $props();
@@ -54,13 +57,17 @@
   });
 
   $effect(() => {
+    // Reading it here is what makes this effect re-run when the client filter changes; the daemon
+    // returns a different page for each, so the fetch is part of the filter rather than a
+    // one-time load.
+    const query = storedQuery();
     const controller = new AbortController();
     loading = true;
     exhausted = false;
 
     void (async () => {
       try {
-        const rows = await api.events({ limit: PAGE_SIZE }, controller.signal);
+        const rows = await api.events(query, controller.signal);
         stored = rows
           .map(rowToEvent)
           .filter((event) => event.kind.startsWith("gamelog."));
@@ -83,9 +90,15 @@
     app.sessions.find((session) => String(session.id) === selected) ?? null,
   );
 
-  const selectedStreamId = $derived(
-    selectedSession === null ? null : liveSessions.streamIdFor(selectedSession),
-  );
+  /*
+   * The *id*, not the session object, is what the fetch depends on.
+   *
+   * `app.sessions` is replaced wholesale on every refresh, so `selectedSession` is a new object
+   * reference each time even when nothing about the selection changed. An effect keyed on the
+   * object would refetch the first page — and throw away the reader's scroll position — every time
+   * a session event ticked. A number compares by value and stays put.
+   */
+  const selectedSessionId = $derived(selectedSession?.id ?? null);
 
   const liveLines = $derived(
     app.liveEvents.filter((event) => event.kind.startsWith("gamelog.")),
@@ -94,11 +107,9 @@
   const all = $derived(mergeEvents(stored, liveLines));
 
   const visible = $derived(
-    selected === ""
+    selectedSessionId === null
       ? all
-      : all.filter(
-          (event) => event.live && event.streamSessionId === selectedStreamId,
-        ),
+      : all.filter((event) => event.sessionId === selectedSessionId),
   );
 
   const triggerLabel = $derived(
@@ -119,12 +130,28 @@
     return out;
   });
 
+  /**
+   * The stored-history query for the current filter.
+   *
+   * Filtering by client happens **in the daemon**, not here. Fetching a global page and narrowing
+   * it in JS means a busy instance's own history is whatever survives the last 300 rows across
+   * every client — so a quiet second client looks empty, and "load older" walks history it then
+   * throws away.
+   */
+  function storedQuery(before?: number): EventQuery {
+    return {
+      limit: PAGE_SIZE,
+      ...(selectedSessionId === null ? {} : { sessionId: selectedSessionId }),
+      ...(before === undefined ? {} : { before }),
+    };
+  }
+
   async function loadMore(): Promise<void> {
     const oldest = stored.at(-1);
     if (oldest === undefined || loadingMore || exhausted) return;
     loadingMore = true;
     try {
-      const rows = await api.events({ limit: PAGE_SIZE, before: oldest.ts });
+      const rows = await api.events(storedQuery(oldest.ts));
       stored = [
         ...stored,
         ...rows
@@ -188,8 +215,7 @@
         </span>
       </Alert.Title>
       <Alert.Description>
-        Stored history has no client attached to it, so this view shows only
-        lines that arrived over the live socket since this page loaded.
+        Showing this client's stored history and its live lines together.
         <a href={hrefFor("sessions")}>Open its session card</a>.
       </Alert.Description>
     </Alert.Root>
@@ -223,9 +249,7 @@
     <EmptyState
       icon={ScrollTextIcon}
       title="Nothing from this client yet"
-      description={selectedStreamId === null
-        ? "vrc.zip has not matched this client to a live log stream, so it cannot attribute lines to it yet. The next line the client writes will do it."
-        : "This client has written no parsed lines since the page loaded."}
+      description="No parsed lines have been recorded for this client — neither in stored history nor since the page loaded."
     >
       {#snippet action()}
         <Button

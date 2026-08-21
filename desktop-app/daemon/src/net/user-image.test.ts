@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { pickUserImageUrl } from "./user-image.ts";
+import { pickUserImageUrl, pickUserImageUrlFull } from "./user-image.ts";
 
 const ICON = "https://api.vrchat.cloud/api/1/file/file_icon/1/256";
 const OVERRIDE_THUMB = "https://api.vrchat.cloud/api/1/file/file_pfp/2/128";
@@ -56,5 +56,43 @@ describe("pickUserImageUrl", () => {
     expect(pickUserImageUrl(undefined)).toBeNull();
     expect(pickUserImageUrl({})).toBeNull();
     expect(pickUserImageUrl({ userIcon: "", currentAvatarImageUrl: "" })).toBeNull();
+  });
+});
+
+describe("pickUserImageUrlFull", () => {
+  test("keeps the same deliberateness order, minus the thumbnails", () => {
+    expect(
+      pickUserImageUrlFull({
+        userIcon: ICON,
+        profilePicOverride: OVERRIDE,
+        currentAvatarImageUrl: AVATAR,
+      }),
+    ).toBe(ICON);
+
+    expect(
+      pickUserImageUrlFull({ profilePicOverride: OVERRIDE, currentAvatarImageUrl: AVATAR }),
+    ).toBe(OVERRIDE);
+
+    expect(pickUserImageUrlFull({ currentAvatarImageUrl: AVATAR })).toBe(AVATAR);
+  });
+
+  test("a thumbnail never stands in for the full image", () => {
+    // The two pickers deliberately disagree here, and that disagreement is the feature: the list
+    // avatar wants the 128px crop, and "open the full image" must not quietly open it too.
+    const thumbnailsOnly = {
+      profilePicOverrideThumbnail: OVERRIDE_THUMB,
+      currentAvatarThumbnailImageUrl: AVATAR_THUMB,
+    };
+    expect(pickUserImageUrl(thumbnailsOnly)).toBe(OVERRIDE_THUMB);
+    // Null, not a crop labelled "full" — the UI hides the action rather than lying about it.
+    expect(pickUserImageUrlFull(thumbnailsOnly)).toBeNull();
+  });
+
+  test('treats "" as absent and null-ish input as nothing, like its sibling', () => {
+    expect(pickUserImageUrlFull({ userIcon: "", profilePicOverride: "" })).toBeNull();
+    expect(pickUserImageUrlFull({ userIcon: "", currentAvatarImageUrl: AVATAR })).toBe(AVATAR);
+    expect(pickUserImageUrlFull(null)).toBeNull();
+    expect(pickUserImageUrlFull(undefined)).toBeNull();
+    expect(pickUserImageUrlFull({})).toBeNull();
   });
 });

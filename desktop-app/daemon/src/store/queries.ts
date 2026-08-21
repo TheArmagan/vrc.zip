@@ -67,14 +67,59 @@ export const SQL = {
   insertEvent: `
     INSERT INTO events (account_id, ts, session_id, kind, subject_id, location, payload)
     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  /*
+   * The feed pages. Four selectors — every account, one account, one game-client session, one
+   * subject — each with and without a `kind` filter, and every one of them does its own paging.
+   *
+   * Written out rather than assembled by a builder, on purpose: eight fixed strings can be read
+   * and their index use reasoned about, where a builder's output can only be discovered at
+   * runtime. They are all `ts < ? ORDER BY ts DESC, id DESC LIMIT ?` so a caller can page any of
+   * them the same way, and none of them filters after the `LIMIT` — post-filtering a page in JS
+   * silently returns short pages and then an empty one, which reads to the user as "the history
+   * stops here".
+   *
+   * `listAllEvents*` deliberately has no `account_id` predicate. It is the only selector that can
+   * see rows with `account_id IS NULL` — a game client signed into an account vrc.zip does not
+   * manage (PLAN.md §1.7) — and those rows are precisely what the game log exists to show.
+   */
   listEvents: `
     SELECT * FROM events
     WHERE account_id = ? AND ts < ?
     ORDER BY ts DESC, id DESC
     LIMIT ?`,
+  listEventsOfKind: `
+    SELECT * FROM events
+    WHERE account_id = ? AND kind = ? AND ts < ?
+    ORDER BY ts DESC, id DESC
+    LIMIT ?`,
+  listAllEvents: `
+    SELECT * FROM events
+    WHERE ts < ?
+    ORDER BY ts DESC, id DESC
+    LIMIT ?`,
+  listAllEventsOfKind: `
+    SELECT * FROM events
+    WHERE kind = ? AND ts < ?
+    ORDER BY ts DESC, id DESC
+    LIMIT ?`,
+  listEventsBySession: `
+    SELECT * FROM events
+    WHERE session_id = ? AND ts < ?
+    ORDER BY ts DESC, id DESC
+    LIMIT ?`,
+  listEventsBySessionOfKind: `
+    SELECT * FROM events
+    WHERE session_id = ? AND kind = ? AND ts < ?
+    ORDER BY ts DESC, id DESC
+    LIMIT ?`,
   listEventsBySubject: `
     SELECT * FROM events
     WHERE subject_id = ? AND ts < ?
+    ORDER BY ts DESC, id DESC
+    LIMIT ?`,
+  listEventsBySubjectOfKind: `
+    SELECT * FROM events
+    WHERE subject_id = ? AND kind = ? AND ts < ?
     ORDER BY ts DESC, id DESC
     LIMIT ?`,
   countEventsByKind: `SELECT kind, COUNT(*) AS count FROM events GROUP BY kind ORDER BY count DESC`,
@@ -106,10 +151,20 @@ export const SQL = {
     LIMIT ?`,
 
   // -- caches ---------------------------------------------------------------
+  /*
+   * `user_cache` is keyed `(account_id, user_id)`, not `user_id` — `GET /users/{id}` answers
+   * differently depending on whether the caller is a friend of the subject, so one cache row per
+   * user would let whichever account fetched last decide what every other account sees. See
+   * migration 002 and PLAN.md §1.3. World and avatar records carry no such per-viewer variation,
+   * so those two caches stay keyed on the object id alone.
+   */
   putUserCache: `
-    INSERT INTO user_cache (user_id, fetched_at, data) VALUES (?, ?, ?)
-    ON CONFLICT(user_id) DO UPDATE SET fetched_at = excluded.fetched_at, data = excluded.data`,
-  getUserCache: `SELECT user_id AS id, fetched_at, data FROM user_cache WHERE user_id = ?`,
+    INSERT INTO user_cache (account_id, user_id, fetched_at, data) VALUES (?, ?, ?, ?)
+    ON CONFLICT(account_id, user_id) DO UPDATE SET
+      fetched_at = excluded.fetched_at, data = excluded.data`,
+  getUserCache: `
+    SELECT user_id AS id, fetched_at, data FROM user_cache
+    WHERE account_id = ? AND user_id = ?`,
   putWorldCache: `
     INSERT INTO world_cache (world_id, fetched_at, data) VALUES (?, ?, ?)
     ON CONFLICT(world_id) DO UPDATE SET fetched_at = excluded.fetched_at, data = excluded.data`,

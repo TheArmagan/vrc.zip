@@ -13,6 +13,8 @@ import AppShell from "$lib/components/AppShell.svelte";
 import CommandPalette from "$lib/components/CommandPalette.svelte";
 import DaemonOffline from "$lib/components/DaemonOffline.svelte";
 import ErrorNote from "$lib/components/ErrorNote.svelte";
+import UserModal from "$lib/components/UserModal.svelte";
+import WorldModal from "$lib/components/WorldModal.svelte";
 import { Toaster } from "$lib/components/ui/sonner/index.js";
 import { registerBuiltinCommands } from "$lib/commands/builtin.svelte.ts";
 import { isTypingTarget, matchKeybinding, runCommand } from "$lib/commands.svelte.ts";
@@ -109,7 +111,8 @@ const offline = $derived(!app.reachable);
     {/if}
 
     {#if route.id === "sessions"}
-      <SessionsScreen />
+      <!-- `#/sessions/<id>` focuses one running client; see `SessionsScreen`. -->
+      <SessionsScreen sessionId={route.param} />
     {:else if route.id === "accounts"}
       <AccountsScreen />
     {:else if route.id === "login"}
@@ -129,3 +132,16 @@ const offline = $derived(!app.reachable);
 {/if}
 
 <CommandPalette bind:open={paletteOpen} />
+
+<!--
+  One instance, at the root, deliberately outside the offline branch: local history is vrc.zip's
+  own data and a name clicked before the daemon went away should still tell that story.
+-->
+<UserModal />
+
+<!--
+  The world's counterpart, and mounted for the same reason: every location in the app is a control
+  that opens it, so there is one dialog rather than one per row. Outside the offline branch too —
+  a world already in the daemon's cache still has a name to show when VRChat cannot be reached.
+-->
+<WorldModal />

@@ -20,12 +20,30 @@ const deps: ControlDeps = {
   },
   removeAccount: async () => {},
   inviteSelfTo: async () => {},
+  listInstanceUsers: async () => {
+    throw new Error("unused");
+  },
   listSessions: async () => [],
   listEvents: async () => [],
   listFriends: async () => [],
   listNotifications: async () => [],
   fetchImage: async () => null,
   markNotificationSeen: async () => {},
+  getUser: async () => {
+    throw new Error("unused");
+  },
+  setUserNote: async () => {
+    throw new Error("unused");
+  },
+  getWorld: async () => {
+    throw new Error("unused");
+  },
+  listWorlds: async () => ({ worlds: {} }),
+  getInstance: async () => {
+    throw new Error("unused");
+  },
+  listUserGroups: async () => ({ groups: [] }),
+  listMutualFriends: async () => ({ users: [], hasMore: false }),
   getSettings: async () => ({}),
   updateSettings: async () => ({}),
   subscribeEvents: () => () => {},

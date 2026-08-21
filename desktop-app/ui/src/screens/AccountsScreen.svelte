@@ -16,6 +16,7 @@ import EmptyState from "$lib/components/EmptyState.svelte";
 import ErrorNote from "$lib/components/ErrorNote.svelte";
 import RelativeTime from "$lib/components/RelativeTime.svelte";
 import SectionHeader from "$lib/components/SectionHeader.svelte";
+import UserName from "$lib/components/UserName.svelte";
 import * as Alert from "$lib/components/ui/alert/index.js";
 import {
   Avatar,
@@ -124,7 +125,18 @@ async function confirmRemove(): Promise<void> {
           </Avatar>
 
           <div class="min-w-0 flex-1">
-            <p class="truncate text-sm font-medium">{account.displayName}</p>
+            <!--
+              An account is a user too, and its own profile is the one VRChat answers most fully —
+              the lookup runs through the account itself. See `userModal.openUser`.
+            -->
+            <p class="truncate text-sm font-medium">
+              <UserName
+                userId={account.id}
+                name={account.displayName}
+                accountId={account.id}
+                class="max-w-full truncate"
+              />
+            </p>
             <p class="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
               <span>{connectionLabel(account.connection)}</span>
               <span aria-hidden="true">·</span>

@@ -28,6 +28,7 @@ import {
   type UserGroup,
   type UserProfile,
 } from "../api.ts";
+import { languageLabel } from "../format.ts";
 import { app } from "./app.svelte.ts";
 import {
   classifyFailure,
@@ -242,6 +243,30 @@ class UserModalState extends EntityModalState {
     mutualFriends: this.mutuals,
     localHistory: this.history,
   });
+
+  /**
+   * The profile card, or null when the daemon had no answer for it.
+   *
+   * Read through here rather than off `profile` directly, so every consumer branches on the same
+   * "unknown" — the card is a *second* upstream call and it is allowed to be missing on a modal
+   * that is otherwise complete.
+   */
+  profileCard = $derived(this.profile?.profileCard ?? null);
+
+  /** Published languages, already human-readable. Empty for most people. */
+  languages = $derived((this.profileCard?.languages ?? []).map(languageLabel));
+
+  /** VRChat's badges, showcased first — the daemon sorts them, this does not re-rank. */
+  badges = $derived(this.profileCard?.badges ?? []);
+
+  /**
+   * Whether VRChat says this account holds VRC+.
+   *
+   * `false` and *unknown* are deliberately not distinguished here, because the badge is only ever
+   * drawn on `true`: with no card there is simply nothing to say, which is the same silence a
+   * non-subscriber gets. Never inferred from `tags` — that guess is what this field replaces.
+   */
+  hasVrcPlus = $derived(this.profileCard?.hasVrcPlus === true);
 
   /**
    * The image behind the header, or null — which is what most users have.

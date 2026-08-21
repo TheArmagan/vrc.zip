@@ -217,6 +217,15 @@ const TAB_FAILURE_BODIES: Record<string, string> = {
       <Badge variant="outline" class={trustTint} title="VRChat trust rank">{trust}</Badge>
     {/if}
 
+    {#if userModal.hasVrcPlus}
+      <!--
+        VRChat's own `hasVrcPlus`, off the profile card — not `tags.includes("system_supporter")`.
+        Drawn only on a `true`: with no card there is nothing to say, and that silence is the same
+        one a non-subscriber gets, so its absence is never a claim either way.
+      -->
+      <Badge variant="outline" title="VRChat Plus subscriber">VRC+</Badge>
+    {/if}
+
     {#if profile !== null && profile.isFriend}
       <Badge
         variant="outline"
@@ -298,6 +307,53 @@ const TAB_FAILURE_BODIES: Record<string, string> = {
             </li>
           {/each}
         </ul>
+      {/if}
+
+      {#if userModal.languages.length > 0}
+        <div class="flex flex-wrap items-center gap-1.5">
+          <span class="text-xs tracking-wide text-muted-foreground uppercase">Speaks</span>
+          <!--
+            Keyed by index, like the bio links above and for the same reason: these come off the
+            wire, VRChat has no rule against a repeated code, and a duplicate key is a hard runtime
+            error in Svelte 5 that would take the whole tab down. The list is static per profile.
+          -->
+          {#each userModal.languages as language, index (index)}
+            <Badge variant="secondary" class="font-normal">{language}</Badge>
+          {/each}
+        </div>
+      {/if}
+
+      {#if userModal.badges.length > 0}
+        <div class="space-y-1">
+          <p class="text-xs tracking-wide text-muted-foreground uppercase">Badges</p>
+          <ul class="flex flex-wrap gap-2">
+            <!-- Index-keyed for the reason above: badge ids arrive from VRChat, not from us. -->
+            {#each userModal.badges as badge, index (index)}
+              <li title={badge.description === null
+                ? badge.name
+                : `${badge.name} — ${badge.description}`}>
+                {#if badge.imageUrl !== null}
+                  <!--
+                    Through `imageUrl()` like every VRChat asset — a browser cannot load
+                    `assets.vrchat.com` directly. `alt` is the badge's name rather than empty: with
+                    the title on the row, the image *is* the only rendering of it.
+                  -->
+                  <img
+                    src={imageUrl(badge.imageUrl)}
+                    alt={badge.name}
+                    class="size-9 rounded-md object-contain {badge.showcased
+                      ? ''
+                      : 'opacity-60 saturate-50'}"
+                    loading="lazy"
+                  />
+                {:else}
+                  <!-- No art: the name still belongs on screen rather than an empty frame. -->
+                  <Badge variant="outline" class="font-normal">{badge.name}</Badge>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        </div>
       {/if}
 
       {#if location !== null}

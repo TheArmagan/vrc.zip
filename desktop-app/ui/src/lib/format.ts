@@ -226,6 +226,28 @@ export function ageVerifiedLabel(
 }
 
 /**
+ * One `Intl.DisplayNames`, built once. Constructing it per language per render is the expensive
+ * half of this — the lookup itself is a map read.
+ */
+const LANGUAGE_NAMES = new Intl.DisplayNames(["en"], { type: "language", fallback: "none" });
+
+/**
+ * The English name of a VRChat language code (`eng` → English), or the code itself.
+ *
+ * VRChat's codes are ISO 639-3, which `Intl` reads directly — including `ase`, American Sign
+ * Language. It does not know all of them, and `of()` **throws** on a structurally invalid tag
+ * rather than returning undefined, so both misses fall back to the code as written. An unfamiliar
+ * three-letter code beside the others is a far better outcome than a thrown render.
+ */
+export function languageLabel(code: string): string {
+  try {
+    return LANGUAGE_NAMES.of(code) ?? code;
+  } catch {
+    return code;
+  }
+}
+
+/**
  * A VRChat group's handle: `SHORTCODE.1234`, the form the game itself shows.
  *
  * Both halves are optional in the payload and the discriminator is meaningless without the short

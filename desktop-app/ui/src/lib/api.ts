@@ -291,6 +291,41 @@ export interface UserProfile {
    * 200. It is not an empty state to apologise for, and not a reason to draw a placeholder.
    */
   readonly representedGroup: UserGroup | null;
+  /**
+   * The profile page's own half of this user — badges, languages, VRC+ — or **null when the
+   * daemon got no answer for it**.
+   *
+   * Null is "unknown", not "empty": it is a second, best-effort call behind the profile, and the
+   * modal must render without it rather than drawing an empty badge row that reads as a claim
+   * this person has none. Nothing presence-shaped lives here; that all comes from the fields
+   * above. See `UserProfileCard`.
+   */
+  readonly profileCard: UserProfileCard | null;
+}
+
+/** One VRChat badge. `imageUrl` goes through `imageUrl()` like every other VRChat asset. */
+export interface UserBadge {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string | null;
+  readonly imageUrl: string | null;
+  /** The user features this one on their profile. The daemon sorts these first. */
+  readonly showcased: boolean;
+}
+
+/**
+ * What `GET /profile/{id}` adds to the user record: the decoration VRChat's profile page shows.
+ *
+ * Every field here is safe to render as absent. An account with no badges, no published
+ * languages and no VRC+ is completely ordinary.
+ */
+export interface UserProfileCard {
+  /** VRChat's short codes (`eng`, `jpn`, …) — see `languageLabel` in `format.ts`. */
+  readonly languages: readonly string[];
+  readonly badges: readonly UserBadge[];
+  readonly hasVrcPlus: boolean;
+  /** A CSS colour for the profile header, or null. */
+  readonly bannerColor: string | null;
 }
 
 /**

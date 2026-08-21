@@ -436,6 +436,49 @@ export interface InstanceDetail {
 }
 
 /**
+ * One VRChat badge, as the profile page shows it.
+ *
+ * `assignedAt`, `hidden` and `updatedAt` exist on VRChat's `Badge` and are documented as *"only
+ * present in CurrentUser badges"*, so they are deliberately absent here: a field that is null for
+ * every user this modal can show is a field the UI eventually branches on wrongly.
+ */
+export interface UserBadge {
+  id: string;
+  name: string;
+  description: string | null;
+  /**
+   * An absolute VRChat asset URL, or null. **The UI must load it through `GET /api/image`, never
+   * directly** — see `ControlAccount.iconUrl`.
+   */
+  imageUrl: string | null;
+  /** The user chose to feature this one on their profile. Showcased badges sort first. */
+  showcased: boolean;
+}
+
+/**
+ * The profile-page half of a user: what `GET /profile/{id}` adds to `GET /users/{id}`.
+ *
+ * **`/profile/{id}` does not replace `/users/{id}`.** It carries none of the presence fields —
+ * no `location`, `state`, `last_login`, `platform`, or `travelingTo*` — so it supplements the user
+ * record and can never stand in for it. Reading presence off it would leave the whole app blind.
+ * See the decision log in PROGRESS.md.
+ *
+ * A separate, **nullable** object rather than fields spread onto {@link UserDetail}, because this
+ * is a second, best-effort call: null means *we got no answer*, which is a different claim from
+ * "this person has no badges and published no languages". The modal renders fully without it.
+ */
+export interface UserProfileCard {
+  /** Languages the user published, in VRChat's own short codes (`eng`, `jpn`, …). */
+  languages: string[];
+  /** Showcased first, then the rest, VRChat's own order preserved within each half. */
+  badges: UserBadge[];
+  /** VRChat's own answer, rather than `tags.includes("system_supporter")` inferred from elsewhere. */
+  hasVrcPlus: boolean;
+  /** The colour VRChat stores for the profile header, or null when unset. */
+  bannerColor: string | null;
+}
+
+/**
  * Everything the user modal shows: VRChat's `getUser` merged with what vrc.zip knows locally.
  *
  * One shape, two very different provenances, which is why `accountId` and `fetchedAt` are on it.
@@ -518,6 +561,14 @@ export interface UserDetail {
    * the profile itself rather than getting a second cache with its own staleness.
    */
   representedGroup: GroupSummary | null;
+  /**
+   * The profile-page extras, or **null when that call did not answer** — never an empty card.
+   *
+   * Costs no extra request on the common path: the profile reports whether the user represents a
+   * group at all, and a `null` there skips the `/users/{id}/groups/represented` call that used to
+   * run unconditionally. See {@link UserProfileCard}.
+   */
+  profileCard: UserProfileCard | null;
 
   // -- from vrc.zip -------------------------------------------------------
   /** Unix milliseconds this account first recorded the friendship, or null when never friends. */

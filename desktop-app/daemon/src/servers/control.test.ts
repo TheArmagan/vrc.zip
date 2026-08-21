@@ -87,6 +87,20 @@ const USER_DETAIL: UserDetail = {
     description: null,
     isRepresenting: true,
   },
+  profileCard: {
+    languages: ["eng", "jpn"],
+    badges: [
+      {
+        id: "bdg_supporter",
+        name: "Supporter",
+        description: "Supported VRChat",
+        imageUrl: "https://assets.vrchat.com/badges/bdg_supporter.png",
+        showcased: true,
+      },
+    ],
+    hasVrcPlus: true,
+    bannerColor: "#112233",
+  },
   friendedAt: 1_650_000_000_000,
   note: null,
   noteUpdatedAt: null,

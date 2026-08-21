@@ -1,9 +1,11 @@
 import type {
+  Badge,
   Group,
   Instance,
   LimitedUserGroups,
   LimitedUserInstance,
   MutualFriend,
+  PublicProfile,
   RepresentedGroup,
   User,
   World,
@@ -38,10 +40,12 @@ import {
   type SettingsPatch,
   type StatusSnapshot,
   type StreamEvent,
+  type UserBadge,
   type UserBatch,
   type UserDetail,
   type UserGroups,
   type UserNote,
+  type UserProfileCard,
   type Settings as WireSettings,
   type WorldBatch,
   type WorldDetail,
@@ -400,21 +404,64 @@ function numberOrNull(value: number | null | undefined): number | null {
 }
 
 /**
- * What one `user_cache` row holds.
+ * One entry of `PublicProfile.badges`, or null when VRChat sent something unidentifiable.
  *
- * The row used to be VRChat's `/users/{id}` body verbatim. The represented group is a *second*
- * upstream call with the same staleness profile, so it belongs in the same row under the same TTL
- * rather than in a second cache that could disagree with the first — hence an envelope. `v` is what
- * tells a new daemon that a row written by an old one is a bare user body; those rows simply lack
- * the group and are rewritten with it on their next miss, within one TTL of the upgrade.
+ * Dropped rather than defaulted: a badge with no id cannot be keyed in an `{#each}`, and a
+ * duplicate key is a hard runtime error in Svelte 5 rather than a warning.
  */
-interface UserCacheEnvelope {
-  v: 2;
-  user: User;
-  representedGroup: GroupSummary | null;
+function toUserBadge(raw: Badge): UserBadge | null {
+  const id = emptyToNull(raw.badgeId);
+  if (id === null) return null;
+
+  return {
+    id,
+    name: emptyToNull(raw.badgeName) ?? id,
+    description: emptyToNull(raw.badgeDescription),
+    imageUrl: emptyToNull(raw.badgeImageUrl),
+    showcased: raw.showcased === true,
+  };
 }
 
-function readUserCache(data: string): { user: User; representedGroup: GroupSummary | null } | null {
+/** `GET /profile/{id}`'s body, reduced to the fields the modal renders. */
+function toProfileCard(raw: PublicProfile): UserProfileCard {
+  const badges = Array.isArray(raw.badges)
+    ? raw.badges.map(toUserBadge).filter((badge): badge is UserBadge => badge !== null)
+    : [];
+
+  return {
+    languages: stringArray(raw.languages),
+    // Two passes rather than a sort on a boolean: VRChat's own order within each half is the
+    // user's chosen order, and partitioning keeps it without depending on sort stability.
+    badges: [...badges.filter((b) => b.showcased), ...badges.filter((b) => !b.showcased)],
+    hasVrcPlus: raw.hasVrcPlus === true,
+    bannerColor: emptyToNull(raw.bannerColor),
+  };
+}
+
+/**
+ * What one `user_cache` row holds.
+ *
+ * The row used to be VRChat's `/users/{id}` body verbatim. The represented group and the profile
+ * card are *further* upstream calls with the same staleness profile, so they belong in the same row
+ * under the same TTL rather than in caches that could disagree with the first — hence an envelope.
+ * `v` is what tells a new daemon what an older one wrote: a bare user body (no `v`), or a `v: 2`
+ * row with no profile card. Neither is discarded; both simply lack the newer halves and are
+ * rewritten complete on their next miss, within one TTL of the upgrade.
+ */
+interface UserCacheEnvelope {
+  v: 3;
+  user: User;
+  representedGroup: GroupSummary | null;
+  profileCard: UserProfileCard | null;
+}
+
+interface CachedUser {
+  user: User;
+  representedGroup: GroupSummary | null;
+  profileCard: UserProfileCard | null;
+}
+
+function readUserCache(data: string): CachedUser | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(data);
@@ -423,12 +470,23 @@ function readUserCache(data: string): { user: User; representedGroup: GroupSumma
   }
   if (typeof parsed !== "object" || parsed === null) return null;
 
-  if ((parsed as Partial<UserCacheEnvelope>).v === 2) {
+  const version = (parsed as Partial<UserCacheEnvelope>).v;
+  if (version === 3) {
     const envelope = parsed as UserCacheEnvelope;
-    return { user: envelope.user, representedGroup: envelope.representedGroup };
+    return {
+      user: envelope.user,
+      representedGroup: envelope.representedGroup,
+      profileCard: envelope.profileCard,
+    };
   }
-  // A pre-envelope row. Legible, just missing the group.
-  return { user: parsed as User, representedGroup: null };
+  if (version === 2) {
+    // Written before the profile card existed. The group is trustworthy; the card is genuinely
+    // unknown, which is exactly what `null` means on the wire — not "this person has no badges".
+    const envelope = parsed as { user: User; representedGroup: GroupSummary | null };
+    return { user: envelope.user, representedGroup: envelope.representedGroup, profileCard: null };
+  }
+  // A pre-envelope row. Legible, just missing both later halves.
+  return { user: parsed as User, representedGroup: null, profileCard: null };
 }
 
 function toControlAccount(snapshot: AccountSnapshot, addedAt: number): ControlAccount {
@@ -574,6 +632,39 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
     }
     if (typeof raw !== "object" || raw === null) return null;
     return toGroupSummary(raw as Partial<RepresentedGroup>);
+  }
+
+  /**
+   * The profile page's own half of this user, or null — best-effort, exactly like the represented
+   * group and for the same reason: it decorates the modal, so losing it must cost a badge row, not
+   * the person. Every failure mode (404, 502, non-JSON) lands on the same null.
+   *
+   * `/profile/{id}` is a **supplement to** `/users/{id}`, never a replacement: it answers with the
+   * profile page's cosmetics — badges, languages, VRC+, banner colour — and carries no presence at
+   * all. Anything the app knows about where somebody is still comes from the user record.
+   *
+   * Returns whether the user represents a group alongside the card, because
+   * `PublicProfile.representedGroup` settles that yes/no in a call we are already making. Its shape
+   * there is thinner than `/users/{id}/groups/represented`'s — no member count, no short code, no
+   * privacy — so it is used as a **predicate, never as the value**. See `getUser`.
+   */
+  async function fetchPublicProfile(
+    account: Account,
+    userId: string,
+  ): Promise<{ card: UserProfileCard; representsGroup: boolean } | null> {
+    let raw: unknown;
+    try {
+      raw = await vrcJson(account, `/profile/${userId}`, "profile_fetch_failed");
+    } catch {
+      return null;
+    }
+    if (typeof raw !== "object" || raw === null) return null;
+
+    const profile = raw as PublicProfile;
+    return {
+      card: toProfileCard(profile),
+      representsGroup: emptyToNull(profile.representedGroup?.id) !== null,
+    };
   }
 
   /**
@@ -1138,11 +1229,13 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
 
       let user: User;
       let representedGroup: GroupSummary | null;
+      let profileCard: UserProfileCard | null;
       let fetchedAt: number;
 
       if (fresh && cached !== null && cachedEnvelope !== null) {
         user = cachedEnvelope.user;
         representedGroup = cachedEnvelope.representedGroup;
+        profileCard = cachedEnvelope.profileCard;
         fetchedAt = cached.fetched_at;
       } else {
         // Only a live fetch needs a signed-in account; a fresh cache row can be served by an
@@ -1179,13 +1272,23 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         // Sequential, not concurrent: two calls to the same account in the same tick would each
         // take a token from a 16/s per-account bucket that presence polling also draws on, and the
         // modal is not so urgent that it should elbow ahead of the friends list.
-        representedGroup = await fetchRepresentedGroup(account, userId);
+        const profile = await fetchPublicProfile(account, userId);
+        profileCard = profile?.card ?? null;
+
+        // Two upstream calls on the common path, not three: the profile has already said whether
+        // there is a group to fetch, and for most people there is not. When the profile itself did
+        // not answer we ask anyway, so the badge behaves exactly as it did before this existed —
+        // a missing supplement never costs a field the modal used to have.
+        representedGroup =
+          profile !== null && !profile.representsGroup
+            ? null
+            : await fetchRepresentedGroup(account, userId);
 
         fetchedAt = now;
         // Keyed by the account that fetched it. See migration 002: the body itself differs per
         // viewer, so the viewer belongs in the key. The envelope carries the group under the same
         // TTL rather than giving it a second cache that could disagree with this one.
-        const envelope: UserCacheEnvelope = { v: 2, user, representedGroup };
+        const envelope: UserCacheEnvelope = { v: 3, user, representedGroup, profileCard };
         store.putUserCache(account.id, userId, fetchedAt, JSON.stringify(envelope));
 
         /*
@@ -1245,6 +1348,7 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         bannerUrl: emptyToNull(user.bannerUrl),
         bannerType: emptyToNull(user.bannerType),
         representedGroup,
+        profileCard,
 
         friendedAt: friend?.friended_at ?? null,
         note: note?.note ?? null,
@@ -1299,16 +1403,21 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         }
 
         /*
-         * Written to `user_cache` under the same key the modal reads, with `representedGroup: null`
-         * — which is honest rather than lossy, because the envelope's group is only ever *added* to
-         * by the modal's own fetch. What it must not do is fetch the represented group per head:
-         * that would double an already-expensive path for a badge no roster row shows.
+         * Written to `user_cache` under the same key the modal reads, with no group and no profile
+         * card — which is honest rather than lossy, because both halves are only ever *added* by
+         * the modal's own fetch. What it must not do is fetch them per head: that would triple an
+         * already-expensive path for decoration no roster row shows.
          */
         store.putUserCache(
           account.id,
           userId,
           now,
-          JSON.stringify({ v: 2, user, representedGroup: null } satisfies UserCacheEnvelope),
+          JSON.stringify({
+            v: 3,
+            user,
+            representedGroup: null,
+            profileCard: null,
+          } satisfies UserCacheEnvelope),
         );
 
         /*

@@ -21,6 +21,8 @@ import { createControlDeps } from "./control-deps.ts";
 const VIEWER = "usr_viewer";
 const OTHER = "usr_other";
 const SUBJECT = "usr_subject";
+/** Module-level: the stub answers for it from `harness`, above the `describe` that asserts on it. */
+const GROUP_ID = "grp_ba913a96-fac4-4048-a062-9aa5db092812";
 const T0 = 1_700_000_000_000;
 
 /** The two bodies VRChat hands out for one user, depending on who asks. See PLAN.md §1.3. */
@@ -56,6 +58,43 @@ function userBody(asFriend: boolean): Record<string, unknown> {
     profilePicOverrideThumbnail: "",
     currentAvatarThumbnailImageUrl: "https://api.vrchat.cloud/api/1/image/file_a/1/256",
     currentAvatarImageUrl: "https://api.vrchat.cloud/api/1/image/file_a/1/1024",
+  };
+}
+
+/**
+ * `GET /profile/{id}` — the profile page's own half of a user.
+ *
+ * Deliberately holds **no presence at all**: no `location`, no `state`, no `last_login`. That is
+ * the endpoint's real shape, and it is why this call supplements `/users/{id}` rather than
+ * replacing it. A test that let presence leak in here would stop proving anything.
+ */
+function profileBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: SUBJECT,
+    displayName: "Subject",
+    languages: ["eng", "jpn", ""],
+    hasVrcPlus: true,
+    bannerColor: "#112233",
+    badges: [
+      {
+        badgeId: "bdg_second",
+        badgeName: "Second",
+        badgeDescription: "not showcased",
+        badgeImageUrl: "https://assets.vrchat.com/badges/second.png",
+        showcased: false,
+      },
+      {
+        badgeId: "bdg_first",
+        badgeName: "First",
+        badgeDescription: "showcased",
+        badgeImageUrl: "https://assets.vrchat.com/badges/first.png",
+        showcased: true,
+      },
+      // No id: unkeyable, so it is dropped rather than rendered with a made-up one.
+      { badgeName: "Nameless", badgeDescription: "", badgeImageUrl: "", showcased: false },
+    ],
+    representedGroup: null,
+    ...overrides,
   };
 }
 
@@ -134,6 +173,12 @@ function harness(
     friends?: string[];
     /** What `GET /users/{id}/groups/represented` answers with. Defaults to `{}` — nobody. */
     represented?: () => Response;
+    /**
+     * What `GET /profile/{id}` answers with. The default mirrors `represented`: a profile whose
+     * `representedGroup` is set exactly when the test gave the group endpoint something to say,
+     * because the daemon uses the former as the predicate for calling the latter.
+     */
+    publicProfile?: () => Response;
     /** What `GET /users/{id}/groups` answers with. Defaults to an empty list. */
     groups?: () => Response;
     /** What `GET /groups/{id}` answers with — the group modal's own route. */
@@ -188,6 +233,18 @@ function harness(
     }
     // Ordered before the profile branch below: these are all `/users/…` paths too, and a
     // `includes("/users/")` test would otherwise answer a user body for every one of them.
+    // Its own top-level path, not a `/users/` sub-resource — which is the whole reason it can be
+    // matched before the branches below without disturbing them.
+    if (path.includes("/profile/")) {
+      return (
+        options.publicProfile?.() ??
+        Response.json(
+          profileBody(
+            options.represented === undefined ? {} : { representedGroup: { id: GROUP_ID } },
+          ),
+        )
+      );
+    }
     if (path.endsWith("/groups/represented")) {
       // `{}` — VRChat's answer for someone representing nothing — unless a test says otherwise.
       return options.represented?.() ?? Response.json({});
@@ -439,8 +496,6 @@ describe("control deps: users", () => {
 });
 
 describe("control deps: groups and mutual friends", () => {
-  const GROUP_ID = "grp_ba913a96-fac4-4048-a062-9aa5db092812";
-
   function groupBody(overrides: Record<string, unknown> = {}) {
     return {
       groupId: GROUP_ID,
@@ -524,6 +579,135 @@ describe("control deps: groups and mutual friends", () => {
    * A row written before the cache learned to carry the group. It must still be *readable* — a
    * daemon upgrade that made every cached profile unopenable would be a worse bug than a stale one.
    */
+  /*
+   * `/profile/{id}` is the supplement, not the successor. Everything presence-shaped on the modal
+   * still comes from `/users/{id}`, which is the whole reason both calls are made.
+   */
+  test("the profile card rides along, and never stands in for the user record", async () => {
+    const h = harness();
+    await resumeAll(h);
+
+    const detail = await h.deps.getUser(SUBJECT, VIEWER);
+
+    expect(detail.profileCard).toEqual({
+      languages: ["eng", "jpn"], // the `""` is VRChat's padding, not a language
+      badges: [
+        // Showcased first, whatever order VRChat listed them in, and the id-less entry dropped.
+        {
+          id: "bdg_first",
+          name: "First",
+          description: "showcased",
+          imageUrl: "https://assets.vrchat.com/badges/first.png",
+          showcased: true,
+        },
+        {
+          id: "bdg_second",
+          name: "Second",
+          description: "not showcased",
+          imageUrl: "https://assets.vrchat.com/badges/second.png",
+          showcased: false,
+        },
+      ],
+      hasVrcPlus: true,
+      bannerColor: "#112233",
+    });
+
+    // The profile page carries no presence at all; these came from `/users/{id}` and must keep
+    // coming from there. A migration onto `/profile/{id}` would blank every one of them.
+    expect(detail.location).toBe("wrld_x:12345");
+    expect(detail.state).toBe("online");
+    expect(detail.lastLogin).not.toBeNull();
+    expect(h.requests.filter((path) => path.endsWith(`/users/${SUBJECT}`)).length).toBe(1);
+    h.stop();
+  });
+
+  /*
+   * The saving that pays for the extra call: `PublicProfile.representedGroup` settles the yes/no,
+   * and for most people the answer is no.
+   */
+  test("no represented group on the profile means the group call is never made", async () => {
+    const h = harness();
+    await resumeAll(h);
+
+    const detail = await h.deps.getUser(SUBJECT, VIEWER);
+
+    expect(detail.representedGroup).toBeNull();
+    expect(h.requests.filter((path) => path.endsWith("/groups/represented")).length).toBe(0);
+
+    // And when it says there *is* one, the rich shape is still fetched — the thin `{id, name}` on
+    // the profile is a predicate, never the value the modal draws.
+    const representing = harness({ represented: () => Response.json(groupBody()) });
+    await resumeAll(representing);
+    const badge = await representing.deps.getUser(SUBJECT, VIEWER);
+    expect(badge.representedGroup?.memberCount).toBe(42);
+    expect(badge.representedGroup?.shortCode).toBe("ABCD");
+    representing.stop();
+    h.stop();
+  });
+
+  /*
+   * Best-effort means best-effort in both directions: a dead supplement costs its own fields and
+   * nothing else, and it must not silently take the represented group down with it.
+   */
+  test("a failed profile call costs the card, not the person or the group", async () => {
+    const h = harness({
+      publicProfile: () => new Response("boom", { status: 500 }),
+      represented: () => Response.json(groupBody()),
+    });
+    await resumeAll(h);
+
+    const detail = await h.deps.getUser(SUBJECT, VIEWER);
+
+    // Null, not an empty card: "we got no answer" is a different claim from "no badges".
+    expect(detail.profileCard).toBeNull();
+    expect(detail.displayName).toBe("Subject");
+    // The predicate is gone, so the group is asked for directly — exactly as before this existed.
+    expect(detail.representedGroup?.id).toBe(GROUP_ID);
+    h.stop();
+
+    // A 404 is the same answer. VRChat has profile-less users and it is not a fault.
+    const missing = harness({ publicProfile: () => new Response("{}", { status: 404 }) });
+    await resumeAll(missing);
+    expect((await missing.deps.getUser(SUBJECT, VIEWER)).profileCard).toBeNull();
+    missing.stop();
+  });
+
+  test("the profile card rides in the same cache row and TTL as the user", async () => {
+    const h = harness();
+    await resumeAll(h);
+
+    await h.deps.getUser(SUBJECT, VIEWER);
+    const cached = await h.deps.getUser(SUBJECT, VIEWER);
+
+    expect(cached.cached).toBe(true);
+    expect(cached.profileCard?.hasVrcPlus).toBe(true);
+    expect(h.requests.filter((path) => path.includes("/profile/")).length).toBe(1);
+    h.stop();
+  });
+
+  /*
+   * A row written before the cache learned to carry the card. Readable, and honest about what it
+   * does not know — `null` says "unknown", which is what the UI needs to hear.
+   */
+  test("a v2 cache row still reads, just without the profile card", async () => {
+    const h = harness();
+    await resumeAll(h);
+    h.store.putUserCache(
+      VIEWER,
+      SUBJECT,
+      Date.now(),
+      JSON.stringify({ v: 2, user: userBody(true), representedGroup: null }),
+    );
+
+    const detail = await h.deps.getUser(SUBJECT, VIEWER);
+
+    expect(detail.cached).toBe(true);
+    expect(detail.displayName).toBe("Subject");
+    expect(detail.profileCard).toBeNull();
+    expect(profileFetches(h)).toBe(0);
+    h.stop();
+  });
+
   test("a pre-envelope cache row still reads, just without the group", async () => {
     const h = harness();
     await resumeAll(h);
@@ -766,6 +950,10 @@ describe("control deps: groups and mutual friends", () => {
     // Warms `user_cache` for SUBJECT through the modal's own path.
     await h.deps.getUser(SUBJECT, VIEWER);
     const afterWarm = h.requests.filter((path) => path.includes("/users/")).length;
+    const groupsAfterWarm = h.requests.filter((path) =>
+      path.endsWith("/groups/represented"),
+    ).length;
+    const profilesAfterWarm = h.requests.filter((path) => path.includes("/profile/")).length;
 
     const batch = await h.deps.listUsers([SUBJECT, "usr_other_one"], VIEWER);
 
@@ -773,9 +961,12 @@ describe("control deps: groups and mutual friends", () => {
     // The cached one cost nothing; only the second was fetched. One call, not two.
     expect(h.requests.filter((path) => path.endsWith(`/users/${SUBJECT}`)).length).toBe(1);
     expect(h.requests.filter((path) => path.includes("/users/")).length).toBe(afterWarm + 1);
-    // And no represented-group fetch per head: that would double the most expensive path in the
-    // app for a badge no roster row draws.
-    expect(h.requests.filter((path) => path.endsWith("/groups/represented")).length).toBe(1);
+    // And neither supplement is fetched per head: either would multiply the most expensive path in
+    // the app for decoration no roster row draws.
+    expect(h.requests.filter((path) => path.endsWith("/groups/represented")).length).toBe(
+      groupsAfterWarm,
+    );
+    expect(h.requests.filter((path) => path.includes("/profile/")).length).toBe(profilesAfterWarm);
 
     // The second call is served entirely from what the first wrote.
     const before = h.requests.length;

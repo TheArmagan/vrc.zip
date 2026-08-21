@@ -9,7 +9,9 @@ was decided along the way.
 **Status:** Phase 1 complete on the automatable side; what remains of 1.10 needs a human with real
 VRChat accounts and a real game client. Phase 2 has started from the bottom up: the grant store,
 the proxy's own credentials, and the egress filter are built and mounted on both `:7774` and
-`:7775`. 562 tests green. The handshake and the mirror routes are next.
+`:7775`. The handshake and the mirror routes are next. Alongside it, the user modal now carries the
+profile card off `GET /profile/{id}` — badges, languages, VRC+ — which is a supplement to
+`GET /users/{id}` and not, despite the rumour, a replacement for it (decisions 49–50).
 
 ---
 
@@ -494,6 +496,25 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     stub that hands the client a socket object proves neither. It is also the only way the Phase-1
     definition-of-done clause "two independent pipeline sockets" is testable at all; before this,
     nothing in the suite ever constructed two `PipelineClient`s.
+49. **`GET /profile/{id}` supplements `GET /users/{id}`; it does not replace it.** The claim going
+    around is that `/users/` is deprecated in favour of `/profile/`. It is not — spec v1.20.8 marks
+    29 operations `deprecated` and `getUser` is not among them — and the two are different
+    resources. `PublicProfile` carries the profile *page*: badges, languages, VRC+, banner colour,
+    a thin represented group. It carries **no presence at all** — no `location`, `state`,
+    `last_login`, `platform`, or `travelingTo*` — so migrating onto it would blank live presence,
+    the friends screen, and the live-profile-read reconciliation in one move. So the modal reads
+    both: the user record for what someone *is doing*, the profile for what they *chose to show*.
+    It rides in the same `user_cache` envelope (now `v: 3`) under the same TTL as the user body,
+    for the same reason the represented group does, and it is best-effort — a `null` card means
+    "no answer", never "no badges", and the modal renders complete without it.
+50. **The profile card pays for its own request.** `PublicProfile.representedGroup` settles whether
+    the user represents a group at all, and for most people the answer is no — so a `null` there
+    skips the `/users/{id}/groups/represented` call that used to run on every cold profile. Two
+    upstream calls on the common path, three only for someone actually representing a group. The
+    profile's group shape is used strictly as a **predicate**: it has no member count, short code,
+    or privacy, so the rich value still comes from the group endpoint. When the profile call fails,
+    the group is fetched unconditionally, exactly as before — a missing supplement never costs a
+    field the modal already had.
 
 ---
 
@@ -774,6 +795,11 @@ Carried in from research, not yet verified against running code:
   has no `content` at all. Unconditional `JSON.parse` drops all three.
 - `GET /users/{id}` returns **different fields** depending on whether the caller is a friend. Never
   share an HTTP cache across accounts keyed on URL alone.
+- `/users/{id}` is **not deprecated**, and `/profile/{id}` is not its successor — see decision 49.
+  The profile endpoint holds no presence field of any kind, so anything reading `location`, `state`,
+  `last_login`, `platform`, or `travelingTo*` off it reads `undefined`. Check `deprecated` in the
+  pinned `openapi.json` before believing any "endpoint X is gone" report; 29 operations carry the
+  flag and it is the only authority we have.
 - `apiKey` query param does **not** exist in spec v1.20.8. Don't implement it.
 - VRChat has added and removed the user id on `OnPlayerJoined` before. The parser must tolerate both.
 - `User Authenticated: (.+?) \((usr_[0-9a-f-]+)\)` is the *only* link between a log file and an

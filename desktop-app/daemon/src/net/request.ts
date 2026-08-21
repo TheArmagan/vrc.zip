@@ -1,6 +1,6 @@
 import { BASE_URL } from "@vrcz/api";
 import type { CookieJar } from "../accounts/cookie-jar.ts";
-import { parseRetryAfter, type RateLimiter } from "./rate-limiter.ts";
+import { parseRetryAfter, type RateClass, type RateLimiter } from "./rate-limiter.ts";
 import { USER_AGENT_HEADER } from "./user-agent.ts";
 
 /**
@@ -40,6 +40,14 @@ export interface RequestOptions extends Omit<RequestInit, "headers"> {
    * present stale cookies alongside a fresh credential.
    */
   readonly basicAuth?: { readonly username: string; readonly password: string };
+  /**
+   * Which VRChat rate ceiling this call is charged against. Defaults to `"api"`.
+   *
+   * `"file"` is for the image/file tier, which has its own far larger per-IP allowance. Getting
+   * this wrong is not a small inefficiency: a screen full of avatars charged to the API bucket
+   * queues presence and friend polling behind pictures.
+   */
+  readonly rateClass?: RateClass;
 }
 
 /** How many times a single call may be re-sent after a 429. */
@@ -87,7 +95,7 @@ export async function vrcFetch(
   let retriedAuth = false;
 
   for (let attempt = 0; ; attempt++) {
-    await ctx.limiter.acquire(ctx.accountId);
+    await ctx.limiter.acquire(ctx.accountId, options.rateClass ?? "api");
 
     const headers = new Headers(options.headers);
 

@@ -165,7 +165,15 @@ On startup, prefer stored cookies and validate with `GET /auth` rather than re-a
 ### 1.4 Network layer — `daemon/src/net/`
 
 - **User-Agent** (mandatory; 403 + `waf_code 13799` without it): `vrc.zip/<version> (<user-configured contact>)`. Contact is collected during first-run setup and validated non-empty, no `@example.com`, no newlines. The proxy **never** lets a downstream client override this header.
-- Per-account token bucket. Global circuit breaker on 429 with exponential backoff from 1s, capped, jittered.
+- **Three ceilings, three buckets.** VRChat enforces **20 req/s per account**, **100 req/s per IP**
+  across all accounts, and **300 req/s per IP for file requests** (images, icons, avatars). Each
+  bucket defaults to 80% of its own ceiling. The per-IP API bucket is the load-bearing one: six
+  accounts each politely under 20/s is 120/s from one IP, which per-account limiting is structurally
+  unable to see. The file bucket has no per-account partner — files have their own generous ceiling,
+  and metering icons per-account would make a large friends screen take seconds to paint.
+- Global circuit breaker on 429 with exponential backoff from 1s, capped, jittered. **One breaker
+  across all three tiers**: if VRChat is telling us to slow down, pausing more than strictly
+  necessary is the safe direction to be wrong in.
 - All polling intervals are `base + random(0, base*0.2)` with the phase seeded from process start time. No top-of-minute schedules.
 - Conservative defaults: friends list refresh ~2–5 min (pipeline carries the deltas); user/world detail fetched on demand and cached with a TTL.
 

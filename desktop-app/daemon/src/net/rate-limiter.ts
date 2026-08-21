@@ -20,10 +20,14 @@ export interface RateLimiterOptions {
   readonly ratePerSecond?: number;
   /** How many requests one account may spend at once after an idle period. */
   readonly burst?: number;
-  /** Sustained requests per second across *every* account. See `VRCHAT_RATE_LIMIT_PER_SECOND`. */
+  /** Sustained requests per second across *every* account. See `VRCHAT_RATE_LIMIT_PER_IP_PER_SECOND`. */
   readonly globalRatePerSecond?: number;
   /** How many requests may be spent at once across every account. */
   readonly globalBurst?: number;
+  /** Sustained *file* requests per second across every account. */
+  readonly fileRatePerSecond?: number;
+  /** How many file requests may be spent at once across every account. */
+  readonly fileBurst?: number;
   /** First backoff step after a 429. PLAN.md §Guardrails: exponential from 1s. */
   readonly baseBackoffMs?: number;
   /** Ceiling on the backoff, so a long outage doesn't park us for an hour. */
@@ -35,24 +39,46 @@ export interface RateLimiterOptions {
 }
 
 /**
- * VRChat's documented API limit: **20 requests per second, and it is per IP, not per account.**
+ * VRChat enforces **two** limits, and conflating them is how you either throttle yourself to a
+ * sixth of the available throughput or walk into a 429 with every account looking well-behaved:
  *
- * This is the number that makes the global bucket below load-bearing rather than belt-and-braces.
- * Six accounts polling politely at 5/s each is 30/s from one IP — comfortably over the line, with
- * every individual account looking well-behaved. Per-account limiting alone cannot see that.
+ *  - **20 req/s per account.**
+ *  - **100 req/s per IP**, across every account on the machine.
+ *
+ * The per-IP ceiling is what makes the global bucket below load-bearing rather than
+ * belt-and-braces. Six accounts each politely under their own 20/s is up to 120/s from one IP —
+ * over the line, with no individual account exceeding anything. Per-account limiting alone is
+ * structurally unable to see that, which is why there are two buckets and not one.
  */
-export const VRCHAT_RATE_LIMIT_PER_SECOND = 20;
+export const VRCHAT_RATE_LIMIT_PER_ACCOUNT_PER_SECOND = 20;
+export const VRCHAT_RATE_LIMIT_PER_IP_PER_SECOND = 100;
 
+/**
+ * **File requests get their own, far larger per-IP ceiling: 300 req/s.**
+ *
+ * Images, avatars, and icons are served by a different tier than the API, and charging them to the
+ * 100/s API budget is a self-inflicted stall: one friends screen is a few hundred icons, which
+ * would eat the entire API allowance and leave presence polling queued behind pictures. They are
+ * metered separately for that reason, not as an optimisation.
+ */
+export const VRCHAT_RATE_LIMIT_FILES_PER_IP_PER_SECOND = 300;
+
+/** Which ceiling a call is charged against. */
+export type RateClass = "api" | "file";
+
+/**
+ * Both defaults are **80% of the corresponding ceiling**, and the headroom is deliberate: a limit
+ * is what VRChat *enforces*, not a target to sit on, and our clock and theirs do not agree on
+ * where a second starts. Backing off from a 429 we caused is strictly worse than being slightly
+ * slower. The same rule is applied at both levels so there is one policy to reason about.
+ */
 const DEFAULTS = {
-  // Per account: enough for responsive UI actions, low enough that one account cannot eat the
-  // whole IP budget and starve the other five.
-  ratePerSecond: 5,
-  burst: 10,
-  // Globally: 80% of the documented ceiling. The headroom is deliberate — the limit is what VRChat
-  // *enforces*, not a target to sit on, and our clock and theirs do not agree on where a second
-  // starts. Backing off from a 429 we caused is strictly worse than being slightly slower.
-  globalRatePerSecond: Math.floor(VRCHAT_RATE_LIMIT_PER_SECOND * 0.8),
-  globalBurst: VRCHAT_RATE_LIMIT_PER_SECOND,
+  ratePerSecond: Math.floor(VRCHAT_RATE_LIMIT_PER_ACCOUNT_PER_SECOND * 0.8),
+  burst: VRCHAT_RATE_LIMIT_PER_ACCOUNT_PER_SECOND,
+  globalRatePerSecond: Math.floor(VRCHAT_RATE_LIMIT_PER_IP_PER_SECOND * 0.8),
+  globalBurst: VRCHAT_RATE_LIMIT_PER_IP_PER_SECOND,
+  fileRatePerSecond: Math.floor(VRCHAT_RATE_LIMIT_FILES_PER_IP_PER_SECOND * 0.8),
+  fileBurst: VRCHAT_RATE_LIMIT_FILES_PER_IP_PER_SECOND,
   baseBackoffMs: 1_000,
   maxBackoffMs: 60_000,
 } as const;
@@ -70,12 +96,24 @@ function refill(bucket: Bucket, now: number, ratePerSecond: number, capacity: nu
 
 export class RateLimiter {
   readonly #buckets = new Map<string, Bucket>();
-  /** The IP-wide budget. Every account draws from this one in addition to its own. */
+  /** The IP-wide API budget. Every account draws from this one in addition to its own. */
   readonly #global: Bucket;
+  /**
+   * The IP-wide *file* budget. Deliberately **not** paired with a per-account bucket.
+   *
+   * The per-account bucket exists to stop one account starving the others under a shared ceiling.
+   * Files have their own ceiling, three times the API one, so that fairness problem barely exists —
+   * while charging icons to a 16/s per-account bucket would make a 200-friend screen take twelve
+   * seconds to paint. VRChat documents no per-account file limit, and inventing one here would be
+   * us throttling ourselves against a rule that does not exist.
+   */
+  readonly #files: Bucket;
   readonly #rate: number;
   readonly #burst: number;
   readonly #globalRate: number;
   readonly #globalBurst: number;
+  readonly #fileRate: number;
+  readonly #fileBurst: number;
   readonly #baseBackoffMs: number;
   readonly #maxBackoffMs: number;
   readonly #now: () => number;
@@ -92,12 +130,15 @@ export class RateLimiter {
     this.#burst = options.burst ?? DEFAULTS.burst;
     this.#globalRate = options.globalRatePerSecond ?? DEFAULTS.globalRatePerSecond;
     this.#globalBurst = options.globalBurst ?? DEFAULTS.globalBurst;
+    this.#fileRate = options.fileRatePerSecond ?? DEFAULTS.fileRatePerSecond;
+    this.#fileBurst = options.fileBurst ?? DEFAULTS.fileBurst;
     this.#baseBackoffMs = options.baseBackoffMs ?? DEFAULTS.baseBackoffMs;
     this.#maxBackoffMs = options.maxBackoffMs ?? DEFAULTS.maxBackoffMs;
     this.#now = options.now ?? Date.now;
     this.#sleep = options.sleep ?? ((ms) => Bun.sleep(ms));
     this.#random = options.random ?? Math.random;
     this.#global = { tokens: this.#globalBurst, lastRefillAt: this.#now() };
+    this.#files = { tokens: this.#fileBurst, lastRefillAt: this.#now() };
   }
 
   /** True while the global breaker is open. Surfaced in the UI so a stall is never mysterious. */
@@ -118,10 +159,26 @@ export class RateLimiter {
     return this.#globalRate;
   }
 
+  /** The per-account sustained rate in effect. Shown against the per-account ceiling. */
+  get ratePerSecond(): number {
+    return this.#rate;
+  }
+
+  /** The IP-wide sustained file rate in effect. */
+  get fileRatePerSecond(): number {
+    return this.#fileRate;
+  }
+
   /**
-   * Blocks until this account may send. Honours the global breaker first, then the account's bucket.
+   * Blocks until this account may send. Honours the global breaker first, then the buckets.
+   *
+   * `rateClass` picks which ceiling the call is charged against — `"file"` for images and other
+   * file-tier fetches, `"api"` for everything else. The **breaker is shared**: a 429 on either tier
+   * stops both. That is deliberate, and it is the safe direction to be wrong in. VRChat may well
+   * throttle the tiers independently, but if we are being told to slow down we would rather pause
+   * more than we strictly must than keep hammering one tier while apologising on the other.
    */
-  async acquire(accountId: string): Promise<void> {
+  async acquire(accountId: string, rateClass: RateClass = "api"): Promise<void> {
     // Loop rather than compute once: while we were waiting out the breaker, another response may
     // have arrived and extended it.
     for (;;) {
@@ -131,10 +188,24 @@ export class RateLimiter {
         continue;
       }
 
-      const wait = this.#reserve(accountId);
+      const wait = rateClass === "file" ? this.#reserveFile() : this.#reserve(accountId);
       if (wait === 0) return;
       await this.#sleep(wait);
     }
+  }
+
+  /**
+   * Takes one token from the file bucket alone. No account bucket is consulted — see `#files`.
+   */
+  #reserveFile(): number {
+    const now = this.#now();
+    refill(this.#files, now, this.#fileRate, this.#fileBurst);
+
+    if (this.#files.tokens >= 1) {
+      this.#files.tokens -= 1;
+      return 0;
+    }
+    return Math.max(1, Math.ceil(((1 - this.#files.tokens) / this.#fileRate) * 1000));
   }
 
   /**

@@ -5,7 +5,9 @@ import {
   parseRetryAfter,
   RateLimiter,
   type RateLimiterOptions,
-  VRCHAT_RATE_LIMIT_PER_SECOND,
+  VRCHAT_RATE_LIMIT_FILES_PER_IP_PER_SECOND,
+  VRCHAT_RATE_LIMIT_PER_ACCOUNT_PER_SECOND,
+  VRCHAT_RATE_LIMIT_PER_IP_PER_SECOND,
 } from "./rate-limiter.ts";
 import { basicAuthHeader, type RequestContext, vrcFetch } from "./request.ts";
 import { buildUserAgent, validateContact } from "./user-agent.ts";
@@ -181,11 +183,69 @@ describe("RateLimiter", () => {
     expect(limiter.consecutive429Count).toBe(0);
   });
 
-  test("the shipped default sits under VRChat's documented ceiling", () => {
-    // The limit is what VRChat enforces, not a target to sit on.
-    expect(VRCHAT_RATE_LIMIT_PER_SECOND).toBe(20);
+  test("the shipped defaults sit under both of VRChat's documented ceilings", () => {
+    // Two ceilings, not one: 20/s per account and 100/s per IP. A limit is what VRChat enforces,
+    // not a target to sit on, so both defaults keep headroom under their own ceiling.
+    expect(VRCHAT_RATE_LIMIT_PER_ACCOUNT_PER_SECOND).toBe(20);
+    expect(VRCHAT_RATE_LIMIT_PER_IP_PER_SECOND).toBe(100);
+    expect(VRCHAT_RATE_LIMIT_FILES_PER_IP_PER_SECOND).toBe(300);
+
     const defaults = new RateLimiter();
-    expect(defaults.globalRatePerSecond).toBeLessThan(VRCHAT_RATE_LIMIT_PER_SECOND);
+    expect(defaults.ratePerSecond).toBeLessThan(VRCHAT_RATE_LIMIT_PER_ACCOUNT_PER_SECOND);
+    expect(defaults.globalRatePerSecond).toBeLessThan(VRCHAT_RATE_LIMIT_PER_IP_PER_SECOND);
+
+    // The global bucket has to be the binding constraint before the per-account one is, or six
+    // accounts each under 20/s would sail past the IP ceiling with nothing to stop them.
+    expect(defaults.globalRatePerSecond).toBeGreaterThan(defaults.ratePerSecond);
+
+    // Files are the roomiest tier by a wide margin. If this ever inverts, avatars are being
+    // metered as if they were API calls.
+    expect(defaults.fileRatePerSecond).toBeLessThan(VRCHAT_RATE_LIMIT_FILES_PER_IP_PER_SECOND);
+    expect(defaults.fileRatePerSecond).toBeGreaterThan(defaults.globalRatePerSecond);
+  });
+
+  test("file requests do not spend the API budget", async () => {
+    // The reason this matters: one friends screen is a few hundred icons. If they draw on the API
+    // bucket, presence polling queues behind pictures on every cold start.
+    const limiter = new RateLimiter({
+      ratePerSecond: 1,
+      burst: 1,
+      globalRatePerSecond: 1,
+      globalBurst: 1,
+      fileRatePerSecond: 1,
+      fileBurst: 4,
+    });
+
+    // Drain the file burst. None of it may touch the account or global API buckets.
+    for (let i = 0; i < 4; i++) await limiter.acquire("usr_a", "file");
+
+    // The API bucket is therefore still full: this must return immediately rather than waiting a
+    // second for a refill.
+    const started = Bun.nanoseconds();
+    await limiter.acquire("usr_a");
+    const elapsedMs = (Bun.nanoseconds() - started) / 1_000_000;
+    expect(elapsedMs).toBeLessThan(50);
+  });
+
+  test("a file request still waits out the shared 429 breaker", async () => {
+    // One breaker for both tiers: being told to slow down means slowing down, not switching lanes.
+    let now = 1_000_000;
+    let slept = 0;
+    const limiter = new RateLimiter({
+      fileBurst: 100,
+      now: () => now,
+      // Advance the injected clock by exactly what was slept, so the breaker actually expires.
+      // A no-op sleep here would spin on the real clock instead of testing anything.
+      sleep: async (ms) => {
+        slept += ms;
+        now += ms;
+      },
+      random: () => 0,
+    });
+
+    limiter.record429();
+    await limiter.acquire("usr_a", "file");
+    expect(slept).toBeGreaterThanOrEqual(1_000);
   });
 
   test("a success resets the counter fully rather than decaying", () => {

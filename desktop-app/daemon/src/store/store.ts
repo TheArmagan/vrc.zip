@@ -1,0 +1,460 @@
+import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
+import { migrate } from "./migrate.ts";
+import { SQL } from "./queries.ts";
+import type { Migration } from "./schema/index.ts";
+import type {
+  AccountRow,
+  AvatarHistoryRow,
+  CacheRow,
+  EventRow,
+  EventsDailyRow,
+  FriendLogHistoryRow,
+  FriendLogRow,
+  KindCount,
+  NewEvent,
+  NewFriendLogHistory,
+  NewSession,
+  NoteRow,
+  NotificationRow,
+  RetentionConfigRow,
+  SessionRow,
+} from "./types.ts";
+
+/** In-memory database path. Tests use this; the daemon passes a real file. */
+export const MEMORY = ":memory:";
+
+/** Options for {@link Store.open}. */
+export type StoreOptions = {
+  /** Override the migration list. Only tests should need this. */
+  readonly migrations?: readonly Migration[];
+  /** Skip `journal_mode = WAL`. Set automatically for `:memory:`. */
+  readonly wal?: boolean;
+};
+
+type Stmt<Row, Params extends SQLQueryBindings[]> = Statement<Row, Params>;
+
+/**
+ * The daemon's single SQLite handle.
+ *
+ * Opening a `Store` creates the file if needed, applies the connection pragmas, and runs any
+ * pending migrations — there is no separate "initialise" step to forget. Every query method is
+ * backed by a statement prepared once in the constructor.
+ *
+ * All timestamps crossing this API are unix milliseconds.
+ */
+export class Store {
+  readonly db: Database;
+  readonly path: string;
+  readonly schemaVersion: number;
+
+  private readonly stmts: ReturnType<typeof prepareAll>;
+
+  private constructor(path: string, options: StoreOptions) {
+    this.path = path;
+    this.db = new Database(path, { create: true });
+    applyPragmas(this.db, options.wal ?? path !== MEMORY);
+    this.schemaVersion =
+      options.migrations === undefined ? migrate(this.db) : migrate(this.db, options.migrations);
+    this.stmts = prepareAll(this.db);
+  }
+
+  /** Opens (creating if absent) the database at `path` and brings its schema up to date. */
+  static open(path: string, options: StoreOptions = {}): Store {
+    return new Store(path, options);
+  }
+
+  close(): void {
+    this.db.close();
+  }
+
+  /** Runs `fn` inside a single SQLite transaction, rolling back if it throws. */
+  transaction<T>(fn: () => T): T {
+    return this.db.transaction(fn)();
+  }
+
+  // -- accounts -------------------------------------------------------------
+
+  upsertAccount(row: AccountRow): void {
+    this.stmts.upsertAccount.run(
+      row.id,
+      row.display_name,
+      row.added_at,
+      row.enabled,
+      row.last_seen_at,
+    );
+  }
+
+  getAccount(id: string): AccountRow | null {
+    return this.stmts.getAccount.get(id);
+  }
+
+  listAccounts(): AccountRow[] {
+    return this.stmts.listAccounts.all();
+  }
+
+  setAccountEnabled(id: string, enabled: boolean): void {
+    this.stmts.setAccountEnabled.run(enabled ? 1 : 0, id);
+  }
+
+  touchAccount(id: string, at: number): void {
+    this.stmts.touchAccount.run(at, id);
+  }
+
+  deleteAccount(id: string): void {
+    this.stmts.deleteAccount.run(id);
+  }
+
+  // -- sessions -------------------------------------------------------------
+
+  /** Inserts a session (or returns the existing one for the same log file + start time). */
+  startSession(session: NewSession): number {
+    const row = this.stmts.insertSession.get(
+      session.account_id,
+      session.display_name,
+      session.log_path,
+      session.log_inode,
+      session.started_at,
+      session.vr_mode,
+      session.current_location,
+      session.current_world_id,
+    );
+    if (row === null) throw new Error("startSession: insert returned no id");
+    return row.id;
+  }
+
+  endSession(id: number, endedAt: number, exitKind: string | null): void {
+    this.stmts.endSession.run(endedAt, exitKind, id);
+  }
+
+  updateSessionLocation(id: number, location: string | null, worldId: string | null): void {
+    this.stmts.updateSessionLocation.run(location, worldId, id);
+  }
+
+  getSession(id: number): SessionRow | null {
+    return this.stmts.getSession.get(id);
+  }
+
+  listOpenSessions(): SessionRow[] {
+    return this.stmts.listOpenSessions.all();
+  }
+
+  listSessions(accountId: string, limit = 50): SessionRow[] {
+    return this.stmts.listSessions.all(accountId, limit);
+  }
+
+  // -- events ---------------------------------------------------------------
+
+  insertEvent(event: NewEvent): number {
+    const changes = this.stmts.insertEvent.run(
+      event.account_id,
+      event.ts,
+      event.session_id,
+      event.kind,
+      event.subject_id,
+      event.location,
+      event.payload,
+    );
+    return Number(changes.lastInsertRowid);
+  }
+
+  /** Bulk insert in one transaction — the pipeline flushes batches through here. */
+  insertEvents(events: readonly NewEvent[]): number {
+    return this.transaction(() => {
+      let n = 0;
+      for (const event of events) {
+        this.insertEvent(event);
+        n += 1;
+      }
+      return n;
+    });
+  }
+
+  /** Newest-first feed page. `before` is an exclusive upper bound on `ts`. */
+  listEvents(accountId: string, before: number, limit: number): EventRow[] {
+    return this.stmts.listEvents.all(accountId, before, limit);
+  }
+
+  listEventsBySubject(subjectId: string, before: number, limit: number): EventRow[] {
+    return this.stmts.listEventsBySubject.all(subjectId, before, limit);
+  }
+
+  /** Row count per event kind — the number Settings shows next to each retention window. */
+  countEventsByKind(): KindCount[] {
+    return this.stmts.countEventsByKind.all();
+  }
+
+  distinctEventKinds(): string[] {
+    return this.stmts.distinctEventKinds.all().map((row) => row.kind);
+  }
+
+  listEventsDaily(accountId: string, fromDay: number, toDay: number): EventsDailyRow[] {
+    return this.stmts.listEventsDaily.all(accountId, fromDay, toDay);
+  }
+
+  // -- friend log -----------------------------------------------------------
+
+  upsertFriend(row: FriendLogRow): void {
+    this.stmts.upsertFriend.run(
+      row.account_id,
+      row.user_id,
+      row.display_name,
+      row.trust_level,
+      row.friended_at,
+      row.unfriended_at,
+    );
+  }
+
+  getFriend(accountId: string, userId: string): FriendLogRow | null {
+    return this.stmts.getFriend.get(accountId, userId);
+  }
+
+  listFriends(accountId: string): FriendLogRow[] {
+    return this.stmts.listFriends.all(accountId);
+  }
+
+  insertFriendHistory(row: NewFriendLogHistory): void {
+    this.stmts.insertFriendHistory.run(
+      row.account_id,
+      row.ts,
+      row.type,
+      row.user_id,
+      row.display_name,
+      row.previous_display_name,
+      row.trust_level,
+      row.previous_trust_level,
+    );
+  }
+
+  listFriendHistory(accountId: string, before: number, limit: number): FriendLogHistoryRow[] {
+    return this.stmts.listFriendHistory.all(accountId, before, limit);
+  }
+
+  // -- caches ---------------------------------------------------------------
+
+  putUserCache(userId: string, fetchedAt: number, data: string): void {
+    this.stmts.putUserCache.run(userId, fetchedAt, data);
+  }
+
+  getUserCache(userId: string): CacheRow | null {
+    return this.stmts.getUserCache.get(userId);
+  }
+
+  putWorldCache(worldId: string, fetchedAt: number, data: string): void {
+    this.stmts.putWorldCache.run(worldId, fetchedAt, data);
+  }
+
+  getWorldCache(worldId: string): CacheRow | null {
+    return this.stmts.getWorldCache.get(worldId);
+  }
+
+  putAvatarCache(avatarId: string, fetchedAt: number, data: string): void {
+    this.stmts.putAvatarCache.run(avatarId, fetchedAt, data);
+  }
+
+  getAvatarCache(avatarId: string): CacheRow | null {
+    return this.stmts.getAvatarCache.get(avatarId);
+  }
+
+  // -- notes ----------------------------------------------------------------
+
+  putNote(accountId: string, userId: string, note: string, updatedAt: number): void {
+    this.stmts.putNote.run(accountId, userId, note, updatedAt);
+  }
+
+  getNote(accountId: string, userId: string): NoteRow | null {
+    return this.stmts.getNote.get(accountId, userId);
+  }
+
+  deleteNote(accountId: string, userId: string): void {
+    this.stmts.deleteNote.run(accountId, userId);
+  }
+
+  // -- notifications --------------------------------------------------------
+
+  putNotification(row: NotificationRow): void {
+    this.stmts.putNotification.run(
+      row.id,
+      row.account_id,
+      row.ts,
+      row.type,
+      row.sender_user_id,
+      row.sender_display_name,
+      row.message,
+      row.seen,
+      row.data,
+    );
+  }
+
+  listNotifications(accountId: string, limit = 100): NotificationRow[] {
+    return this.stmts.listNotifications.all(accountId, limit);
+  }
+
+  markNotificationSeen(id: string): void {
+    this.stmts.markNotificationSeen.run(id);
+  }
+
+  // -- avatar history -------------------------------------------------------
+
+  recordAvatarSeen(accountId: string, avatarId: string, at: number): void {
+    this.stmts.recordAvatarSeen.run(accountId, avatarId, at, at);
+  }
+
+  listAvatarHistory(accountId: string, limit = 100): AvatarHistoryRow[] {
+    return this.stmts.listAvatarHistory.all(accountId, limit);
+  }
+
+  // -- retention config -----------------------------------------------------
+
+  listRetentionConfig(): RetentionConfigRow[] {
+    return this.stmts.listRetentionConfig.all();
+  }
+
+  setRetentionConfig(kind: string, retainDays: number, updatedAt: number): void {
+    if (!Number.isInteger(retainDays) || retainDays <= 0) {
+      throw new RangeError(`retain_days must be a positive integer, got ${retainDays}`);
+    }
+    this.stmts.setRetentionConfig.run(kind, retainDays, updatedAt);
+  }
+
+  deleteRetentionConfig(kind: string): void {
+    this.stmts.deleteRetentionConfig.run(kind);
+  }
+
+  // -- meta / housekeeping --------------------------------------------------
+
+  getMeta(key: string): string | null {
+    return this.stmts.getMeta.get(key)?.value ?? null;
+  }
+
+  setMeta(key: string, value: string): void {
+    this.stmts.setMeta.run(key, value);
+  }
+
+  /** Bytes the database occupies on disk (page_count * page_size). */
+  dbSizeBytes(): number {
+    const row = this.db
+      .query<{ size: number }, []>(
+        `SELECT (SELECT * FROM pragma_page_count()) * (SELECT * FROM pragma_page_size()) AS size`,
+      )
+      .get();
+    return row?.size ?? 0;
+  }
+
+  /**
+   * Reclaims up to `pages` freelist pages. Only does anything with
+   * `auto_vacuum = INCREMENTAL`, which {@link applyPragmas} sets before the first table exists.
+   */
+  incrementalVacuum(pages?: number): void {
+    this.db.run(
+      pages === undefined ? `PRAGMA incremental_vacuum` : `PRAGMA incremental_vacuum(${pages})`,
+    );
+  }
+}
+
+/**
+ * Connection pragmas. `auto_vacuum` has to be set before any table is created for a fresh
+ * database to pick it up, which is why this runs before the migrations rather than inside them
+ * (`journal_mode` and `auto_vacuum` also cannot be changed inside a transaction).
+ */
+function applyPragmas(db: Database, wal: boolean): void {
+  db.run(`PRAGMA auto_vacuum = INCREMENTAL`);
+  if (wal) db.run(`PRAGMA journal_mode = WAL`);
+  db.run(`PRAGMA foreign_keys = ON`);
+  db.run(`PRAGMA synchronous = NORMAL`);
+  db.run(`PRAGMA busy_timeout = 5000`);
+}
+
+/** Prepares every statement once, at open time, so no query path compiles SQL on the fly. */
+function prepareAll(db: Database) {
+  const q = <Row, Params extends SQLQueryBindings[]>(sql: string): Stmt<Row, Params> =>
+    db.query(sql) as unknown as Stmt<Row, Params>;
+
+  return {
+    upsertAccount: q<void, [string, string, number, number, number | null]>(SQL.upsertAccount),
+    getAccount: q<AccountRow, [string]>(SQL.getAccount),
+    listAccounts: q<AccountRow, []>(SQL.listAccounts),
+    setAccountEnabled: q<void, [number, string]>(SQL.setAccountEnabled),
+    touchAccount: q<void, [number, string]>(SQL.touchAccount),
+    deleteAccount: q<void, [string]>(SQL.deleteAccount),
+
+    insertSession: q<
+      { id: number },
+      [
+        string | null,
+        string | null,
+        string,
+        number | null,
+        number,
+        string | null,
+        string | null,
+        string | null,
+      ]
+    >(SQL.insertSession),
+    endSession: q<void, [number, string | null, number]>(SQL.endSession),
+    updateSessionLocation: q<void, [string | null, string | null, number]>(
+      SQL.updateSessionLocation,
+    ),
+    getSession: q<SessionRow, [number]>(SQL.getSession),
+    listOpenSessions: q<SessionRow, []>(SQL.listOpenSessions),
+    listSessions: q<SessionRow, [string, number]>(SQL.listSessions),
+
+    insertEvent: q<
+      void,
+      [string, number, number | null, string, string | null, string | null, string | null]
+    >(SQL.insertEvent),
+    listEvents: q<EventRow, [string, number, number]>(SQL.listEvents),
+    listEventsBySubject: q<EventRow, [string, number, number]>(SQL.listEventsBySubject),
+    countEventsByKind: q<KindCount, []>(SQL.countEventsByKind),
+    distinctEventKinds: q<{ kind: string }, []>(SQL.distinctEventKinds),
+    listEventsDaily: q<EventsDailyRow, [string, number, number]>(SQL.listEventsDaily),
+
+    upsertFriend: q<void, [string, string, string, string | null, number, number | null]>(
+      SQL.upsertFriend,
+    ),
+    getFriend: q<FriendLogRow, [string, string]>(SQL.getFriend),
+    listFriends: q<FriendLogRow, [string]>(SQL.listFriends),
+    insertFriendHistory: q<
+      void,
+      [string, number, string, string, string | null, string | null, string | null, string | null]
+    >(SQL.insertFriendHistory),
+    listFriendHistory: q<FriendLogHistoryRow, [string, number, number]>(SQL.listFriendHistory),
+
+    putUserCache: q<void, [string, number, string]>(SQL.putUserCache),
+    getUserCache: q<CacheRow, [string]>(SQL.getUserCache),
+    putWorldCache: q<void, [string, number, string]>(SQL.putWorldCache),
+    getWorldCache: q<CacheRow, [string]>(SQL.getWorldCache),
+    putAvatarCache: q<void, [string, number, string]>(SQL.putAvatarCache),
+    getAvatarCache: q<CacheRow, [string]>(SQL.getAvatarCache),
+
+    putNote: q<void, [string, string, string, number]>(SQL.putNote),
+    getNote: q<NoteRow, [string, string]>(SQL.getNote),
+    deleteNote: q<void, [string, string]>(SQL.deleteNote),
+
+    putNotification: q<
+      void,
+      [
+        string,
+        string,
+        number,
+        string,
+        string | null,
+        string | null,
+        string | null,
+        number,
+        string | null,
+      ]
+    >(SQL.putNotification),
+    listNotifications: q<NotificationRow, [string, number]>(SQL.listNotifications),
+    markNotificationSeen: q<void, [string]>(SQL.markNotificationSeen),
+
+    recordAvatarSeen: q<void, [string, string, number, number]>(SQL.recordAvatarSeen),
+    listAvatarHistory: q<AvatarHistoryRow, [string, number]>(SQL.listAvatarHistory),
+
+    listRetentionConfig: q<RetentionConfigRow, []>(SQL.listRetentionConfig),
+    setRetentionConfig: q<void, [string, number, number]>(SQL.setRetentionConfig),
+    deleteRetentionConfig: q<void, [string]>(SQL.deleteRetentionConfig),
+
+    getMeta: q<{ value: string }, [string]>(SQL.getMeta),
+    setMeta: q<void, [string, string]>(SQL.setMeta),
+  };
+}

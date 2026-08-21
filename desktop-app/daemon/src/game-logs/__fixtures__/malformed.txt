@@ -1,0 +1,10 @@
+
+Unhandled Exception: System.NullReferenceException: Object reference not set to an instance of an object
+  at VRC.Something.Method () [0x00000] in <00000000000000000000000000000000>:0
+2024.03.09 14:22:07
+2024.03.09 14:22:07 Log
+9999.99.99 99:99:99 Log        -  [Behaviour] OnPlayerJoined Nope (usr_00000000-0000-0000-0000-000000000000)
+2024.03.09 14:22:07 Log        -  [Behaviour] Joining or Creating Room: The Great Pug
+2024.03.09 14:22:08 Log        -  [Behaviour] Joining not-a-location
+2024.03.09 14:22:09 Log        -  [Behaviour] OnPlayerJoined
+2024.03.09 14:22:10 Log        -  [Behaviour] Some Marker We Do Not Handle Yet

@@ -1,5 +1,7 @@
 # Logs
-logs
+# Anchored to the repo root on purpose: a bare `logs` matches any directory named `logs` at
+# any depth, which silently swallowed desktop-app/daemon/src/logs/ (the VRChat log watcher).
+/logs
 *.log
 npm-debug.log*
 yarn-debug.log*

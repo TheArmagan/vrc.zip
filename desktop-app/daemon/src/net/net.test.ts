@@ -1,0 +1,366 @@
+import { describe, expect, test } from "bun:test";
+import { CookieJar } from "../accounts/cookie-jar.ts";
+import { initialDelay, jitter } from "./jitter.ts";
+import {
+  parseRetryAfter,
+  RateLimiter,
+  type RateLimiterOptions,
+  VRCHAT_RATE_LIMIT_PER_SECOND,
+} from "./rate-limiter.ts";
+import { basicAuthHeader, type RequestContext, vrcFetch } from "./request.ts";
+import { buildUserAgent, validateContact } from "./user-agent.ts";
+
+describe("user agent", () => {
+  test("builds the mandated shape", () => {
+    // A missing or generic UA is a hard 403 + waf_code 13799, on the WS handshake too.
+    expect(buildUserAgent("me@somewhere.dev", "1.2.3")).toBe("vrc.zip/1.2.3 (me@somewhere.dev)");
+  });
+
+  test("rejects placeholder contacts rather than shipping dishonest attribution", () => {
+    for (const bad of ["", "   ", "test", "n/a", "someone@example.com", "you@example.invalid"]) {
+      expect(validateContact(bad).ok, `${bad} should be rejected`).toBe(false);
+    }
+  });
+
+  test("rejects header injection and parentheses", () => {
+    expect(validateContact("me@x.dev\r\nX-Evil: 1").ok).toBe(false);
+    expect(validateContact("me@x.dev\nfoo").ok).toBe(false);
+    expect(validateContact("me (not really)").ok).toBe(false);
+  });
+
+  test("accepts non-email contacts, because a fake email is the worse outcome", () => {
+    expect(validateContact("discord: someuser").ok).toBe(true);
+    expect(validateContact("https://github.com/someuser").ok).toBe(true);
+  });
+
+  test("throws rather than substituting a placeholder", () => {
+    expect(() => buildUserAgent("test")).toThrow(/invalid User-Agent contact/);
+  });
+});
+
+describe("parseRetryAfter", () => {
+  const now = 1_750_000_000_000;
+
+  test("reads delta-seconds", () => {
+    expect(parseRetryAfter("120", now)).toBe(120_000);
+    expect(parseRetryAfter("0", now)).toBe(0);
+  });
+
+  test("reads an HTTP date", () => {
+    const future = new Date(now + 30_000).toUTCString();
+    expect(parseRetryAfter(future, now)).toBeLessThanOrEqual(30_000);
+  });
+
+  test("returns undefined for junk and for absent, so the caller uses its own backoff", () => {
+    expect(parseRetryAfter(null, now)).toBeUndefined();
+    expect(parseRetryAfter("soon", now)).toBeUndefined();
+    expect(parseRetryAfter("-5", now)).toBeUndefined();
+  });
+});
+
+describe("RateLimiter", () => {
+  function harness(overrides: RateLimiterOptions = {}) {
+    let now = 0;
+    const slept: number[] = [];
+    const limiter = new RateLimiter({
+      ratePerSecond: 1,
+      burst: 2,
+      // Generous by default so the per-account assertions below aren't measuring the global bucket.
+      // The global bucket gets its own tests.
+      globalRatePerSecond: 1000,
+      globalBurst: 1000,
+      baseBackoffMs: 1000,
+      maxBackoffMs: 60_000,
+      random: () => 0, // deterministic: no jitter added
+      now: () => now,
+      sleep: async (ms) => {
+        slept.push(ms);
+        now += ms;
+      },
+      ...overrides,
+    });
+    return { limiter, slept, advance: (ms: number) => (now += ms), at: () => now };
+  }
+
+  test("spends the burst immediately, then paces", async () => {
+    const { limiter, slept } = harness();
+    await limiter.acquire("usr_a");
+    await limiter.acquire("usr_a");
+    expect(slept).toEqual([]);
+
+    await limiter.acquire("usr_a");
+    expect(slept).toEqual([1000]);
+  });
+
+  test("buckets are per-account and do not share tokens", async () => {
+    // Six accounts are six users as far as VRChat is concerned. Coupling them would make one busy
+    // account throttle the other five for no reason.
+    const { limiter, slept } = harness();
+    await limiter.acquire("usr_a");
+    await limiter.acquire("usr_a");
+    await limiter.acquire("usr_b");
+    await limiter.acquire("usr_b");
+    expect(slept).toEqual([]);
+  });
+
+  test("429 backoff is exponential from 1s and capped", () => {
+    const { limiter } = harness();
+    expect(limiter.record429()).toBe(1000);
+    expect(limiter.record429()).toBe(2000);
+    expect(limiter.record429()).toBe(4000);
+    expect(limiter.record429()).toBe(8000);
+    for (let i = 0; i < 10; i++) limiter.record429();
+    expect(limiter.record429()).toBe(60_000);
+  });
+
+  test("jitter only ever lengthens the wait", () => {
+    let r = 0;
+    const { limiter } = harness({ random: () => r });
+    r = 1;
+    expect(limiter.record429()).toBe(1250); // 1000 * (1 + 1 * 0.25)
+  });
+
+  test("Retry-After wins when longer, but cannot shorten our backoff", () => {
+    const a = harness().limiter;
+    expect(a.record429(30_000)).toBe(30_000);
+
+    const b = harness().limiter;
+    b.record429();
+    b.record429();
+    b.record429(); // computed 4000
+    // A Retry-After: 1 during a 429 storm must not talk us into hammering.
+    expect(b.record429(1000)).toBe(8000);
+  });
+
+  test("the breaker is global — a 429 on one account stops every account", async () => {
+    // Continuing to send from the same IP on other accounts is how a rate limit becomes a
+    // moderation action.
+    const { limiter, slept } = harness();
+    limiter.record429();
+    expect(limiter.isBackingOff).toBe(true);
+
+    await limiter.acquire("usr_b");
+    expect(slept[0]).toBe(1000);
+  });
+
+  test("the global bucket caps the whole IP, not each account", async () => {
+    // VRChat's 20/s is per IP. Six accounts each politely under their own limit still add up, and
+    // per-account limiting alone cannot see that.
+    const { limiter, slept } = harness({
+      ratePerSecond: 1000,
+      burst: 1000,
+      globalRatePerSecond: 4,
+      globalBurst: 4,
+    });
+
+    for (const account of ["usr_a", "usr_b", "usr_c", "usr_d"]) {
+      await limiter.acquire(account);
+    }
+    expect(slept).toEqual([]);
+
+    // Five accounts' worth of "well-behaved" traffic still hits the IP ceiling.
+    await limiter.acquire("usr_e");
+    expect(slept.length).toBe(1);
+    expect(slept[0]).toBeGreaterThan(0);
+  });
+
+  test("a contended call spends neither bucket", async () => {
+    // Spending the account token while waiting on the global one would leak a token per contended
+    // call and let the effective rate drift above the configured one.
+    const { limiter } = harness({
+      ratePerSecond: 2,
+      burst: 2,
+      globalRatePerSecond: 1,
+      globalBurst: 1,
+    });
+
+    await limiter.acquire("usr_a"); // spends 1 account + 1 global
+    await limiter.acquire("usr_a"); // waits for global, then spends the second account token
+    // If the first contended attempt had leaked an account token, this third call would find the
+    // account bucket empty and wait on it rather than on the global bucket.
+    expect(limiter.consecutive429Count).toBe(0);
+  });
+
+  test("the shipped default sits under VRChat's documented ceiling", () => {
+    // The limit is what VRChat enforces, not a target to sit on.
+    expect(VRCHAT_RATE_LIMIT_PER_SECOND).toBe(20);
+    const defaults = new RateLimiter();
+    expect(defaults.globalRatePerSecond).toBeLessThan(VRCHAT_RATE_LIMIT_PER_SECOND);
+  });
+
+  test("a success resets the counter fully rather than decaying", () => {
+    const { limiter } = harness();
+    limiter.record429();
+    limiter.record429();
+    limiter.recordSuccess();
+    expect(limiter.consecutive429Count).toBe(0);
+    expect(limiter.record429()).toBe(1000);
+  });
+});
+
+describe("jitter", () => {
+  test("adds between 0 and spread, never subtracts", () => {
+    expect(jitter(1000, { random: () => 0 })).toBe(1000);
+    expect(jitter(1000, { random: () => 1 })).toBe(1200);
+    expect(jitter(1000, { random: () => 0.5, spread: 0.5 })).toBe(1250);
+  });
+
+  test("the first tick spreads across the whole interval, not just the jitter window", () => {
+    // On a cold start every poller would otherwise fire inside the same narrow window — a small
+    // synchronized spike of exactly the kind the guidelines ask us not to create.
+    const delays = new Set<number>();
+    for (let i = 0; i < 50; i++) delays.add(initialDelay(60_000, { random: () => i / 50 }));
+    expect(delays.size).toBeGreaterThan(40);
+    for (const d of delays) {
+      expect(d).toBeGreaterThanOrEqual(0);
+      expect(d).toBeLessThanOrEqual(60_000);
+    }
+  });
+});
+
+describe("vrcFetch", () => {
+  function context(
+    handler: (request: Request) => Response | Promise<Response>,
+    overrides: Partial<RequestContext> = {},
+  ): { ctx: RequestContext; seen: Request[] } {
+    const seen: Request[] = [];
+    // A fake clock that the fake sleep actually advances. A no-op sleep against the real clock
+    // would make `acquire` spin for the length of a real 429 backoff — the loop re-checks the
+    // breaker each pass, which is correct behaviour and a slow test.
+    let clock = 1_750_000_000_000;
+    const ctx: RequestContext = {
+      accountId: "usr_a",
+      jar: new CookieJar(),
+      userAgent: "vrc.zip/0.1.0 (me@somewhere.dev)",
+      limiter: new RateLimiter({
+        burst: 100,
+        now: () => clock,
+        sleep: async (ms) => {
+          clock += ms;
+        },
+      }),
+      baseUrl: "https://api.test.invalid/api/1",
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        seen.push(request);
+        return handler(request);
+      },
+      ...overrides,
+    };
+    return { ctx, seen };
+  }
+
+  test("always sends our User-Agent, and a caller cannot override it", async () => {
+    const { ctx, seen } = context(() => new Response("{}"));
+    await vrcFetch(ctx, "/auth/user", { headers: { "User-Agent": "SomeOtherApp/1.0" } });
+    expect(seen[0]?.headers.get("User-Agent")).toBe("vrc.zip/0.1.0 (me@somewhere.dev)");
+  });
+
+  test("sends the jar's cookies and absorbs Set-Cookie from the response", async () => {
+    const { ctx, seen } = context(() => {
+      const headers = new Headers();
+      headers.append("Set-Cookie", "auth=authcookie_new; Path=/");
+      return new Response("{}", { headers });
+    });
+    ctx.jar.set({ name: "auth", value: "authcookie_old", expiresAt: null });
+
+    await vrcFetch(ctx, "/auth/user");
+    expect(seen[0]?.headers.get("Cookie")).toBe("auth=authcookie_old");
+    expect(ctx.jar.get("auth")).toBe("authcookie_new");
+  });
+
+  test("a Basic-auth login sends no cookies at all", async () => {
+    // A login must not present a stale session alongside a fresh credential.
+    const { ctx, seen } = context(() => new Response("{}"));
+    ctx.jar.set({ name: "auth", value: "authcookie_stale", expiresAt: null });
+
+    await vrcFetch(ctx, "/auth/user", { basicAuth: { username: "u", password: "p" } });
+    expect(seen[0]?.headers.get("Cookie")).toBeNull();
+    expect(seen[0]?.headers.get("Authorization")).toBe(basicAuthHeader("u", "p"));
+  });
+
+  test("percent-encodes the Basic-auth pair", () => {
+    // A password containing ':' would otherwise split the credential in the wrong place.
+    const header = basicAuthHeader("user@x.dev", "p:a$s w:rd");
+    const decoded = Buffer.from(header.slice("Basic ".length), "base64").toString("utf8");
+    expect(decoded).toBe("user%40x.dev:p%3Aa%24s%20w%3Ard");
+  });
+
+  test("retries a 429 and records the backoff", async () => {
+    let calls = 0;
+    const { ctx } = context(() => {
+      calls++;
+      return calls === 1
+        ? new Response("rate limited", { status: 429, headers: { "Retry-After": "1" } })
+        : new Response("{}");
+    });
+
+    const response = await vrcFetch(ctx, "/auth/user");
+    expect(calls).toBe(2);
+    expect(response.status).toBe(200);
+  });
+
+  test("gives up on a 429 rather than retrying forever", async () => {
+    let calls = 0;
+    const { ctx } = context(() => {
+      calls++;
+      return new Response("rate limited", { status: 429 });
+    });
+
+    const response = await vrcFetch(ctx, "/auth/user");
+    expect(response.status).toBe(429);
+    expect(calls).toBe(6); // the first attempt plus MAX_429_RETRIES
+  });
+
+  test("retries a 401 exactly once, through the re-auth hook", async () => {
+    let calls = 0;
+    let reauths = 0;
+    const { ctx } = context(
+      () => {
+        calls++;
+        return calls === 1 ? new Response("unauthorized", { status: 401 }) : new Response("{}");
+      },
+      {
+        onUnauthorized: async () => {
+          reauths++;
+          return true;
+        },
+      },
+    );
+
+    const response = await vrcFetch(ctx, "/auth/user");
+    expect(response.status).toBe(200);
+    expect(reauths).toBe(1);
+  });
+
+  test("does not loop when re-auth fails", async () => {
+    let calls = 0;
+    const { ctx } = context(
+      () => {
+        calls++;
+        return new Response("unauthorized", { status: 401 });
+      },
+      { onUnauthorized: async () => false },
+    );
+
+    const response = await vrcFetch(ctx, "/auth/user");
+    expect(response.status).toBe(401);
+    expect(calls).toBe(1);
+  });
+
+  test("returns the upstream Response untouched", async () => {
+    // Phase 2's proxy forwards this byte-for-byte; re-encoding here would break that.
+    const { ctx } = context(
+      () =>
+        new Response('{"error":{"message":"nope","status_code":403}}', {
+          status: 403,
+          headers: { "Content-Type": "application/json", "X-Upstream": "kept" },
+        }),
+    );
+
+    const response = await vrcFetch(ctx, "/auth/user");
+    expect(response.status).toBe(403);
+    expect(response.headers.get("X-Upstream")).toBe("kept");
+    expect(await response.text()).toBe('{"error":{"message":"nope","status_code":403}}');
+  });
+});

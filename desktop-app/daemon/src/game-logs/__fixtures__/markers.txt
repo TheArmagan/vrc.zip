@@ -1,0 +1,16 @@
+Initialize engine version: 2022.3.22f1 (887be4894c44)
+2024.03.09 14:22:01 Log        -  VRCApplication: HandleApplicationLaunch
+2024.03.09 14:22:03 Log        -  Initializing VRSDK.
+2024.03.09 14:22:05 Log        -  VR Disabled
+2024.03.09 14:22:07 Log        -  User Authenticated: Kira Test (usr_0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9)
+2024.03.09 14:22:12 Log        -  [Behaviour] Destination fetching: wrld_1a2b3c4d-5e6f-7081-92a3-b4c5d6e7f809:12345~region(us)
+2024.03.09 14:22:14 Log        -  [Behaviour] Entering Room: The Great Pug
+2024.03.09 14:22:15 Log        -  [Behaviour] Joining wrld_1a2b3c4d-5e6f-7081-92a3-b4c5d6e7f809:12345~region(us)~group(grp_11112222-3333-4444-5555-666677778888)
+2024.03.09 14:22:18 Log        -  [Behaviour] OnPlayerJoined Kira Test (usr_0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9)
+2024.03.09 14:22:19 Log        -  [Behaviour] OnPlayerJoined Someone (Else) (usr_99887766-5544-3322-1100-aabbccddeeff)
+2024.03.09 14:22:30 Log        -  [Behaviour] Instantiated a (Clone [123456]) for Portals/PortalInternalDynamic
+2024.03.09 14:22:41 Log        -  [VRC Camera] Took screenshot to: C:\Users\test\Pictures\VRChat\2024-03\VRChat_2024-03-09_14-22-41.png
+2024.03.09 14:23:02 Log        -  [Behaviour] OnPlayerLeft Someone (Else) (usr_99887766-5544-3322-1100-aabbccddeeff)
+2024.03.09 14:23:10 Log        -  [Behaviour] OnLeftRoom
+2024.03.09 14:23:12 Warning    -  [Behaviour] Failed to join instance 'wrld_1a2b3c4d-5e6f-7081-92a3-b4c5d6e7f809:99999' due to reason 'instance is full'
+2024.03.09 14:23:40 Log        -  VRCApplication: OnApplicationQuit at 4290.113

@@ -1,0 +1,5 @@
+2024.03.09 14:22:07 Log        -  User Authenticated: Kira Test (usr_0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9)
+2024.03.09 14:22:18 Log        -  [Behaviour] OnPlayerJoined Kira Test
+2024.03.09 14:22:19 Log        -  [Behaviour] OnPlayerJoined Someone (Else)
+2024.03.09 14:22:44 Log        -  [Behaviour] OnPlayerLeft Someone (Else)
+2024.03.09 14:22:51 Log        -  [Behaviour] OnPlayerJoined Kira Test (usr_0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9)

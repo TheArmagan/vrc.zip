@@ -60,6 +60,9 @@ is no CI workflow yet (it would live in the repo root, shared ground with `backe
 - **Commit after every noticeable change** — a finished feature, fix, refactor, or doc update —
   without being asked. Don't batch unrelated work into one commit, and don't leave a session's work
   sitting uncommitted. A half-finished edit or a scratch file is not a noticeable change.
+- **Stage only files you changed yourself.** Never `git add -A`, `git add .`, or `git commit -a` —
+  the working tree usually holds the user's own in-progress edits. Name the paths you touched, and
+  leave anything else alone (say so rather than sweeping it in).
 - **Push once a group of commits is done** — when the task finishes or a coherent batch has landed.
   Push the group, not every individual commit.
 - **Commits are authored solely by the user.** No `Co-Authored-By: Claude`, no `Claude-Session:`

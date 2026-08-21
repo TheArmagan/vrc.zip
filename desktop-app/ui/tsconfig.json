@@ -4,8 +4,14 @@
     // The UI is a browser bundle, not a Bun program: it gets DOM libs and Vite's ambient
     // types instead of `@types/bun`, and it is deliberately excluded from the root
     // `tsc --noEmit` (see ../tsconfig.json). `bun run check` (svelte-check) is the type gate.
-    "lib": ["ESNext", "DOM", "DOM.Iterable"],
-    "types": ["vite/client"],
+    "lib": [
+      "ESNext",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "types": [
+      "vite/client"
+    ],
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
     "allowJs": true,
@@ -14,10 +20,23 @@
     "sourceMap": true,
     "baseUrl": ".",
     "paths": {
-      "$lib": ["./src/lib"],
-      "$lib/*": ["./src/lib/*"]
-    }
+      "$lib": [
+        "./src/lib"
+      ],
+      "$lib/*": [
+        "./src/lib/*"
+      ]
+    },
+    "ignoreDeprecations": "6.0"
   },
-  "include": ["src/**/*.ts", "src/**/*.svelte", "vite.config.ts", "svelte.config.js"],
-  "exclude": ["node_modules", "dist"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.svelte",
+    "vite.config.ts",
+    "svelte.config.js"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
 }

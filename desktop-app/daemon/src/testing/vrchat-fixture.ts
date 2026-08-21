@@ -20,6 +20,17 @@ export interface FixtureAccount {
   /** Methods to demand, in VRChat's order. Empty means no 2FA. */
   readonly twoFactorMethods?: readonly ("totp" | "emailOtp" | "otp")[];
   readonly twoFactorCode?: string;
+  readonly friends?: readonly FixtureFriend[];
+}
+
+export interface FixtureFriend {
+  readonly id: string;
+  readonly displayName: string;
+  readonly online: boolean;
+  readonly status?: string;
+  readonly location?: string;
+  readonly tags?: readonly string[];
+  readonly platform?: string;
 }
 
 export interface FixtureOptions {
@@ -224,8 +235,36 @@ export function startVrchatFixture(options: FixtureOptions): VrchatFixture {
             { status: 401 },
           );
         }
-        // Deliberately different per account: a cross-account cache bug shows up here.
-        return json([{ id: `usr_friend_of_${session.account.userId}`, displayName: "A Friend" }]);
+        // `offline` is a filter, not a field: one pass returns only half the list. Modelled
+        // faithfully because a client that fetches only one half looks correct until every offline
+        // friend silently disappears from the UI.
+        const wantOffline = url.searchParams.get("offline") === "true";
+        const n = Number(url.searchParams.get("n") ?? "100");
+        const offset = Number(url.searchParams.get("offset") ?? "0");
+
+        const all = (
+          session.account.friends ?? [
+            // Deliberately keyed on the account: a cross-account cache bug shows up here.
+            {
+              id: `usr_friend_of_${session.account.userId}`,
+              displayName: "A Friend",
+              online: true,
+            },
+          ]
+        ).filter((f) => f.online !== wantOffline);
+
+        return json(
+          all.slice(offset, offset + n).map((f) => ({
+            id: f.id,
+            displayName: f.displayName,
+            status: f.status ?? (f.online ? "active" : "offline"),
+            statusDescription: "",
+            location: f.location ?? (f.online ? "wrld_example:12345" : "offline"),
+            tags: f.tags ?? [],
+            platform: f.platform ?? "standalonewindows",
+            currentAvatarImageUrl: "",
+          })),
+        );
       }
 
       return json({ error: { message: "Not Found", status_code: 404 } }, { status: 404 });

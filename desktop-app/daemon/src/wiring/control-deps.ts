@@ -1,5 +1,6 @@
 import type { AccountSnapshot } from "../accounts/account.ts";
 import type { AccountManager } from "../accounts/manager.ts";
+import type { PresenceService } from "../accounts/presence.ts";
 import type { EventBus } from "../bus/event-bus.ts";
 import type { RateLimiter } from "../net/rate-limiter.ts";
 import type { SecretsStore } from "../security/secrets.ts";
@@ -34,6 +35,7 @@ export interface ControlDepsOptions {
   readonly bus: EventBus;
   readonly limiter: RateLimiter;
   readonly secrets: SecretsStore;
+  readonly presence: PresenceService;
   readonly settings: Settings;
   readonly env?: NodeJS.ProcessEnv;
   readonly connectPipeline: (accountId: string) => void;
@@ -66,7 +68,7 @@ function toControlAccount(snapshot: AccountSnapshot, addedAt: number): ControlAc
 }
 
 export function createControlDeps(options: ControlDepsOptions): ControlDeps {
-  const { accounts, store, bus, limiter, secrets, connectPipeline } = options;
+  const { accounts, store, bus, limiter, secrets, presence, connectPipeline } = options;
   let settings = options.settings;
 
   function accountRowAddedAt(id: string): number {
@@ -196,20 +198,20 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
     },
 
     async listFriends(accountId): Promise<FriendPresence[]> {
-      const ids = accountId === null ? accounts.list().map((s) => s.id) : [accountId];
+      // Presence is live in-memory state, not a table — see PresenceService. Reading it from
+      // `friend_log` would serve stale "online" rows after a restart until the first poll landed.
+      const records = accountId === null ? presence.listAll() : presence.list(accountId);
 
-      return ids.flatMap((id) =>
-        store.listFriends(id).map((row) => ({
-          id: row.user_id,
-          displayName: row.display_name,
-          status: "offline",
-          statusDescription: null,
-          location: null,
-          worldId: null,
-          platform: null,
-          lastSeenAt: null,
-        })),
-      );
+      return records.map((record) => ({
+        id: record.id,
+        displayName: record.displayName,
+        status: record.status,
+        statusDescription: record.statusDescription,
+        location: record.location,
+        worldId: record.worldId,
+        platform: record.platform,
+        lastSeenAt: record.lastSeenAt,
+      }));
     },
 
     async getSettings(): Promise<WireSettings> {

@@ -1,4 +1,5 @@
 import { AccountManager } from "./accounts/manager.ts";
+import { PresenceService } from "./accounts/presence.ts";
 import { EventBus } from "./bus/event-bus.ts";
 import { discoverLogDirectories, LogWatcher } from "./game-logs/index.ts";
 import { RateLimiter } from "./net/rate-limiter.ts";
@@ -138,6 +139,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     { kinds: ["account.state"] },
   );
 
+  // --- friend presence ------------------------------------------------------
+  const presence = new PresenceService({ accounts, store, bus });
+  presence.start();
+
   // --- game log watcher -----------------------------------------------------
   const logDirectories =
     settings.logDirectories.length > 0
@@ -165,6 +170,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     limiter,
     secrets,
     settings,
+    presence,
     connectPipeline,
     ...(env !== undefined ? { env } : {}),
     onSettingsSaved: (next) => saveSettings(next, env),
@@ -201,6 +207,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
       // Order is the reverse of construction, and the first two lines are the ones that matter:
       // stop accepting work, then flush what is already queued, before anything closes.
       watcher.stop();
+      presence.stop();
       retention.stop();
       for (const client of pipelines.values()) client.dispose();
       feedWriter.detach();

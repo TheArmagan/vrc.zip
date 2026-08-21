@@ -1,8 +1,236 @@
 /**
- * OpenAPI codegen: pinned spec -> typed fetch client + route table. See PLAN.md §1.1.
+ * Codegen: pinned OpenAPI spec -> typed fetch client + route table. See PLAN.md §1.1.
  *
- * Deliberately a hard failure rather than a silent no-op — a codegen step that appears to succeed
- * while emitting nothing is how a stale client ships.
+ * Run with `bun run codegen` from the workspace root. Output lands in
+ * `packages/api/src/generated/` and is **committed**. Nothing fetches the spec at build time — the
+ * spec is a checked-in artifact with a pinned hash, so a network blip or an upstream force-push can
+ * never change what we ship.
+ *
+ * Updating the spec is a deliberate three-step act: replace `spec/openapi.json`, update
+ * `SPEC_SHA256` and `SPEC_VERSION` below, re-run codegen, and read the diff.
  */
-console.error("codegen: not implemented yet (Phase 1.1).");
-process.exit(1);
+import { createHash } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { createClient } from "@hey-api/openapi-ts";
+import { isScope, type Scope } from "@vrcz/shared";
+import { HARD_DENIED_OPERATIONS, resolveScope } from "./scope-map.ts";
+
+const ROOT = join(import.meta.dir, "..", "..");
+const SPEC_PATH = join(ROOT, "packages", "api", "spec", "openapi.json");
+const OUT_DIR = join(ROOT, "packages", "api", "src", "generated");
+
+/** The pinned release of `vrchatapi/specification`. */
+const SPEC_VERSION = "1.20.8";
+/** sha256 of `spec/openapi.json` as downloaded from that release. */
+const SPEC_SHA256 = "8061fbe4309e01c0e06a9c944a5dd250097aaeb9bba8c60c6c587b0ad3596273";
+
+const HTTP_METHODS = ["get", "post", "put", "delete", "patch", "head", "options"] as const;
+type HttpMethod = (typeof HTTP_METHODS)[number];
+
+interface SpecOperation {
+  operationId?: string;
+  tags?: string[];
+  security?: Array<Record<string, string[]>>;
+}
+interface Spec {
+  info: { version: string };
+  servers: Array<{ url: string }>;
+  paths: Record<string, Partial<Record<HttpMethod, SpecOperation>>>;
+}
+
+interface RouteRow {
+  method: string;
+  pathTemplate: string;
+  operationId: string;
+  tag: string;
+  security: string[];
+  scope: Scope;
+  hardDenied: boolean;
+}
+
+function fail(message: string): never {
+  console.error(`codegen: ${message}`);
+  process.exit(1);
+}
+
+async function loadSpec(): Promise<Spec> {
+  const raw = await readFile(SPEC_PATH).catch(() => fail(`spec not found at ${SPEC_PATH}`));
+  const actual = createHash("sha256").update(raw).digest("hex");
+  if (actual !== SPEC_SHA256) {
+    fail(
+      `spec hash mismatch.\n  expected ${SPEC_SHA256}\n  actual   ${actual}\n` +
+        "If you intentionally updated the spec, update SPEC_SHA256 and SPEC_VERSION in this file.",
+    );
+  }
+  const spec = JSON.parse(raw.toString("utf8")) as Spec;
+  if (spec.info.version !== SPEC_VERSION) {
+    fail(`spec says version ${spec.info.version}, this file pins ${SPEC_VERSION}`);
+  }
+  return spec;
+}
+
+function buildRouteTable(spec: Spec): RouteRow[] {
+  const rows: RouteRow[] = [];
+  const seen = new Set<string>();
+  const problems: string[] = [];
+
+  for (const [pathTemplate, item] of Object.entries(spec.paths)) {
+    for (const method of HTTP_METHODS) {
+      const op = item[method];
+      if (!op) continue;
+
+      const upper = method.toUpperCase();
+      const operationId = op.operationId;
+      if (!operationId) {
+        problems.push(`${upper} ${pathTemplate}: no operationId`);
+        continue;
+      }
+
+      const tag = op.tags?.[0];
+      if (!tag) {
+        problems.push(`${operationId}: no tag`);
+        continue;
+      }
+
+      const scope = resolveScope(operationId, upper, tag);
+      if (!scope) {
+        problems.push(`${operationId} (${upper} ${pathTemplate}, tag "${tag}"): no scope mapping`);
+        continue;
+      }
+      if (!isScope(scope)) {
+        problems.push(`${operationId}: resolved to "${scope}", which is not in the scope registry`);
+        continue;
+      }
+
+      const key = `${upper} ${pathTemplate}`;
+      if (seen.has(key)) problems.push(`duplicate route ${key}`);
+      seen.add(key);
+
+      rows.push({
+        method: upper,
+        pathTemplate,
+        operationId,
+        tag,
+        security: (op.security ?? []).flatMap((s) => Object.keys(s)),
+        scope,
+        hardDenied: HARD_DENIED_OPERATIONS.includes(operationId),
+      });
+    }
+  }
+
+  if (problems.length > 0) {
+    fail(`route table has ${problems.length} problem(s):\n  ${problems.join("\n  ")}`);
+  }
+  return rows;
+}
+
+function renderRouteTable(spec: Spec, rows: RouteRow[]): string {
+  const baseUrl = spec.servers[0]?.url ?? fail("spec has no servers[0].url");
+  rows.sort((a, b) =>
+    a.pathTemplate === b.pathTemplate
+      ? a.method.localeCompare(b.method)
+      : a.pathTemplate.localeCompare(b.pathTemplate),
+  );
+
+  const lines = rows.map((r) => {
+    const security = r.security.length > 0 ? JSON.stringify(r.security) : "[]";
+    return (
+      `  { method: ${JSON.stringify(r.method)}, pathTemplate: ${JSON.stringify(r.pathTemplate)}, ` +
+      `operationId: ${JSON.stringify(r.operationId)}, tag: ${JSON.stringify(r.tag)}, ` +
+      `security: ${security}, scope: ${JSON.stringify(r.scope)}, hardDenied: ${r.hardDenied} },`
+    );
+  });
+
+  return `// GENERATED BY tools/src/codegen.ts — DO NOT EDIT.
+// Spec: vrchatapi/specification v${SPEC_VERSION} (${rows.length} operations)
+import type { Scope } from "@vrcz/shared";
+
+export interface Route {
+  readonly method: string;
+  readonly pathTemplate: string;
+  readonly operationId: string;
+  readonly tag: string;
+  /** Security scheme names from the spec: authCookie, authHeader, twoFactorAuthCookie. */
+  readonly security: readonly string[];
+  /** The scope the proxy requires for this operation. Exactly one, always. */
+  readonly scope: Scope;
+  /** Denied on every port regardless of granted scopes. */
+  readonly hardDenied: boolean;
+}
+
+export const SPEC_VERSION = ${JSON.stringify(SPEC_VERSION)};
+export const BASE_URL = ${JSON.stringify(baseUrl)};
+
+export const ROUTES: readonly Route[] = [
+${lines.join("\n")}
+] as const;
+
+const BY_OPERATION_ID = new Map(ROUTES.map((r) => [r.operationId, r]));
+
+export function routeByOperationId(operationId: string): Route | undefined {
+  return BY_OPERATION_ID.get(operationId);
+}
+`;
+}
+
+/**
+ * `@hey-api`'s generated *runtime helpers* (`client/`, `core/`) do not compile under
+ * `exactOptionalPropertyTypes`. They pass `{ foo: string | undefined }` where the callee declares
+ * `foo?: string` — correct enough JavaScript, and not ours to fix.
+ *
+ * The options were: drop the flag workspace-wide, or exempt the files. Exempting wins by a wide
+ * margin — the flag earns its keep in a codebase whose whole job is round-tripping optional fields
+ * without perturbing them, and dropping it would weaken 100% of our code to accommodate 12 errors
+ * in code we do not write.
+ *
+ * Scoped deliberately narrowly: **only the runtime helper directories**. `types.gen.ts`,
+ * `sdk.gen.ts`, and `routes.ts` stay fully typechecked, so every call the daemon actually makes is
+ * still checked against the spec. If this ever needs to grow past `client/` and `core/`, that is a
+ * signal to re-examine the generator, not to widen the exemption.
+ */
+async function suppressGeneratedRuntimeStrictness(): Promise<number> {
+  const banner = `// @ts-nocheck -- generated runtime helper; exempted in tools/src/codegen.ts\n`;
+  const files = new Bun.Glob("{client,core}/**/*.ts").scan({ cwd: OUT_DIR });
+  let count = 0;
+  for await (const rel of files) {
+    const full = join(OUT_DIR, rel);
+    const body = await readFile(full, "utf8");
+    if (body.startsWith("// @ts-nocheck")) continue;
+    await writeFile(full, banner + body, "utf8");
+    count++;
+  }
+  return count;
+}
+
+async function main(): Promise<void> {
+  const spec = await loadSpec();
+  console.log(`codegen: spec v${SPEC_VERSION} verified (${Object.keys(spec.paths).length} paths)`);
+
+  await mkdir(OUT_DIR, { recursive: true });
+
+  await createClient({
+    input: SPEC_PATH,
+    // `postProcess: []` — no prettier/eslint pass. Biome ignores this directory entirely
+    // (see biome.json), because reformatting 22k lines of generated code on every check is pure
+    // cost and the diff noise would bury real changes.
+    output: { path: OUT_DIR, postProcess: [] },
+    plugins: [
+      // `baseUrl: false` — the daemon sets the base URL per request. The generated client must not
+      // bake in `api.vrchat.cloud`, because the proxy's own tests point it at a fixture server.
+      { name: "@hey-api/client-fetch", baseUrl: false },
+      // Plain exported functions, not a god-class. PLAN.md §1.1.
+      { name: "@hey-api/sdk", operations: { strategy: "single" } },
+    ],
+  });
+  const suppressed = await suppressGeneratedRuntimeStrictness();
+  console.log(`codegen: client generated (${suppressed} runtime helper(s) exempted from strict)`);
+
+  const rows = buildRouteTable(spec);
+  const routesPath = join(OUT_DIR, "routes.ts");
+  await mkdir(dirname(routesPath), { recursive: true });
+  await writeFile(routesPath, renderRouteTable(spec, rows), "utf8");
+  console.log(`codegen: route table generated (${rows.length} operations)`);
+}
+
+await main();

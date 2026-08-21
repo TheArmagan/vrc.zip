@@ -10,5 +10,8 @@
   },
   "dependencies": {
     "@vrcz/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@hey-api/openapi-ts": "0.99.0"
   }
 }

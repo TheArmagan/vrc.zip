@@ -5,4 +5,14 @@
  * Nothing here may import from `@vrcz/daemon`, `@vrcz/api`, or `@vrcz/ui`. This package is a leaf.
  */
 
+export {
+  ALL_SCOPES,
+  DEFAULT_SCOPES,
+  expandWildcard,
+  isDangerousScope,
+  isScope,
+  SCOPES,
+  type Scope,
+  type ScopeDefinition,
+} from "./scopes.ts";
 export { APP_NAME, APP_VERSION, PLUGIN_API_PROTOCOL_MAJOR } from "./version.ts";

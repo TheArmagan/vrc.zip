@@ -6,7 +6,6 @@
  * something the user is already looking at is noise.
  */
 
-import type { FeedEvent } from "./api.ts";
 import { eventLabel, subjectName } from "./format.ts";
 
 export type NotificationPermissionState = "default" | "granted" | "denied" | "unsupported";
@@ -61,18 +60,24 @@ export function notify(options: NotifyOptions): void {
   });
 }
 
-/** Turns a feed event into a notification, if the user asked to be told about that kind. */
+/**
+ * Turns a live event into a desktop notification, if the user asked to be told about that kind.
+ *
+ * `enabled` is a predicate rather than a list because the preference is per *family*
+ * (`friend`, `notification`, …) while events arrive as full dotted kinds.
+ */
 export function notifyForEvent(
-  event: FeedEvent,
-  enabledKinds: readonly string[],
+  event: { readonly kind: string; readonly subjectId: string | null; readonly payload: unknown },
+  enabled: (kind: string) => boolean,
   onClick?: () => void,
 ): void {
-  if (!enabledKinds.includes(event.kind)) return;
+  if (!enabled(event.kind)) return;
   const who = subjectName(event.payload);
+  const label = eventLabel(event.kind);
   const options: NotifyOptions = {
-    title: who === null ? eventLabel(event.kind) : `${who} — ${eventLabel(event.kind)}`,
-    tag: `vrcz:${event.kind}:${event.subjectId ?? event.id}`,
-    ...(who === null ? {} : { body: eventLabel(event.kind) }),
+    title: who === null ? label : `${who} — ${label}`,
+    tag: `vrcz:${event.kind}:${event.subjectId ?? "none"}`,
+    ...(who === null ? {} : { body: label }),
     ...(onClick === undefined ? {} : { onClick }),
   };
   notify(options);

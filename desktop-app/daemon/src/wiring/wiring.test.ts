@@ -224,10 +224,12 @@ describe("log bridge", () => {
     const store = openStoreWithAccounts("usr_a");
     const bus = new EventBus();
     const sink = createLogSink(store, bus);
+    sink.sessionStart(snapshot({ id: "sess-1", accountId: "usr_a" }));
+    const rowId = store.listOpenSessions()[0]?.id;
 
     const events: Array<{
       kind: string;
-      sessionId: string | null | undefined;
+      sessionId: number | null | undefined;
       subjectId: string | null | undefined;
     }> = [];
     bus.subscribe(
@@ -248,9 +250,53 @@ describe("log bridge", () => {
       userId: "usr_player",
     } as unknown as SessionEvent);
 
+    // The store row id, not the watcher's string — the same identifier /api/sessions returns, so a
+    // consumer can join the two without correlating on start time.
     expect(events).toEqual([
-      { kind: "gamelog.player_join", sessionId: "sess-1", subjectId: "usr_player" },
+      { kind: "gamelog.player_join", sessionId: rowId, subjectId: "usr_player" },
     ]);
+    store.close();
+  });
+
+  test("a gamelog event's sessionId joins directly against /api/sessions", () => {
+    // Without this, a consumer holding a stream event and a REST session list has two different
+    // identifiers and is reduced to correlating on start time — which mis-attributes two clients
+    // launched in the same second. One id, published on both surfaces.
+    const store = openStoreWithAccounts("usr_a", "usr_b");
+    const bus = new EventBus();
+    const sink = createLogSink(store, bus);
+
+    sink.sessionStart(
+      snapshot({ id: "sess-a", logKey: "k1", accountId: "usr_a", logPath: "C:/logs/a.txt" }),
+    );
+    sink.sessionStart(
+      snapshot({ id: "sess-b", logKey: "k2", accountId: "usr_b", logPath: "C:/logs/b.txt" }),
+    );
+
+    const seen: Array<number | null | undefined> = [];
+    bus.subscribe(
+      (e) => {
+        seen.push(e.sessionId);
+      },
+      { kinds: ["gamelog.*"] },
+    );
+
+    sink.event({
+      kind: "player-join",
+      at: NOW,
+      sessionId: "sess-b",
+      accountId: "usr_b",
+      accountDisplayName: "B",
+      logPath: "C:/logs/b.txt",
+      displayName: "P",
+      userId: "usr_p",
+    } as unknown as SessionEvent);
+
+    const sessions = store.listOpenSessions();
+    const bRow = sessions.find((row) => row.log_path === "C:/logs/b.txt");
+    expect(seen[0]).toBe(bRow?.id);
+    // And it is genuinely discriminating: the two clients have different ids.
+    expect(sessions[0]?.id).not.toBe(sessions[1]?.id);
     store.close();
   });
 

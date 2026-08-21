@@ -1,7 +1,7 @@
 /**
  * The shell's shared state: daemon status, accounts, live sessions, settings, and the live event
- * tail. Screens own their own queries; anything the sidebar, the palette, or two screens all
- * need lives here so it is fetched once and updated by the socket rather than polled per screen.
+ * tail. Screens own their own queries; anything the sidebar, the palette, or two screens all need
+ * lives here so it is fetched once and updated by the socket rather than polled per screen.
  *
  * Written as a class with `$state` fields and exported as a singleton — the rune equivalent of a
  * store, without the store API.
@@ -9,60 +9,106 @@
 
 import {
   type Account,
+  ApiError,
   api,
   type DaemonStatus,
   describeError,
-  type FeedEvent,
   type GameSession,
   isAbort,
   isOffline,
+  type NotificationItem,
   onReachabilityChange,
   type Settings,
 } from "../api.ts";
+import { EPHEMERAL_KINDS, frameToEvent, type LiveEvent } from "../events.ts";
 import { notifyForEvent } from "../notifications.ts";
 import { hrefFor } from "../router.ts";
-import { connectStream, type StreamConnection, type StreamState } from "../stream.ts";
+import {
+  connectStream,
+  type StreamConnection,
+  type StreamFrame,
+  type StreamState,
+} from "../stream.ts";
+import { liveSessions } from "./live-sessions.svelte.ts";
+import { prefs } from "./prefs.svelte.ts";
 
 /** How many live events the shell keeps in memory for the feed's "new since you looked" tail. */
-const LIVE_TAIL_LIMIT = 300;
+const LIVE_TAIL_LIMIT = 500;
+
+/** Coalesces the refetch bursts a single instance transition produces. */
+const REFRESH_DEBOUNCE_MS = 250;
 
 export type LoadPhase = "idle" | "loading" | "ready" | "error";
 
 class AppState {
-  /** `null` until the first successful `/api/status`. */
+  /** `null` until the first successful `GET /api/status`. */
   status = $state<DaemonStatus | null>(null);
   accounts = $state<Account[]>([]);
   sessions = $state<GameSession[]>([]);
   settings = $state<Settings | null>(null);
+  notifications = $state<NotificationItem[]>([]);
 
   /** Events pushed over the socket since the page loaded, newest first. */
-  liveEvents = $state<FeedEvent[]>([]);
+  liveEvents = $state<LiveEvent[]>([]);
 
   phase = $state<LoadPhase>("idle");
   /** The last non-offline failure, shown inline. Offline gets the full-screen treatment instead. */
   error = $state<string | null>(null);
   /** False once a request has failed to reach the daemon at all. */
   reachable = $state(true);
+  /**
+   * Why the shell is showing the offline screen.
+   *
+   * `not-api` is the misconfiguration case, and it needs its own words. The daemon binds the UI on
+   * one port and the control API on another, so a packaged build that is reachable can still have
+   * nothing but static files answering on `/api`. That returns `index.html`, which parses as
+   * neither JSON nor a network failure, and telling the user their daemon has crashed when it is
+   * running fine would send them hunting in the wrong place.
+   */
+  offlineReason = $state<"unreachable" | "not-api">("unreachable");
   streamState = $state<StreamState>("connecting");
 
-  /** Bumped on every live event so screens can cheaply watch for "something happened". */
+  /** Bumped on every friend-affecting frame, so the Friends screen can cheaply refetch. */
+  friendsRevision = $state(0);
+  /** Bumped on every live event, for screens that only need "something happened". */
   revision = $state(0);
 
   #stream: StreamConnection | null = null;
   #refreshing = false;
+  #timers = new Map<string, number>();
 
-  /** Accounts the daemon currently holds a live pipeline for. */
-  onlineAccounts = $derived(this.accounts.filter((account) => account.online));
+  /** Accounts whose pipeline the daemon currently holds open. */
+  connectedAccounts = $derived(
+    this.accounts.filter((account) => account.connection === "connected"),
+  );
 
-  /** Sessions still running, i.e. no exit recorded. */
-  runningSessions = $derived(this.sessions.filter((session) => session.exitKind === null));
+  /** Accounts sitting on an unanswered 2FA challenge — the one state that blocks on the user. */
+  accountsNeeding2fa = $derived(
+    this.accounts.filter((account) => account.connection === "needs-2fa"),
+  );
 
-  /** Running clients the daemon could not attribute to a logged-in account. */
-  unlinkedSessions = $derived(this.runningSessions.filter((session) => session.accountId === null));
+  /**
+   * Running clients the daemon could not attribute to a signed-in account. Normal, not an error:
+   * a VRChat client can be signed into an account vrc.zip does not manage.
+   */
+  unlinkedSessions = $derived(this.sessions.filter((session) => session.accountId === null));
+
+  unseenNotifications = $derived(this.notifications.filter((item) => !item.seen));
+
+  /** True until the user has supplied a contact address. Nothing can talk to VRChat before then. */
+  needsFirstRun = $derived(this.settings !== null && this.settings.contact.trim() === "");
 
   accountById(id: string | null): Account | null {
     if (id === null) return null;
     return this.accounts.find((account) => account.id === id) ?? null;
+  }
+
+  /** The name to put on a session card: the account's, the client's own, or "Unlinked client". */
+  sessionLabel(session: GameSession): string {
+    const account = this.accountById(session.accountId);
+    if (account !== null) return account.displayName;
+    if (session.displayName !== null && session.displayName !== "") return session.displayName;
+    return "Unlinked client";
   }
 
   /** Fetches everything the shell needs. Safe to call repeatedly; overlapping calls collapse. */
@@ -82,10 +128,19 @@ class AppState {
       this.sessions = sessions;
       this.settings = settings;
       this.error = null;
+      this.reachable = true;
       this.phase = "ready";
+      // Notifications are fetched separately: the badge wants them, but a failure here must not
+      // take down the whole shell (this route is newer than the rest of the contract).
+      void this.refreshNotifications();
     } catch (error) {
       if (isAbort(error)) return;
       if (isOffline(error)) {
+        this.offlineReason = "unreachable";
+        this.reachable = false;
+        this.phase = "error";
+      } else if (error instanceof ApiError && error.kind === "malformed") {
+        this.offlineReason = "not-api";
         this.reachable = false;
         this.phase = "error";
       } else {
@@ -94,6 +149,27 @@ class AppState {
       }
     } finally {
       this.#refreshing = false;
+    }
+  }
+
+  async refreshNotifications(): Promise<void> {
+    try {
+      this.notifications = await api.notifications.list();
+    } catch {
+      /* the badge stays at its last known value; the screen shows its own error */
+    }
+  }
+
+  /** Optimistically marks one notification seen, then confirms with the daemon. */
+  async markNotificationSeen(id: string): Promise<void> {
+    const before = this.notifications;
+    this.notifications = this.notifications.map((item) =>
+      item.id === id ? { ...item, seen: true } : item,
+    );
+    try {
+      await api.notifications.markSeen(id);
+    } catch {
+      this.notifications = before;
     }
   }
 
@@ -109,34 +185,19 @@ class AppState {
     this.#stream = connectStream({
       onState: (state) => {
         this.streamState = state;
-        // The socket reconnecting means the daemon came back after a restart; whatever changed
+        // The socket opening again means the daemon came back after a restart; whatever changed
         // while it was gone is not in `liveEvents`, so re-read rather than trusting the cache.
         if (state === "open") void this.refresh();
       },
-      onMessage: (message) => {
-        switch (message.type) {
-          case "event":
-            this.#ingestEvent(message.event);
-            break;
-          case "sessions":
-            this.sessions = [...message.sessions];
-            break;
-          case "accounts-changed":
-            void this.#refreshAccounts();
-            break;
-          case "status-changed":
-            void this.#refreshStatus();
-            break;
-          case "hello":
-            break;
-          default:
-            break;
-        }
+      onFrame: (frame) => {
+        this.#ingest(frame);
       },
     });
 
     return () => {
       stopWatchingReachability();
+      for (const timer of this.#timers.values()) window.clearTimeout(timer);
+      this.#timers.clear();
       this.#stream?.close();
       this.#stream = null;
     };
@@ -145,25 +206,116 @@ class AppState {
   /** Force a reconnect and a re-read — the offline screen's retry button. */
   retry(): void {
     this.reachable = true;
+    this.offlineReason = "unreachable";
     this.error = null;
     void this.refresh();
     this.#stream?.reconnectNow();
   }
 
-  #ingestEvent(event: FeedEvent): void {
+  #debounce(key: string, run: () => void): void {
+    const existing = this.#timers.get(key);
+    if (existing !== undefined) window.clearTimeout(existing);
+    this.#timers.set(
+      key,
+      window.setTimeout(() => {
+        this.#timers.delete(key);
+        run();
+      }, REFRESH_DEBOUNCE_MS),
+    );
+  }
+
+  #ingest(frame: StreamFrame): void {
+    if (frame.type === "ready") return;
+
+    liveSessions.apply(frame);
+    this.#applySideEffects(frame);
+
+    if (EPHEMERAL_KINDS.has(frame.type)) return;
+
+    const event = frameToEvent(frame);
+    if (event === null) return;
+
     this.liveEvents = [event, ...this.liveEvents].slice(0, LIVE_TAIL_LIMIT);
     this.revision += 1;
-    const enabled = this.settings?.notifyOn ?? [];
-    notifyForEvent(event, enabled, () => {
+    notifyForEvent(event, prefs.shouldNotify, () => {
       window.location.hash = hrefFor("feed");
     });
+  }
+
+  #applySideEffects(frame: StreamFrame): void {
+    const family = frame.type.split(".", 1)[0];
+    switch (family) {
+      case "session":
+        this.#debounce("sessions", () => {
+          void this.#refreshSessions();
+        });
+        break;
+      case "account":
+      case "pipeline":
+        this.#debounce("accounts", () => {
+          void this.#refreshAccounts();
+          void this.#refreshStatus();
+        });
+        break;
+      case "friend":
+      case "user":
+        this.friendsRevision += 1;
+        break;
+      case "notification":
+        this.#applyNotificationFrame(frame);
+        break;
+      default:
+        break;
+    }
+  }
+
+  /**
+   * Notification frames update the list in place rather than triggering a refetch — a busy inbox
+   * would otherwise turn every incoming invite into a round trip. Only `received` needs the
+   * daemon, because the frame carries VRChat's shape and the list wants the daemon's.
+   */
+  #applyNotificationFrame(frame: StreamFrame): void {
+    const subjectId = frame.payload?.subjectId ?? null;
+
+    switch (frame.type) {
+      case "notification.seen":
+      case "notification.hidden":
+        if (subjectId === null) break;
+        this.notifications = this.notifications.map((item) =>
+          item.id === subjectId ? { ...item, seen: true } : item,
+        );
+        break;
+      case "notification.cleared":
+        // VRChat's clear frame names nothing, so the daemon marks rather than deletes. Mirror it.
+        this.notifications = this.notifications.map((item) => ({ ...item, seen: true }));
+        break;
+      case "notification.received":
+      case "notification.received_v2":
+      case "notification.updated":
+      case "notification.deleted":
+      case "notification.responded":
+        this.#debounce("notifications", () => {
+          void this.refreshNotifications();
+        });
+        break;
+      default:
+        break;
+    }
+  }
+
+  async #refreshSessions(): Promise<void> {
+    try {
+      this.sessions = await api.sessions();
+    } catch {
+      /* the next full refresh will pick it up */
+    }
   }
 
   async #refreshAccounts(): Promise<void> {
     try {
       this.accounts = await api.accounts.list();
     } catch {
-      /* the next full refresh will pick it up */
+      /* as above */
     }
   }
 

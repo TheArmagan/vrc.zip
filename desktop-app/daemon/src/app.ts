@@ -1,10 +1,11 @@
+import { resolve } from "node:path";
 import { AccountManager } from "./accounts/manager.ts";
 import { PresenceService } from "./accounts/presence.ts";
 import { EventBus } from "./bus/event-bus.ts";
 import { discoverLogDirectories, LogWatcher } from "./game-logs/index.ts";
 import { RateLimiter } from "./net/rate-limiter.ts";
 import { buildUserAgent } from "./net/user-agent.ts";
-import { databasePath } from "./paths.ts";
+import { databasePath, ensureStateDir } from "./paths.ts";
 import { PipelineClient } from "./pipeline/index.ts";
 import { loadOrCreateMasterKey } from "./security/keychain.ts";
 import { SecretsStore } from "./security/secrets.ts";
@@ -46,6 +47,11 @@ export interface RunningDaemon {
 
 export async function startDaemon(options: DaemonOptions = {}): Promise<RunningDaemon> {
   const env = options.env;
+
+  // Before anything else touches the filesystem. Nothing below creates its own parent directory,
+  // and the failure without this is an opaque SQLITE_CANTOPEN on every genuinely fresh install.
+  ensureStateDir(env);
+
   const settings = await loadSettings(env);
 
   const masterKey = await loadOrCreateMasterKey(env);
@@ -187,7 +193,9 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     deps,
     token: () => sessionToken,
     ports: settings.ports,
-    uiDistDir: new URL("../../ui/dist", import.meta.url).pathname,
+    // `new URL(...).pathname` yields "/C:/Users/..." on Windows, which no fs call resolves — the
+    // daemon then silently serves the "UI not built" placeholder while the bundle sits right there.
+    uiDistDir: resolve(import.meta.dir, "..", "..", "ui", "dist"),
   });
 
   await writeStateFile(

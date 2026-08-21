@@ -11,7 +11,6 @@
     "check": "svelte-check --tsconfig ./tsconfig.json"
   },
   "dependencies": {
-    "@lucide/svelte": "1.33.0",
     "@vrcz/shared": "workspace:*",
     "bits-ui": "2.19.0",
     "clsx": "2.1.1",

@@ -1,47 +1,74 @@
 /**
- * The live event socket (`/api/stream`), with reconnect.
+ * The live event socket (`GET /api/stream`), with reconnect.
  *
  * Browsers cannot set request headers on a WebSocket handshake, so this is the one place the
- * session token travels as a query parameter instead of `Authorization: Bearer`. The daemon
- * binds to loopback only, so the token never leaves the machine either way.
+ * session token travels as a query parameter instead of `Authorization: Bearer`. The daemon binds
+ * to loopback only, so the token never leaves the machine either way.
  *
- * Reconnect is exponential with jitter and caps at 15s. Two things deliberately do *not*
- * happen: the socket does not reconnect after an auth failure (retrying a rejected token just
- * burns the daemon's rate limiter), and it does not reconnect while the tab is hidden and has
- * already failed once — it retries immediately on `visibilitychange` instead.
+ * The wire shape is the daemon's bus, verbatim: `{ type, ts, payload }` where `type` is the dotted
+ * bus kind (`friend.online`, `gamelog.player_join`, …) and `payload` wraps the event's envelope
+ * plus its kind-specific `data`. The very first frame after a successful upgrade is
+ * `{ type: "ready", ts, payload: null }` — there is no version handshake.
+ *
+ * Reconnect is exponential with full jitter and caps at 15s. Two things deliberately do *not*
+ * happen: the socket does not reconnect after an auth close (retrying a rejected token just burns
+ * the daemon's rate limiter and the token cannot be refreshed from inside the page), and it does
+ * not keep retrying while the tab is hidden — it retries immediately on `visibilitychange`.
  */
 
-import type { FeedEvent, GameSession } from "./api.ts";
+import { streamUrl } from "./config.ts";
 import { getToken } from "./session.ts";
 
-/** A frame pushed by the daemon. `kind` is the discriminant for every message on the socket. */
-export type StreamMessage =
-  | { readonly type: "event"; readonly event: FeedEvent }
-  | { readonly type: "sessions"; readonly sessions: readonly GameSession[] }
-  | { readonly type: "accounts-changed" }
-  | { readonly type: "status-changed" }
-  | { readonly type: "hello"; readonly version: string };
+/** The envelope every non-`ready` frame carries in `payload`. */
+export interface StreamPayload {
+  readonly accountId: string | null;
+  /**
+   * The log watcher's *string* session id on `gamelog.*` and `session.*` frames. Note this is a
+   * different identifier space from `GameSession.id`, which is the store's integer row id.
+   */
+  readonly sessionId: string | null;
+  readonly subjectId: string | null;
+  readonly location: string | null;
+  /** The kind-specific body. Untyped on purpose; screens narrow what they actually read. */
+  readonly data: unknown;
+}
+
+export interface StreamFrame {
+  /** The bus kind, or the literal `"ready"` for the handshake frame. */
+  readonly type: string;
+  readonly ts: number;
+  readonly payload: StreamPayload | null;
+}
 
 export type StreamState = "connecting" | "open" | "reconnecting" | "closed" | "unauthorized";
 
 export interface StreamHandlers {
-  readonly onMessage: (message: StreamMessage) => void;
+  readonly onFrame: (frame: StreamFrame) => void;
   readonly onState: (state: StreamState) => void;
 }
 
 const BASE_DELAY_MS = 500;
 const MAX_DELAY_MS = 15_000;
 
-function socketUrl(): string {
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const url = new URL(`${protocol}//${window.location.host}/api/stream`);
-  const token = getToken();
-  if (token !== null) url.searchParams.set("token", token);
-  return url.toString();
+function asPayload(value: unknown): StreamPayload | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  return {
+    accountId: typeof record.accountId === "string" ? record.accountId : null,
+    sessionId:
+      typeof record.sessionId === "string"
+        ? record.sessionId
+        : typeof record.sessionId === "number"
+          ? String(record.sessionId)
+          : null,
+    subjectId: typeof record.subjectId === "string" ? record.subjectId : null,
+    location: typeof record.location === "string" ? record.location : null,
+    data: record.data ?? null,
+  };
 }
 
-/** Narrows an arbitrary parsed frame to a `StreamMessage`, dropping anything unrecognised. */
-function parseMessage(raw: string): StreamMessage | null {
+/** Narrows an arbitrary parsed frame, dropping anything without a usable `type`. */
+export function parseFrame(raw: string): StreamFrame | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -50,31 +77,18 @@ function parseMessage(raw: string): StreamMessage | null {
   }
   if (typeof parsed !== "object" || parsed === null) return null;
   const record = parsed as Record<string, unknown>;
-  if (typeof record.type !== "string") return null;
-  switch (record.type) {
-    case "event":
-      return typeof record.event === "object" && record.event !== null
-        ? { type: "event", event: record.event as FeedEvent }
-        : null;
-    case "sessions":
-      return Array.isArray(record.sessions)
-        ? { type: "sessions", sessions: record.sessions as GameSession[] }
-        : null;
-    case "accounts-changed":
-      return { type: "accounts-changed" };
-    case "status-changed":
-      return { type: "status-changed" };
-    case "hello":
-      return { type: "hello", version: String(record.version ?? "") };
-    default:
-      return null;
-  }
+  if (typeof record.type !== "string" || record.type === "") return null;
+  return {
+    type: record.type,
+    ts: typeof record.ts === "number" ? record.ts : Date.now(),
+    payload: asPayload(record.payload),
+  };
 }
 
 export interface StreamConnection {
   /** Drop the socket and stop reconnecting. */
   readonly close: () => void;
-  /** Reset backoff and reconnect now — used by the offline screen's "retry" button. */
+  /** Reset backoff and reconnect now — used by the offline screen's retry button. */
   readonly reconnectNow: () => void;
 }
 
@@ -111,7 +125,7 @@ export function connectStream(handlers: StreamHandlers): StreamConnection {
 
     let next: WebSocket;
     try {
-      next = new WebSocket(socketUrl());
+      next = new WebSocket(streamUrl(getToken()));
     } catch {
       scheduleReconnect();
       return;
@@ -125,26 +139,26 @@ export function connectStream(handlers: StreamHandlers): StreamConnection {
       handlers.onState("open");
     });
 
-    next.addEventListener("message", (frame: MessageEvent<unknown>) => {
-      if (typeof frame.data !== "string") return;
-      const message = parseMessage(frame.data);
-      if (message !== null) handlers.onMessage(message);
+    next.addEventListener("message", (event: MessageEvent<unknown>) => {
+      if (typeof event.data !== "string") return;
+      const frame = parseFrame(event.data);
+      if (frame !== null) handlers.onFrame(frame);
     });
 
-    next.addEventListener("close", (frame: CloseEvent) => {
+    next.addEventListener("close", (event: CloseEvent) => {
       if (disposed || socket !== next) return;
       socket = null;
-      // 1008 (policy violation) / 4401 are the daemon rejecting the token. Retrying is pointless
+      // 1008 (policy violation) and 4401 are the daemon rejecting the token. Retrying is pointless
       // and noisy; the shell asks the user to relaunch from the tray instead.
-      if (frame.code === 1008 || frame.code === 4401) {
+      if (event.code === 1008 || event.code === 4401) {
         handlers.onState("unauthorized");
         return;
       }
       scheduleReconnect();
     });
 
-    // `error` always precedes `close`, which is where reconnect is decided. Swallowing it here
-    // is what keeps an unreachable daemon from printing a wall of uncaught errors.
+    // `error` always precedes `close`, which is where reconnect is decided. Swallowing it here is
+    // what keeps an unreachable daemon from printing a wall of uncaught errors.
     next.addEventListener("error", () => {});
   }
 

@@ -1,4 +1,5 @@
 import type { Context, MiddlewareHandler } from "hono";
+import { getCookie } from "hono/cookie";
 import { sessionTokensMatch } from "./session-token.ts";
 
 /**
@@ -77,6 +78,9 @@ export type TokenSource = () => string | Promise<string>;
  * - `?token=<token>` — the launch URL, which is the only way the very first navigation can carry
  *   credentials at all. The UI strips it from the address bar immediately after boot.
  */
+/** Set once the launch URL's `?token=` has been validated, so subresources authenticate too. */
+export const SESSION_COOKIE = "vrcz_session";
+
 export function sessionAuth(getToken: TokenSource): MiddlewareHandler {
   return async function sessionAuthMiddleware(c, next) {
     const presented = extractSessionToken(c);
@@ -105,5 +109,13 @@ export function extractSessionToken(c: Context): string | undefined {
   if (tokenHeader !== undefined && tokenHeader !== "") return tokenHeader;
   const fromQuery = c.req.query(TOKEN_QUERY_PARAM);
   if (fromQuery !== undefined && fromQuery !== "") return fromQuery;
+
+  // The cookie is last, and it is not a UI-server special case. A browser attaches no headers to
+  // `<script>` and `<link>` loads, so without this every asset request on the UI port is
+  // unauthenticated and the page renders blank — which is exactly what happened. Safe on all three
+  // ports: it is HttpOnly and SameSite=Strict, and `hostGuard` plus `originGuard` have already run.
+  const fromCookie = getCookie(c, SESSION_COOKIE);
+  if (fromCookie !== undefined && fromCookie !== "") return fromCookie;
+
   return undefined;
 }

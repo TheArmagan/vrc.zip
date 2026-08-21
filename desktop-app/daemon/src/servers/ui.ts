@@ -6,13 +6,25 @@ import {
   extractSessionToken,
   hostGuard,
   originGuard,
+  SESSION_COOKIE,
   TOKEN_QUERY_PARAM,
   type TokenSource,
 } from "../security/guards.ts";
 import { sessionTokensMatch } from "../security/session-token.ts";
+import { type ControlDeps, createControlApp } from "./control.ts";
 
 /**
- * The UI server — static files from `ui/dist`, and nothing else. See PLAN.md §1.8.
+ * The UI server — the built bundle, plus the session API it needs. See PLAN.md §Architecture,
+ * which puts ":7773 UI + session API (token in URL)" on one port for exactly this reason.
+ *
+ * **The API must be same-origin with the page.** Served from 7773 while the control API listens on
+ * 7775, every call the bundle makes is cross-origin: `originGuard` rejects it and no CORS headers
+ * come back, so the packaged build is inert while the daemon looks perfectly healthy. Only `vite
+ * dev` works, because it proxies. Mounting the same routes here removes the problem rather than
+ * papering over it with CORS, which would mean deciding which origins may hold a session token.
+ *
+ * The proxy port keeps its own separate instance. That separation is the one PLAN.md §1.8 insists
+ * on — the byte-faithful mirror must not be able to serve a control route — and it is untouched.
  *
  * The UI is scaffolded in Phase 1.9, so `ui/dist` frequently does not exist yet. Rather than 404 in
  * a way that reads as a bug, an unbuilt tree gets an explicit placeholder page naming the build
@@ -23,14 +35,19 @@ import { sessionTokensMatch } from "../security/session-token.ts";
  * means `/accounts/usr_…` is a real URL that only exists inside the bundle.
  */
 
-/** Set once the launch URL's `?token=` has been validated, so subresources authenticate too. */
-export const SESSION_COOKIE = "vrcz_session";
+// Re-exported for callers that had it from here. It lives in `guards.ts` now, because the cookie
+// is a transport every port understands rather than a UI-server special case.
+export { SESSION_COOKIE } from "../security/guards.ts";
 
 export interface UiAppOptions {
   /** The port this instance will be bound to. The `Host` allowlist is built from it. */
   port: number;
   /** Resolves the session token. */
   token: TokenSource;
+  /**
+   * Mounts the control API on this port too. Omitted in tests that only exercise static serving.
+   */
+  deps?: ControlDeps;
   /** Where the built UI lives. Defaults to `<repo>/ui/dist`. */
   distDir?: string;
   /** Shown on the placeholder page so a first-run user can find the API. */
@@ -42,7 +59,7 @@ export function defaultUiDistDir(): string {
   return resolve(import.meta.dir, "..", "..", "..", "ui", "dist");
 }
 
-export function createUiApp({ port, token, distDir, controlUrl }: UiAppOptions) {
+export function createUiApp({ port, token, deps, distDir, controlUrl }: UiAppOptions) {
   const root = resolve(distDir ?? defaultUiDistDir());
 
   const app = new Hono()
@@ -58,11 +75,20 @@ export function createUiApp({ port, token, distDir, controlUrl }: UiAppOptions) 
     .use(async (c, next) => {
       const expected = await token();
       const fromCookie = getCookie(c, SESSION_COOKIE);
-      const presented = extractSessionToken(c) ?? fromCookie;
+      const presented = extractSessionToken(c);
       if (expected === "" || presented === undefined || !sessionTokensMatch(presented, expected)) {
         return c.json({ error: "unauthorized" }, 401);
       }
-      if (c.req.query(TOKEN_QUERY_PARAM) !== undefined && fromCookie !== presented) {
+      const wantsCookie = c.req.query(TOKEN_QUERY_PARAM) !== undefined && fromCookie !== presented;
+
+      await next();
+
+      // **After** `next()`, on purpose. The static handler returns `new Response(Bun.file(...))`,
+      // which *replaces* `c.res` wholesale — a cookie set before the handler runs is thrown away
+      // with the response it was attached to. The page then loads, every subresource arrives with
+      // no credential, and the app renders blank while the daemon looks healthy. Setting it here
+      // mutates the response that is actually going out.
+      if (wantsCookie) {
         setCookie(c, SESSION_COOKIE, presented, {
           httpOnly: true,
           sameSite: "Strict",
@@ -71,8 +97,11 @@ export function createUiApp({ port, token, distDir, controlUrl }: UiAppOptions) 
           // simply never be stored there.
         });
       }
-      await next();
     })
+
+    // Before the catch-all: `.get("*")` would otherwise answer /api with index.html, which is
+    // exactly the failure this mount exists to fix — a 200 of HTML where JSON was expected.
+    .route("/", deps ? createControlApp({ port, deps, token }) : new Hono())
 
     .get("*", async (c) => {
       if (!existsSync(join(root, "index.html"))) {

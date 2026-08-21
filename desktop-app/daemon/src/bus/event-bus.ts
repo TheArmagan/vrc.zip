@@ -20,8 +20,16 @@ export interface BusEvent {
   readonly ts: number;
   /** The user, world, or group this is about, when there is one. */
   readonly subjectId?: string | null;
-  /** Set on `gamelog.*` events — several VRChat clients can run at once. See PLAN.md §1.7. */
-  readonly sessionId?: string | null;
+  /**
+   * The `sessions` row id, set on `gamelog.*` events — several VRChat clients can run at once.
+   *
+   * Deliberately the **store's** id rather than the log watcher's internal string. The watcher
+   * generates its own ids, but `GET /api/sessions` returns row ids, and a consumer given one of
+   * each has no way to join them: it is reduced to correlating on start time, which is a heuristic
+   * that silently mis-attributes two clients started in the same second. One identifier, published
+   * on both surfaces. See PLAN.md §1.7.
+   */
+  readonly sessionId?: number | null;
   readonly location?: string | null;
   readonly payload?: unknown;
 }

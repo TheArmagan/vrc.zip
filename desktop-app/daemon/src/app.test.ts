@@ -99,6 +99,34 @@ describe("daemon end to end", () => {
     expect(state.pid).toBe(process.pid);
   });
 
+  test("the UI port serves the API same-origin", async () => {
+    // Without this the packaged build is inert: the bundle is served from the UI port, the control
+    // API listens on another, and every call is cross-origin — originGuard rejects it and no CORS
+    // headers come back. Only `vite dev` works, because it proxies. PLAN.md §Architecture puts
+    // "UI + session API" on one port for exactly this reason.
+    const running = await boot();
+
+    const response = await fetch(`${running.servers.urls.uiUrl}/api/status`, {
+      headers: {
+        Authorization: `Bearer ${running.sessionToken}`,
+        Origin: running.servers.urls.uiUrl,
+      },
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("application/json");
+  });
+
+  test("the proxy port still refuses to serve a control route", async () => {
+    // The separation PLAN.md §1.8 actually insists on: the byte-faithful mirror must not be able
+    // to answer a control request. Mounting the API on the UI port must not have weakened it.
+    const running = await boot();
+
+    const response = await fetch(`${running.servers.urls.proxyUrl}/api/status`, {
+      headers: { Authorization: `Bearer ${running.sessionToken}` },
+    });
+    expect(response.status).toBe(501);
+  });
+
   test("rejects an unauthenticated request and a rebinding Host", async () => {
     const running = await boot();
     const base = running.servers.urls.controlUrl;

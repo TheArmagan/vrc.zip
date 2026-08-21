@@ -102,3 +102,47 @@ describe("UI server static serving", () => {
     }
   });
 });
+
+describe("UI server session cookie", () => {
+  /**
+   * The launch URL carries `?token=`, but a browser attaches no headers to `<script>` and `<link>`
+   * loads. The cookie exchange is the only thing that makes subresources authenticate, so these
+   * assert the exchange survives the *specific* shape of response the static handler returns.
+   */
+
+  test("issues the cookie on a real file response, not just the placeholder", async () => {
+    // The bug this exists for: the static handler returns `new Response(Bun.file(...))`, which
+    // replaces `c.res` wholesale and discards a cookie set before the handler ran. It stayed
+    // invisible while `ui/dist` was missing, because the placeholder path uses `c.html()` and
+    // keeps its headers — so the failure only appeared once the UI was actually built, and it
+    // appeared as a blank page with a healthy-looking daemon.
+    await writeFile(join(dist, "index.html"), "<!doctype html><title>vrc.zip</title>", "utf8");
+
+    const response = await call(`/?token=${TOKEN}`);
+    expect(response.status).toBe(200);
+
+    const cookie = response.headers.get("set-cookie");
+    expect(cookie).toContain(`${SESSION_COOKIE}=${TOKEN}`);
+    expect(cookie).toContain("HttpOnly");
+    expect(cookie).toContain("SameSite=Strict");
+    // No `secure`: the runtime default is plain http on loopback, where a secure cookie is dropped.
+    expect(cookie?.toLowerCase()).not.toContain("secure");
+  });
+
+  test("an asset authenticates on the cookie alone", async () => {
+    await writeFile(join(dist, "index.html"), "<!doctype html>", "utf8");
+    await writeFile(join(dist, "app.js"), "export default 1;", "utf8");
+
+    const denied = await call("/app.js");
+    expect(denied.status).toBe(401);
+
+    const allowed = await call("/app.js", { cookie: `${SESSION_COOKIE}=${TOKEN}` });
+    expect(allowed.status).toBe(200);
+  });
+
+  test("a wrong cookie is rejected like any other bad token", async () => {
+    await writeFile(join(dist, "index.html"), "<!doctype html>", "utf8");
+    const response = await call("/", { cookie: `${SESSION_COOKIE}=${generateSessionToken()}` });
+    expect(response.status).toBe(401);
+  });
+});

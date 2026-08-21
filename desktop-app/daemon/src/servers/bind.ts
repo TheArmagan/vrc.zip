@@ -153,9 +153,12 @@ export async function bindServers(options: BindServersOptions): Promise<BoundSer
       createUiApp({
         port,
         token,
+        deps,
         controlUrl: control.url,
         ...(uiDistDir === undefined ? {} : { distDir: uiDistDir }),
       }),
+    // The UI port serves /api/stream too, so it needs the same upgrade handler.
+    websocket: controlWebSocketHandler as WebSocketHandler<unknown>,
   });
 
   return {

@@ -1,3 +1,4 @@
+import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -35,6 +36,20 @@ export function stateDir(env: NodeJS.ProcessEnv = process.env): string {
   const xdgState = env.XDG_STATE_HOME;
   if (xdgState) return join(xdgState, "vrc.zip");
   return join(homedir(), ".local", "state", "vrc.zip");
+}
+
+/**
+ * Creates the state directory if it is not there.
+ *
+ * Must run before anything opens a file under it. `bun:sqlite`'s `create: true` creates the
+ * *database*, not the directory holding it, so a genuinely fresh machine gets `SQLITE_CANTOPEN` and
+ * the daemon dies before it can show anyone why. Synchronous because every caller needs it done
+ * before its next line, and it happens exactly once at boot.
+ */
+export function ensureStateDir(env?: NodeJS.ProcessEnv): string {
+  const dir = stateDir(env);
+  mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 /** The encrypted credential store. */

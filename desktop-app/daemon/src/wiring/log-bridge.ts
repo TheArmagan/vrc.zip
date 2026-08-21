@@ -77,8 +77,8 @@ export function createLogSink(store: Store, bus: EventBus): LogSink {
         kind: "session.start",
         accountId: session.accountId,
         ts: session.startedAt,
-        sessionId: session.id,
-        payload: session,
+        sessionId: rowIds.get(session.id) ?? null,
+        payload: { ...session, id: rowIds.get(session.id) ?? null },
       });
     },
 
@@ -96,7 +96,7 @@ export function createLogSink(store: Store, bus: EventBus): LogSink {
         kind: "session.update",
         accountId: patch.accountId ?? null,
         ts: Date.now(),
-        sessionId,
+        sessionId: rowId,
         payload: patch,
       });
     },
@@ -111,7 +111,7 @@ export function createLogSink(store: Store, bus: EventBus): LogSink {
         kind: "session.end",
         accountId: null,
         ts: endedAt,
-        sessionId,
+        sessionId: rowId ?? null,
         payload: { exitKind },
       });
     },
@@ -126,7 +126,10 @@ export function createLogSink(store: Store, bus: EventBus): LogSink {
         kind,
         accountId: event.accountId,
         ts: event.at,
-        sessionId: event.sessionId,
+        // Translated here, the one place that owns the watcher-id -> row-id mapping. A miss means
+        // an event arrived before its session row existed, which is a wiring bug worth seeing as a
+        // null rather than papering over.
+        sessionId: rowIds.get(event.sessionId) ?? null,
         subjectId: subjectOf(event),
         payload: event,
       });

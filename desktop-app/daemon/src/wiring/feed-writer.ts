@@ -64,9 +64,7 @@ export class FeedWriter {
         batch.map((event) => ({
           account_id: event.accountId,
           ts: event.ts,
-          // The bus carries the watcher's string session id; the column is the store's integer row
-          // id. Joining the two belongs to the log bridge, which owns that mapping.
-          session_id: null,
+          session_id: event.sessionId ?? null,
           kind: event.kind,
           subject_id: event.subjectId ?? null,
           location: event.location ?? null,

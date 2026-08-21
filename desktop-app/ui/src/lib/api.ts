@@ -210,6 +210,30 @@ export interface Friend {
   readonly lastSeenAt: number | null;
 }
 
+/**
+ * One row of a VRChat notification inbox, as the daemon stores it.
+ *
+ * Rows are never deleted — VRChat's `clear-notification` frame carries no content at all, so
+ * deleting on it would mean guessing which rows it meant. `seen` is therefore the only thing that
+ * changes, and the screen filters on it rather than waiting for rows to disappear.
+ */
+export interface NotificationItem {
+  readonly id: string;
+  readonly accountId: string;
+  readonly ts: number;
+  /**
+   * VRChat's own type string: `friendRequest`, `invite`, `requestInvite`, `message`, `votetokick`,
+   * group announcements, and whatever they add next. An open set — unknown types render
+   * generically rather than being dropped.
+   */
+  readonly type: string;
+  readonly senderUserId: string | null;
+  readonly senderDisplayName: string | null;
+  readonly message: string | null;
+  readonly seen: boolean;
+  readonly data: unknown;
+}
+
 export interface SettingsPorts {
   readonly ui: number;
   readonly proxy: number;
@@ -475,6 +499,17 @@ export const api = {
       query: { accountId },
       ...withSignal(signal),
     }),
+
+  notifications: {
+    list: (accountId?: string, signal?: AbortSignal): Promise<NotificationItem[]> =>
+      request<NotificationItem[]>("/notifications", {
+        query: { accountId },
+        ...withSignal(signal),
+      }),
+
+    markSeen: (id: string): Promise<void> =>
+      request<void>(`/notifications/${encodeURIComponent(id)}/seen`, { method: "POST" }),
+  },
 
   settings: {
     get: (signal?: AbortSignal): Promise<Settings> =>

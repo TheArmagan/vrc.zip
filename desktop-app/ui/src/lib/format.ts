@@ -1,9 +1,10 @@
 /**
  * Display helpers. Every timestamp crossing the wire is an integer unix millisecond value; the
- * conversion to something a person reads happens here and nowhere else.
+ * conversion to something a person reads happens here and nowhere else. So does the vocabulary —
+ * one place decides that `friend.location` reads "moved instance" and `otp` reads "recovery code".
  */
 
-import type { EventKind, FriendStatus, TrustLevel } from "./api.ts";
+import type { AccountConnection, EventKind, FriendStatus, TwoFactorMethod } from "./api.ts";
 
 const relative = new Intl.RelativeTimeFormat(undefined, { numeric: "auto", style: "narrow" });
 const clock = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" });
@@ -55,12 +56,12 @@ export function dateHeading(ts: number, now: number = Date.now()): string {
 
 /** "2h 14m", "48m", "31s". Used for session uptime, which ticks. */
 export function duration(ms: number): string {
-  if (ms < MINUTE) return `${Math.max(0, Math.floor(ms / 1000))}s`;
+  if (ms < MINUTE) return `${String(Math.max(0, Math.floor(ms / 1000)))}s`;
   const totalMinutes = Math.floor(ms / MINUTE);
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
-  if (hours === 0) return `${minutes}m`;
-  return `${hours}h ${minutes}m`;
+  if (hours === 0) return `${String(minutes)}m`;
+  return `${String(hours)}h ${String(minutes)}m`;
 }
 
 // ---------------------------------------------------------------------------
@@ -94,54 +95,18 @@ const ACCESS_TAGS: ReadonlyArray<readonly [string, InstanceAccess]> = [
   ["~group", "group"],
 ];
 
-/**
- * VRChat encodes access in tags appended to the instance id, and "invite+" is the `canRequestInvite`
- * flag on top of `~private` rather than a tag of its own — which is why this is a parser and not a
- * lookup table.
- */
-export function parseLocation(location: string | null): ParsedLocation {
-  if (location === null || location === "") {
-    return {
-      worldId: null,
-      instanceId: null,
-      access: "unknown",
-      region: null,
-      opaque: true,
-      label: "Unknown",
-    };
-  }
-  if (location === "offline") {
-    return { ...opaque("Offline"), label: "Offline" };
-  }
-  if (location === "private") {
-    return { ...opaque("Private"), label: "In a private world" };
-  }
-  if (location === "traveling") {
-    return { ...opaque("Traveling"), label: "Between worlds" };
-  }
+const ACCESS_LABELS: Record<InstanceAccess, string> = {
+  public: "Public",
+  "friends+": "Friends+",
+  friends: "Friends",
+  "invite+": "Invite+",
+  invite: "Invite",
+  group: "Group",
+  unknown: "Unknown",
+};
 
-  const [worldId = null, rest = ""] = location.split(":", 2);
-  const instanceId = rest === "" ? null : (rest.split("~")[0] ?? null);
-
-  let access: InstanceAccess = "public";
-  for (const [tag, kind] of ACCESS_TAGS) {
-    if (rest.includes(tag)) {
-      access = kind;
-      break;
-    }
-  }
-  if (access === "invite" && rest.includes("~canRequestInvite")) access = "invite+";
-
-  const regionMatch = /~region\(([^)]+)\)/.exec(rest);
-
-  return {
-    worldId,
-    instanceId,
-    access,
-    region: regionMatch?.[1] ?? null,
-    opaque: false,
-    label: instanceId === null ? "Instance" : `#${instanceId}`,
-  };
+export function accessLabel(access: InstanceAccess): string {
+  return ACCESS_LABELS[access];
 }
 
 function opaque(label: string): ParsedLocation {
@@ -155,18 +120,63 @@ function opaque(label: string): ParsedLocation {
   };
 }
 
+/**
+ * VRChat encodes access in tags appended to the instance id, and "invite+" is the
+ * `canRequestInvite` flag on top of `~private` rather than a tag of its own — which is why this is
+ * a parser and not a lookup table.
+ */
+export function parseLocation(location: string | null): ParsedLocation {
+  // VRChat spells "nowhere" six different ways, and `/api/friends` passes the string through raw:
+  // "", "offline", "private", "traveling", and "traveling:traveling" all reach here.
+  if (location === null || location === "") return opaque("Unknown");
+  if (location === "offline") return opaque("Offline");
+  if (location === "private") return opaque("In a private world");
+  if (location === "traveling" || location.startsWith("traveling:")) {
+    return opaque("Between worlds");
+  }
+
+  const [worldId = null, rest = ""] = location.split(":", 2);
+  const instanceId = rest === "" ? null : (rest.split("~")[0] ?? null);
+
+  let access: InstanceAccess = "public";
+  for (const [tag, kind] of ACCESS_TAGS) {
+    if (rest.includes(tag)) {
+      access = kind;
+      break;
+    }
+  }
+  if (access === "invite" && rest.includes("canRequestInvite")) access = "invite+";
+
+  const regionMatch = /~region\(([^)]+)\)/.exec(rest);
+
+  return {
+    worldId,
+    instanceId,
+    access,
+    region: regionMatch?.[1] ?? null,
+    opaque: false,
+    label: instanceId === null ? "Instance" : `#${instanceId}`,
+  };
+}
+
 /** The `vrchat://` deep link that launches the game into an instance, or null if there is none. */
 export function launchLink(location: string | null): string | null {
   const parsed = parseLocation(location);
   if (parsed.opaque || location === null) return null;
-  return `vrchat://launch?ref=vrc.zip&id=${encodeURIComponent(location)}`;
+  return `vrchat://launch?ref=vrchat.com&id=${encodeURIComponent(location)}`;
+}
+
+/** Worlds are only ever identified by id until a name arrives; `wrld_1234abcd…` -> `wrld_1234ab`. */
+export function shortId(id: string | null, keep = 10): string {
+  if (id === null || id === "") return "unknown";
+  return id.length <= keep + 3 ? id : `${id.slice(0, keep)}…`;
 }
 
 // ---------------------------------------------------------------------------
 // Vocabulary
 // ---------------------------------------------------------------------------
 
-const STATUS_LABELS: Record<FriendStatus, string> = {
+const STATUS_LABELS: Readonly<Record<string, string>> = {
   active: "Online",
   "join me": "Join me",
   "ask me": "Ask me",
@@ -178,78 +188,199 @@ export function statusLabel(status: FriendStatus): string {
   return STATUS_LABELS[status] ?? "Unknown";
 }
 
-/** Maps a presence status to its theme token suffix (see `--status-*` in app.css). */
+/** Presence status -> the theme token suffix declared in `app.css`. */
 export function statusToken(status: FriendStatus): string {
   switch (status) {
     case "active":
-      return "status-online";
+      return "online";
     case "join me":
-      return "status-join-me";
+      return "join-me";
     case "ask me":
-      return "status-ask-me";
+      return "ask-me";
     case "busy":
-      return "status-busy";
+      return "busy";
     default:
-      return "status-offline";
+      return "offline";
   }
 }
 
-const TRUST_LABELS: Record<TrustLevel, string> = {
-  visitor: "Visitor",
-  new: "New User",
-  user: "User",
-  known: "Known User",
-  trusted: "Trusted User",
-  veteran: "Veteran",
-  troll: "Nuisance",
-  "vrchat-team": "VRChat Team",
+const CONNECTION_LABELS: Record<AccountConnection, string> = {
+  connected: "Connected",
+  connecting: "Connecting",
+  disconnected: "Signed out",
+  "needs-2fa": "Needs 2FA",
 };
 
-export function trustLabel(level: TrustLevel): string {
-  return TRUST_LABELS[level] ?? "Unknown";
+export function connectionLabel(connection: AccountConnection): string {
+  return CONNECTION_LABELS[connection];
 }
 
-const EVENT_LABELS: Readonly<Record<string, string>> = {
-  "friend-online": "Friend came online",
-  "friend-offline": "Friend went offline",
-  "friend-location": "Friend changed world",
-  "friend-add": "Friend added",
-  "friend-delete": "Friend removed",
-  "friend-request": "Friend request",
-  notification: "Notification",
-  invite: "Invite",
-  "invite-request": "Invite request",
-  "player-join": "Player joined",
-  "player-leave": "Player left",
-  "world-change": "World changed",
-  "session-start": "Client started",
-  "session-end": "Client closed",
+const PLATFORM_LABELS: Readonly<Record<string, string>> = {
+  standalonewindows: "PC",
+  android: "Quest",
+  ios: "iOS",
+  web: "Web",
 };
 
-/** Falls back to title-casing the raw kind, so a kind this build has never seen still reads. */
+export function platformLabel(platform: string | null): string | null {
+  if (platform === null || platform === "") return null;
+  return PLATFORM_LABELS[platform.toLowerCase()] ?? platform;
+}
+
+/**
+ * The log's VR-mode string is not a boolean and not a fixed set — `Standalone`, `Oculus`,
+ * `OpenVR`, `None`, `Desktop`. Anything that is not explicitly "no headset" counts as VR.
+ */
+export function isVrMode(vrMode: string | null): boolean {
+  if (vrMode === null || vrMode === "") return false;
+  const normalized = vrMode.toLowerCase();
+  return normalized !== "none" && normalized !== "desktop" && normalized !== "false";
+}
+
+export function vrModeLabel(vrMode: string | null): string {
+  if (vrMode === null || vrMode === "") return "Unknown";
+  return isVrMode(vrMode) ? "VR" : "Desktop";
+}
+
+const TWO_FACTOR_LABELS: Record<TwoFactorMethod, string> = {
+  totp: "Authenticator app",
+  emailOtp: "Emailed code",
+  otp: "Recovery code",
+};
+
+export function twoFactorLabel(method: TwoFactorMethod): string {
+  return TWO_FACTOR_LABELS[method];
+}
+
+/**
+ * Bus kinds, in the app's own words. The map is over the dotted taxonomy the daemon actually
+ * emits (`daemon/src/wiring/pipeline-bridge.ts` and `log-bridge.ts`), not VRChat's wire names.
+ */
+const EVENT_LABELS: Readonly<Record<string, string>> = {
+  "friend.online": "Friend came online",
+  "friend.offline": "Friend went offline",
+  "friend.active": "Friend became active",
+  "friend.location": "Friend changed instance",
+  "friend.updated": "Friend profile changed",
+  "friend.added": "Friend added",
+  "friend.removed": "Friend removed",
+  "user.updated": "Your profile changed",
+  "user.location": "You changed instance",
+  "notification.received": "Notification",
+  "notification.received_v2": "Notification",
+  "notification.updated": "Notification updated",
+  "notification.deleted": "Notification deleted",
+  "notification.responded": "Notification answered",
+  "notification.seen": "Notification seen",
+  "notification.hidden": "Notification hidden",
+  "notification.cleared": "Notifications cleared",
+  "gamelog.player_join": "Player joined",
+  "gamelog.player_leave": "Player left",
+  "gamelog.world_enter": "Entered world",
+  "gamelog.location_join": "Joined instance",
+  "gamelog.portal_spawn": "Portal dropped",
+  "gamelog.destination_set": "Destination set",
+  "gamelog.left_room": "Left instance",
+  "gamelog.join_failed": "Join failed",
+  "gamelog.screenshot": "Screenshot taken",
+  "gamelog.app_quit": "Client quit",
+  "gamelog.vr_mode": "VR mode reported",
+  "gamelog.authenticated": "Client signed in",
+  "session.start": "Game client started",
+  "session.update": "Game client updated",
+  "session.end": "Game client closed",
+  "account.state": "Account state changed",
+  "pipeline.state": "Pipeline state changed",
+  "economy.update": "Subscription updated",
+  "instance.queue_joined": "Joined instance queue",
+  "instance.queue_ready": "Instance queue ready",
+  "group.joined": "Joined group",
+  "group.left": "Left group",
+  "group.member_updated": "Group member updated",
+  "group.role_updated": "Group role updated",
+  "content.refresh": "Content refreshed",
+  "content.image_updated": "Image updated",
+};
+
+/** Falls back to humanising the raw kind, so a kind this build has never seen still reads. */
 export function eventLabel(kind: EventKind): string {
   const known = EVENT_LABELS[kind];
   if (known !== undefined) return known;
-  return kind
-    .split(/[-_.]/)
+  const words = kind
+    .split(/[.\-_]/)
     .filter((part) => part !== "")
-    .map((part, index) => (index === 0 ? part.charAt(0).toUpperCase() + part.slice(1) : part))
     .join(" ");
+  return words === "" ? kind : words.charAt(0).toUpperCase() + words.slice(1);
 }
+
+const FAMILY_LABELS: Readonly<Record<string, string>> = {
+  friend: "Friends",
+  notification: "Notifications",
+  gamelog: "Game log",
+  session: "Sessions",
+  user: "You",
+  group: "Groups",
+  instance: "Instances",
+  account: "Accounts",
+  pipeline: "Pipeline",
+  economy: "Economy",
+  content: "Content",
+  other: "Other",
+};
+
+export function familyLabel(family: string): string {
+  return FAMILY_LABELS[family] ?? family;
+}
+
+// ---------------------------------------------------------------------------
+// Payload probing
+// ---------------------------------------------------------------------------
+
+/**
+ * Bus payloads are untyped by design — the daemon forwards VRChat's own shapes. These two helpers
+ * are the only place the UI guesses at them, and both return null rather than inventing text.
+ */
+function asRecord(payload: unknown): Readonly<Record<string, unknown>> | null {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return null;
+  return payload as Record<string, unknown>;
+}
+
+function firstString(
+  record: Readonly<Record<string, unknown>>,
+  keys: readonly string[],
+): string | null {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value !== "") return value;
+  }
+  return null;
+}
+
+const NAME_KEYS = [
+  "displayName",
+  "userDisplayName",
+  "senderUsername",
+  "username",
+  "playerName",
+  "name",
+] as const;
 
 /** Best-effort human name for an event's subject, pulled out of the untyped payload. */
-export function subjectName(payload: Readonly<Record<string, unknown>>): string | null {
-  for (const key of ["displayName", "userDisplayName", "senderUsername", "username", "name"]) {
-    const value = payload[key];
-    if (typeof value === "string" && value !== "") return value;
-  }
-  return null;
+export function subjectName(payload: unknown): string | null {
+  const record = asRecord(payload);
+  if (record === null) return null;
+  const direct = firstString(record, NAME_KEYS);
+  if (direct !== null) return direct;
+  const nested = asRecord(record.user) ?? asRecord(record.data);
+  return nested === null ? null : firstString(nested, NAME_KEYS);
 }
 
-export function payloadText(payload: Readonly<Record<string, unknown>>): string | null {
-  for (const key of ["message", "details", "text", "worldName"]) {
-    const value = payload[key];
-    if (typeof value === "string" && value !== "") return value;
-  }
-  return null;
+/** A short line of detail for the event, or null when the payload carries nothing readable. */
+export function payloadText(payload: unknown): string | null {
+  const record = asRecord(payload);
+  if (record === null) return typeof payload === "string" && payload !== "" ? payload : null;
+  const direct = firstString(record, ["message", "details", "text", "worldName", "title"]);
+  if (direct !== null) return direct;
+  const nested = asRecord(record.data);
+  return nested === null ? null : firstString(nested, ["message", "details", "text", "worldName"]);
 }

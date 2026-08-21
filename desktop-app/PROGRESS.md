@@ -6,7 +6,7 @@ was decided along the way.
 
 **Last updated:** 2026-08-21
 **Current phase:** Phase 1 — Foundation
-**Status:** 1.0-1.8 done; the daemon runs. 1.9 (UI) in progress.
+**Status:** Phase 1 built end to end — daemon + UI both run. 1.10 verification is partly done.
 
 ---
 
@@ -86,7 +86,7 @@ behind each line.
 - [x] **1.8 Servers** (`daemon/src/servers/`, `security/`) — three ports, Host + Origin validation,
       session token, `state.json`. **Default URL is `http://127.0.0.1:PORT`**; `local.vrc.zip` is
       opt-in with a resolve check and silent fallback.
-- [ ] **1.9 UI** (`ui/`) — Svelte 5 + shadcn-svelte. Account switcher, login (all three 2FA paths),
+- [x] **1.9 UI** (`ui/`) — Svelte 5 + shadcn-svelte. Account switcher, login (all three 2FA paths),
       friend list, feed, game log, notifications, settings. **Command palette + command registry ship
       in Phase 1** even though plugins don't — retrofitting a registry is worse than building it empty.
 - [ ] **1.10 Verification** — see `PLAN.md` §1.10. Recorded-fixture server for CI; two real accounts
@@ -261,6 +261,18 @@ Found by running code. Each of these contradicted an assumption, and most were s
 - The **spec facts in PLAN.md all verified**: 232 paths, 297 operations, 19 tags, no PATCH, no
   `apiKey` query param. A test asserts them so a spec bump cannot quietly change them.
 
+- **Four bugs survived 340+ passing tests and were only found by opening a browser.** Worth
+  internalising as a class: the daemon crashed on a fresh machine (`bun:sqlite`'s `create: true`
+  creates the *database*, not its directory); the packaged UI could not reach the API at all
+  (same-origin, not CORS, is the fix — and PLAN.md's architecture diagram had said so all along);
+  the session cookie was discarded because the static handler returns `new Response(...)`, which
+  replaces `c.res` and throws away headers set before it; and `new URL(...).pathname` yields
+  `/C:/Users/...` on Windows. Every one of them was silent — the daemon looked healthy in each case.
+- **A cookie set before `next()` does not survive a handler that returns a new `Response`.** Set it
+  after. This is a general Hono footgun, not a UI-server quirk.
+- **Test setup can hide a first-run bug.** The smoke tests all `mkdir`'d the state directory before
+  starting, so the crash-on-fresh-install never appeared until someone ran it for real.
+
 Carried in from research, now confirmed against the fixture server rather than just believed:
 
 Carried in from research, not yet verified against running code:
@@ -334,9 +346,12 @@ Unresolved; flag to the user rather than guessing.
   the control-API wire types (`ControlAccount`, `FeedEvent`, `GameSession`, `FriendPresence`,
   `StreamEvent`), the retention config/plan types the settings UI renders verbatim, and the
   token header/query-param constants plus default ports.
-- **`listFriends` returns stored rows with placeholder presence.** Nothing populates `friend_log`
-  yet — that needs the friends poller and the pipeline presence handlers writing through. The route
-  and the shape are real; the data is not.
+- **No retention control on the API.** The retention job runs and is configurable in the database,
+  but nothing exposes it, so the Settings screen explains it rather than offering a control.
+- **No endpoints for invite / invite-request / boop.** Those three are registered in the command
+  palette as stubs that name the missing route when run.
+- **`favicon.ico` 404s** on every page load. Cosmetic, but it is a console error on first
+  impression.
 - **`rateLimit.remaining` and `queued` are approximations.** The limiter does not expose live token
   counts. Either expose them or have the UI stop drawing a gauge that implies precision.
 - **No CI workflow.** It belongs at the repo root in `.github/`, which is shared ground with

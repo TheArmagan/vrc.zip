@@ -29,7 +29,7 @@
 
 import { api, type GroupDetail, type UserGroup } from "../api.ts";
 import { shortId } from "../format.ts";
-import { EntityModalState } from "./entity-modal.svelte.ts";
+import { EntityModalState, type ResumePoint } from "./entity-modal.svelte.ts";
 
 export interface OpenGroupOptions {
   /**
@@ -79,9 +79,10 @@ class GroupModalState extends EntityModalState {
   /** Opens the dialog on `groupId`, replacing whatever it was showing. */
   openGroup(groupId: string, options: OpenGroupOptions = {}): void {
     const same = this.groupId === groupId && this.phase === "ready";
+    // First, before the assignments below — see `EntityModalState.takeScreen`.
+    this.takeScreen(!same);
     this.groupId = groupId;
     this.accountId = options.accountId ?? null;
-    this.open = true;
     // Reopening the group already on screen keeps it there. Anything else starts clean, so the
     // previous group's description never sits under the new group's name.
     if (same) return;
@@ -91,6 +92,17 @@ class GroupModalState extends EntityModalState {
 
   retry(): void {
     if (this.groupId !== null) void this.#load(this.groupId);
+  }
+
+  /**
+   * The summary rides back as the hint, so a step back onto a group whose fetch has to run again
+   * still draws its name, icon and banner immediately rather than a spinner over a short id.
+   */
+  protected resumePoint(): ResumePoint | null {
+    const groupId = this.groupId;
+    if (groupId === null) return null;
+    const { title, summary: hint, accountId } = this;
+    return { label: title, restore: () => this.openGroup(groupId, { hint, accountId }) };
   }
 
   protected resetPayload(): void {

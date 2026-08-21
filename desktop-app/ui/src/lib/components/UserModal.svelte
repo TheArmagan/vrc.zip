@@ -57,6 +57,7 @@ import {
   trustClass,
   trustLabel,
 } from "$lib/format.ts";
+import { modalBack } from "$lib/state/entity-modal.svelte.ts";
 import { groupModal } from "$lib/state/group-modal.svelte.ts";
 import {
   USER_TAB_LABELS,
@@ -155,6 +156,7 @@ const TAB_FAILURE_BODIES: Record<string, string> = {
 <EntityModal
   open={userModal.open}
   onClose={() => userModal.close()}
+  backLabel={modalBack()?.label ?? null}
   bannerUrl={userModal.bannerUrl}
   title={userModal.title}
   {tabs}

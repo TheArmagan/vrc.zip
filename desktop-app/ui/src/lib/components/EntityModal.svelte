@@ -26,6 +26,19 @@
   image genuinely wants more height than a user's banner and a world's name genuinely wants to wrap
   where a display name should clip. They are for those differences and not for new ones: anything
   that would look like a fourth style of dialog belongs in this file, applied to all three.
+
+  ## The back control
+
+  The three modals share one screen and a back stack — `entity-modal.svelte.ts` explains why — so
+  closing this dialog often means *stepping back* to whatever it was opened from. That is a
+  perfectly good behaviour and a terrible surprise: a close button that reopens something is
+  indistinguishable from a bug unless the reader was told where it goes.
+
+  So when there is a level below, the banner grows a control that names it. It calls `onClose`,
+  because back and close are the same action here and giving them two handlers would be inventing a
+  difference the model does not have. It sits opposite the dialog's own X for the same reason a
+  browser puts Back at the far left: the two controls are read together, and the labelled one is
+  what teaches the reader what the unlabelled one does.
 -->
 <script module lang="ts">
 /**
@@ -44,6 +57,7 @@ export interface ModalTab {
 
 <script lang="ts">
 import type { Snippet } from "svelte";
+import ChevronLeftIcon from "@lucide/svelte/icons/chevron-left";
 import HeroBanner from "$lib/components/HeroBanner.svelte";
 import { Badge } from "$lib/components/ui/badge/index.js";
 import * as Dialog from "$lib/components/ui/dialog/index.js";
@@ -53,6 +67,7 @@ import { cn } from "$lib/utils.js";
 let {
   open,
   onClose,
+  backLabel = null,
   bannerUrl = null,
   bannerClass = "",
   title,
@@ -69,8 +84,15 @@ let {
   children,
 }: {
   open: boolean;
-  /** Called for every close gesture — the X, Escape, and a click outside. */
+  /** Called for every close gesture — the X, Escape, a click outside, and the back control. */
   onClose: () => void;
+  /**
+   * What closing this dialog would return to, or null when it would dismiss.
+   *
+   * Present means a back control is drawn naming it. It is a label rather than a handler because
+   * there is only one thing it could do — see the note above.
+   */
+  backLabel?: string | null;
   bannerUrl?: string | null;
   /** Height only, in practice. The band is drawn either way; see `HeroBanner`. */
   bannerClass?: string;
@@ -109,6 +131,25 @@ const BODY = "min-h-0 overflow-y-auto px-6 pt-4 pb-6";
       one height for every record of a given kind.
     -->
     <HeroBanner url={bannerUrl} class={bannerClass} />
+
+    {#if backLabel !== null && backLabel !== ""}
+      <!--
+        Over the banner rather than in the header, which rides up into it: the header's row is
+        already the avatar, the title and the actions, and a fourth thing in it would push the
+        title off its baseline on exactly the records that have the longest names.
+
+        `max-w-[55%]` keeps it clear of the X at any name length, and the label truncates rather
+        than wrapping — a two-line back button would overlap the avatar below it.
+      -->
+      <button
+        type="button"
+        onclick={onClose}
+        class="absolute top-3.5 left-4 z-20 inline-flex max-w-[55%] items-center gap-1 rounded-full bg-popover/85 px-2 py-1 text-xs text-popover-foreground ring-1 ring-foreground/10 backdrop-blur transition-colors hover:bg-popover focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
+      >
+        <ChevronLeftIcon class="size-3.5 shrink-0" aria-hidden="true" />
+        <span class="truncate">{backLabel}</span>
+      </button>
+    {/if}
 
     <!--
       `relative z-10` is load-bearing, not decoration. The header deliberately rides up into the

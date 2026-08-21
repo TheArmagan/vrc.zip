@@ -30,6 +30,7 @@ import { Button } from "$lib/components/ui/button/index.js";
 import { Separator } from "$lib/components/ui/separator/index.js";
 import { Skeleton } from "$lib/components/ui/skeleton/index.js";
 import { accessLabel, calendarDay } from "$lib/format.ts";
+import { modalBack } from "$lib/state/entity-modal.svelte.ts";
 import { worldModal } from "$lib/state/world-modal.svelte.ts";
 
 const world = $derived(worldModal.world);
@@ -102,6 +103,7 @@ const INSTANCE_BODIES: Record<string, string> = {
 <EntityModal
   open={worldModal.open}
   onClose={() => worldModal.close()}
+  backLabel={modalBack()?.label ?? null}
   bannerUrl={heroUrl}
   bannerClass="h-40"
   title={worldModal.title}

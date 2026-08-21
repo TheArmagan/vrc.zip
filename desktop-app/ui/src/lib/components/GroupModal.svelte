@@ -36,6 +36,7 @@ import { Badge } from "$lib/components/ui/badge/index.js";
 import { Separator } from "$lib/components/ui/separator/index.js";
 import { Skeleton } from "$lib/components/ui/skeleton/index.js";
 import { calendarDay, groupLink, groupTag, initials } from "$lib/format.ts";
+import { modalBack } from "$lib/state/entity-modal.svelte.ts";
 import { groupModal } from "$lib/state/group-modal.svelte.ts";
 
 const summary = $derived(groupModal.summary);
@@ -101,6 +102,7 @@ const FAILURE_BODIES: Record<string, string> = {
 <EntityModal
   open={groupModal.open}
   onClose={() => groupModal.close()}
+  backLabel={modalBack()?.label ?? null}
   bannerUrl={groupModal.bannerUrl}
   bannerClass="h-32"
   title={groupModal.title}

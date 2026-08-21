@@ -35,6 +35,7 @@ import {
   EntityModalState,
   type LoadFailure,
   type LoadPhase,
+  type ResumePoint,
 } from "./entity-modal.svelte.ts";
 
 /** How many history rows a page holds. The list is dense, so this is roughly three screens. */
@@ -256,6 +257,9 @@ class UserModalState extends EntityModalState {
   /** Opens the dialog on `userId`, replacing whatever it was showing. */
   openUser(userId: string, options: OpenUserOptions = {}): void {
     const sameUser = this.userId === userId && this.phase === "ready";
+    // Before the first assignment below: the resume point is built out of the subject this
+    // singleton is holding right now, and clicking a mutual friend re-targets this very modal.
+    this.takeScreen(!sameUser);
     this.userId = userId;
     this.hintName = options.name ?? this.hintName;
     /*
@@ -263,7 +267,6 @@ class UserModalState extends EntityModalState {
      * the full profile to the account it belongs to and a trimmed one to everybody else.
      */
     this.accountId = options.accountId ?? this.#ownAccountId(userId) ?? null;
-    this.open = true;
     // Reopening the same user whose profile is already loaded keeps it on screen; anything else
     // starts clean, so the previous person's bio never flashes under the new person's name.
     if (!sameUser) {
@@ -275,6 +278,26 @@ class UserModalState extends EntityModalState {
   /** Re-reads the profile and the first page of history. The error state's retry button. */
   retry(): void {
     if (this.userId !== null) void this.#load(this.userId);
+  }
+
+  /**
+   * The tab comes back too. Someone three levels deep in Mutual friends who steps back onto
+   * Overview has been moved, not returned — the tab is part of where they were.
+   */
+  protected resumePoint(): ResumePoint | null {
+    const userId = this.userId;
+    if (userId === null) return null;
+    const { title, tab, accountId } = this;
+    // `OpenUserOptions.name` is optional rather than nullable, and this file is compiled with
+    // `exactOptionalPropertyTypes`: "no hint" is an absent key, not a null one.
+    const name = this.hintName ?? undefined;
+    return {
+      label: title,
+      restore: () => {
+        this.openUser(userId, { name, accountId });
+        this.tab = tab;
+      },
+    };
   }
 
   #ownAccountId(userId: string): string | undefined {

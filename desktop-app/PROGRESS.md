@@ -301,6 +301,18 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     the page has to read as a different plane. The tooltip is the app's *rich* hover surface, not an
     inverted chip: `WorldLink` and `UserName` both put an image, a name and an id inside one, so
     shadcn's default `bg-primary` (near-white in this dark theme) was never going to fit.
+39. **The three entity modals share one screen and a back stack.** They are separate singletons but
+    they were never separate *places*: opening a group from a profile left the profile mounted
+    underneath, so two dialogs stacked, two scrims doubled into near-black, and the X closed the top
+    one onto a subject the reader had already navigated past. Opening anything now sets aside what
+    was showing and pushes a way back to it; every close gesture pops one level, and closing the
+    last one dismisses. `close()` **is** the back button — one control, because there is one thing
+    it can mean — and the banner names the level below so that a close which reopens something
+    reads as navigation rather than as a bug. Coming back is usually free: a modal that was
+    suspended rather than re-targeted still holds its subject, so its own `open…` guard keeps what
+    is loaded. Only a chain through the same modal — profile to profile through mutual friends —
+    re-reads, because a singleton cannot hold two subjects. The stack is capped at 16 and drops the
+    oldest, since nothing else bounds a click-driven chain.
 
 29. **Notifications are backfilled over REST, not sourced from the socket alone.** The pipeline is
     the reason the screen is live; it is not, and cannot be, the reason it is *correct*. Both
@@ -372,6 +384,12 @@ Empirical notes. Add to this as you hit things — especially where the plan tur
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
 
+- **Two singleton dialogs are two dialogs.** Each of the three entity modals was independently
+  correct — one instance, mounted once, re-targeted by callers — and the bug was in the space
+  between them: nothing said only one may be on screen. Opening a group from a profile mounted a
+  second `Dialog.Root` over the first, and the scrims *composited*, which is how it presented: not
+  "two dialogs" but "the background went black". A set of singletons is not the same thing as a
+  singleton over the set.
 - **A design token used for both a background and its text is invisible, and neither theme reveals
   it.** The vendored tooltip shipped as `bg-foreground text-foreground` — the same token twice. In
   dark that is near-white on near-white; in light it is near-black on near-black. It only became

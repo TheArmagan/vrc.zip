@@ -19,6 +19,25 @@
  *    record's life. Both get sentences, not apologies — see `FailureNote`.
  *
  * Each modal keeps its own subject-specific state and its own words. This holds the machinery.
+ *
+ * ## The three are one screen, and it has history
+ *
+ * They are separate singletons but they are not separate *places*. Opening a group from inside a
+ * profile used to leave the profile mounted and open underneath it, so two dialogs stacked, two
+ * scrims doubled up into near-black, and the X closed the top one onto a profile the reader had
+ * already navigated away from. Three peers with no relationship between them is the wrong model
+ * for what is plainly one drill-down.
+ *
+ * So the three share one screen and a back stack. Opening anything sets aside whatever was showing
+ * and pushes a way back to it; every close gesture — the X, Escape, a click outside — pops one
+ * level and puts that subject back, and closing the last level dismisses. This is browser history,
+ * not window management, which is why `close()` is also the back button: there is one control
+ * because there is one thing it can mean.
+ *
+ * Coming back is usually free. A modal that was suspended rather than re-targeted still holds its
+ * subject, so its own `open…` guard recognises it and keeps what is already loaded. Only a chain
+ * through the *same* modal — profile to profile through mutual friends — has to re-read, because
+ * a singleton cannot hold two subjects at once.
  */
 
 import { describeError, isAbort, isNoAccountOnline, isNotFound, isOffline } from "../api.ts";
@@ -65,11 +84,60 @@ export function dedupeById<T extends { readonly id: string }>(rows: readonly T[]
 }
 
 /**
+ * A subject set aside, and how to come back to it.
+ *
+ * `restore` is a closure over the subject as it was, built before the modal is re-targeted —
+ * capturing the values rather than reading them back later, because by then the singleton is
+ * holding somebody else.
+ */
+export interface ResumePoint {
+  /** What to call the destination on the back control. The subject's own title. */
+  readonly label: string;
+  readonly restore: () => void;
+}
+
+/**
+ * The back stack, newest last.
+ *
+ * `$state` because the header reads the top of it to label its back control — see `modalBack`.
+ */
+const suspended = $state<ResumePoint[]>([]);
+
+/**
+ * Which modal owns the screen, or null when none does.
+ *
+ * Deliberately not `$state`: nothing renders it. It exists so that opening any modal can set aside
+ * whichever of the three was showing without the three needing to know about each other.
+ */
+let active: EntityModalState | null = null;
+
+/**
+ * How deep the stack may go.
+ *
+ * A drill-down of any honest depth is far below this; the cap is here because the chain is driven
+ * by clicks and nothing else bounds it — a profile names a group whose owner is a profile — and an
+ * unbounded array of closures over abandoned subjects is a leak with a long fuse. Overflow drops
+ * the *oldest* entry, so the levels nearest the reader are the ones that survive.
+ */
+const MAX_DEPTH = 16;
+
+/**
+ * Where a close gesture would land, or null when it would dismiss.
+ *
+ * Reactive: call it inside a `$derived`. The header uses it to name the back control, which is what
+ * makes the stack legible — a close that reopens something is a bug unless the reader was told
+ * where it goes.
+ */
+export function modalBack(): ResumePoint | null {
+  return suspended.at(-1) ?? null;
+}
+
+/**
  * The base every modal's state class extends.
  *
  * It owns the dialog's open flag, the account the subject was seen through, the primary load's
- * phase, and the abort/generation pair described at the top of this file. Subclasses own their
- * subject, their payload, and their words.
+ * phase, the abort/generation pair described at the top of this file, and this modal's place in
+ * the shared back stack. Subclasses own their subject, their payload, and their words.
  */
 export abstract class EntityModalState {
   open = $state(false);
@@ -145,13 +213,84 @@ export abstract class EntityModalState {
     return true;
   }
 
+  /**
+   * Hands the screen to this modal, setting aside whatever was on it.
+   *
+   * **Call it first, before overwriting the subject.** The resume point is built out of what the
+   * outgoing modal is holding *now*, and the outgoing modal is frequently this one — a profile
+   * opening another profile — so a single assignment ahead of this call is a back button that
+   * returns to where the reader already is.
+   *
+   * `changing` is false when the caller is re-opening the subject already on screen, which is not
+   * navigation and must not push anything: `openUser(sameUser)` from three different rows would
+   * otherwise build three levels of stack that all lead to the current page.
+   */
+  protected takeScreen(changing: boolean): void {
+    if (changing && active !== null) {
+      const point = active.suspend();
+      if (point !== null) {
+        suspended.push(point);
+        if (suspended.length > MAX_DEPTH) suspended.shift();
+      }
+    }
+    active = this;
+    this.open = true;
+  }
+
+  /**
+   * Takes this modal off the screen without dismissing it, and says how to come back.
+   *
+   * The in-flight load is aborted: nothing about it is visible any more, and if the reader does
+   * come back, `restore` re-enters through the ordinary `open…` path. When the subject was never
+   * re-targeted that path recognises it and keeps what is already loaded, so a step back is
+   * usually free — see the note at the top of this file.
+   *
+   * Setting `open` false here and true again in the same `takeScreen` call is deliberate for the
+   * same-modal case: Svelte batches the pair, so the dialog never sees the closed frame and the
+   * subject swaps in place rather than the whole dialog animating out and back in.
+   */
+  private suspend(): ResumePoint | null {
+    this.open = false;
+    this.abort();
+    return this.resumePoint();
+  }
+
+  /**
+   * Closes the dialog, or steps back one level when there is one.
+   *
+   * This is every close gesture and the back control both, because they are the same action — see
+   * the note at the top of this file about there being one screen rather than three.
+   */
   close(): void {
     this.open = false;
     this.abort();
+    if (active === this) active = null;
+    const previous = suspended.pop();
+    // `restore` re-enters `open…`, which calls `takeScreen`. `active` is null by now, so nothing
+    // is pushed and the level just popped does not come straight back.
+    previous?.restore();
+  }
+
+  /**
+   * Empties the stack and closes. Nothing in the UI calls this yet; it is what a route change or a
+   * sign-out should use, because those invalidate every level rather than one.
+   */
+  dismiss(): void {
+    suspended.length = 0;
+    this.close();
   }
 
   /** Re-reads everything. The error state's retry button, in every modal. */
   abstract retry(): void;
+
+  /**
+   * How to come back to what this modal is showing right now, and what to call it.
+   *
+   * Null when there is nothing worth returning to — no subject yet, which is the state before the
+   * first open. Subclasses capture their subject **by value**: the closure runs after the singleton
+   * has been re-targeted, so anything it reads off `this` at call time is the wrong subject.
+   */
+  protected abstract resumePoint(): ResumePoint | null;
 
   /**
    * Clears whatever the subclass is holding about the previous subject.

@@ -34,7 +34,7 @@ import {
   type WorldDetail,
 } from "../api.ts";
 import { parseLocation, shortId } from "../format.ts";
-import { EntityModalState } from "./entity-modal.svelte.ts";
+import { EntityModalState, type ResumePoint } from "./entity-modal.svelte.ts";
 import { worldNames } from "./world-names.svelte.ts";
 
 /**
@@ -110,17 +110,29 @@ class WorldModalState extends EntityModalState {
   openWorld(worldId: string, options: OpenWorldOptions = {}): void {
     const location = options.location ?? null;
     const same = this.worldId === worldId && this.location === location && this.phase === "ready";
+    // First, before the assignments below — see `EntityModalState.takeScreen`.
+    this.takeScreen(!same);
     this.worldId = worldId;
     this.location = location;
     this.hintName = options.name ?? (same ? this.hintName : null);
     this.accountId = options.accountId ?? null;
-    this.open = true;
     if (!same) void this.#load(worldId);
   }
 
   /** Re-reads both halves. The error state's retry button. */
   retry(): void {
     if (this.worldId !== null) void this.#load(this.worldId);
+  }
+
+  /**
+   * The location rides back with the world id, not just the id: coming back to "that world" from
+   * "that instance of that world" would be a quieter step back than the reader took.
+   */
+  protected resumePoint(): ResumePoint | null {
+    const worldId = this.worldId;
+    if (worldId === null) return null;
+    const { title, location, hintName: name, accountId } = this;
+    return { label: title, restore: () => this.openWorld(worldId, { location, name, accountId }) };
   }
 
   /** Re-reads the live instance counts only. The world record has not changed. */

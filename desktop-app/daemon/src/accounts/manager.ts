@@ -53,6 +53,7 @@ export class AccountManager {
 
         await account.resume();
         await this.#rekeyIfNeeded(id, account);
+        this.#announceReady(account);
       }),
     );
   }
@@ -92,6 +93,7 @@ export class AccountManager {
     if (existing) {
       const result = await existing.login(password);
       await this.#rekeyIfNeeded(existing.id, existing);
+      this.#announceReady(existing);
       return { result, account: existing };
     }
 
@@ -102,6 +104,7 @@ export class AccountManager {
     try {
       const result = await account.login(password);
       await this.#rekeyIfNeeded(id, account);
+      this.#announceReady(account);
       return { result, account };
     } catch (error) {
       // Don't leave a half-added account behind for a wrong password — the UI would show a broken
@@ -122,6 +125,7 @@ export class AccountManager {
 
     const user = await account.verifyTwoFactor(method, code);
     await this.#rekeyIfNeeded(accountId, account);
+    this.#announceReady(account);
     return user;
   }
 
@@ -157,6 +161,25 @@ export class AccountManager {
       ...(this.deps.fetch !== undefined ? { fetch: this.deps.fetch } : {}),
     };
     return deps;
+  }
+
+  /**
+   * Announces that an account is fully registered under its real id **and** online.
+   *
+   * This is a different fact from `account.state`, and the difference is load-bearing. `Account`
+   * emits `account.state` from inside `login()`, at which point the manager still has it filed
+   * under its pending id — so a subscriber that reacts by calling `accounts.get(realId)` gets
+   * `undefined` and silently does nothing. Only the manager knows when the rekey has landed, so
+   * only the manager can emit this.
+   */
+  #announceReady(account: Account): void {
+    if (account.state !== "online") return;
+    this.deps.bus.emit({
+      kind: "account.ready",
+      accountId: account.id,
+      ts: Date.now(),
+      payload: account.snapshot(),
+    });
   }
 
   /**

@@ -16,6 +16,8 @@ import { fallbackKeyPath } from "../paths.ts";
  */
 
 const SERVICE = "vrc.zip";
+/** Set to `file` to skip the OS keychain entirely. See `loadOrCreateMasterKey`. */
+const BACKEND_ENV = "VRCZIP_KEY_BACKEND";
 const ACCOUNT = "master-key";
 
 export type KeyBackend = "windows-credential-manager" | "libsecret" | "file";
@@ -166,6 +168,17 @@ async function fileWrite(key: Buffer, env?: NodeJS.ProcessEnv): Promise<void> {
  * not advisory — the UI is expected to show a persistent warning while it is true.
  */
 export async function loadOrCreateMasterKey(env?: NodeJS.ProcessEnv): Promise<MasterKey> {
+  // Forces the file-backed key. Tests use it so a run never writes to the developer's real
+  // keychain, and it is a genuine escape hatch on a locked-down machine where the platform store
+  // is present but unusable — without it, such a user has no way to reach the fallback.
+  if ((env ?? process.env)[BACKEND_ENV] === "file") {
+    const existing = await fileRead(env);
+    if (existing) return { key: existing, backend: "file", degraded: true };
+    const key = randomKey();
+    await fileWrite(key, env);
+    return { key, backend: "file", degraded: true };
+  }
+
   if (process.platform === "win32") {
     const existing = await windowsRead();
     if (existing?.length === KEY_BYTES) {

@@ -76,6 +76,12 @@ export class PresenceService {
   readonly #byAccount = new Map<string, Map<string, FriendPresenceRecord>>();
   readonly #timers = new Map<string, JitteredInterval>();
   #subscription: Subscription | null = null;
+  /**
+   * Set by `stop()`. A refresh already awaiting the network resumes *after* shutdown has closed the
+   * store, so cancelling the timer is not enough — the resumed continuation would write to a closed
+   * database. Anything that outlives `stop()` has to re-check this after every await.
+   */
+  #disposed = false;
 
   constructor(private readonly options: PresenceServiceOptions) {}
 
@@ -83,7 +89,7 @@ export class PresenceService {
     this.#subscription = this.options.bus.subscribe(
       (event) => this.#onBusEvent(event.kind, event),
       {
-        kinds: ["friend.*", "user.updated", "account.state"],
+        kinds: ["friend.*", "user.updated", "account.ready"],
       },
     );
 
@@ -93,6 +99,7 @@ export class PresenceService {
   }
 
   stop(): void {
+    this.#disposed = true;
     this.#subscription?.unsubscribe();
     this.#subscription = null;
     for (const timer of this.#timers.values()) timer.stop();
@@ -120,6 +127,8 @@ export class PresenceService {
    * offline friend vanish from the UI rather than appear as offline.
    */
   async refresh(accountId: string): Promise<void> {
+    if (this.#disposed) return;
+
     const account = this.options.accounts.get(accountId);
     if (account?.state !== "online") return;
 
@@ -131,12 +140,14 @@ export class PresenceService {
       for (let offset = 0; ; offset += pageSize) {
         const query = `?n=${String(pageSize)}&offset=${String(offset)}&offline=${String(offline)}`;
         const response = await vrcFetch(account.context(), `/auth/user/friends${query}`);
+        if (this.#disposed) return;
         if (!response.ok) {
           await response.arrayBuffer().catch(() => undefined);
           return;
         }
 
         const page = (await response.json()) as LimitedUserFriend[];
+        if (this.#disposed) return;
         for (const friend of page) {
           next.set(friend.id, this.#toRecord(friend, !offline, now));
         }
@@ -146,6 +157,8 @@ export class PresenceService {
         if (page.length < pageSize) break;
       }
     }
+
+    if (this.#disposed) return;
 
     this.#byAccount.set(accountId, next);
     this.#persistFriendships(accountId, next, now);
@@ -203,9 +216,11 @@ export class PresenceService {
   #onBusEvent(kind: string, event: { accountId: string | null; payload?: unknown }): void {
     if (!event.accountId) return;
 
-    if (kind === "account.state") {
-      const payload = event.payload as { state?: string } | undefined;
-      if (payload?.state === "online") this.#startPolling(event.accountId);
+    if (kind === "account.ready") {
+      // `account.ready`, not `account.state`: the latter fires while the manager still has the
+      // account under its pending id, so `accounts.get(realId)` would return undefined and the
+      // first refresh would silently do nothing.
+      this.#startPolling(event.accountId);
       return;
     }
 

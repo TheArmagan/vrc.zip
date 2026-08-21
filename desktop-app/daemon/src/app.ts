@@ -136,13 +136,14 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
   }
 
   // An account that comes online later — a fresh login, or a 2FA challenge answered — gets its
-  // socket here rather than at every call site that might cause it.
+  // socket here rather than at every call site that might cause it. `account.ready` rather than
+  // `account.state`, because the latter fires before the manager has filed the account under its
+  // real id. See AccountManager#announceReady.
   bus.subscribe(
     (event) => {
-      const payload = event.payload as { state?: string } | undefined;
-      if (payload?.state === "online" && event.accountId) connectPipeline(event.accountId);
+      if (event.accountId) connectPipeline(event.accountId);
     },
-    { kinds: ["account.state"] },
+    { kinds: ["account.ready"] },
   );
 
   // --- friend presence ------------------------------------------------------

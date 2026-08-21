@@ -22,9 +22,18 @@ Two top-level directories, and they are **separate projects**:
 - `desktop-app/PROGRESS.md` — state: phase checklist, **Decision log** (why a call was made),
   **Gotchas** (where reality contradicted the plan — the highest-value section), and Open questions.
 
-Keep both current. Append to the Decision log when you make a call not already in `PLAN.md`, and to
-Gotchas when running code contradicts an assumption. A decision that only lives in a commit message
-is a decision the next person re-litigates.
+**Always update `PROGRESS.md` as part of the work — never as a follow-up someone else does.** Every
+noticeable change lands with its `PROGRESS.md` edit in the same commit:
+
+- Tick the **phase checklist** and refresh the **Status** line when a unit of work finishes.
+- Append to the **Decision log** when you make a call not already in `PLAN.md` — say *why*, briefly.
+  A decision that only lives in a commit message is one the next person re-litigates.
+- Append to **Gotchas** when running code contradicts an assumption. This is the highest-value
+  section in the file; the plan was written from research, not from running code.
+- Move or strike an **Open question** once it is answered.
+
+`PLAN.md` changes too when the *architecture* changes, but it is the plan, not the log — most work
+touches `PROGRESS.md` only.
 
 ## Commands
 
@@ -60,6 +69,8 @@ is no CI workflow yet (it would live in the repo root, shared ground with `backe
 - **Commit after every noticeable change** — a finished feature, fix, refactor, or doc update —
   without being asked. Don't batch unrelated work into one commit, and don't leave a session's work
   sitting uncommitted. A half-finished edit or a scratch file is not a noticeable change.
+- **The `PROGRESS.md` update belongs in the same commit as the change it describes**, not a separate
+  docs commit afterwards.
 - **Stage only files you changed yourself.** Never `git add -A`, `git add .`, or `git commit -a` —
   the working tree usually holds the user's own in-progress edits. Name the paths you touched, and
   leave anything else alone (say so rather than sweeping it in).

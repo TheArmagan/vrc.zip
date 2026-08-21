@@ -417,6 +417,15 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 23. **The EventBus fans out by prefix bucket, and `emit()` never awaits.** Async subscribers are
     observed only to route rejections to `onError`. A slow subscriber must not stall the pipeline
     reader, because a socket that stops draining is a socket VRChat eventually closes.
+40. **A repo-root `CLAUDE.md` orients coding agents; this file stays the source of truth.**
+    It carries the `desktop-app` / `backend` split, the commands, the three-server shape, and the
+    invariants and gotchas that are load-bearing — all distilled from here and `PLAN.md`, not
+    restated in full, so there is one place a fact lives. It also records the working rules: commit
+    every noticeable change authored solely by the user with no Claude trailers, stage only the
+    files the agent itself touched, push once a group of commits is done, and **update this file in
+    the same commit as the change it describes**. A `PROGRESS.md` edit deferred to a later pass is a
+    `PROGRESS.md` edit that does not happen, and Gotchas is exactly the section with no failing test
+    behind it.
 
 ---
 

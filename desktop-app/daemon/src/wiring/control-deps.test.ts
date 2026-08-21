@@ -238,8 +238,13 @@ function harness(
     presence: {
       // The friend list this account is already holding in memory. `isFriend` is a set membership
       // test against it and `trustLevel` is a lookup in it, which is why neither costs a request.
-      list: () => (options.friends ?? []).map((id) => ({ id, trustLevel: "trusted" })),
+      list: () =>
+        (options.friends ?? []).map((id) => ({ id, trustLevel: "trusted", status: "join me" })),
       listAll: () => [],
+      // A live profile read writes back into presence; here there is nothing to write into, so it
+      // reports no news and no event is emitted. The behaviour itself is tested in presence.test.ts,
+      // against a real map — this double exists to answer `list`, not to reimplement the service.
+      observe: () => false,
     } as unknown as PresenceService,
     settings: DEFAULT_SETTINGS,
     connectPipeline: () => {},
@@ -640,6 +645,36 @@ describe("control deps: groups and mutual friends", () => {
       ["usr_new", "visitor"],
     ]);
     // Not one profile was fetched to work that out.
+    expect(profileFetches(h)).toBe(0);
+    h.stop();
+  });
+
+  test("a mutual friend with no status in the payload takes presence's, not offline", async () => {
+    const h = harness({
+      // `usr_known` is in the live presence map; `usr_new` is not.
+      friends: ["usr_known"],
+      mutuals: () =>
+        Response.json([
+          // VRChat specifies a `status` on `MutualFriend` and then sends `""` — the same way it
+          // specifies `tags` and sends none. Defaulting that to "offline" rendered the whole tab
+          // as offline, always, next to a card reading the real status off `GET /users/{id}`.
+          { id: "usr_known", displayName: "Known", status: "", currentAvatarImageUrl: "" },
+          { id: "usr_new", displayName: "New", status: "", currentAvatarImageUrl: "" },
+          { id: "usr_said", displayName: "Said", status: "busy", currentAvatarImageUrl: "" },
+        ]),
+    });
+    await resumeAll(h);
+
+    const { users } = await h.deps.listMutualFriends(SUBJECT, VIEWER, { n: 10, offset: 0 });
+
+    expect(users.map((u) => [u.id, u.status])).toEqual([
+      // From presence, which the socket keeps current.
+      ["usr_known", "join me"],
+      // Nobody knows anything about this one, so "offline" is still the honest floor.
+      ["usr_new", "offline"],
+      // When VRChat does answer, its answer wins — it is from this instant.
+      ["usr_said", "busy"],
+    ]);
     expect(profileFetches(h)).toBe(0);
     h.stop();
   });

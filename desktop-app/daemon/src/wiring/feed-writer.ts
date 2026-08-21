@@ -18,6 +18,10 @@ const EPHEMERAL = new Set([
   // A backfill summary, not something that happened to the user. Persisting it would put a row
   // reading "synced 250 notifications" into the feed on every poll, forever.
   "notification.synced",
+  // "the presence map now agrees with a profile we just read" — a cache correction, not an event
+  // in anybody's day. It exists to wake the friends list up, and opening a card would otherwise
+  // write a feed row for every friend whose status had drifted.
+  "friend.presence",
 ]);
 
 export interface FeedWriterOptions {

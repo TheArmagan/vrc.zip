@@ -323,6 +323,27 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     for the moment it stops being declined**, because otherwise a join inside the floor is the same
     bug three seconds to the left. Only ids count toward "missing" — a log line with no user id
     could never be looked up and would hold the refetch permanently open.
+41. **A live profile read writes back into presence.** `GET /users/{id}` is the freshest reading of
+    a person the daemon ever has — fresher than the friends poll, which runs on an interval, and
+    fresher than the last socket frame, which fires only when something changed *and* the socket was
+    up to hear it. Discarding it meant the friends list could sit on a stale status while a card
+    opened over it showed the true one, from the same daemon, seconds apart. `PresenceService.observe`
+    takes it, under two rules that keep it from becoming a way to invent friends: it only ever
+    updates a record that **already exists**, because presence *is* the friends list and
+    `GET /users/{id}` answers for anybody; and it writes only fields VRChat actually filled in,
+    because the body is shorter for a non-friend and `""` is how VRChat spells nothing. It reports
+    whether anything changed, and only a change is announced — otherwise every hover would emit an
+    event and every event would send the friends list back for a refetch. Only the live branch
+    primes; a cache hit is as old as its row and would push stale status over a socket frame that
+    had already corrected it. `friend.presence` is ephemeral in both the daemon's feed writer and
+    the UI's mirror of that list: it is a cache reconciliation, not something that happened to
+    anybody.
+42. **Mutual friends take their status from presence, exactly as they take their trust rank.** The
+    spec gives `MutualFriend` a `status` and VRChat sends it empty, the same way it specifies `tags`
+    and sends none. Defaulting the empty one to `"offline"` rendered every mutual friend as offline,
+    always. A mutual friend is by definition one of this account's own friends, so presence is
+    already holding a live answer and it costs no request. VRChat's own value still wins when there
+    is one — it is from this instant.
 
 29. **Notifications are backfilled over REST, not sourced from the socket alone.** The pipeline is
     the reason the screen is live; it is not, and cannot be, the reason it is *correct*. Both
@@ -394,6 +415,16 @@ Empirical notes. Add to this as you hit things — especially where the plan tur
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
 
+- **`??` is the wrong operator against every optional string VRChat sends.** It writes `""` rather
+  than omitting a field, and the empty string sails through `??` as if it were an answer. It was
+  known for image URLs and written down as such; it is the same for `status` and
+  `statusDescription`, where presence stored `""` and the UI — which maps an unrecognised status to
+  "Unknown" and an unrecognised colour to grey — drew a grey dot for a friend who was plainly
+  online. The rule is not about images. It is about the whole API.
+- **`status` is what a user chose, not whether they are here.** VRChat leaves `status` at `active`
+  while somebody is offline; `state` (`online` / `active` / `offline`) is the online-ness. Reading
+  presence off `status` leaves an offline friend online forever, which is why `observe` uses `state`
+  and falls back to what it already knew rather than guessing from `status`.
 - **An `$effect` that fires correctly still does nothing if the thing it calls declines.** The
   roster's refetch-on-join was wired up and working — the effect ran on every arrival — and the
   rate limit inside `ensure` swallowed it, so the feature looked implemented and never once ran.

@@ -2,9 +2,58 @@ import type { LimitedUserFriend } from "@vrcz/api/types";
 import type { EventBus, Subscription } from "../bus/event-bus.ts";
 import { JitteredInterval } from "../net/jitter.ts";
 import { vrcFetch } from "../net/request.ts";
-import { pickUserImageUrl } from "../net/user-image.ts";
+import { pickUserImageUrl, type UserImageFields } from "../net/user-image.ts";
 import type { Store } from "../store/index.ts";
 import type { AccountManager } from "./manager.ts";
+
+/**
+ * The fields of a VRChat user body this cares about.
+ *
+ * Structural rather than `User`, because both `GET /users/{id}` and the pipeline's partial frames
+ * feed it and neither is the other's type. Everything is optional: the body is genuinely shorter
+ * for a non-friend, and treating a missing field as an answer is how presence would get worse from
+ * being told more.
+ */
+export interface ObservedUser extends UserImageFields {
+  readonly id?: string;
+  readonly displayName?: string;
+  readonly status?: string;
+  readonly statusDescription?: string;
+  /** VRChat's own `online` / `active` / `offline`. The only reliable online-ness in this body. */
+  readonly state?: string;
+  readonly location?: string;
+  readonly worldId?: string;
+  readonly platform?: string;
+  readonly last_platform?: string;
+  readonly tags?: readonly string[];
+}
+
+/** Everything that counts as news. `lastSeenAt` deliberately does not — see `observe`. */
+function sameRecord(a: FriendPresenceRecord, b: FriendPresenceRecord): boolean {
+  return (
+    a.displayName === b.displayName &&
+    a.status === b.status &&
+    a.statusDescription === b.statusDescription &&
+    a.location === b.location &&
+    a.worldId === b.worldId &&
+    a.platform === b.platform &&
+    a.trustLevel === b.trustLevel &&
+    a.isOnline === b.isOnline &&
+    a.iconUrl === b.iconUrl
+  );
+}
+
+/**
+ * A string VRChat actually filled in, or null.
+ *
+ * VRChat writes `""` rather than omitting a field, which makes `??` the wrong operator against
+ * every one of its optional strings — the empty string is truthy to `??` and meaningless to
+ * everything downstream. This is the same rule the UI applies to image URLs; it applies here for
+ * exactly the same reason.
+ */
+function nonEmpty(value: string | null | undefined): string | null {
+  return typeof value === "string" && value !== "" ? value : null;
+}
 
 /**
  * Friend presence: who is online, where, and on what.
@@ -127,6 +176,68 @@ export class PresenceService {
   }
 
   /**
+   * Records what a live `GET /users/{id}` just told us about one of this account's friends.
+   *
+   * A profile fetch is the freshest reading of a person there is — fresher than the friends poll,
+   * which runs on an interval, and fresher than the last socket frame, which only fires when
+   * something changed *and* the socket was up to hear it. Throwing that away meant the friends
+   * list could sit on a stale status while a card opened over it showed the true one, from the
+   * same daemon, seconds apart.
+   *
+   * Two rules keep this from being a way to invent friends:
+   *
+   *  - **It only ever updates a record that already exists.** Presence *is* the friends list, so
+   *    inserting here would put a stranger in it — and `GET /users/{id}` answers for anybody.
+   *  - **It writes only what VRChat actually filled in.** The body is shorter for a non-friend and
+   *    partial in general, and `""` is how VRChat spells "nothing", so an absent field leaves what
+   *    is already known alone rather than blanking it.
+   *
+   * Returns true when something actually changed, which is what the caller announces. Hovering the
+   * same unchanged name ten times is ten fetches and no events.
+   */
+  observe(accountId: string, user: ObservedUser, now = Date.now()): boolean {
+    const map = this.#byAccount.get(accountId);
+    if (map === undefined) return false;
+
+    const id = nonEmpty(user.id);
+    if (id === null) return false;
+
+    const existing = map.get(id);
+    // Not a friend of this account — or the first friends poll has not landed yet, in which case
+    // it is about to overwrite everything here anyway.
+    if (existing === undefined) return false;
+
+    /*
+     * `state` is VRChat's own online/offline verdict and the only trustworthy one in this body:
+     * `status` is the user's *chosen* status and stays `active` while they are offline, which is
+     * exactly the trap that makes an offline friend look online.
+     */
+    const state = nonEmpty(user.state);
+    const isOnline = state === null ? existing.isOnline : state !== "offline";
+
+    const next: FriendPresenceRecord = {
+      ...existing,
+      displayName: nonEmpty(user.displayName) ?? existing.displayName,
+      status: nonEmpty(user.status) ?? existing.status,
+      statusDescription: nonEmpty(user.statusDescription) ?? existing.statusDescription,
+      location: nonEmpty(user.location) ?? existing.location,
+      worldId: nonEmpty(user.worldId) ?? existing.worldId,
+      platform: nonEmpty(user.platform) ?? nonEmpty(user.last_platform) ?? existing.platform,
+      trustLevel: user.tags === undefined ? existing.trustLevel : trustLevelOf(user.tags),
+      isOnline,
+      iconUrl: pickUserImageUrl(user) ?? existing.iconUrl,
+      lastSeenAt: now,
+    };
+
+    // `lastSeenAt` moves on every call and is not news, so it is excluded from the comparison —
+    // otherwise every hover would emit an event and every event would refetch the friends list.
+    if (sameRecord(existing, next)) return false;
+
+    map.set(id, next);
+    return true;
+  }
+
+  /**
    * Fetches the full friends list for one account and replaces its presence map.
    *
    * Online and offline are **separate paginated queries** — VRChat's `offline` flag is a filter, not
@@ -181,8 +292,11 @@ export class PresenceService {
     return {
       id: friend.id,
       displayName: friend.displayName,
-      status: friend.status ?? (isOnline ? "active" : "offline"),
-      statusDescription: friend.statusDescription ?? null,
+      // `nonEmpty`, not `??`: VRChat sends `""` for a field it has nothing for, so `??` lets the
+      // empty string through as if it were an answer. `""` is not a status any vocabulary maps, so
+      // the UI drew a grey dot and the word "Unknown" for a friend who was plainly online.
+      status: nonEmpty(friend.status) ?? (isOnline ? "active" : "offline"),
+      statusDescription: nonEmpty(friend.statusDescription),
       location: friend.location ?? null,
       // `friend.location` is literally "private" when hidden; there is no world id to recover.
       worldId:
@@ -258,8 +372,8 @@ export class PresenceService {
     map.set(userId, {
       id: userId,
       displayName: user?.displayName ?? existing?.displayName ?? userId,
-      status: user?.status ?? (isOnline ? (existing?.status ?? "active") : "offline"),
-      statusDescription: user?.statusDescription ?? existing?.statusDescription ?? null,
+      status: nonEmpty(user?.status) ?? (isOnline ? (existing?.status ?? "active") : "offline"),
+      statusDescription: nonEmpty(user?.statusDescription) ?? existing?.statusDescription ?? null,
       location:
         payload.location ?? user?.location ?? (isOnline ? (existing?.location ?? null) : null),
       worldId: existing?.worldId ?? null,

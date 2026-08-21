@@ -237,6 +237,84 @@ describe("PresenceService", () => {
     presence.stop();
   });
 
+  test("a live profile read updates presence, and says whether it was news", async () => {
+    const presence = await setup(friends(1, true, "on"));
+    presence.start();
+    await presence.refresh("usr_alice");
+    expect(presence.list("usr_alice")[0]?.status).toBe("active");
+
+    // What `GET /users/{id}` answers, which is fresher than the poll that filled the list.
+    const changed = presence.observe("usr_alice", {
+      id: "usr_on_0",
+      status: "busy",
+      statusDescription: "heads down",
+      state: "online",
+    });
+
+    expect(changed).toBe(true);
+    const updated = presence.list("usr_alice")[0];
+    expect(updated?.status).toBe("busy");
+    expect(updated?.statusDescription).toBe("heads down");
+    expect(updated?.isOnline).toBe(true);
+
+    // The same read again is not news. Otherwise every hover would announce a change and every
+    // announcement would send the friends list back for a refetch.
+    expect(
+      presence.observe("usr_alice", {
+        id: "usr_on_0",
+        status: "busy",
+        statusDescription: "heads down",
+        state: "online",
+      }),
+    ).toBe(false);
+    presence.stop();
+  });
+
+  test("`state` decides online-ness, not `status`", async () => {
+    const presence = await setup(friends(1, true, "on"));
+    presence.start();
+    await presence.refresh("usr_alice");
+
+    // VRChat keeps `status` at the user's *chosen* value while they are offline, so reading
+    // online-ness off it would leave this friend online forever.
+    presence.observe("usr_alice", { id: "usr_on_0", status: "active", state: "offline" });
+
+    const updated = presence.list("usr_alice")[0];
+    expect(updated?.isOnline).toBe(false);
+    expect(updated?.status).toBe("active");
+    presence.stop();
+  });
+
+  test("a profile read never invents a friend, and never blanks what it did not say", async () => {
+    const presence = await setup([
+      { id: "usr_on_0", displayName: "Iconed", online: true, userIcon: ICON_URL },
+    ]);
+    presence.start();
+    await presence.refresh("usr_alice");
+
+    // `GET /users/{id}` answers for anybody. Presence *is* the friends list, so a stranger read
+    // through this account must not appear in it.
+    expect(presence.observe("usr_alice", { id: "usr_stranger", status: "active" })).toBe(false);
+    expect(presence.list("usr_alice").map((r) => r.id)).toEqual(["usr_on_0"]);
+
+    // `""` is how VRChat spells "nothing", including in a shorter non-friend body. Writing it
+    // through would strip the icon and the name off a row that already had them.
+    presence.observe("usr_alice", {
+      id: "usr_on_0",
+      displayName: "",
+      status: "join me",
+      userIcon: "",
+      profilePicOverride: "",
+      currentAvatarImageUrl: "",
+    });
+
+    const updated = presence.list("usr_alice")[0];
+    expect(updated?.status).toBe("join me");
+    expect(updated?.displayName).toBe("Iconed");
+    expect(updated?.iconUrl).toBe(ICON_URL);
+    presence.stop();
+  });
+
   test("friend.removed drops the friend from presence", async () => {
     const presence = await setup(friends(2, true, "on"));
     presence.start();

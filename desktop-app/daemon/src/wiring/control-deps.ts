@@ -277,6 +277,7 @@ function toGroupSummary(raw: GroupFields): GroupSummary | null {
 function toMutualFriend(
   raw: Partial<MutualFriend>,
   trustLevel: string,
+  knownStatus: string | null,
 ): MutualFriendSummary | null {
   if (typeof raw.id !== "string" || raw.id === "") return null;
 
@@ -286,7 +287,18 @@ function toMutualFriend(
       typeof raw.displayName === "string" && raw.displayName !== "" ? raw.displayName : raw.id,
     iconUrl: pickUserImageUrl(raw),
     trustLevel,
-    status: emptyToNull(raw.status) ?? "offline",
+    /*
+     * Presence is the fallback, and it is doing the real work here.
+     *
+     * The spec gives `MutualFriend` a `status`, and in practice the field arrives empty — the same
+     * way `tags` is absent despite being specified, two lines up. Defaulting an empty one straight
+     * to `"offline"` meant the whole tab rendered every mutual friend as offline, confidently and
+     * always, next to a hover card reading their real status off `GET /users/{id}`.
+     *
+     * A mutual friend is by definition one of this account's own friends, so presence is holding a
+     * live answer for them already, kept current by the socket. It costs nothing to ask.
+     */
+    status: emptyToNull(raw.status) ?? knownStatus ?? "offline",
   };
 }
 
@@ -1165,6 +1177,24 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         // TTL rather than giving it a second cache that could disagree with this one.
         const envelope: UserCacheEnvelope = { v: 2, user, representedGroup };
         store.putUserCache(account.id, userId, fetchedAt, JSON.stringify(envelope));
+
+        /*
+         * A live read is the freshest thing anyone has about this person, so presence takes it.
+         *
+         * Only on this branch: a cache hit is as old as the row it came from and would push stale
+         * status back over a socket frame that had already corrected it. `observe` no-ops for
+         * anybody who is not already a friend of this account, and reports whether it changed
+         * anything — so the announcement below is real news, not one event per hover.
+         */
+        if (presence.observe(account.id, user)) {
+          bus.emit({
+            kind: "friend.presence",
+            accountId: account.id,
+            ts: fetchedAt,
+            subjectId: userId,
+            payload: { source: "profile" },
+          });
+        }
       }
 
       const friend = store.getFriend(account.id, userId);
@@ -1366,14 +1396,19 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
        * A mutual friend is by definition one of this account's own friends, so presence already
        * holds their rank. `friend_log` is the fallback for the window before the first friends poll
        * lands, since it persists the rank from the last time it did. Neither costs a request.
+       *
+       * The same record supplies the presence status, for the same reason and with the same
+       * evidence behind it — see `toMutualFriend`.
        */
-      const ranks = new Map(presence.list(account.id).map((r) => [r.id, r.trustLevel]));
+      const known = new Map(presence.list(account.id).map((r) => [r.id, r]));
 
       const users = raw
         .map((entry: Partial<MutualFriend>) => {
           const id = typeof entry.id === "string" ? entry.id : "";
-          const rank = ranks.get(id) ?? store.getFriend(account.id, id)?.trust_level ?? "visitor";
-          return toMutualFriend(entry, rank);
+          const record = known.get(id);
+          const rank =
+            record?.trustLevel ?? store.getFriend(account.id, id)?.trust_level ?? "visitor";
+          return toMutualFriend(entry, rank, record?.status ?? null);
         })
         .filter((user): user is MutualFriendSummary => user !== null);
 

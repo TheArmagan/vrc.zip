@@ -35,6 +35,9 @@ export const EPHEMERAL_KINDS: ReadonlySet<string> = new Set([
   "pipeline.state",
   // Emitted once per notification backfill so the screen can refetch. It is a signal, not a row.
   "notification.synced",
+  // Emitted when a live profile read corrects the presence map — a cache reconciliation, not
+  // something that happened to anyone. Its whole job is to send the friends list for a refetch.
+  "friend.presence",
 ]);
 
 /** Synthetic ids for socket-borne rows. Negative and decreasing, so they never collide with rows. */

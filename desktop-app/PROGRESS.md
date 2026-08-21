@@ -276,6 +276,31 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 35. **A filter over a paged list says so.** The Groups tab holds everything, so its search is
     complete; mutual friends are paged, so that search states how many are loaded. A search box that
     quietly returns "no match" while an unloaded page holds the answer is worse than no search box.
+36. **Profiles are cached in a resolver and fetched on hover, never on render.** `user-profiles`
+    is the sibling of `world-names` and `instance-info` and obeys their rules: `entry()`/`get()` are
+    pure and safe inside a `$derived`, `ensure()` is the only thing that fetches, and a recent answer
+    is reused. The split matters most on `UserName`, which a feed page mounts a hundred of in one
+    frame — the hover card asks from `onOpenChange`, so a request means a person pointed at a name.
+    Live sessions is the one screen allowed to `ensure()` from an `$effect`, because its set is the
+    game clients running on this machine and cannot grow past a handful. Profiles are keyed by user
+    **and** by the account they were read through: `isFriend` is a statement about the asking
+    account, and VRChat sends a shorter body to a non-friend, so merging two accounts' answers would
+    invent a third that neither gave.
+37. **A tooltip and a context menu cannot share a trigger, so the menu wraps in `display: contents`.**
+    Both bits-ui primitives want to own the element and their prop bags collide on `id`,
+    `data-state` and three pointer handlers, so spreading one over the other silently drops whichever
+    lost. bits-ui does not re-export `mergeProps` (it comes from `svelte-toolbelt`, which is not a
+    declared dependency of `@vrcz/ui`). They are split by what each actually needs instead: the
+    tooltip keeps the button, because hover is hit-testing and has to be a real box, and the context
+    menu becomes a wrapper carrying `contents`, which generates no box and so changes no layout.
+    Every event the menu listens for bubbles to it, and it opens at the pointer's coordinates rather
+    than against the trigger's rectangle, so having no rectangle costs it nothing.
+38. **Overlays are all one surface: `bg-popover` with `ring-1 ring-foreground/5`.** Dialog, dropdown,
+    context menu, select, command and now popover and tooltip. `--popover` is a step lighter than
+    `--background` in the dark theme and that is the whole point of the token — a panel floating over
+    the page has to read as a different plane. The tooltip is the app's *rich* hover surface, not an
+    inverted chip: `WorldLink` and `UserName` both put an image, a name and an id inside one, so
+    shadcn's default `bg-primary` (near-white in this dark theme) was never going to fit.
 
 29. **Notifications are backfilled over REST, not sourced from the socket alone.** The pipeline is
     the reason the screen is live; it is not, and cannot be, the reason it is *correct*. Both
@@ -288,6 +313,25 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 31. **`hidden` age verification renders nothing, exactly like unknown.** VRChat's `hidden` means
     *verified but not published*. Collapsing it into a boolean would make a missing badge look like
     a claim that a real person is unverified — a claim we are not entitled to make.
+32. **One modal shell, three cards.** `EntityModal` owns the dialog, the three-row grid, the banner
+    band and the header; `UserModal`, `WorldModal` and `GroupModal` own only their bodies. The three
+    had been copies of each other and had already drifted — two header offsets, two title behaviours,
+    two banner heights, two scroll containers — none of it decided by anybody. `EntityModalState`
+    does the same for the state side: the abort/generation pair, the phase and failure vocabulary,
+    and the dedup helper. The wording of every failure stays with its own modal, because
+    "no account is online" genuinely means something different in front of a profile, a world and a
+    group, and collapsing those into one sentence would be the opposite of the point.
+33. **The group modal exists, and `GET /api/groups/:id` is not cached.** A world is the same record
+    whoever asks and changes on a release cadence, so `world_cache` is right for it. The two figures
+    worth opening a *group* card for are the online member count and this account's own membership
+    status; a cached answer would be neither. A 404 is `unknown_group`, never `unknown_user`, and its
+    sentence names both causes — deleted, or private to this account — because VRChat answers them
+    identically and guessing in front of a user who can see the group on their own screen would be a
+    confident wrong answer.
+34. **The hero banner's scrim is opaque under the header, not merely tinted.** The header rides up
+    into the band by design, which put the display name where the old gradient was still half
+    transparent, so a bright banner showed through the text and cut it apart. The bottom two-fifths
+    are now flat popover: a fade that starts at the text is a texture behind the text, not a scrim.
 
 28. **Sessions are the store's business, not just the watcher's.** Retroactive attribution, the
     orphan sweep, and re-adoption all write through the store, because the UI reads sessions back
@@ -310,6 +354,17 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **A design token used for both a background and its text is invisible, and neither theme reveals
+  it.** The vendored tooltip shipped as `bg-foreground text-foreground` — the same token twice. In
+  dark that is near-white on near-white; in light it is near-black on near-black. It only became
+  visible as a bug once `WorldLink` put a *card* in a tooltip, because a blank white slab under a
+  world thumbnail looks like a broken image while a blank one-line chip looks like nothing at all.
+  Grep for a `bg-*` and `text-*` naming the same token before trusting a vendored class string.
+- **`bg-background` is not the dark theme's panel colour.** It is the *page*. A popover moved onto
+  it is not visibly broken — it is dark, it has a shadow — it has just quietly become the same plane
+  as everything behind it. `--popover` exists to be one step lighter (`0.205` against `0.145`), so
+  the fix for "this floating thing looks flat" is almost always the token, not the shadow.
 
 - **A bare `logs` pattern in the repo-root `.gitignore` matched `daemon/src/logs/` and excluded the
   entire log watcher from git.** A bare `*.log` did the same to its fixtures. Both are fixed — the
@@ -595,9 +650,12 @@ Unresolved; flag to the user rather than guessing.
   token header/query-param constants plus default ports.
 - **No retention control on the API.** The retention job runs and is configurable in the database,
   but nothing exposes it, so the Settings screen explains it rather than offering a control.
-- **No group modal yet.** Users and worlds have one; groups are still only a badge and a list row
-  linking out to vrchat.com. The daemon already returns everything a group *card* needs; a real one
-  wants `GET /groups/{groupId}` plus members, posts, and instances.
+- **The group modal is a card, not a group screen.** `GET /api/groups/:id` and `GroupModal` landed:
+  a represented badge and a row in a user's Groups tab both open it, and it shows the description,
+  the rules, the links, both member counts with the age of the live one, the owner, the join state
+  and this account's membership status. What it still does not have is **members, posts, galleries
+  and instances** — each needs its own endpoint and its own paging, and the footer links to
+  vrchat.com in the meantime rather than letting the card pass for the whole group.
 - **`mutualGroup` is on the wire and unused.** `LimitedUserGroups` carries it, so the "Mutual" badge
   dropped from the Groups tab as uncomputable can be restored for free.
 - **The profile image/banner context-menu action is not built.** `UserDetail.iconUrlFull` now exists

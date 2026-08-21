@@ -19,25 +19,60 @@
   Selection lives in the URL (`#/sessions/<id>`), so a focused client survives a reload and can be
   linked to. An id that no longer names a running client falls back to the first one rather than
   rendering an empty pane — clients come and go while the tab is open.
+
+  ## Why the focused client is drawn as a person
+
+  A session's account was, for a long time, a display name and nothing else on this screen: no
+  icon, no trust rank, no age verification, while the roster directly below it showed exactly those
+  things for every stranger in the room. That asymmetry is backwards — the one person on screen the
+  reader definitely cares about was the one described the least. The header therefore reads the
+  same VRChat profile the user modal reads, through `user-profiles.svelte.ts`, and renders it on
+  the roster's own rule: absence is never a claim. A profile VRChat will not hand over — nobody
+  signed in, an id it does not know — draws no chips at all rather than empty or negative ones.
 -->
 <script lang="ts">
 import { untrack } from "svelte";
 import HeadsetIcon from "@lucide/svelte/icons/headset";
+import HeartHandshakeIcon from "@lucide/svelte/icons/heart-handshake";
 import MonitorIcon from "@lucide/svelte/icons/monitor";
+import ShieldCheckIcon from "@lucide/svelte/icons/shield-check";
 import UserPlusIcon from "@lucide/svelte/icons/user-plus";
+import { imageUrl } from "$lib/api.ts";
 import EmptyState from "$lib/components/EmptyState.svelte";
 import LocationLine from "$lib/components/LocationLine.svelte";
+import RepresentedGroup from "$lib/components/RepresentedGroup.svelte";
 import SectionHeader from "$lib/components/SectionHeader.svelte";
 import SessionRoster from "$lib/components/SessionRoster.svelte";
+import StatusDot from "$lib/components/StatusDot.svelte";
 import UserName from "$lib/components/UserName.svelte";
+import {
+  Avatar,
+  AvatarBadge,
+  AvatarFallback,
+  AvatarImage,
+} from "$lib/components/ui/avatar/index.js";
 import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
 import { Skeleton } from "$lib/components/ui/skeleton/index.js";
-import { duration, isVrMode, shortId, timeOfDay, vrModeLabel } from "$lib/format.ts";
+import {
+  ageVerifiedLabel,
+  calendarDay,
+  duration,
+  initials,
+  isVrMode,
+  platformLabel,
+  shortId,
+  statusLabel,
+  timeOfDay,
+  trustClass,
+  trustLabel,
+  vrModeLabel,
+} from "$lib/format.ts";
 import { hrefFor } from "$lib/router.ts";
 import { app } from "$lib/state/app.svelte.ts";
 import { clock } from "$lib/state/clock.svelte.ts";
 import { liveSessions } from "$lib/state/live-sessions.svelte.ts";
+import { userProfiles } from "$lib/state/user-profiles.svelte.ts";
 import { worldNames } from "$lib/state/world-names.svelte.ts";
 
 let {
@@ -78,6 +113,61 @@ $effect(() => {
 
 const focusedAccount = $derived(
   focused === null ? null : app.accountById(focused.session.accountId),
+);
+
+/*
+ * The person behind each client.
+ *
+ * `sessionLabel` is a display name and nothing else, which made this screen the one place in the
+ * app that showed a VRChat user as bare text — no icon, no rank, no age verification — while the
+ * roster three inches below it showed all of that for every stranger in the room. The account
+ * record carries only a name and an icon, so the rest has to be read from VRChat.
+ *
+ * Fetching from an `$effect` is allowed here for the reason `user-profiles.svelte.ts` states: the
+ * set is the *running game clients on this machine*, which is one or two and cannot become a
+ * hundred. It is the same shape as the world-name effect above, and untracked for the same reason.
+ */
+$effect(() => {
+  const accountIds = merged.map((entry) => entry.session.accountId);
+  untrack(() => {
+    for (const accountId of accountIds) userProfiles.ensure(accountId, accountId);
+  });
+});
+
+const focusedProfile = $derived(
+  focused === null ? null : userProfiles.get(focused.session.accountId, focused.session.accountId),
+);
+
+/**
+ * The focused client's icon: VRChat's current one, or the copy the daemon cached on the account.
+ *
+ * The account's icon is the better *first* answer even though it can be stale — it is already in
+ * memory, so the header opens with a face in it rather than a grey circle that fills in a moment
+ * later.
+ */
+const focusedIcon = $derived(imageUrl(focusedProfile?.iconUrl ?? focusedAccount?.iconUrl));
+
+const focusedTrust = $derived(trustLabel(focusedProfile?.trustLevel ?? null));
+const focusedAge = $derived(
+  focusedProfile === null
+    ? null
+    : ageVerifiedLabel(focusedProfile.ageVerificationStatus, focusedProfile.ageVerified),
+);
+const focusedPlatform = $derived(platformLabel(focusedProfile?.platform ?? null));
+
+/**
+ * True while VRChat has not answered yet *and* has not refused.
+ *
+ * It only keeps the chip row from looking like a finished, empty answer during the first second. A
+ * refusal — no signed-in account, an unknown id — draws nothing at all, because absent chips are
+ * the honest rendering of "VRChat did not say", exactly as in `PlayerAttributes`.
+ */
+const profileLoading = $derived(
+  focused !== null &&
+    focused.session.accountId !== null &&
+    focusedProfile === null &&
+    (userProfiles.entry(focused.session.accountId, focused.session.accountId)?.status ??
+      "loading") === "loading",
 );
 
 const RAIL_BASE =
@@ -139,15 +229,27 @@ const RAIL_OFF = "hover:bg-muted/40";
           entry.worldName ??
           worldNames.get(session.currentWorldId)?.name ??
           shortId(session.currentWorldId, 16)}
+        {@const label = app.sessionLabel(session)}
+        {@const profile = userProfiles.get(session.accountId, session.accountId)}
+        {@const icon = imageUrl(
+          profile?.iconUrl ?? app.accountById(session.accountId)?.iconUrl,
+        )}
         <a
           href={hrefFor("sessions", String(session.id))}
           aria-current={selected ? "true" : undefined}
           class="{RAIL_BASE} {selected ? RAIL_ON : RAIL_OFF}"
         >
           <span class="flex min-w-0 items-center gap-2">
-            <span class="min-w-0 flex-1 truncate text-sm font-medium">
-              {app.sessionLabel(session)}
-            </span>
+            <!--
+              alt="" deliberately: the name is right beside it. An unlinked client has no user and
+              so no icon, and falls back to its initials like anyone else rather than to a silhouette
+              that would imply vrc.zip knows who is signed in.
+            -->
+            <Avatar class="size-6 shrink-0">
+              <AvatarImage src={icon} alt="" loading="lazy" />
+              <AvatarFallback class="text-[9px]">{initials(label)}</AvatarFallback>
+            </Avatar>
+            <span class="min-w-0 flex-1 truncate text-sm font-medium">{label}</span>
             {#if isVrMode(session.vrMode)}
               <HeadsetIcon class="size-3.5 shrink-0 text-muted-foreground" aria-label="VR" />
             {:else}
@@ -179,32 +281,133 @@ const RAIL_OFF = "hover:bg-muted/40";
     <!-- The focused client, full height. -->
     <section class="flex min-h-0 min-w-0 flex-1 flex-col">
       <div class="shrink-0 space-y-2 border-b border-border px-4 py-3">
-        <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
-          <!--
-            The heading is a user only when the client is linked to an account. An unlinked
-            client's label is either the name the log reported (no id ever accompanies it) or the
-            words "Unlinked client", and neither is something to open a profile for.
-          -->
-          <h2 class="min-w-0 truncate text-base font-semibold tracking-tight">
-            <UserName
-              userId={focused.session.accountId}
-              name={app.sessionLabel(focused.session)}
-              accountId={focused.session.accountId}
-              class="max-w-full truncate"
-            />
-          </h2>
-          <Badge variant="outline">
-            {#if isVrMode(focused.session.vrMode)}
-              <HeadsetIcon />
-            {:else}
-              <MonitorIcon />
+        <div class="flex min-w-0 items-start gap-3">
+          <!-- alt="" deliberately: the name is the next column, so announcing it twice is noise. -->
+          <Avatar class="size-11 shrink-0">
+            <AvatarImage src={focusedIcon} alt="" />
+            <AvatarFallback>{initials(app.sessionLabel(focused.session))}</AvatarFallback>
+            {#if focusedProfile !== null}
+              <AvatarBadge class="bg-transparent ring-background">
+                <StatusDot status={focusedProfile.status} size={null} class="size-full" />
+              </AvatarBadge>
             {/if}
-            {vrModeLabel(focused.session.vrMode)}
-          </Badge>
-          <p class="tabular text-xs text-muted-foreground">
-            Started {timeOfDay(focused.session.startedAt)}, up {duration(clock.now - focused.session.startedAt)}
-          </p>
-          <div class="ml-auto">
+          </Avatar>
+
+          <div class="min-w-0 flex-1 space-y-1">
+            <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <!--
+                The heading is a user only when the client is linked to an account. An unlinked
+                client's label is either the name the log reported (no id ever accompanies it) or
+                the words "Unlinked client", and neither is something to open a profile for.
+              -->
+              <h2 class="min-w-0 truncate text-base font-semibold tracking-tight">
+                <UserName
+                  userId={focused.session.accountId}
+                  name={app.sessionLabel(focused.session)}
+                  accountId={focused.session.accountId}
+                  class="max-w-full truncate"
+                />
+              </h2>
+              <Badge variant="outline">
+                {#if isVrMode(focused.session.vrMode)}
+                  <HeadsetIcon />
+                {:else}
+                  <MonitorIcon />
+                {/if}
+                {vrModeLabel(focused.session.vrMode)}
+              </Badge>
+              <p class="tabular text-xs text-muted-foreground">
+                Started {timeOfDay(focused.session.startedAt)}, up {duration(
+                  clock.now - focused.session.startedAt,
+                )}
+              </p>
+            </div>
+
+            <!--
+              VRChat's own presence line for this account, which is a different thing from the two
+              facts above it: those are what this machine can see, this is what everyone else sees.
+              A client can be running with the account set to "busy", or still reading "offline".
+            -->
+            {#if focusedProfile !== null}
+              <p
+                class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground"
+              >
+                <span>{statusLabel(focusedProfile.status)}</span>
+                {#if focusedProfile.statusDescription}
+                  <span aria-hidden="true">·</span>
+                  <span class="truncate">{focusedProfile.statusDescription}</span>
+                {/if}
+                {#if focusedProfile.pronouns}
+                  <span aria-hidden="true">·</span>
+                  <span>{focusedProfile.pronouns}</span>
+                {/if}
+                {#if focusedProfile.dateJoined !== null}
+                  <span aria-hidden="true">·</span>
+                  <span>On VRChat since {calendarDay(focusedProfile.dateJoined)}</span>
+                {/if}
+              </p>
+            {/if}
+
+            <!--
+              The chips, on exactly the rule `PlayerAttributes` sets for the roster below: absence
+              is never a claim. No age chip means VRChat said nothing *or* said `hidden` — a
+              verified person keeping it private — and there is no "unverified" variant to render.
+              A profile VRChat would not hand over draws no chips at all rather than empty ones.
+            -->
+            {#if focusedProfile !== null || profileLoading}
+              <div class="flex flex-wrap items-center gap-2">
+                {#if profileLoading}
+                  <Skeleton class="h-5 w-20" />
+                  <Skeleton class="h-5 w-16" />
+                {/if}
+                {#if focusedProfile !== null && focusedProfile.representedGroup !== null}
+                  <!--
+                    First, as in the user modal: the group is the user's own statement about
+                    themselves, where every chip after it is VRChat's statement about them.
+                  -->
+                  <RepresentedGroup
+                    group={focusedProfile.representedGroup}
+                    accountId={focused.session.accountId}
+                  />
+                {/if}
+                {#if focusedTrust !== null}
+                  <!-- VRChat's own rank colour; see `trustClass` for why it is not a vrc.zip token. -->
+                  <Badge
+                    variant="outline"
+                    class={trustClass(focusedProfile?.trustLevel ?? null)}
+                    title="VRChat trust rank"
+                  >
+                    {focusedTrust}
+                  </Badge>
+                {/if}
+                {#if focusedAge !== null}
+                  <Badge variant="outline" title="VRChat age verification">
+                    <ShieldCheckIcon />
+                    {focusedAge}
+                  </Badge>
+                {/if}
+                {#if focusedProfile !== null && focusedProfile.isFriend}
+                  <Badge
+                    variant="outline"
+                    class="border-status-online/40 bg-status-online/10 text-status-online"
+                    title={focusedProfile.friendedAt === null
+                      ? "A friend of the account this profile was read through"
+                      : `Friends since ${calendarDay(focusedProfile.friendedAt)}`}
+                  >
+                    <HeartHandshakeIcon />
+                    Friend
+                  </Badge>
+                {/if}
+                {#if focusedPlatform !== null}
+                  <Badge variant="outline" title="The platform VRChat last saw this account on">
+                    {focusedPlatform}
+                  </Badge>
+                {/if}
+              </div>
+            {/if}
+          </div>
+
+          <div class="shrink-0">
             <Button variant="outline" size="sm" href={hrefFor("gamelog", String(focused.session.id))}>
               Open game log
             </Button>

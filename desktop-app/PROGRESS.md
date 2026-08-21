@@ -313,6 +313,16 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     is loaded. Only a chain through the same modal — profile to profile through mutual friends —
     re-reads, because a singleton cannot hold two subjects. The stack is capped at 16 and drops the
     oldest, since nothing else bounds a click-driven chain.
+40. **A freshness window is about age; a join is about completeness.** The instance roster reused an
+    answer for fifteen seconds, which is right for "is this snapshot stale" and wrong for "does this
+    snapshot describe everyone in the room" — so somebody walking in got a bare name until the
+    screen was rebuilt, and the effect that fired on their arrival was declined for being too soon.
+    An answer that does not describe a player the log is reporting is now treated as incomplete
+    rather than recent: it skips the window, subject to a three-second floor so forty people loading
+    into a fresh instance is one request and not forty. A request the floor declines is **re-armed
+    for the moment it stops being declined**, because otherwise a join inside the floor is the same
+    bug three seconds to the left. Only ids count toward "missing" — a log line with no user id
+    could never be looked up and would hold the refetch permanently open.
 
 29. **Notifications are backfilled over REST, not sourced from the socket alone.** The pipeline is
     the reason the screen is live; it is not, and cannot be, the reason it is *correct*. Both
@@ -384,6 +394,11 @@ Empirical notes. Add to this as you hit things — especially where the plan tur
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
 
+- **An `$effect` that fires correctly still does nothing if the thing it calls declines.** The
+  roster's refetch-on-join was wired up and working — the effect ran on every arrival — and the
+  rate limit inside `ensure` swallowed it, so the feature looked implemented and never once ran.
+  Nothing pointed at the gap: no error, no log, and the data appeared a moment later if you left
+  the screen and came back. When a guard and a trigger disagree, the guard wins silently.
 - **Two singleton dialogs are two dialogs.** Each of the three entity modals was independently
   correct — one instance, mounted once, re-targeted by callers — and the bug was in the space
   between them: nothing said only one may be on screen. Opening a group from a profile mounted a

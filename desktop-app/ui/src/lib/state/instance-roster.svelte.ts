@@ -117,6 +117,21 @@ export function rosterUnavailableText(reason: RosterUnavailable, filled = false)
 /** How long an answer is reused before a new request is allowed. */
 const FRESH_MS = 15_000;
 
+/**
+ * The floor under a refetch driven by somebody new being in the room.
+ *
+ * A join is not "the snapshot is fifteen seconds old", it is "the snapshot is missing a person",
+ * and waiting out `FRESH_MS` for that is what left a new arrival with a bare name until the screen
+ * was rebuilt. So an undescribed player skips the freshness window — but not all the way to zero:
+ * forty people loading into a fresh instance is forty changes to the roster in a second or two, and
+ * that has to collapse into one request rather than forty.
+ *
+ * When the floor does decline a request, a timer picks it up at the deadline. That matters more
+ * than the number: without it a person who joins during the floor is undescribed with nothing left
+ * to ask again, which is the original bug moved three seconds to the left.
+ */
+const JOIN_FLOOR_MS = 3_000;
+
 function keyFor(location: string, accountId: string | null): string {
   // `\0` as the separator, written as an escape rather than as a literal NUL byte. The raw byte
   // was in this file, and it made every tool treat the source as binary — `grep -r` skipped it
@@ -135,6 +150,8 @@ function unavailableReason(error: unknown): RosterUnavailable | null {
 class InstanceRosterState {
   readonly #byKey = new SvelteMap<string, RosterEntry>();
   readonly #inFlight = new Set<string>();
+  /** Pending join-driven retries, one per instance. See `#armRetry`. */
+  readonly #retries = new Map<string, ReturnType<typeof setTimeout>>();
 
   /**
    * What is known about `location` right now. Pure — safe to call from a `$derived`. It never
@@ -149,6 +166,10 @@ class InstanceRosterState {
    * Fetches attributes for `location` unless a recent answer is already held. Call from an
    * `$effect` that reads the location, the account, and the roster size — a player joining is the
    * one event that reliably invalidates an otherwise fine snapshot.
+   *
+   * "Unless a recent answer is already held" has an exception, and it is the point of the freshness
+   * window rather than a hole in it: an answer that does not describe somebody standing in the room
+   * is not a recent answer, it is an incomplete one. See `JOIN_FLOOR_MS`.
    */
   ensure(
     location: string | null,
@@ -167,11 +188,20 @@ class InstanceRosterState {
 
     const existing = this.#byKey.get(key);
     if (existing !== undefined && !force) {
-      const age = existing.fetchedAt === null ? 0 : Date.now() - existing.fetchedAt;
-      if (existing.fetchedAt !== null && age < FRESH_MS) return;
-      // A daemon that does not have the route will not grow one between two clicks; retrying it
-      // every fifteen seconds for the life of the screen is pure noise.
+      // First, and unconditionally: a daemon that does not have the route will not grow one
+      // because somebody walked into a room. Below the freshness check this would be skippable.
       if (existing.reason === "no-route") return;
+
+      const age = existing.fetchedAt === null ? 0 : Date.now() - existing.fetchedAt;
+      const window = this.#missesSomeone(existing, observedIds) ? JOIN_FLOOR_MS : FRESH_MS;
+      if (existing.fetchedAt !== null && age < window) {
+        // Declined, but not dropped: a request refused for being too soon is re-armed for the
+        // moment it stops being too soon. `#armRetry` collapses a burst onto one deadline.
+        if (window === JOIN_FLOOR_MS) {
+          this.#armRetry(key, location, accountId, observedIds, window - age);
+        }
+        return;
+      }
     }
 
     void this.#load(key, location, accountId, observedIds);
@@ -184,6 +214,54 @@ class InstanceRosterState {
     observedIds: readonly string[] = [],
   ): void {
     this.ensure(location, accountId, observedIds, true);
+  }
+
+  /**
+   * Whether anyone the log has identified is absent from what was fetched.
+   *
+   * Ids only. A log line with no user id cannot be looked up individually, so its row would be
+   * "missing" on every single call and would hold the refetch permanently open — the roster size
+   * that the caller's `$effect` also watches is what covers those joins, once.
+   */
+  #missesSomeone(entry: RosterEntry, observedIds: readonly string[]): boolean {
+    if (observedIds.length === 0) return false;
+    const described = new Set(entry.users.map((user) => user.id));
+    return observedIds.some((id) => !described.has(id));
+  }
+
+  /**
+   * Re-arms a declined request for the end of its floor.
+   *
+   * One timer per instance, replaced rather than stacked, and always with the *remaining* delay —
+   * so ten people loading in over two seconds move the ids without moving the deadline, and the
+   * whole burst costs one request.
+   */
+  #armRetry(
+    key: string,
+    location: string,
+    accountId: string | null,
+    observedIds: readonly string[],
+    delay: number,
+  ): void {
+    this.#clearRetry(key);
+    const ids = [...observedIds];
+    this.#retries.set(
+      key,
+      setTimeout(
+        () => {
+          this.#retries.delete(key);
+          this.ensure(location, accountId, ids);
+        },
+        Math.max(delay, 0),
+      ),
+    );
+  }
+
+  #clearRetry(key: string): void {
+    const timer = this.#retries.get(key);
+    if (timer === undefined) return;
+    clearTimeout(timer);
+    this.#retries.delete(key);
   }
 
   #ensureEntry(key: string): RosterEntry {
@@ -215,20 +293,41 @@ class InstanceRosterState {
   ): Promise<void> {
     const entry = this.#ensureEntry(key);
     this.#inFlight.add(key);
+    // A request is happening now, so a timer waiting to ask for the same thing is redundant.
+    this.#clearRetry(key);
     // A refresh keeps the old rows on screen while it runs, so the chips do not blink out and
     // back for a request that is going to return the same answer.
     if (entry.fetchedAt === null) entry.status = "loading";
 
     try {
       const answer = await api.instanceUsers(location, accountId);
-      entry.users = answer.source === "instance" ? answer.users : [];
-      entry.status = answer.source === "instance" ? "ready" : "unavailable";
-      entry.reason = answer.source === "instance" ? null : "not-owner";
+      if (answer.source === "instance") {
+        entry.users = answer.users;
+        entry.status = "ready";
+        entry.reason = null;
+        entry.filledIndividually = false;
+      } else {
+        /*
+         * Keep what the per-user fallback already established rather than blanking it.
+         *
+         * This was invisible while a refetch happened at most every fifteen seconds — the chips
+         * were rebuilt from scratch and looked the same. Now that one person walking in drives a
+         * refetch, blanking would mean re-reading the entire room every time anybody joined, and
+         * the chips on eighty rows would drop out and come back on each one.
+         *
+         * People who have left stay in the list. They decorate nothing, because `mergeRoster` only
+         * ever looks up rows the log is still reporting, so this is a per-instance cache and not a
+         * roster — the file's first rule, that nothing here may add a person, still holds.
+         */
+        entry.status = "unavailable";
+        entry.reason = "not-owner";
+        if (!entry.filledIndividually) entry.users = [];
+      }
       entry.error = null;
       entry.fetchedAt = answer.fetchedAt;
-      entry.filledIndividually = false;
 
-      // Only when the cheap path came back empty-handed, and only for people it did not describe.
+      // Only when the cheap path came back empty-handed, and only for people it did not describe —
+      // which, with the list above kept, is usually just whoever arrived since the last call.
       if (answer.source !== "instance" && observedIds.length > 0) {
         const described = new Set(entry.users.map((user) => user.id));
         const wanted = observedIds.filter((id) => !described.has(id));
@@ -243,8 +342,13 @@ class InstanceRosterState {
     } catch (cause) {
       if (isAbort(cause)) return;
       const reason = unavailableReason(cause);
-      entry.users = [];
-      entry.filledIndividually = false;
+      /*
+       * What was read stays read. A failed attempt is a fact about this attempt — a blip, or an
+       * account signing out — and not grounds to withdraw chips that were true a moment ago; the
+       * sentence under the toolbar is what explains the gap. This mattered less when a fetch ran
+       * every fifteen seconds and matters now that a join drives one: a single dropped request
+       * would otherwise strip every chip in the room.
+       */
       entry.fetchedAt = Date.now();
       if (reason !== null) {
         entry.status = "unavailable";
@@ -261,6 +365,7 @@ class InstanceRosterState {
   }
 
   clear(): void {
+    for (const key of [...this.#retries.keys()]) this.#clearRetry(key);
     this.#byKey.clear();
   }
 }

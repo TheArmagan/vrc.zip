@@ -188,7 +188,16 @@ function authorize(
   // `security: []` in the spec means VRChat itself serves this without a session — but only a read
   // gets the benefit of that. See `UNAUTHENTICATED_METHODS`.
   if (route.security.length === 0 && UNAUTHENTICATED_METHODS.has(route.method.toUpperCase())) {
-    return { grant: null };
+    // **Never refused, only downgraded.** A public read is upgraded to the bound account when the
+    // caller presents a grant that carries the route's scope, and falls back to anonymous otherwise.
+    //
+    // Both directions matter, and images are where both show up at once. VRCX renders avatars from
+    // `<img>` tags whose cookie jar never saw the login, so demanding a grant made every picture a
+    // 401 — that is the downgrade. But an image the account can see and the public cannot needs the
+    // session, so a caller that *does* present one should get it — that is the upgrade. Refusing
+    // would break the first case; using the account unconditionally would let an app without
+    // `files:read` see private content through a route that skips the scope check.
+    return { grant: optionalGrant(route, request, deps) };
   }
 
   const token = authCookie(request.headers.get("cookie"));
@@ -213,6 +222,23 @@ function authorize(
   }
 
   return { grant };
+}
+
+/** A grant good enough to act under on a public read, or null to go anonymous. */
+function optionalGrant(
+  route: Route,
+  request: PassthroughRequest,
+  deps: PassthroughDeps,
+): GrantRow | null {
+  const token = authCookie(request.headers.get("cookie"));
+  if (token === null) return null;
+
+  const grant = deps.grants.grantByTokenHash(hashProxyToken(token));
+  if (grant === null) return null;
+
+  // The scope is still checked, because the account's session is what makes private content
+  // visible. An app without it is not refused — it simply sees what anyone would.
+  return parseScopes(grant.scopes).includes(route.scope) ? grant : null;
 }
 
 /** The `auth` cookie's value out of a `Cookie` header, or null. */

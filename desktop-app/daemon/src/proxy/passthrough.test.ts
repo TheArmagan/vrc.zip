@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { gzipSync } from "node:zlib";
 import { ROUTES, type Route } from "@vrcz/api";
-import { CookieJar } from "../accounts/cookie-jar.ts";
+import { type Cookie, CookieJar } from "../accounts/cookie-jar.ts";
 import { RateLimiter } from "../net/rate-limiter.ts";
 import type { RequestContext } from "../net/request.ts";
 import { hashProxyToken, mintProxyToken } from "../security/proxy-tokens.ts";
@@ -12,7 +12,7 @@ import {
   type PassthroughRequest,
   passthrough,
 } from "./passthrough.ts";
-import { matchRoute } from "./route-table.ts";
+import { matchRoute, SUPPLEMENTAL_ROUTES } from "./route-table.ts";
 
 /**
  * The pass-through's four rules, one describe block each.
@@ -22,7 +22,11 @@ import { matchRoute } from "./route-table.ts";
  * byte-for-byte, and that the app's own `Cookie` and `User-Agent` never reach it.
  */
 
-const ROUTE_BY_ID = new Map(ROUTES.map((route) => [route.operationId, route]));
+// The supplement is included, because the file and image download routes only exist there — the
+// pinned spec does not describe the URLs VRChat puts in its own responses. See `route-table.ts`.
+const ROUTE_BY_ID = new Map(
+  [...ROUTES, ...SUPPLEMENTAL_ROUTES].map((route) => [route.operationId, route]),
+);
 
 function route(operationId: string): Route {
   const found = ROUTE_BY_ID.get(operationId);
@@ -78,13 +82,19 @@ function harness(options: { grant?: GrantRow | null; signedIn?: boolean } = {}):
   });
 
   const limiter = new RateLimiter();
-  const context = (accountId: string): RequestContext => ({
+  // The signed-in account carries a real session; the anonymous context has an empty jar of its own,
+  // exactly as the composition root builds them. Giving both the same jar would make every
+  // "did this go out anonymously" assertion vacuous.
+  const context = (accountId: string, cookies: Cookie[]): RequestContext => ({
     accountId,
-    jar: new CookieJar([{ name: "auth", value: "authcookie_REAL", expiresAt: null }]),
+    jar: new CookieJar(cookies),
     userAgent: "vrc.zip/0.1.0 (me@example.com)",
     limiter,
     baseUrl: `http://127.0.0.1:${String(upstream.port)}`,
   });
+  const signedIn = (): RequestContext =>
+    context("usr_a", [{ name: "auth", value: "authcookie_REAL", expiresAt: null }]);
+  const anonymous = (): RequestContext => context("vrczip:anonymous", []);
 
   const touched: string[] = [];
   return {
@@ -93,8 +103,8 @@ function harness(options: { grant?: GrantRow | null; signedIn?: boolean } = {}):
         grantByTokenHash: () => options.grant ?? null,
         touchGrant: (id) => void touched.push(id),
       },
-      context: () => (options.signedIn === false ? null : context("usr_a")),
-      anonymousContext: () => context("vrczip:anonymous"),
+      context: () => (options.signedIn === false ? null : signedIn()),
+      anonymousContext: anonymous,
     },
     seen: () => seen,
     touched,
@@ -148,8 +158,9 @@ describe("unauthenticated operations", () => {
     const h = harness();
     try {
       await passthrough(route("getConfig"), request(), h.deps);
-      // The anonymous context in the composition root has its own empty jar; this harness gives it
-      // a populated one deliberately, so the assertion is about the *request*, not the fixture.
+      // Tying a public call to a real user's session buys nothing and says who they are.
+      expect(h.seen()?.cookie).toBeNull();
+      // Still our own honest User-Agent, which is the half VRChat does require.
       expect(h.seen()?.userAgent).toBe("vrc.zip/0.1.0 (me@example.com)");
     } finally {
       h.close();
@@ -506,5 +517,62 @@ describe("the image and file routes the spec omits", () => {
     // `tag: "files"` is what `passthrough` reads to pick the rate class. A screen full of avatars
     // charged to the API bucket queues presence and friend polling behind pictures.
     expect(matchRoute("GET", "/image/file_a/1/256")?.route.tag).toBe("files");
+  });
+});
+
+describe("public reads downgrade rather than refuse", () => {
+  const image = route("downloadImageVersion");
+  const path = "/image/file_a/1/256";
+
+  test("an image with no cookie at all is served, not 401'd", async () => {
+    // VRCX renders avatars from <img> tags whose cookie jar never saw the login. VRChat itself
+    // answers these unauthenticated — a bogus id gets 404 File not found, never 401 — so demanding
+    // a grant here made every picture in the client a 401.
+    const h = harness();
+    try {
+      const response = await passthrough(image, request({ path }), h.deps);
+      expect(response.status).toBe(203);
+      expect(h.seen()?.path).toBe(path);
+      expect(h.touched).toEqual([]);
+    } finally {
+      h.close();
+    }
+  });
+
+  test("a caller presenting a grant with files:read gets the account's session", async () => {
+    // The upgrade half: an image the account can see and the public cannot needs the cookie jar.
+    const token = mintProxyToken().token;
+    const h = harness({ grant: grantWith(["files:read"], token) });
+    try {
+      const response = await passthrough(
+        image,
+        request({ path, headers: new Headers({ cookie: `auth=${token}` }) }),
+        h.deps,
+      );
+      expect(response.status).toBe(203);
+      expect(h.seen()?.cookie).toBe("auth=authcookie_REAL");
+      expect(h.touched).toEqual(["grant_1"]);
+    } finally {
+      h.close();
+    }
+  });
+
+  test("a grant without files:read sees what anyone would, and is not refused", async () => {
+    // Never 403 on a route VRChat does not gate — but never lend it the account's session either,
+    // or a scope check would be bypassable through any public route.
+    const token = mintProxyToken().token;
+    const h = harness({ grant: grantWith(["friends:read"], token) });
+    try {
+      const response = await passthrough(
+        image,
+        request({ path, headers: new Headers({ cookie: `auth=${token}` }) }),
+        h.deps,
+      );
+      expect(response.status).toBe(203);
+      expect(h.seen()?.cookie).toBeNull();
+      expect(h.touched).toEqual([]);
+    } finally {
+      h.close();
+    }
   });
 });

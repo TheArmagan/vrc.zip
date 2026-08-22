@@ -91,14 +91,18 @@ test("with nobody watching, it notifies and opens the consent tab", async () => 
   detach();
 });
 
-test("with the UI connected, it stays out of the way entirely", async () => {
-  // The app raises its own sheet and its own Web Notification. A second surface competing with it,
-  // plus an unbidden browser tab, is the kind of help that trains people to dismiss things unread.
+test("with the UI connected, it still notifies but does not open a tab", async () => {
+  // The regression this encodes: a connected UI client only means a browser tab holds the socket,
+  // not that anyone is looking at it. Someone logging into a VRChat app is usually in a headset,
+  // and the UI's own Web Notification needs a browser permission most people never grant. Staying
+  // silent left a login waiting for a code nobody was ever shown.
   const detach = attach({ uiConnected: true });
   open();
   await settle();
 
-  expect(notified).toEqual([]);
+  expect(notified).toHaveLength(1);
+  expect(notified[0]?.body).toContain("424242");
+  // The tab is the intrusive half, and the app already has its own sheet up.
   expect(opened).toEqual([]);
   detach();
 });

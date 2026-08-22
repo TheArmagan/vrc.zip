@@ -834,6 +834,32 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     denials (`PUT /users/{id}/delete`, `DELETE /auth/twofactorauth`) are unaffected: they are route
     table flags, refused regardless of what was granted.
 
+84. **A public read downgrades to anonymous; it is never refused.** The file and image download
+    routes were marked `security: ["authCookie"]` on the guess that images need a session, and that
+    made every picture in VRCX a 401 — its renderer loads avatars from `<img>` tags whose cookie jar
+    never saw the login. The guess was checkable and wrong: an unauthenticated request for a
+    well-formed but nonexistent id answers `404 File not found`, not `401`, so VRChat does not gate
+    these on a session at all.
+
+    The rule is now two-directional rather than a flag. A caller presenting a grant that carries the
+    route's scope gets the bound account's session, because an image the account can see and the
+    public cannot needs it; anyone else gets an anonymous request, which is what VRChat serves them
+    anyway. Refusing would break the cookie-less case, and lending the account's session
+    unconditionally would let an app without `files:read` read private content through a route that
+    skips the scope check. **Measure before marking a route authenticated** — the spec's `security`
+    list is a description of intent, not of behaviour.
+
+85. **The consent notification now always fires; only the browser tab is conditional.** It used to
+    skip both channels when a UI client was connected, on the reasoning that the app raises its own
+    sheet. But "a UI client is connected" only means a browser tab holds the event-stream socket — it
+    says nothing about whether anyone is looking at it, and the person logging into a VRChat app is
+    usually in a headset. The UI's own Web Notification was meant to cover that and cannot: it fires
+    only from a loaded page and only with a browser permission most people are never prompted for.
+    The observed result was a VRCX login sitting there waiting for a code nobody was ever shown.
+    A toast is cheap and does not steal focus, so a duplicate of a visible sheet is a far better
+    failure than silence. Opening a tab on top of an app the user already has open stays conditional,
+    because *that* is the intrusive half.
+
 ---
 
 ## Gotchas

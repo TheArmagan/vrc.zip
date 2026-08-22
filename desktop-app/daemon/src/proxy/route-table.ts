@@ -59,8 +59,14 @@ interface CompiledRoute {
  *
  * Additions are held to the same bar as the generated table: exactly one scope, an honest `tag`
  * (`files`, so the pass-through charges them to the file rate bucket rather than the API one), and
- * `security` describing what VRChat really requires — these need the auth cookie, which is the whole
- * reason `net/image-cache.ts` exists.
+ * `security` describing what VRChat really requires.
+ *
+ * **`security: []` here is measured, not assumed.** An unauthenticated request for a well-formed but
+ * nonexistent id answers `404 File not found`, not `401` — so VRChat does not gate these on a
+ * session, and a client rendering an avatar from an `<img>` tag with no cookie in its jar is doing
+ * something VRChat supports. Marking them authenticated made every image in VRCX a 401. The scope is
+ * still `files:read`, because the pass-through upgrades to the bound account when a grant carrying
+ * it is presented; see `proxy/passthrough.ts`.
  */
 export const SUPPLEMENTAL_ROUTES: readonly Route[] = [
   {
@@ -69,7 +75,7 @@ export const SUPPLEMENTAL_ROUTES: readonly Route[] = [
     pathTemplate: "/file/{fileId}/{versionId}/{variant}",
     operationId: "downloadFileVersion",
     tag: "files",
-    security: ["authCookie"],
+    security: [],
     scope: "files:read",
     hardDenied: false,
   },
@@ -78,7 +84,7 @@ export const SUPPLEMENTAL_ROUTES: readonly Route[] = [
     pathTemplate: "/image/{fileId}/{versionId}/{resolution}",
     operationId: "downloadImageVersion",
     tag: "files",
-    security: ["authCookie"],
+    security: [],
     scope: "files:read",
     hardDenied: false,
   },

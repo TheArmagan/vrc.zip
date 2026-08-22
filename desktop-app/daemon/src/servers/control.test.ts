@@ -6,6 +6,8 @@ import { TOKEN_HEADER } from "../security/guards.ts";
 import { generateSessionToken } from "../security/session-token.ts";
 import type { ControlDeps } from "./control.ts";
 import {
+  type AppAuditEntry,
+  type AuditQuery,
   type ControlAccount,
   ControlError,
   createControlApp,
@@ -42,6 +44,23 @@ const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
 const ICON_URL = "https://api.vrchat.cloud/api/1/file/file_icon/1/256";
 /** The non-thumbnail original behind ICON_URL — what "open image in a new tab" opens. */
 const ICON_URL_FULL = "https://api.vrchat.cloud/api/1/file/file_icon/1/1024";
+
+/** The one grant `fakeDeps` knows about, so an unknown id has something to be unknown against. */
+const GRANT_ID = "grant_00000000";
+
+const AUDIT_ENTRY: AppAuditEntry = {
+  id: 7,
+  ts: 1_700_000_000_000,
+  grantId: GRANT_ID,
+  accountId: "usr_00000000-0000-0000-0000-000000000000",
+  appName: "Test App",
+  method: "PUT",
+  path: "/api/1/user/usr_subject",
+  operationId: "updateUser",
+  scope: "user.write",
+  outcome: "allowed",
+  status: 200,
+};
 
 const ACCOUNT: ControlAccount = {
   id: "usr_00000000-0000-0000-0000-000000000000",
@@ -317,6 +336,7 @@ interface Recorder {
   userBatches: { userIds: string[]; accountId: string | null }[];
   mutualLookups: { userId: string; accountId: string | null; page: PageQuery }[];
   noteWrites: { userId: string; accountId: string | null; note: string }[];
+  auditQueries: { grantId: string; query: AuditQuery }[];
   removed: string[];
   selfInvites: { accountId: string; target: InviteTarget }[];
   listeners: ((event: StreamEvent) => void)[];
@@ -343,6 +363,7 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     userBatches: [],
     mutualLookups: [],
     noteWrites: [],
+    auditQueries: [],
     removed: [],
     selfInvites: [],
     listeners: [],
@@ -373,6 +394,11 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     listConnectedApps: async () => [],
     revokeConnectedApp: async () => {},
     revokeAllConnectedApps: async () => 0,
+    listAppAudit: async (grantId, query) => {
+      seen.auditQueries.push({ grantId, query });
+      if (grantId !== GRANT_ID) throw new ControlError(404, "unknown_app");
+      return [AUDIT_ENTRY];
+    },
     streamClientCount: () => 0,
     login: async ({ username }) =>
       username === "needs2fa"
@@ -1617,5 +1643,47 @@ describe("GET /api/image", () => {
     const res = await call(deps, imagePath(ICON_URL));
     expect(res.status).toBe(503);
     expect(await res.json()).toMatchObject({ error: "no_account" });
+  });
+});
+
+describe("GET /api/apps/:id/audit", () => {
+  test("returns the app's rows as the wire shape", async () => {
+    const { deps, seen } = fakeDeps();
+    const res = await call(deps, `/api/apps/${GRANT_ID}/audit`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([AUDIT_ENTRY]);
+    expect(seen.auditQueries).toEqual([
+      { grantId: GRANT_ID, query: { limit: 100, before: undefined } },
+    ]);
+  });
+
+  test("an app that has changed nothing is an empty 200, not a 404", async () => {
+    const { deps } = fakeDeps({ listAppAudit: async () => [] });
+    const res = await call(deps, `/api/apps/${GRANT_ID}/audit`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([]);
+  });
+
+  test("limit is clamped and before is passed through", async () => {
+    const { deps, seen } = fakeDeps();
+    await call(deps, `/api/apps/${GRANT_ID}/audit?limit=5&before=1699999999999`);
+    // Above the ceiling, and nonsense, both land on the same defaults the feed uses.
+    await call(deps, `/api/apps/${GRANT_ID}/audit?limit=9999`);
+    await call(deps, `/api/apps/${GRANT_ID}/audit?limit=nonsense`);
+    await call(deps, `/api/apps/${GRANT_ID}/audit?limit=0`);
+
+    expect(seen.auditQueries.map((entry) => entry.query)).toEqual([
+      { limit: 5, before: 1_699_999_999_999 },
+      { limit: 500, before: undefined },
+      { limit: 100, before: undefined },
+      { limit: 100, before: undefined },
+    ]);
+  });
+
+  test("an unknown grant id is a 404", async () => {
+    const { deps } = fakeDeps();
+    const res = await call(deps, "/api/apps/grant_nonexistent/audit");
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ error: "unknown_app" });
   });
 });

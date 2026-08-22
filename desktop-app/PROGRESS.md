@@ -206,7 +206,7 @@ handshake, because the alternative is a login flow that mints credentials with n
       onto `:7774`; every other host is a blind byte pipe. Numbered out of order because it is a
       delivery mechanism for the mirror rather than a step toward it. Decisions 70–73.
 
-- [~] **2.8 Rate budgets + audit + kill switch** — the **kill switch, the Connected apps page, and
+- [x] **2.8 Rate budgets + audit + kill switch** — the **kill switch, the Connected apps page, and
       per-account/per-grant rate metering are done**: `GET /api/apps`, `POST /api/apps/:id/revoke`, `POST /api/apps/revoke-all`, and
       `ui/src/screens/ConnectedAppsScreen.svelte` behind `#/apps`. Revocation is per grant and closes
       the pipeline sockets that grant holds, since a socket authenticated once at its handshake would
@@ -219,6 +219,14 @@ handshake, because the alternative is a login flow that mints credentials with n
       scope; and `rateLimit.remaining`/`queued` become real numbers off the limiter while the single
       gauge becomes the three ceilings that actually exist. Also here: the flaky control-deps test
       (decision 103) and the roster cap + low-priority budget (decision 102).
+      **Audit rows and budgets are now built** (decisions 114–116): every mutating call and every
+      read behind a dangerous scope writes an `audit_log` row attributed to the app, readable at
+      `GET /api/apps/:id/audit` and shown per card on the Connected apps page; the three risky scopes
+      carry a rolling hourly allowance per grant, refused with a 429 that never reaches VRChat.
+      **Still outstanding in 2.8:** the per-app *override* for those allowances — decision 95 asks for
+      them to be editable on the Connected apps page, and today they are the defaults only. The
+      honest gauge from decision 100 (`rateLimit.remaining`/`queued` made real, one gauge becoming
+      three) is also still outstanding.
 - [x] **2.9 Pipeline mirror** (`proxy/pipeline-mirror.ts`) — `wss://…:7774/` speaking VRChat's
       protocol, filtered per event type by the grant's scopes, fed from the daemon's single real
       socket per account. Frames are re-emitted **verbatim** and scanned before forwarding; a dead
@@ -1183,6 +1191,43 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      are therefore carried on the entry and excluded from that check: a deferred id is a decision,
      not a gap. Anything a cap defers has to be invisible to whatever the code uses to detect
      incompleteness, and that check is rarely in the same file as the cap.
+
+114. **The audit log covers mutations *plus* dangerous-scope reads, and skips ordinary reads.**
+     PLAN.md asks for "every mutating call", which reads as complete while missing what someone
+     would actually go looking for: an app quietly enumerating the user's moderation history writes
+     nothing under a write-only rule, because reading is all it ever did. The line is therefore
+     anything that changes something, plus anything a `dangerous` scope guards — the same set the
+     consent sheet already renders in its own block, which is a good sign it is the right set.
+     Ordinary reads stay out on purpose: `GET /users/{id}` at eighty a room would bury the rows that
+     mean something under rows that mean nothing, on a table nothing prunes, answering a question
+     `VRCZIP_PROXY_LOG` already answers while debugging. Refusals are audited too — `hard_denied`
+     is forced regardless of the rule, since an attempt to delete the user's account through the
+     mirror is the most interesting row the table can hold. A request carrying *no* credentials
+     writes nothing: there is nothing to attribute it to beyond a User-Agent anyone can type, and
+     the handshake produces them legitimately.
+
+115. **The per-grant budget is counted from the audit log, not from a counter in memory.** An hourly
+     allowance held in memory resets on every daemon restart, which makes it a limit an app outlasts
+     by being installed on a machine that reboots. The audit log is already the durable record of
+     exactly these calls, so a second counter would be a second thing to keep in agreement with the
+     first — and nothing prunes `audit_log`, so the window cannot be silently truncated out from
+     under the count. Only `outcome = 'allowed'` rows count: a call refused for want of a scope, or
+     by this budget itself, never reached VRChat and nobody saw it, so counting refusals would let
+     an app exhaust its own allowance by being denied and make the budget permanent once it first
+     tripped. The refusal is a 429 in vrc.zip's own envelope — VRChat's shape, so existing client
+     backoff reads it, with `vrczip: true` and `retryAfterMs` so an app can tell "the user's proxy is
+     pacing me" from "VRChat is angry".
+
+116. **The audit row is written *before* the upstream call, and that ordering is the budget's
+     correctness rather than a detail.** Found by writing the test: the check reads a count and the
+     call that follows takes time, so recording the spend afterwards let a hundred simultaneous
+     invites all read the same pre-spend number and all pass. The test that exposed it allowed 40
+     calls against a limit of 30. Writing the row first makes it a *reservation* — the next call,
+     concurrent or not, counts one already committed — and `finishAudit` fills in what VRChat
+     answered once it does. A row left with a null status is a call that went out and whose answer
+     was never seen, which is a more honest record than no row at all. The general shape is worth
+     keeping: **any quota checked before an awaited operation and recorded after it is not a quota**,
+     and a test that awaits its calls in sequence will never notice.
 
 ---
 

@@ -315,6 +315,20 @@ export const SQL = {
   listAudit: `SELECT * FROM audit_log WHERE ts < ? ORDER BY ts DESC LIMIT ?`,
   listAuditForGrant: `
     SELECT * FROM audit_log WHERE grant_id = ? AND ts < ? ORDER BY ts DESC LIMIT ?`,
+  /*
+   * What one grant has spent against one scope inside a window. The per-grant budget is measured
+   * with this rather than with a counter in memory, so it survives a restart — see
+   * `PassthroughGrantStore.countGrantScopeUsage`.
+   *
+   * `outcome = 'allowed'` is the whole correctness of it: a call refused for want of a scope, or
+   * refused by this budget itself, never reached VRChat and nobody saw it. Counting refusals would
+   * let an app exhaust its own allowance by being denied, and would make the budget permanent once
+   * it first tripped.
+   */
+  finishAudit: `UPDATE audit_log SET status = ? WHERE id = ?`,
+  countGrantScopeUsage: `
+    SELECT COUNT(*) AS n FROM audit_log
+    WHERE grant_id = ? AND scope = ? AND outcome = 'allowed' AND ts >= ?`,
 
   // -- meta / housekeeping --------------------------------------------------
   getMeta: `SELECT value FROM meta WHERE key = ?`,

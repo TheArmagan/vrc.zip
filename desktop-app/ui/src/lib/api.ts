@@ -16,6 +16,8 @@
 
 import {
   type AccountConnection,
+  type AppAuditEntry,
+  type AuditOutcome,
   type ControlAccount,
   type DaemonStatus,
   EVENT_FAMILIES,
@@ -67,6 +69,8 @@ import { getToken } from "./session.ts";
  */
 export {
   type AccountConnection,
+  type AppAuditEntry,
+  type AuditOutcome,
   type ControlAccount as Account,
   type DaemonStatus,
   EVENT_FAMILIES,
@@ -1038,6 +1042,23 @@ export const api = {
 
     revokeAll: (): Promise<{ revoked: number }> =>
       request<{ revoked: number }>("/apps/revoke-all", { method: "POST" }),
+
+    /**
+     * What one app has actually done, newest first.
+     *
+     * Only mutating calls are recorded, so an empty list means "this app has changed nothing", not
+     * "this app is idle". A grant the daemon has never issued is a 404; a revoked one still
+     * answers, because the log outlives the access.
+     */
+    audit: (
+      grantId: string,
+      query: { limit?: number; before?: number } = {},
+      signal?: AbortSignal,
+    ): Promise<AppAuditEntry[]> =>
+      request<AppAuditEntry[]>(`/apps/${encodeURIComponent(grantId)}/audit`, {
+        query: { limit: query.limit, before: query.before },
+        ...withSignal(signal),
+      }),
   },
 
   sessions: (signal?: AbortSignal): Promise<GameSession[]> =>

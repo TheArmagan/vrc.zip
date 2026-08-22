@@ -540,3 +540,52 @@ export interface StatusSnapshot {
 export interface DaemonStatus extends StatusSnapshot {
   readonly version: string;
 }
+
+// ---------------------------------------------------------------------------
+// The proxy audit log
+// ---------------------------------------------------------------------------
+
+/**
+ * What the proxy did with one call, in the store's own vocabulary.
+ *
+ * Widened to `string` for the same reason {@link EventKind} is: a daemon newer than this bundle may
+ * record an outcome this build has never heard of, and a row that cannot be labelled must still
+ * list rather than vanish out of the very log that exists to show it.
+ */
+export type AuditOutcome =
+  | "allowed"
+  | "denied_scope"
+  | "hard_denied"
+  | "denied_revoked"
+  | "rate_limited"
+  | "blocked_egress"
+  | (string & {});
+
+/**
+ * One mutating call an app made through the mirror, as `GET /apps/:id/audit` returns it.
+ *
+ * **Reads are deliberately not recorded** — see migration 003 — so this is a log of what an app
+ * *changed*, not of what it looked at. That is what makes it short enough to read: an app polling
+ * friends every ten seconds contributes nothing here, and the one time it accepted an invite does.
+ *
+ * `grantId` is null for a call that was refused before a grant could be attributed, which is why a
+ * row can exist that no app on the Connected apps page owns.
+ */
+export interface AppAuditEntry {
+  readonly id: number;
+  /** Unix milliseconds, integer. */
+  readonly ts: number;
+  readonly grantId: string | null;
+  readonly accountId: string | null;
+  /** Off the app's `User-Agent`, and a claim rather than a verified identity — as everywhere. */
+  readonly appName: string;
+  readonly method: string;
+  readonly path: string;
+  /** The route table's name for the operation, when one resolved. Null on a path with no route. */
+  readonly operationId: string | null;
+  /** The scope the call was checked against, or null when it never got that far. */
+  readonly scope: string | null;
+  readonly outcome: AuditOutcome;
+  /** The status the caller was given, or null when the call was refused before one was chosen. */
+  readonly status: number | null;
+}

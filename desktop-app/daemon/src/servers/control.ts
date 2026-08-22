@@ -1,5 +1,6 @@
 import {
   APP_VERSION,
+  type AppAuditEntry,
   type ControlAccount,
   type EventQuery,
   type FeedEvent,
@@ -48,6 +49,7 @@ import { hostGuard, originGuard, sessionAuth, type TokenSource } from "../securi
  * hand-copied sets had drifted into.
  */
 export type {
+  AppAuditEntry,
   ControlAccount,
   EventQuery,
   FeedEvent,
@@ -245,6 +247,18 @@ export interface MutualFriendPage {
    * claiming the list ended when it did not is not.
    */
   hasMore: boolean;
+}
+
+/**
+ * Paging for `GET /api/apps/:id/audit`. Already validated and clamped by the route.
+ *
+ * Keyed on a timestamp rather than an offset, exactly as the feed is: the audit log grows while the
+ * page is open, and an offset would re-show the row the reader just scrolled past.
+ */
+export interface AuditQuery {
+  readonly limit: number;
+  /** Unix milliseconds; return rows strictly older than this. Absent means "from now". */
+  readonly before?: number | undefined;
 }
 
 /** Paging for `GET /api/users/:id/mutual-friends`. Already validated and clamped by the route. */
@@ -783,6 +797,21 @@ export interface ControlDeps {
 
   /** The global kill switch. Returns how many live grants it closed. */
   revokeAllConnectedApps(): Promise<number>;
+
+  /**
+   * What one app has actually done — its rows of the proxy audit log, newest first.
+   *
+   * Scoped to a grant rather than served whole, because the question the Connected apps page asks
+   * is about one app: the revoke button beside it is a decision about that app, and a mixed log of
+   * every app's calls is not evidence for it.
+   *
+   * A **revoked** grant is still a valid id here: the log outlives the access, which is the point of
+   * keeping it. Throws `ControlError(404, "unknown_app")` only for a grant that never existed —
+   * an empty list is a normal answer for an app that has changed nothing.
+   *
+   * `query` has already been validated and clamped by the route.
+   */
+  listAppAudit(grantId: string, query: AuditQuery): Promise<AppAuditEntry[]>;
 
   /**
    * How many UI clients currently hold an event-stream socket.
@@ -1665,6 +1694,23 @@ export function createControlApp({ port, deps, token }: ControlAppOptions) {
      * not involve deleting a database file.
      */
     .get("/api/apps", async (c) => c.json(await deps.listConnectedApps()))
+
+    /*
+     * What one app has done, as against what it is allowed to do. The scope list above is a
+     * statement of permission; this is the record of use, and it is the half that tells a user
+     * whether an app has been doing anything with the access it holds.
+     *
+     * `limit` and `before` follow `GET /api/events` exactly — same clamp, same "strictly older
+     * than" cursor — so a list that pages here pages the way the feed already does.
+     */
+    .get("/api/apps/:id/audit", async (c) =>
+      c.json(
+        await deps.listAppAudit(c.req.param("id"), {
+          limit: clampLimit(c.req.query("limit")),
+          before: integerParam(c.req.query("before")),
+        }),
+      ),
+    )
 
     .post("/api/apps/:id/revoke", async (c) => {
       await deps.revokeConnectedApp(c.req.param("id"));

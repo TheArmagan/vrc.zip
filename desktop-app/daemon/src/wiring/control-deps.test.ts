@@ -2030,3 +2030,75 @@ describe("control deps: events", () => {
     h.stop();
   });
 });
+
+describe("control deps: app audit", () => {
+  test("reads back the stored rows, newest first, and 404s only for a grant that never existed", async () => {
+    const h = harness();
+    h.store.insertGrant({
+      id: "grant_a",
+      account_id: VIEWER,
+      app_name: "Test App",
+      app_version: "1.0.0",
+      app_contact: "test@example.invalid",
+      scopes: JSON.stringify(["user.write"]),
+      token_hash: "hash_a",
+      two_factor_hash: null,
+      created_at: T0,
+    });
+    // A second grant, so "scoped to this app" is provable rather than incidental.
+    h.store.insertGrant({
+      id: "grant_b",
+      account_id: VIEWER,
+      app_name: "Other App",
+      app_version: "1.0.0",
+      app_contact: "other@example.invalid",
+      scopes: "[]",
+      token_hash: "hash_b",
+      two_factor_hash: null,
+      created_at: T0,
+    });
+
+    for (const [index, grantId] of ["grant_a", "grant_a", "grant_b"].entries()) {
+      h.store.appendAudit({
+        ts: T0 + index,
+        grant_id: grantId,
+        account_id: VIEWER,
+        app_name: grantId === "grant_a" ? "Test App" : "Other App",
+        method: "PUT",
+        path: `/api/1/user/${SUBJECT}`,
+        operation_id: "updateUser",
+        scope: "user.write",
+        outcome: index === 1 ? "denied_scope" : "allowed",
+        status: index === 1 ? 403 : 200,
+      });
+    }
+
+    const rows = await h.deps.listAppAudit("grant_a", { limit: 10 });
+    expect(rows.map((row) => [row.ts, row.outcome, row.status])).toEqual([
+      [T0 + 1, "denied_scope", 403],
+      [T0, "allowed", 200],
+    ]);
+    expect(rows[0]).toMatchObject({
+      grantId: "grant_a",
+      accountId: VIEWER,
+      appName: "Test App",
+      method: "PUT",
+      operationId: "updateUser",
+      scope: "user.write",
+    });
+
+    // `before` is a strict "older than", exactly as the feed's cursor is.
+    expect(await h.deps.listAppAudit("grant_a", { limit: 10, before: T0 + 1 })).toHaveLength(1);
+    expect(await h.deps.listAppAudit("grant_a", { limit: 1 })).toHaveLength(1);
+
+    // A revoked grant still answers: the log outlives the access it records.
+    h.store.revokeGrant("grant_b", T0 + 100);
+    expect(await h.deps.listAppAudit("grant_b", { limit: 10 })).toHaveLength(1);
+
+    await expect(h.deps.listAppAudit("grant_missing", { limit: 10 })).rejects.toMatchObject({
+      status: 404,
+      code: "unknown_app",
+    });
+    h.stop();
+  });
+});

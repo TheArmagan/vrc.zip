@@ -22,6 +22,7 @@
 <script lang="ts">
 import KeyRoundIcon from "@lucide/svelte/icons/key-round";
 import RadioIcon from "@lucide/svelte/icons/radio";
+import ScrollTextIcon from "@lucide/svelte/icons/scroll-text";
 import ShieldAlertIcon from "@lucide/svelte/icons/shield-alert";
 import TrashIcon from "@lucide/svelte/icons/trash-2";
 import EmptyState from "$lib/components/EmptyState.svelte";
@@ -29,7 +30,7 @@ import SectionHeader from "$lib/components/SectionHeader.svelte";
 import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
 import { Separator } from "$lib/components/ui/separator/index.js";
-import { api, type ConnectedApp } from "$lib/api.ts";
+import { api, type AppAuditEntry, type ConnectedApp } from "$lib/api.ts";
 import Sparkline from "$lib/components/Sparkline.svelte";
 import { fullTimestamp, timeAgo } from "$lib/format.ts";
 import { clock } from "$lib/state/clock.svelte.ts";
@@ -81,6 +82,8 @@ async function revoke(app: ConnectedApp): Promise<void> {
     // Removed locally rather than by refetching: the answer is not in doubt, and a list that
     // flickers through a loading state on every revoke makes revoking several feel unreliable.
     apps = apps.filter((entry) => entry.id !== app.id);
+    forgetActivity(app.id);
+    if (expanded === app.id) expanded = null;
     // Its history must not outlive it: a revoked grant's id could be reused by nothing, but a
     // series nobody reads is one the live frame keeps advancing forever.
     rates.forgetGrant(app.id);
@@ -103,10 +106,80 @@ async function revokeAll(): Promise<void> {
     await api.apps.revokeAll();
     for (const entry of apps) rates.forgetGrant(entry.id);
     apps = [];
+    activity = {};
+    expanded = null;
   } catch (error) {
     actionError = error instanceof Error ? error.message : String(error);
   } finally {
     busy = null;
+  }
+}
+
+/**
+ * One app's audit rows, once someone has asked for them.
+ *
+ * Fetched on the click, never on render: this list is one request per card, and a page of six apps
+ * would otherwise spend six of them to fill panels nobody opened. The entry is kept after the
+ * panel closes so reopening it costs nothing.
+ */
+interface Activity {
+  loading: boolean;
+  error: string | null;
+  entries: AppAuditEntry[];
+}
+
+let activity = $state<Record<string, Activity>>({});
+/** One panel at a time. The card is already dense, and two open lists read as one long one. */
+let expanded = $state<string | null>(null);
+
+/** A card's worth of rows. Older ones are in the log; this panel is about what happened lately. */
+const ACTIVITY_LIMIT = 20;
+
+async function toggleActivity(app: ConnectedApp): Promise<void> {
+  if (expanded === app.id) {
+    expanded = null;
+    return;
+  }
+  expanded = app.id;
+  if (activity[app.id] !== undefined) return;
+
+  activity[app.id] = { loading: true, error: null, entries: [] };
+  try {
+    const entries = await api.apps.audit(app.id, { limit: ACTIVITY_LIMIT });
+    activity[app.id] = { loading: false, error: null, entries };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    activity[app.id] = { loading: false, error: message, entries: [] };
+  }
+}
+
+/** Forgets one app's rows without a `delete`, which Biome bans for the shape change it causes. */
+function forgetActivity(grantId: string): void {
+  activity = Object.fromEntries(Object.entries(activity).filter(([id]) => id !== grantId));
+}
+
+/**
+ * The store's outcome vocabulary in words a user has a chance with.
+ *
+ * An unrecognised outcome falls through as itself rather than as "unknown": a daemon newer than
+ * this bundle records outcomes this build has never heard of, and the raw word is still evidence.
+ */
+function outcomeLabel(outcome: string): string {
+  switch (outcome) {
+    case "allowed":
+      return "Allowed";
+    case "denied_scope":
+      return "Denied, no permission";
+    case "hard_denied":
+      return "Blocked by vrc.zip";
+    case "denied_revoked":
+      return "Denied, revoked";
+    case "rate_limited":
+      return "Rate limited";
+    case "blocked_egress":
+      return "Blocked, not VRChat";
+    default:
+      return outcome;
   }
 }
 
@@ -190,6 +263,7 @@ function ordinary(app: ConnectedApp): readonly { scope: string; description: str
           {@const plain = ordinary(entry)}
           <!-- `{@const}` is only legal as an immediate child of a block, hence up here. -->
           {@const history = rates.grant(entry.id)}
+          {@const rows = activity[entry.id]}
           <li class="rounded-lg border border-border bg-card p-4">
             <header class="flex items-start justify-between gap-3">
               <div class="min-w-0">
@@ -263,6 +337,56 @@ function ordinary(app: ConnectedApp): readonly { scope: string; description: str
                 <span class="tabular whitespace-nowrap text-xs text-muted-foreground">
                   {latest(history)}/s now · {windowTotal(history)} in the last minute
                 </span>
+              </div>
+
+              <!--
+                What it has done, as against what it may do. The scope badges above are a
+                permission; this is the record of use, and it is the half that turns "should I
+                revoke this?" into a question with evidence behind it. Only mutating calls are
+                recorded, so an empty panel means the app has changed nothing.
+              -->
+              <div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  class="-ml-2 h-7 px-2 text-xs"
+                  onclick={() => toggleActivity(entry)}
+                >
+                  <ScrollTextIcon class="size-3.5" />
+                  {expanded === entry.id ? "Hide recent activity" : "Recent activity"}
+                </Button>
+
+                {#if expanded === entry.id}
+                  {#if rows === undefined || rows.loading}
+                    <p class="px-2 py-1 text-xs text-muted-foreground">Loading…</p>
+                  {:else if rows.error !== null}
+                    <p class="px-2 py-1 text-xs text-destructive">{rows.error}</p>
+                  {:else if rows.entries.length === 0}
+                    <p class="px-2 py-1 text-xs text-muted-foreground">
+                      This app has not changed anything. Reading is not recorded.
+                    </p>
+                  {:else}
+                    <ul class="mt-1 flex flex-col divide-y divide-border rounded-md border border-border">
+                      {#each rows.entries as row (row.id)}
+                        <li class="flex items-baseline gap-2 px-2 py-1 text-xs">
+                          <span
+                            class="shrink-0 text-muted-foreground"
+                            title={fullTimestamp(row.ts)}>{timeAgo(row.ts, clock.now)}</span
+                          >
+                          <span class="tabular shrink-0 font-medium text-foreground">{row.method}</span>
+                          <span class="truncate text-muted-foreground" title={row.path}>{row.path}</span>
+                          <Badge
+                            variant={row.outcome === "allowed" ? "secondary" : "destructive"}
+                            class="ml-auto shrink-0"
+                            title={row.status === null ? undefined : `HTTP ${row.status}`}
+                          >
+                            {outcomeLabel(row.outcome)}
+                          </Badge>
+                        </li>
+                      {/each}
+                    </ul>
+                  {/if}
+                {/if}
               </div>
 
               <p class="text-xs text-muted-foreground">

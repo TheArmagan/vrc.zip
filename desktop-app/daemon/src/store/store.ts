@@ -547,9 +547,15 @@ export class Store {
     return stale.length;
   }
 
-  /** Records one mutating proxy call. Reads are deliberately not audited — see 003. */
-  appendAudit(entry: NewAuditEntry): void {
-    this.stmts.insertAudit.run(
+  /**
+   * Records one proxy call and returns its row id. See `isAuditable` for what earns a row.
+   *
+   * The id is what makes the row a **reservation** rather than only a record: the pass-through
+   * writes an allowed call before it goes out and fills the status in afterwards with `finishAudit`,
+   * so a per-grant budget counting these rows cannot be beaten by firing a hundred calls at once.
+   */
+  appendAudit(entry: NewAuditEntry): number {
+    const result = this.stmts.insertAudit.run(
       entry.ts,
       entry.grant_id,
       entry.account_id,
@@ -561,6 +567,12 @@ export class Store {
       entry.outcome,
       entry.status,
     );
+    return Number(result.lastInsertRowid);
+  }
+
+  /** Fills in what VRChat answered, for a row written before the call went out. */
+  finishAudit(id: number, status: number | null): void {
+    this.stmts.finishAudit.run(status, id);
   }
 
   listAudit(options: { grantId?: string; before?: number; limit?: number } = {}): AuditRow[] {
@@ -569,6 +581,10 @@ export class Store {
     return options.grantId === undefined
       ? this.stmts.listAudit.all(before, limit)
       : this.stmts.listAuditForGrant.all(options.grantId, before, limit);
+  }
+
+  countGrantScopeUsage(grantId: string, scope: string, since: number): number {
+    return this.stmts.countGrantScopeUsage.get(grantId, scope, since)?.n ?? 0;
   }
 
   // -- meta / housekeeping --------------------------------------------------
@@ -778,6 +794,8 @@ function prepareAll(db: Database) {
     >(SQL.insertAudit),
     listAudit: q<AuditRow, [number, number]>(SQL.listAudit),
     listAuditForGrant: q<AuditRow, [string, number, number]>(SQL.listAuditForGrant),
+    finishAudit: q<void, [number | null, number]>(SQL.finishAudit),
+    countGrantScopeUsage: q<{ n: number }, [string, string, number]>(SQL.countGrantScopeUsage),
 
     getMeta: q<{ value: string }, [string]>(SQL.getMeta),
     setMeta: q<void, [string, string]>(SQL.setMeta),

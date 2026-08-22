@@ -5,9 +5,11 @@ import { type Cookie, CookieJar } from "../accounts/cookie-jar.ts";
 import { RateLimiter } from "../net/rate-limiter.ts";
 import type { RequestContext } from "../net/request.ts";
 import { hashProxyToken, mintProxyToken } from "../security/proxy-tokens.ts";
-import type { GrantRow } from "../store/types.ts";
+import type { GrantRow, NewAuditEntry } from "../store/types.ts";
 import {
   authCookie,
+  BUDGET_WINDOW_MS,
+  DEFAULT_GRANT_BUDGETS,
   type PassthroughDeps,
   type PassthroughRequest,
   passthrough,
@@ -52,6 +54,8 @@ interface Harness {
   seen: () => Seen | null;
   /** Grant ids marked as used. Empty is the correct answer for an unauthenticated operation. */
   touched: string[];
+  /** Audit rows written, in order. See `isAuditable` — an ordinary read writes none. */
+  audited: NewAuditEntry[];
   close: () => void;
 }
 
@@ -97,17 +101,37 @@ function harness(options: { grant?: GrantRow | null; signedIn?: boolean } = {}):
   const anonymous = (): RequestContext => context("vrczip:anonymous", []);
 
   const touched: string[] = [];
+  const audited: NewAuditEntry[] = [];
   return {
     deps: {
       grants: {
         grantByTokenHash: () => options.grant ?? null,
         touchGrant: (id) => void touched.push(id),
+        // Mirrors the store: the id is the row's position, so `finishAudit` can fill in the status
+        // the same way an UPDATE would.
+        appendAudit: (entry) => audited.push(entry),
+        finishAudit: (id, status) => {
+          const row = audited[id - 1];
+          if (row !== undefined) row.status = status;
+        },
+        // Counted from the rows this harness has already collected, exactly as the store counts
+        // them from the table — so a budget test exercises the real relationship between the audit
+        // log and the budget rather than a number handed to it.
+        countGrantScopeUsage: (grantId, scope, since) =>
+          audited.filter(
+            (row) =>
+              row.grant_id === grantId &&
+              row.scope === scope &&
+              row.outcome === "allowed" &&
+              row.ts >= since,
+          ).length,
       },
       context: () => (options.signedIn === false ? null : signedIn()),
       anonymousContext: anonymous,
     },
     seen: () => seen,
     touched,
+    audited,
     close: () => upstream.stop(true),
   };
 }
@@ -294,6 +318,314 @@ describe("hard denials", () => {
   });
 });
 
+describe("the audit log", () => {
+  /*
+   * PROGRESS.md decision 96. The rule is "anything that changes something, plus anything a
+   * dangerous scope guards", and the second half is the part worth testing: a write-only log reads
+   * as complete while an app quietly enumerates the user's moderation history.
+   */
+  const mutating = route("createAvatar");
+  const dangerousRead = route("getPlayerModerations");
+  const ordinaryRead = route("getUser");
+
+  test("records a mutating call with what VRChat actually answered", async () => {
+    const token = mintProxyToken().token;
+    const h = harness({ grant: grantWith([mutating.scope], token) });
+    try {
+      await passthrough(
+        mutating,
+        request({
+          method: "POST",
+          path: "/avatars",
+          headers: new Headers({ cookie: `auth=${token}`, "user-agent": "Thing/1.0 (a@b.c)" }),
+          body: new TextEncoder().encode("{}").buffer as ArrayBuffer,
+        }),
+        h.deps,
+      );
+      expect(h.audited).toHaveLength(1);
+      expect(h.audited[0]).toMatchObject({
+        outcome: "allowed",
+        // The upstream status, not ours. An app being refused by VRChat itself looks identical to a
+        // working one until this column says otherwise.
+        status: 203,
+        method: "POST",
+        operation_id: "createAvatar",
+        scope: mutating.scope,
+        grant_id: "grant_1",
+        account_id: "usr_a",
+        // The grant's own name, not the `User-Agent` this request happened to carry — a grant is
+        // the identity the user consented to, and a header is whatever the app says today.
+        app_name: "MyApp",
+      });
+    } finally {
+      h.close();
+    }
+  });
+
+  test("records a read behind a dangerous scope, and not an ordinary one", async () => {
+    const token = mintProxyToken().token;
+    const h = harness({ grant: grantWith([dangerousRead.scope, ordinaryRead.scope], token) });
+    try {
+      const headers = () => new Headers({ cookie: `auth=${token}` });
+      await passthrough(
+        dangerousRead,
+        request({ path: "/auth/user/playermoderations", headers: headers() }),
+        h.deps,
+      );
+      await passthrough(
+        ordinaryRead,
+        request({ path: "/users/usr_x", headers: headers() }),
+        h.deps,
+      );
+
+      // Exactly one row, and it is the moderation read. `GET /users/{id}` at eighty a room would
+      // bury the rows that mean something under rows that mean nothing.
+      expect(h.audited.map((row) => row.operation_id)).toEqual(["getPlayerModerations"]);
+    } finally {
+      h.close();
+    }
+  });
+
+  test("records a hard denial whether or not the rule would otherwise audit it", async () => {
+    // A route-table flag, not a scope: somebody attempting to delete the user's account through the
+    // mirror is the single most interesting row this table can hold, so it is forced.
+    const denied = ROUTES.find((entry) => entry.hardDenied);
+    if (denied === undefined) throw new Error("no hard-denied route in the table");
+    const h = harness();
+    try {
+      await passthrough(
+        denied,
+        request({
+          method: denied.method,
+          path: "/users/usr_x/delete",
+          headers: new Headers({ "user-agent": "Thing/1.0 (a@b.c)" }),
+        }),
+        h.deps,
+      );
+      expect(h.audited).toHaveLength(1);
+      expect(h.audited[0]).toMatchObject({
+        outcome: "hard_denied",
+        status: 403,
+        grant_id: null,
+        // No grant to name, so the User-Agent the consent sheet would have shown.
+        app_name: "Thing",
+      });
+    } finally {
+      h.close();
+    }
+  });
+
+  test("records a refusal, attributing it to whatever identity it presented", async () => {
+    const token = mintProxyToken().token;
+    const h = harness({ grant: grantWith(["friends:read"], token) });
+    try {
+      await passthrough(
+        mutating,
+        request({
+          method: "POST",
+          path: "/avatars",
+          headers: new Headers({ cookie: `auth=${token}`, "user-agent": "Thing/1.0 (a@b.c)" }),
+        }),
+        h.deps,
+      );
+      expect(h.audited[0]).toMatchObject({ outcome: "denied_scope", status: 403 });
+    } finally {
+      h.close();
+    }
+  });
+
+  test("writes nothing for a request carrying no credentials at all", async () => {
+    // Nothing to attribute it to beyond a User-Agent anyone can type, and the handshake produces
+    // these legitimately. A row per anonymous probe is noise on a table nothing prunes.
+    const h = harness();
+    try {
+      await passthrough(mutating, request({ method: "POST", path: "/avatars" }), h.deps);
+      expect(h.audited).toEqual([]);
+    } finally {
+      h.close();
+    }
+  });
+
+  test("records the account being offline, which is a refusal the app can do nothing about", async () => {
+    const token = mintProxyToken().token;
+    const h = harness({ grant: grantWith([mutating.scope], token), signedIn: false });
+    try {
+      await passthrough(
+        mutating,
+        request({
+          method: "POST",
+          path: "/avatars",
+          headers: new Headers({ cookie: `auth=${token}` }),
+        }),
+        h.deps,
+      );
+      expect(h.audited[0]).toMatchObject({ outcome: "account_offline", status: 503 });
+    } finally {
+      h.close();
+    }
+  });
+});
+
+describe("per-grant budgets", () => {
+  /*
+   * PROGRESS.md decision 95. The three scopes here are the ones whose abuse other people can *see* —
+   * mass invites, mass friending, dragging strangers into a group — which is how a user gets
+   * blocked, reported or moderated for something an app did. The per-account bucket already paces
+   * requests; what it structurally cannot express is volume over an hour, and sixty invites spread
+   * politely across one passes every rate limit there is.
+   */
+  const budgeted = route("createGroupInvite");
+  const limit = DEFAULT_GRANT_BUDGETS[budgeted.scope];
+  const unbudgeted = route("createAvatar");
+
+  function spend(h: ReturnType<typeof harness>, token: string, times: number): Promise<Response>[] {
+    return Array.from({ length: times }, () =>
+      passthrough(
+        budgeted,
+        request({
+          method: "POST",
+          path: "/groups/grp_x/invites",
+          headers: new Headers({ cookie: `auth=${token}` }),
+        }),
+        h.deps,
+      ),
+    );
+  }
+
+  test("refuses past the hourly allowance, in a shape an app's 429 handling already reads", async () => {
+    if (limit === undefined) throw new Error("createGroupInvite should be budgeted");
+    const token = mintProxyToken().token;
+    const h = harness({ grant: grantWith([budgeted.scope], token) });
+    try {
+      for (const call of spend(h, token, limit)) expect((await call).status).toBe(203);
+
+      const refused = await spend(h, token, 1)[0];
+      expect(refused?.status).toBe(429);
+      expect(await refused?.json()).toMatchObject({
+        error: {
+          code: "budget_exhausted",
+          status_code: 429,
+          // Ours, and it says so: an app can tell "the user's proxy is pacing me" from "VRChat is
+          // angry" and back off against the right thing.
+          vrczip: true,
+          scope: budgeted.scope,
+          limit,
+        },
+      });
+    } finally {
+      h.close();
+    }
+  });
+
+  test("the refusal never reaches VRChat, which is the entire point", async () => {
+    if (limit === undefined) throw new Error("createGroupInvite should be budgeted");
+    const token = mintProxyToken().token;
+    const h = harness({ grant: grantWith([budgeted.scope], token) });
+    try {
+      for (const call of spend(h, token, limit)) await call;
+      const before = h.seen()?.path;
+      await spend(h, token, 1)[0];
+      // Nothing new was sent upstream: the last thing VRChat saw is the last allowed call.
+      expect(h.seen()?.path).toBe(before);
+    } finally {
+      h.close();
+    }
+  });
+
+  test("a refusal is audited but does not itself consume the allowance", async () => {
+    // Otherwise an app exhausts its own budget by being denied, and the budget becomes permanent
+    // the moment it first trips. Only `allowed` rows count — see `SQL.countGrantScopeUsage`.
+    if (limit === undefined) throw new Error("createGroupInvite should be budgeted");
+    const token = mintProxyToken().token;
+    const h = harness({ grant: grantWith([budgeted.scope], token) });
+    try {
+      for (const call of spend(h, token, limit)) await call;
+      await spend(h, token, 1)[0];
+      await spend(h, token, 1)[0];
+
+      const allowed = h.audited.filter((row) => row.outcome === "allowed");
+      const refused = h.audited.filter((row) => row.outcome === "rate_limited");
+      expect(allowed).toHaveLength(limit);
+      expect(refused).toHaveLength(2);
+    } finally {
+      h.close();
+    }
+  });
+
+  test("the window rolls, so an app that waits it out continues", async () => {
+    if (limit === undefined) throw new Error("createGroupInvite should be budgeted");
+    const token = mintProxyToken().token;
+    let clock = 1_000_000;
+    const h = harness({ grant: grantWith([budgeted.scope], token) });
+    const deps = { ...h.deps, now: () => clock };
+    try {
+      const send = (): Promise<Response> =>
+        passthrough(
+          budgeted,
+          request({
+            method: "POST",
+            path: "/groups/grp_x/invites",
+            headers: new Headers({ cookie: `auth=${token}` }),
+          }),
+          deps,
+        );
+
+      for (let i = 0; i < limit; i++) await send();
+      expect((await send()).status).toBe(429);
+
+      clock += BUDGET_WINDOW_MS + 1;
+      expect((await send()).status).toBe(203);
+    } finally {
+      h.close();
+    }
+  });
+
+  test("holds under concurrency, because the slot is reserved before the call goes out", async () => {
+    /*
+     * The check reads a count and the call that follows takes time, so a budget that recorded the
+     * spend *after* the response would let N simultaneous calls all read the same pre-spend number
+     * and all pass. An app firing a hundred group invites at once is not a hypothetical shape — it
+     * is the exact abuse this budget exists for, and it is the shape that would defeat it.
+     */
+    if (limit === undefined) throw new Error("createGroupInvite should be budgeted");
+    const token = mintProxyToken().token;
+    const h = harness({ grant: grantWith([budgeted.scope], token) });
+    try {
+      const responses = await Promise.all(spend(h, token, limit + 10));
+      const allowed = responses.filter((response) => response.status === 203);
+      const refused = responses.filter((response) => response.status === 429);
+      expect(allowed).toHaveLength(limit);
+      expect(refused).toHaveLength(10);
+    } finally {
+      h.close();
+    }
+  });
+
+  test("a scope with no budget is not counted against one", async () => {
+    // Every scope but the three. A budget over all writes would punish a chatty-but-harmless app
+    // for volume that costs the user nothing.
+    expect(DEFAULT_GRANT_BUDGETS[unbudgeted.scope]).toBeUndefined();
+    const token = mintProxyToken().token;
+    const h = harness({ grant: grantWith([unbudgeted.scope], token) });
+    try {
+      for (let i = 0; i < 5; i++) {
+        const response = await passthrough(
+          unbudgeted,
+          request({
+            method: "POST",
+            path: "/avatars",
+            headers: new Headers({ cookie: `auth=${token}` }),
+          }),
+          h.deps,
+        );
+        expect(response.status).toBe(203);
+      }
+    } finally {
+      h.close();
+    }
+  });
+});
+
 describe("what reaches VRChat", () => {
   const authenticated = route("getUser");
 
@@ -445,12 +777,19 @@ describe("responses whose body fetch already decoded", () => {
 
     return {
       deps: {
-        grants: { grantByTokenHash: () => null, touchGrant: () => {} },
+        grants: {
+          grantByTokenHash: () => null,
+          touchGrant: () => {},
+          appendAudit: () => 1,
+          finishAudit: () => {},
+          countGrantScopeUsage: () => 0,
+        },
         context: () => context("usr_a"),
         anonymousContext: () => context("vrczip:anonymous"),
       },
       seen: () => seen,
       touched: [],
+      audited: [],
       close: () => upstream.stop(true),
     };
   }

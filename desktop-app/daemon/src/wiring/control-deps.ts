@@ -29,6 +29,8 @@ import type { ConsentRegistry, PendingConsent } from "../proxy/consent.ts";
 import type { PipelineMirror } from "../proxy/pipeline-mirror.ts";
 import type { SecretsStore } from "../security/secrets.ts";
 import {
+  type AppAuditEntry,
+  type AuditQuery,
   type ConnectedApp,
   type ControlAccount,
   type ControlDeps,
@@ -1544,6 +1546,36 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       const revoked = store.revokeGrants(now);
       for (const grant of live) options.pipelineMirror?.disconnectGrant(grant.id);
       return revoked;
+    },
+
+    async listAppAudit(grantId, query: AuditQuery): Promise<AppAuditEntry[]> {
+      // Checked against the grant table rather than against the audit rows: an app that has changed
+      // nothing has no rows, and answering 404 for it would tell the user their app is gone when it
+      // is merely quiet. Revoked grants resolve here too — the log outlives the access.
+      if (store.getGrant(grantId) === null) {
+        throw new ControlError(404, "unknown_app", `no app grant ${grantId}`);
+      }
+
+      // `before` is left off entirely rather than passed as undefined: `exactOptionalPropertyTypes`
+      // makes the two different, and the store reads absence as "from now".
+      const rows =
+        query.before === undefined
+          ? store.listAudit({ grantId, limit: query.limit })
+          : store.listAudit({ grantId, limit: query.limit, before: query.before });
+
+      return rows.map((row) => ({
+        id: row.id,
+        ts: row.ts,
+        grantId: row.grant_id,
+        accountId: row.account_id,
+        appName: row.app_name,
+        method: row.method,
+        path: row.path,
+        operationId: row.operation_id,
+        scope: row.scope,
+        outcome: row.outcome,
+        status: row.status,
+      }));
     },
 
     async denyConsent(pairingId): Promise<void> {

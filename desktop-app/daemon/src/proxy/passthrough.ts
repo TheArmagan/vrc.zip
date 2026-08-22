@@ -1,8 +1,9 @@
 import type { Route } from "@vrcz/api";
-import type { Scope } from "@vrcz/shared";
+import { isDangerousScope, type Scope } from "@vrcz/shared";
 import { type RequestContext, vrcFetch } from "../net/request.ts";
 import { hashProxyToken } from "../security/proxy-tokens.ts";
-import type { GrantRow } from "../store/types.ts";
+import type { GrantRow, NewAuditEntry } from "../store/types.ts";
+import { parseAppIdentity } from "./identity.ts";
 import { invalidCredentials, missingCredentials, vrczipError } from "./vrchat-shapes.ts";
 
 /**
@@ -31,6 +32,78 @@ import { invalidCredentials, missingCredentials, vrczipError } from "./vrchat-sh
 export interface PassthroughGrantStore {
   grantByTokenHash(hash: string): GrantRow | null;
   touchGrant(id: string, at: number): void;
+  /** Records a call and returns the row id, so an allowed one can be finished with its status. */
+  appendAudit(entry: NewAuditEntry): number;
+  /** Fills in what VRChat answered on a row written before the call went out. */
+  finishAudit(id: number, status: number | null): void;
+  /**
+   * Calls this grant has already spent against `scope` since `since`, counting only the ones that
+   * actually reached VRChat.
+   *
+   * **Counted from the audit log rather than from a counter in memory**, and that is the design
+   * rather than an implementation detail. A per-hour allowance held in memory is reset by every
+   * daemon restart, which makes it a limit an app can outlast simply by being installed on a machine
+   * that reboots — and the audit log is already the durable record of exactly these calls, so a
+   * second counter would be a second thing to keep in agreement with the first. Nothing prunes
+   * `audit_log`, so the window can never be silently truncated out from under the count.
+   */
+  countGrantScopeUsage(grantId: string, scope: string, since: number): number;
+}
+
+/**
+ * The scopes a per-grant budget applies to, and the default hourly allowance for each.
+ *
+ * **Not every mutating call, and that is deliberate.** PLAN.md §Enforcement names these three, and
+ * the thing being defended against is abuse other people can see — an app that mass-invites, mass-
+ * friends, or drags strangers into a group is how a user gets blocked, reported, or moderated, and
+ * they will blame vrc.zip rather than the app. A budget over every write would instead punish a
+ * chatty-but-harmless app for volume that costs the user nothing.
+ *
+ * Burst is already handled a level down: the per-account bucket paces a grant's requests. What a
+ * bucket structurally cannot express is *volume over an hour*, which is the shape this kind of abuse
+ * actually has — sixty invites spread politely across an hour passes every rate limit there is.
+ * PROGRESS.md decision 95.
+ */
+export const DEFAULT_GRANT_BUDGETS: Readonly<Partial<Record<Scope, number>>> = {
+  "invite:send": 60,
+  "friends:write": 60,
+  "groups:invite": 30,
+};
+
+/** The window a budget is measured over. */
+export const BUDGET_WINDOW_MS = 60 * 60_000;
+
+/**
+ * What the audit log records, and why it is not simply "every mutating call".
+ *
+ * PLAN.md §Enforcement asks for "an audit log of every mutating call attributed to the app", and
+ * that alone reads as complete while missing the thing someone would actually go looking for. An
+ * app quietly enumerating the user's moderation history writes nothing under a write-only rule,
+ * because reading is all it ever did. So the line is drawn at **anything that changes something,
+ * plus anything a dangerous scope guards** — the second half is exactly the set of reads the consent
+ * sheet already renders in its own block, which is a good sign it is the set that matters.
+ * PROGRESS.md decision 96.
+ *
+ * Ordinary reads are deliberately absent. `GET /users/{id}` at eighty a room would bury the rows
+ * that mean something under rows that mean nothing, on a table nothing prunes, for a question
+ * `VRCZIP_PROXY_LOG` already answers while debugging.
+ */
+function isAuditable(route: Route): boolean {
+  return !UNAUTHENTICATED_METHODS.has(route.method.toUpperCase()) || isDangerousScope(route.scope);
+}
+
+/**
+ * Who to attribute a row to when there is no grant to name.
+ *
+ * A refusal is the case that matters here: a hard denial or an unknown token has nothing in the
+ * database behind it, and the `app_name` column is `NOT NULL` because a row nobody can be attributed
+ * to is not worth writing. The `User-Agent` is the same identity the consent sheet shows, so it is
+ * the honest fallback — and `"unknown"` rather than an empty string when even that is missing, so
+ * the column never carries a value that renders as absence.
+ */
+function appNameFor(grant: GrantRow | null, headers: Headers): string {
+  if (grant !== null) return grant.app_name;
+  return parseAppIdentity(headers.get("user-agent"))?.name ?? "unknown";
 }
 
 export interface PassthroughDeps {
@@ -104,7 +177,41 @@ export async function passthrough(
 ): Promise<Response> {
   const now = deps.now ?? Date.now;
 
+  /*
+   * One writer for every outcome, so a branch added later cannot quietly skip the log. It is
+   * deliberately fire-and-forget from the caller's point of view: an audit row is a record of what
+   * happened, and failing the request because the record could not be written would turn a
+   * bookkeeping fault into an outage. `Store.appendAudit` is synchronous, so this costs one insert
+   * on a path that is about to make a network call.
+   */
+  const audit = (
+    outcome: string,
+    grant: GrantRow | null,
+    status: number | null,
+    force = false,
+  ): number | null => {
+    if (!force && !isAuditable(route)) return null;
+    return deps.grants.appendAudit({
+      ts: now(),
+      grant_id: grant?.id ?? null,
+      account_id: grant?.account_id ?? null,
+      app_name: appNameFor(grant, request.headers),
+      method: request.method,
+      // Query included, as the route table matched it. What an app asked for is part of what it
+      // did — `?n=100` against a member list is the difference between a look and a scrape.
+      path: request.path,
+      operation_id: route.operationId,
+      scope: route.scope,
+      outcome,
+      status,
+    });
+  };
+
   if (route.hardDenied) {
+    // `force`, because the two hard denials are route-table flags rather than scopes: whether they
+    // happen to be auditable by the ordinary rule is beside the point. Somebody attempting to delete
+    // the user's account through the mirror is the single most interesting row this table can hold.
+    audit("hard_denied", null, 403, true);
     return vrczipError(
       403,
       "hard_denied",
@@ -114,7 +221,18 @@ export async function passthrough(
   }
 
   const authorized = authorize(route, request, deps);
-  if (authorized instanceof Response) return authorized;
+  if (authorized instanceof Response) {
+    // A refusal is attributed to whatever identity it presented. `missing_credentials` is not
+    // recorded: it carries no token, so there is nothing to attribute it to beyond a User-Agent
+    // anyone can type, and the handshake itself produces them legitimately.
+    if (authorized.status === 403) audit("denied_scope", null, 403);
+    else if (authorized.status === 401 && request.headers.get("cookie") !== null) {
+      // Unknown and revoked are one answer to the caller on purpose (see `authorize`), and one row
+      // here for the same reason: the distinction is exactly what we decline to tell an app.
+      audit("denied_revoked", null, 401);
+    }
+    return authorized;
+  }
 
   const context =
     authorized.grant === null
@@ -124,6 +242,7 @@ export async function passthrough(
         deps.context(authorized.grant.account_id, authorized.grant.id);
 
   if (context === null) {
+    audit("account_offline", authorized.grant, 503);
     return vrczipError(
       503,
       "account_offline",
@@ -133,7 +252,50 @@ export async function passthrough(
     );
   }
 
+  /*
+   * The budget, after authorisation and before the call. A grant that has spent its hour on a scope
+   * is refused here rather than upstream, so the abuse never reaches anyone.
+   *
+   * The refusal is a **429 in vrc.zip's own envelope**, not a fabricated VRChat one. It is still the
+   * shape VRChat uses — `vrczipError` emits the same `{error:{message,status_code}}` an app's
+   * existing 429 handling already reads — with `vrczip: true` and a `retryAfterMs` alongside, so an
+   * app can tell "the user's proxy is pacing me" from "VRChat is angry" and back off against the
+   * right thing. Inventing a VRChat error VRChat never sent would be the worse lie.
+   */
+  const grant = authorized.grant;
+  if (grant !== null) {
+    // The default, and for now the only, allowance. Decision 95 also asks for a per-app override
+    // edited on the Connected apps page; the seam for it is deliberately absent until the control
+    // that writes it exists, because an override nothing can set is a capability nothing uses.
+    const limit = DEFAULT_GRANT_BUDGETS[route.scope];
+    if (limit !== undefined) {
+      const since = now() - BUDGET_WINDOW_MS;
+      if (deps.grants.countGrantScopeUsage(grant.id, route.scope, since) >= limit) {
+        audit("rate_limited", grant, 429, true);
+        return vrczipError(
+          429,
+          "budget_exhausted",
+          `This app has used its hourly allowance of ${String(limit)} "${route.scope}" calls. It will be able to continue within the hour.`,
+          { scope: route.scope, limit, windowMs: BUDGET_WINDOW_MS, retryAfterMs: BUDGET_WINDOW_MS },
+        );
+      }
+    }
+  }
+
   if (authorized.grant !== null) deps.grants.touchGrant(authorized.grant.id, now());
+
+  /*
+   * **Written before the call, not after, and that ordering is the budget's correctness.**
+   *
+   * The check above reads a count and the call below takes time. Recording the spend afterwards
+   * would let a hundred simultaneous invites all read the same pre-spend number and all pass — the
+   * exact shape this budget exists to stop. Writing the row first makes it a reservation: the next
+   * call, concurrent or not, counts one that is already committed.
+   *
+   * The status is filled in below. A row left with a null status is a call that went out and whose
+   * answer we never saw — a crash mid-flight — which is a more honest record than no row at all.
+   */
+  const reserved = audit("allowed", authorized.grant, null);
 
   const upstream = await vrcFetch(context, request.path, {
     method: request.method,
@@ -145,6 +307,10 @@ export async function passthrough(
       ? {}
       : { body: request.body }),
   });
+
+  // The row was written before the call; this is what VRChat actually answered. An app being told
+  // 403 by VRChat itself looks identical to a working one until this column says otherwise.
+  if (reserved !== null) deps.grants.finishAudit(reserved, upstream.status);
 
   return withDecodedBodyHeaders(upstream);
 }

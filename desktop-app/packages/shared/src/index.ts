@@ -54,6 +54,8 @@ export {
 export { APP_NAME, APP_VERSION, PLUGIN_API_PROTOCOL_MAJOR } from "./version.ts";
 export {
   type AccountConnection,
+  type AppAuditEntry,
+  type AuditOutcome,
   type ControlAccount,
   type DaemonStatus,
   type EventQuery,

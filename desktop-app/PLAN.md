@@ -960,50 +960,71 @@ retention policy to forget about.
 
 > **Shipped ahead of this section, and deliberately simpler:** today `bun run package` compiles the
 > daemon, the UI bundle and the Bun runtime into a **single** `dist/vrc.zip.exe` with the app icon
-> and version metadata on it (`tools/src/package.ts`). Everything below is about giving *plugins* a
-> real runtime to spawn with real flags — and plugins are Phase 3, so until the plugin host exists
-> the layout below is three files and a hash check guarding a capability nothing uses, against the
-> cost of turning "download and run this" into "unzip this and keep these together." The section
-> stands as written for the day that changes; see PROGRESS.md decision 91.
+> and version metadata on it (`tools/src/package.ts`). See PROGRESS.md decision 91.
 >
-> **That day has now been decided against.** The single `.exe` stays, and the plugin host is the same
-> executable re-invoked in a host mode — one file to download, one file to hash-check. What it costs
-> is that `--smol` cannot be argv, which is the exact knob the layout below was designed to preserve.
-> **One sub-question blocks the plugin supervisor and must be answered before it is written:** whether
-> JSC's small heap can be selected anywhere other than at process launch. If it cannot, the small heap
-> becomes a property of the host mode rather than a per-plugin choice, and shipping two artefacts gets
-> reconsidered on the evidence. Decision 106.
+> **The three-file layout this section used to describe is superseded.** It existed to give plugin
+> processes a real `bun` binary to spawn with real flags — `--smol` above all — at the cost of turning
+> "download and run this" into "unzip this and keep these together." The runtime is now **fetched, not
+> shipped**: one `.exe` to download, and the plugin runtime is materialised on demand. Decisions 106
+> and 111.
 
-**vrc.zip ships its own `bun` binary.** It never uses a Bun the user may or may not have installed, and
-never one on `PATH`. The bundled runtime executes both the daemon and every plugin process.
+**vrc.zip runs plugins on its own pinned `bun`. It never uses a Bun the user may or may not have
+installed, and never one on `PATH`** — but it no longer carries that binary inside the download.
+
+The daemon itself is the compiled `.exe` and needs no external runtime at all. The **plugin host** is
+the only thing that needs a real `bun`, so the first time a plugin is installed:
+
+1. Download the **exact pinned version** for this platform from `bun.sh` (which redirects to the
+   GitHub release asset).
+2. **Verify it against a SHA-256 pinned at build time and committed to this repo.** Not the version
+   string, not TLS — the hash of the exact artifact.
+3. Extract it to `<state>/runtime/bun-<version>/`, `0700`, written to a temp path and atomically
+   renamed so two daemons racing on a cold start cannot hand each other a half-written executable.
+4. Spawn plugin hosts as `bun --smol <host entry>`, which is what this whole arrangement is for.
 
 ```
-vrc.zip/
-  bun.exe            # or `bun` — the pinned runtime, ours
-  app/               # daemon + UI bundle
+<state>/                    # %LOCALAPPDATA%\vrc.zip, ~/.local/state/vrc.zip — see daemon/src/paths.ts
+  runtime/
+    bun-1.4.0/bun.exe       # fetched on first plugin install, hash-pinned, never on PATH
   plugins/
 ```
 
-Why this and not `bun build --compile` into one self-contained executable:
+Why fetched rather than embedded in the `.exe`:
 
 - **Plugin processes need a real runtime with real flags.** `--smol` per plugin, and whatever comes
-  later, are ordinary argv on a bundled binary. A compiled executable would have to re-invoke itself in
-  a plugin-host mode and inherit whatever flags were baked in at build time — the same setting for the
-  daemon and every plugin, which is exactly the knob we want per-process.
-- **The plugin runtime is the Bun we tested against**, pinned and identical on every machine, rather
-  than whatever the user happens to have. For a system that executes third-party code, "reproducible"
-  is worth more than "small download."
+  later, are ordinary argv on a real binary. Re-invoking the compiled executable in a host mode would
+  bake one flag set at build time and share it between the daemon and every plugin — precisely the
+  knob we want per-process. This is what closes the JSC sub-question decision 106 left open: the
+  answer is to not need it answered.
+- **The download stays small, and the majority never pay for it.** Someone who uses vrc.zip as an
+  account manager and never installs a plugin never fetches tens of MB of runtime.
 - **`vrcz dev` works out of the box.** Plugin authors don't need their own Bun install.
 
-Costs, accepted: the download grows by the size of the Bun binary (tens of MB), and updates ship a new
-one when we bump the pin.
+**The hash pin is not optional — it is the entire property.** The claim worth keeping from decision 14
+is that the runtime executing third-party plugin code is *the exact one we tested against, on every
+machine*. Embedding the binary gave that for free. Fetching it gives it only if the artifact is pinned
+by content, so:
 
-**Integrity matters more than usual here.** The bundled `bun` is the thing that executes the daemon and
-every plugin; anyone who can replace it owns everything, including the VRChat cookies. So: the
-installer writes it to a location the user's normal account can't modify where the platform allows it,
-the updater verifies a signature before swapping it, and the launcher checks its hash at startup and
-refuses to run on mismatch rather than warning. This is the same reasoning as the plugin-signing tier —
-executing code you didn't verify is the whole risk surface.
+- The pinned SHA-256 is a **build input committed alongside the version**, which means Bun's pin now
+  lives in **four** places that move together: `packageManager`, `engines.bun`, `.bun-version`, and the
+  runtime hash. A test asserts the first three agree; the hash is verified against the release when it
+  is bumped, by hand, because verifying it in CI would mean trusting the network to tell us what the
+  network should have sent.
+- A mismatch is a **hard failure with the download discarded** — never a warning, never a prompt
+  offering to run it anyway. A downloaded executable that isn't the one we pinned is the single worst
+  thing this app could execute.
+- **This does move the trust anchor from the download onto the network**, and that is a real change
+  rather than a neutral one. An embedded copy could always be re-materialised from bytes the user
+  already chose to trust when they ran the installer. A fetched copy cannot: if the release is yanked,
+  the host is blocked, or the user is behind a corporate proxy or offline, **plugins do not work**. So
+  the failure is surfaced as a plain, actionable error naming the URL and the expected hash, with a
+  manual "use this `bun` instead" path that verifies against the same pin. It is never a silent
+  fallback to a `PATH` Bun.
+- `<state>/runtime/` is **user-writable**, which the old `bun.exe` next to the installer did not have
+  to be. Be honest about what the startup hash check buys there: it catches corruption, a partial
+  download, and a stale copy after a pin bump — it does **not** stop a local attacker already running
+  as this user, who can equally read `secrets.enc` and the cookie jar. The boundary that matters is
+  the network fetch, and that is what the pin defends.
 
 Rest of Phase 5: Windows installer; `.desktop` entry and a systemd user unit on Linux (the tray is
 unreliable there — StatusNotifierItem support is inconsistent and GNOME needs an extension, so autostart

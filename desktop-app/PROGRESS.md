@@ -36,7 +36,9 @@ route), **cuts `local.vrc.zip`** rather than owning a renewal endpoint for the l
 and sets the run-up to Phase 3: plugins are next, they install from a local path or a pinned git URL
 with no registry, the hostile plugin is written immediately after the supervisor, and the single
 `.exe` stays and re-invokes itself as the plugin host. One sub-question is genuinely open and blocks
-the supervisor: whether JSC's small heap can be selected anywhere but at process launch.
+the supervisor: whether JSC's small heap can be selected anywhere but at process launch. **That one
+closed too** — decision 111 fetches a hash-pinned `bun` from `bun.sh` on first plugin install and
+spawns plugin hosts with it, so `--smol` is argv again and the `.exe` stays one file.
 
 Before resuming 2.7, a foundations pass landed: the duplicated types and constants are hoisted into
 `@vrcz/shared` and the producers are typed against them (decisions 62, 63, 65, 66), `ui/` has a test
@@ -291,6 +293,11 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     **Consequence to not forget:** whoever can replace that binary owns the daemon and every credential
     in it, so it needs signature verification on update and a startup hash check that refuses to run on
     mismatch — same reasoning as plugin signing.
+    *(**Revised by decisions 91 and 111.** The daemon ships as one compiled `.exe` and needs no Bun at
+    all; only the plugin host does, and it fetches a hash-pinned one on demand rather than bundling it.
+    The load-bearing half of this decision — never a `PATH` Bun, always the exact pinned runtime, and
+    integrity is the whole point — is unchanged, and the content pin is now the only thing enforcing
+    it.)*
 9. **Plugin UI is a declarative JSON tree rendered by host components, with no escape hatch.** The host
    page holds the session token, and any plugin JS in that page can read it. An iframe-on-separate-port
    mode was drafted and **cut**: an escape hatch that exists gets reached for by default, eroding the
@@ -1069,6 +1076,9 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      mode can be selected any way other than at process launch. If it cannot, `--smol` stops being a
      per-plugin knob and becomes a property of the host mode — a real regression against §Phase 5's
      reasoning, and the point at which shipping two artefacts gets reconsidered.
+     *(**Superseded the same day by decision 111**, which sidesteps the sub-question entirely: the
+     plugin host is a real `bun` fetched on demand, not this executable re-invoked, so `--smol` goes
+     back to being argv. The single `.exe` — the part worth keeping — stays.)*
 107. **Plugins install from a local path or a pinned git URL. No registry in v1.** A registry is a
      service to host, moderate and take down from, and `backend/` is explicitly out of scope. A git
      URL pinned to a commit lets authors distribute without asking permission while keeping what ran
@@ -1093,6 +1103,44 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      the one legitimate argument for the iframe escape hatch that decision 9 cut, so shipping them
      badly would reopen a decision that is otherwise closed. The first plugin genuinely blocked on a
      chart is the signal to build them properly.
+
+111. **The plugin runtime is fetched from `bun.sh` on first plugin install, hash-pinned, and spawned
+     with `--smol`. It is neither bundled in the `.exe` nor re-invoked from it.** This supersedes the
+     compromise in decision 106 and **closes the JSC sub-question by making it moot** — plugin hosts
+     get a real `bun` binary, so `--smol` is ordinary argv again, exactly as PLAN.md §Phase 5 always
+     wanted. The daemon itself stays the compiled single-file executable and needs no runtime at all.
+     The binary lands in `<state>/runtime/bun-<version>/` at `0700`, written to a temp path and
+     atomically renamed so two daemons racing a cold start cannot hand each other a half-written
+     executable, and `<state>` is `daemon/src/paths.ts` — so `VRCZIP_STATE_DIR` redirects it with
+     everything else and a test never touches the real one.
+
+     **Three things this buys, and two it costs. Both halves are the decision.**
+
+     Buys: the download stays small and lazy, so someone who never installs a plugin never fetches
+     tens of MB of runtime; `--smol` stays per-process rather than becoming a property of a host mode;
+     and `vrcz dev` works without the author installing Bun.
+
+     Costs, and neither is neutral. **First, the trust anchor moves from the download onto the
+     network.** An embedded copy could always be re-materialised from bytes the user already chose to
+     trust when they ran the installer; a fetched one cannot. What preserves decision 14's actual
+     claim — that the runtime executing third-party plugin code is *the exact one we tested against,
+     on every machine* — is not HTTPS and not the version string but a **SHA-256 of the exact
+     artifact, pinned at build time and committed**. A mismatch discards the download and fails hard:
+     no warning, no prompt offering to run it anyway, and never a silent fallback to a `PATH` Bun. A
+     downloaded executable that is not the one we pinned is the worst thing this app could execute.
+     **Consequence to not forget: the Bun pin now lives in *four* places that must move together** —
+     `packageManager`, `engines.bun`, `.bun-version`, and the runtime hash. CLAUDE.md says three.
+
+     **Second, plugins now require network on first install**, and fail where an embedded copy would
+     not: offline, behind a corporate proxy, on a blocked host, or after a yanked release. That is
+     surfaced as a plain error naming the URL and the expected hash, with a manual "use this `bun`
+     instead" path that verifies against the same pin.
+
+     Two implementation notes for whoever writes it. The release asset is a **`.zip`**, and Bun has no
+     built-in unzip — Windows 10+ ships `tar.exe` (bsdtar, which reads zip), and a central-directory
+     reader over `node:zlib` is the portable alternative; pick one deliberately rather than shelling
+     out to whatever is around. And **downloading an executable into `%LOCALAPPDATA%` and spawning it
+     is a textbook malware shape**, so expect AV heuristics to have opinions, on first run especially.
 
 ---
 
@@ -1553,12 +1601,12 @@ Unresolved; flag to the user rather than guessing.
 to the user in batches and answered; the answers are decisions 95–110. What each one *was* is kept
 below in one line, because a question closed without a trace is a question that gets reopened.
 
-- **Can JSC's small-heap mode be selected any way other than at process launch?** The one genuinely
-  open item, and the only one with a code consequence nobody has checked. Decision 106 keeps the
-  single `.exe` and re-invokes it as the plugin host, which means `--smol` cannot be argv. If the
-  small heap can only be chosen at launch, it stops being a per-plugin knob and becomes a property of
-  the host mode — which is what PLAN.md §Phase 5 built the whole `bun.exe` + `app/` layout to avoid.
-  **Settle this before the plugin supervisor is written**, not after.
+- **~~Can JSC's small-heap mode be selected any way other than at process launch?~~ Closed by
+  decision 111**, which removes the need to know: the plugin host is a real `bun` fetched on demand,
+  so `--smol` is ordinary argv again. What replaced it is smaller and concrete — **verify the Bun
+  release asset's SHA-256 by hand when the pin is bumped**, since it is now a build input and the pin
+  lives in four places rather than three (`packageManager`, `engines.bun`, `.bun-version`, the runtime
+  hash). CLAUDE.md still says three and will need updating when the fetcher lands.
 - **The per-user roster fallback still wants a real measurement**, even though its design is now
   decided (decision 102: cap the eager batch, hover-hydrate the rest, low-priority budget under the
   account bucket). The number worth having is what a busy public instance actually costs against the
@@ -1593,8 +1641,9 @@ below in one line, because a question closed without a trace is a question that 
 - The one flaky control-deps test → fix it before Phase 2 closes, don't wait for it to recur (103).
 - Where `invite-request` and `boop` land → with 2.10 (104).
 - What follows Phase 2 → Phase 3, the plugin system (105).
-- Single `.exe` vs `bun.exe` + `app/` once plugins need a runtime → single `.exe`, re-invoked (106),
-  with the JSC sub-question above.
+- Single `.exe` vs `bun.exe` + `app/` once plugins need a runtime → single `.exe` (106), and the
+  plugin runtime is **fetched hash-pinned from `bun.sh` on first plugin install** rather than bundled
+  or re-invoked (111), which closed the JSC sub-question by making it moot.
 - Where plugins come from in v1 → local path or pinned git URL, no registry (107).
 - How early the hostile plugin gets written → immediately after the supervisor (108).
 - What lifts dry-run on outbound social actions → an explicit per-scope gesture, never a timer (109).

@@ -248,7 +248,7 @@ handshake, because the alternative is a login flow that mints credentials with n
       `EAGER_FILL_LIMIT` (24) and the tail hydrates on hover, and every one of those calls is
       charged at `"low"` priority, which reserves a quarter of each bucket for everything else.
       Decisions 112 and 113.
-- [~] **2.10 Control API** (`:7775`) — consent status, grant list/revoke, the enriched event stream
+- [x] **2.10 Control API** (`:7775`) — consent status, grant list/revoke, the enriched event stream
       with `sessionId`/`accountId`/`displayName` on every `gamelog.*`, and webhook registration.
       **Scoped by the 2026-08-22 planning pass (decisions 97, 98, 99, 104):** webhooks ship *with*
       the stream rather than after it, which means this step carries a real outbound-HTTP subsystem
@@ -268,9 +268,11 @@ handshake, because the alternative is a login flow that mints credentials with n
       what a window would delete before anyone saves it, replacing the paragraph that used to
       apologise for its own absence. `StreamEnvelope` now carries `displayName` on every event
       (decision 121), and vrc.zip's own scopes exist (decision 120): `sessions:read`,
-      `sessions:unlinked`, `webhooks:write`. **Still outstanding:** the UI half — the palette stubs
-      and the user menu still do not call the three action routes, and there is no screen listing
-      the webhooks an app has registered — plus an end-to-end run against a real third-party client.
+      `sessions:unlinked`, `webhooks:write`. **The UI half landed too** (decision 126): the three
+      social actions are on every display name's menu and in the palette, and each app card on the
+      Connected apps page lists the webhooks that grant has registered, with a Delete beside each.
+      **Not yet done:** an end-to-end run against a real third-party client, which is verification
+      rather than construction.
       **Alongside it (2026-08-22):** the command palette grew direct access — clipboard-first entry
       for any user, world, instance or group id or VRChat link, argument prompts for the same by
       hand, and the rest of the actions this build already supports (mark every notification seen,
@@ -1374,6 +1376,18 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      holding real words, and defaulting to it would send a message the user never chose, in their
      name. 403 and 404 from VRChat keep their own codes, because "they do not accept invites from
      you" and "they are gone" are answers, not faults.
+
+126. **The three social actions live in one module and refuse rather than guess.** Invite, ask for an
+     invite, and boop are reached from the palette, the right-click menu on any display name, and
+     the user modal's overflow menu, so `ui/src/lib/social-actions.ts` owns the two awkward
+     questions all three share. *Which account is asking* has no safe default: these arrive in a
+     stranger's inbox with a name on it, so with two accounts connected the app declines and says
+     so rather than taking the first. *Where is "my instance"* comes from a running game client and
+     acts as **that client's** account, not the caller's preference — inviting to a room from an
+     account that is not in it is a request VRChat would refuse for a reason nobody could see from
+     this side. The menu items are omitted rather than greyed out when neither question can be
+     answered: a disabled "Boop" with no explanation is worse than one that is not offered, and the
+     fix belongs on the Accounts screen, not in a tooltip.
 
 ---
 

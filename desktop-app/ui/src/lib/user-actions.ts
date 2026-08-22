@@ -7,22 +7,30 @@
  * modal's header (`UserActionsMenu`). Two menu component families, one list of actions — a
  * "copy id" that exists in one menu and not the other is exactly the drift this prevents.
  *
- * Every action here is a clipboard or navigation action, which is why they work for a user whose
- * profile failed to load, or when no account is online at all. The two image items are the one
- * qualification: they open a daemon URL in a new tab, so they need the daemon reachable — and they
- * are the only items that are hidden when the caller does not have the URL to open.
+ * Most actions here are clipboard or navigation actions, which is why they work for a user whose
+ * profile failed to load, or when no account is online at all. Three of them are not, and they are
+ * grouped apart for exactly that reason: invite, ask for an invite, and boop all put something in
+ * another person's inbox **with the user's name on it**. They appear only when the app knows
+ * without guessing which account is asking (see `social-actions.ts`), because with two accounts
+ * signed in a wrong guess is not a glitch — it is the wrong identity appearing to have messaged a
+ * stranger. The two image items are hidden on the same principle: shown only when the caller has
+ * the URL to open, rather than opening a blank tab.
  */
 
 import BracesIcon from "@lucide/svelte/icons/braces";
 import CopyIcon from "@lucide/svelte/icons/copy";
 import ExternalLinkIcon from "@lucide/svelte/icons/external-link";
 import GalleryHorizontalIcon from "@lucide/svelte/icons/gallery-horizontal";
+import HandIcon from "@lucide/svelte/icons/hand";
 import IdCardIcon from "@lucide/svelte/icons/id-card";
 import ImageIcon from "@lucide/svelte/icons/image";
+import MailPlusIcon from "@lucide/svelte/icons/mail-plus";
+import MailQuestionIcon from "@lucide/svelte/icons/mail-question";
 import UserIcon from "@lucide/svelte/icons/user";
 import type { Component } from "svelte";
 import { toast } from "svelte-sonner";
 import { imageUrl } from "./api.ts";
+import { boop, canAct, inviteToMyInstance, myInstance, requestInvite } from "./social-actions.ts";
 import { userModal } from "./state/user-modal.svelte.ts";
 
 /** The canonical web profile. Opening it is a *browser* action; vrc.zip never fetches it. */
@@ -99,6 +107,55 @@ function openImage(url: string): void {
  * The image items are the only conditional ones: a caller that knows nothing but a name and an id
  * omits them entirely, rather than offering something that would open a blank tab.
  */
+/**
+ * The three actions that reach the other person.
+ *
+ * Omitted entirely rather than disabled when there is nobody to act as: a greyed-out "Boop" with no
+ * explanation is a worse answer than a menu that does not offer it, and the explanation belongs on
+ * the screen that could fix it (Accounts), not in a context menu tooltip.
+ *
+ * "Invite to my instance" has its own condition on top: it needs a running client somewhere a
+ * second person can actually be invited to, and it acts as *that client's* account rather than the
+ * caller's preference — inviting to a room from an account that is not in it is a request VRChat
+ * would refuse for a reason nobody could see from here.
+ */
+function socialActions(target: UserActionTarget): UserAction[] {
+  const actions: UserAction[] = [];
+  if (myInstance() !== null) {
+    actions.push({
+      id: "invite",
+      label: "Invite to my instance",
+      icon: MailPlusIcon,
+      separatorBefore: true,
+      run: () => {
+        void inviteToMyInstance(target.userId, target.name);
+      },
+    });
+  }
+  if (canAct(target.accountId)) {
+    actions.push(
+      {
+        id: "request-invite",
+        label: "Ask for an invite",
+        icon: MailQuestionIcon,
+        separatorBefore: actions.length === 0,
+        run: () => {
+          void requestInvite(target.userId, target.name, target.accountId);
+        },
+      },
+      {
+        id: "boop",
+        label: "Boop",
+        icon: HandIcon,
+        run: () => {
+          void boop(target.userId, target.name, target.accountId);
+        },
+      },
+    );
+  }
+  return actions;
+}
+
 export function userActions(target: UserActionTarget): UserAction[] {
   const meta = target.meta;
   const icon = target.iconUrlFull ?? null;
@@ -143,6 +200,7 @@ export function userActions(target: UserActionTarget): UserAction[] {
       },
     },
     ...imageActions,
+    ...socialActions(target),
     {
       id: "copy-name",
       label: "Copy display name",

@@ -30,6 +30,7 @@ import {
   type StreamFrame,
   type TwoFactorMethod,
   type VerifyTwoFactorInput,
+  type WebhookSummary,
 } from "@vrcz/shared";
 import type { ServerWebSocket } from "bun";
 import { Hono } from "hono";
@@ -876,6 +877,18 @@ export interface ControlDeps {
    * `ControlError(404)` for an unknown app and `ControlError(400)` for a scope that is not budgeted.
    */
   setAppBudget(grantId: string, scope: string, limit: number | null): Promise<ConnectedApp>;
+
+  /**
+   * Every webhook registered on this daemon, newest first.
+   *
+   * The user's oversight view, and deliberately *not* scoped to a grant the way `/app/webhooks` is:
+   * an app sees only its own, the person who owns the machine sees all of them. A webhook is an
+   * app quietly forwarding this user's presence to an address they never typed, so being able to
+   * enumerate them is the point.
+   */
+  listWebhooks(): Promise<WebhookSummary[]>;
+  /** Removes one, whoever registered it. Idempotent; an unknown id is not an error. */
+  deleteWebhook(webhookId: string): Promise<void>;
 
   /** The global kill switch. Returns how many live grants it closed. */
   revokeAllConnectedApps(): Promise<number>;
@@ -1894,6 +1907,19 @@ export function createControlApp({ port, deps, appApi, token }: ControlAppOption
         );
       }
       return c.json(await deps.setAppBudget(c.req.param("id"), c.req.param("scope"), raw));
+    })
+
+    /*
+     * Webhook oversight. Read and delete only — there is no route here that *creates* one, because
+     * a webhook is something an app asks for through `/app/webhooks` after the user approved it at
+     * consent. A create button on this side would be the user hand-configuring an outbound feed of
+     * their own presence, which is a feature, not part of the app-access story this page tells.
+     */
+    .get("/api/webhooks", async (c) => c.json(await deps.listWebhooks()))
+
+    .delete("/api/webhooks/:id", async (c) => {
+      await deps.deleteWebhook(c.req.param("id"));
+      return c.body(null, 204);
     })
 
     .post("/api/apps/:id/revoke", async (c) => {

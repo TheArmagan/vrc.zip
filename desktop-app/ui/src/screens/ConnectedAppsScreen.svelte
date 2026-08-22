@@ -31,7 +31,13 @@ import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
 import { Input } from "$lib/components/ui/input/index.js";
 import { Separator } from "$lib/components/ui/separator/index.js";
-import { api, type AppAuditEntry, type ConnectedApp, describeError } from "$lib/api.ts";
+import {
+  api,
+  type AppAuditEntry,
+  type ConnectedApp,
+  describeError,
+  type WebhookSummary,
+} from "$lib/api.ts";
 import Sparkline from "$lib/components/Sparkline.svelte";
 import { fullTimestamp, timeAgo } from "$lib/format.ts";
 import { clock } from "$lib/state/clock.svelte.ts";
@@ -68,6 +74,9 @@ async function load(): Promise<void> {
     // Seed each card's history; the live socket extends them from here.
     for (const entry of apps) rates.seedGrant(entry.id, entry.rate);
     loadError = null;
+    // Not awaited into the same failure path: a webhook list that cannot load must not turn a page
+    // of perfectly good app cards into an error state. See `loadWebhooks`.
+    void loadWebhooks();
   } catch (error) {
     loadError = error instanceof Error ? error.message : String(error);
   } finally {
@@ -223,9 +232,10 @@ function ordinary(app: ConnectedApp): readonly { scope: string; description: str
  */
 let savingBudget = $state<string | null>(null);
 
+// A space, because neither a grant id nor a scope string can contain one. The separator only has
+// to be a character that cannot appear in either half; it never reaches a screen.
 function budgetKey(grantId: string, scope: string): string {
-  return `${grantId}
-${scope}`;
+  return `${grantId} ${scope}`;
 }
 
 async function saveBudget(app: ConnectedApp, scope: string, raw: string): Promise<void> {
@@ -255,6 +265,57 @@ async function saveBudget(app: ConnectedApp, scope: string, raw: string): Promis
 
 async function resetBudget(app: ConnectedApp, scope: string): Promise<void> {
   await saveBudget(app, scope, "");
+}
+
+/*
+ * Webhooks, listed under the app that registered them.
+ *
+ * This is the quietest thing an app can do and the one most worth showing: a grant with a webhook
+ * is forwarding this user's presence to an address they never typed, at an address that keeps
+ * working while nothing is on screen. Revoking the app stops the events; deleting the webhook stops
+ * this one feed without touching anything else the app does, which is why both buttons exist.
+ *
+ * Fetched once with the page rather than per card. There are rarely more than a handful, and one
+ * request that returns them all is cheaper than one request per app that mostly returns nothing.
+ */
+let webhooks = $state<WebhookSummary[]>([]);
+let deletingWebhook = $state<string | null>(null);
+
+function webhooksFor(grantId: string): WebhookSummary[] {
+  return webhooks.filter((hook) => hook.grantId === grantId);
+}
+
+async function loadWebhooks(): Promise<void> {
+  try {
+    webhooks = await api.webhooks.list();
+  } catch {
+    // Deliberately silent. The app cards are the page; a webhook list that failed to load should
+    // not put an error banner over apps that loaded fine. An empty section is the honest fallback,
+    // and the next refresh retries.
+    webhooks = [];
+  }
+}
+
+async function removeWebhook(hook: WebhookSummary): Promise<void> {
+  if (deletingWebhook !== null) return;
+  deletingWebhook = hook.id;
+  actionError = null;
+  try {
+    await api.webhooks.remove(hook.id);
+    webhooks = webhooks.filter((entry) => entry.id !== hook.id);
+  } catch (cause) {
+    actionError = describeError(cause);
+  } finally {
+    deletingWebhook = null;
+  }
+}
+
+/** "Delivered 12, 1 waiting, 3 given up" — the three states an endpoint can be in at once. */
+function deliveryLine(hook: WebhookSummary): string {
+  const parts = [`${hook.deliveredCount.toLocaleString()} delivered`];
+  if (hook.pending > 0) parts.push(`${hook.pending.toLocaleString()} waiting`);
+  if (hook.deadCount > 0) parts.push(`${hook.deadCount.toLocaleString()} given up on`);
+  return parts.join(" · ");
 }
 </script>
 
@@ -368,6 +429,55 @@ async function resetBudget(app: ConnectedApp, scope: string): Promise<void> {
                 </div>
               {:else if danger.length === 0}
                 <p class="text-muted-foreground">No permissions recorded for this app.</p>
+              {/if}
+
+              <!--
+                What this app is quietly forwarding, and where to. A webhook keeps working while
+                nothing is on screen, which is exactly why it belongs on the page whose job is
+                "what does this app actually have".
+              -->
+              {#if webhooksFor(entry.id).length > 0}
+                {@const hooks = webhooksFor(entry.id)}
+                <div class="rounded-md border border-border">
+                  <p class="border-b border-border px-3 py-2 text-xs text-muted-foreground">
+                    Sending your events to {hooks.length === 1 ? "an address" : "addresses"} outside
+                    vrc.zip. Deleting one stops that feed without touching anything else this app
+                    does.
+                  </p>
+                  <ul class="divide-y divide-border">
+                    {#each hooks as hook (hook.id)}
+                      <li class="flex flex-wrap items-center gap-3 px-3 py-2">
+                        <div class="min-w-0 flex-1">
+                          <p class="truncate font-mono text-xs text-foreground" title={hook.url}>
+                            {hook.url}
+                          </p>
+                          <p class="text-xs text-muted-foreground">
+                            {hook.kinds.join(", ")} · {deliveryLine(hook)}
+                            {#if hook.disabledAt !== null}
+                              · <span class="text-warning"
+                                >switched off{hook.disabledReason === null
+                                  ? ""
+                                  : `: ${hook.disabledReason}`}</span
+                              >
+                            {:else if hook.lastError !== null}
+                              · <span class="text-warning" title={hook.lastError}>last try failed</span
+                              >
+                            {/if}
+                          </p>
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          class="h-7 px-2 text-xs"
+                          disabled={deletingWebhook !== null}
+                          onclick={() => removeWebhook(hook)}
+                        >
+                          {deletingWebhook === hook.id ? "Deleting…" : "Delete"}
+                        </Button>
+                      </li>
+                    {/each}
+                  </ul>
+                </div>
               {/if}
 
               <!--

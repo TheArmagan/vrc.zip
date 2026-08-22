@@ -21,6 +21,7 @@ import type { Store } from "../store/index.ts";
 import type { GrantRow, WebhookRow } from "../store/types.ts";
 import type { WebhookManager } from "../webhooks/index.ts";
 import { WebhookUrlError } from "../webhooks/index.ts";
+import { webhookSummary } from "./webhook-summary.ts";
 
 export interface AppApiDepsOptions {
   readonly store: Store;
@@ -60,27 +61,7 @@ export function createAppApiDeps(options: AppApiDepsOptions): AppApiDeps {
     };
   }
 
-  function toSummary(row: WebhookRow): WebhookSummary {
-    return {
-      id: row.id,
-      grantId: row.grant_id,
-      // Resolved from the grant rather than stored on the webhook: a row that carried its own copy
-      // of the app's name would keep the old one after the app updated its User-Agent.
-      appName: row.grant_id === null ? null : (store.getGrant(row.grant_id)?.app_name ?? null),
-      url: row.url,
-      kinds: parseKinds(row.kinds),
-      accountId: row.account_id,
-      createdAt: row.created_at,
-      disabledAt: row.disabled_at,
-      disabledReason: row.disabled_reason,
-      deliveredCount: row.delivered_count,
-      deadCount: row.dead_count,
-      lastDeliveryAt: row.last_delivery_at,
-      lastStatus: row.last_status,
-      lastError: row.last_error,
-      pending: store.countPendingWebhookDeliveries(row.id),
-    };
-  }
+  const toSummary = (row: WebhookRow): WebhookSummary => webhookSummary(row, store);
 
   return {
     async resolveGrant(token): Promise<AppGrant | null> {
@@ -178,15 +159,4 @@ export function createAppApiDeps(options: AppApiDepsOptions): AppApiDeps {
       return webhooks.remove(webhookId);
     },
   };
-
-  function parseKinds(json: string): string[] {
-    try {
-      const parsed: unknown = JSON.parse(json);
-      return Array.isArray(parsed) ? parsed.filter((kind) => typeof kind === "string") : [];
-    } catch {
-      // A row we cannot read still describes a webhook the user may want to delete, so it lists
-      // with no kinds rather than vanishing out of the very list that offers the delete button.
-      return [];
-    }
-  }
 }

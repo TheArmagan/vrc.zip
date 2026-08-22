@@ -85,6 +85,8 @@ const deps: ControlDeps = {
   boop: async () => {
     throw new Error("unused");
   },
+  listWebhooks: async () => [],
+  deleteWebhook: async () => {},
   setAppBudget: async () => {
     throw new Error("unused");
   },

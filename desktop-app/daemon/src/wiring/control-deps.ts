@@ -26,6 +26,7 @@ import {
   type RetentionUpdate,
   SCOPES,
   STREAM_RATE,
+  type WebhookSummary,
 } from "@vrcz/shared";
 import type { Account, AccountSnapshot } from "../accounts/account.ts";
 import type { AccountManager } from "../accounts/manager.ts";
@@ -94,6 +95,8 @@ import {
   type Store,
 } from "../store/index.ts";
 import type { GrantRow } from "../store/types.ts";
+import type { WebhookManager } from "../webhooks/index.ts";
+import { webhookSummary } from "./webhook-summary.ts";
 
 /**
  * Implements the control API's `ControlDeps` against the live daemon.
@@ -135,6 +138,13 @@ export interface ControlDepsOptions {
    * store has no scheduler, and "no pass scheduled" is an honest answer for one.
    */
   readonly nextRetentionRunAt?: (() => number) | undefined;
+  /**
+   * The outbound webhook subsystem, for the user's oversight view.
+   *
+   * Optional for the same reason `consent` is: a Phase 1 test constructing these deps has none, and
+   * "no webhooks are registered" is exactly true for a daemon that cannot register any.
+   */
+  readonly webhooks?: WebhookManager | undefined;
   readonly settings: Settings;
   readonly env?: NodeJS.ProcessEnv;
   readonly connectPipeline: (accountId: string) => void;
@@ -1724,6 +1734,18 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         options.pipelineMirror ?? null,
         options.meter ?? null,
       );
+    },
+
+    async listWebhooks(): Promise<WebhookSummary[]> {
+      const hooks = options.webhooks;
+      if (hooks === undefined) return [];
+      return hooks.list().map((row) => webhookSummary(row, store));
+    },
+
+    async deleteWebhook(webhookId): Promise<void> {
+      // Idempotent, like `revokeConnectedApp`: deleting something already gone is the outcome the
+      // user asked for, and a 404 would make a double-click look like a failure.
+      options.webhooks?.remove(webhookId);
     },
 
     async revokeConnectedApp(grantId): Promise<void> {

@@ -2,11 +2,16 @@
  * The commands the shell itself owns: navigation, appearance, connection, and the four instant
  * actions from the plan.
  *
- * The instant actions are registered even though two of the four still have no daemon endpoint
- * behind them. That is deliberate and is the whole reason the registry exists in Phase 1: a command
- * that appears the day its endpoint lands is a command nobody discovers, and retrofitting a
- * registry onto screens that already grew their own buttons costs far more than carrying a few
- * stubs. A stub says so out loud when it is run — it never silently does nothing.
+ * The instant actions were registered as stubs long before their endpoints existed, which was the
+ * whole reason the registry landed in Phase 1: a command that appears the day its endpoint lands is
+ * a command nobody discovers, and retrofitting a registry onto screens that already grew their own
+ * buttons costs far more than carrying a few stubs. Phase 2.10 gave all three their routes, so they
+ * are real now — the stub shape is worth remembering rather than the stubs themselves.
+ *
+ * Each of the three takes a user id as its palette argument. That is the only way this surface can
+ * name a person: the palette has no roster, and the clipboard is where a `usr_…` usually arrives
+ * from anyway. The richer entry point is the menu on any display name in the app, which already has
+ * both the id and the name in hand — see `user-actions.ts`.
  */
 
 import { api, describeError } from "../api.ts";
@@ -14,11 +19,13 @@ import { registerCommands } from "../commands.svelte.ts";
 import { parseLocation, planJoin } from "../format.ts";
 import { requestJoin } from "../join.ts";
 import { navigate, ROUTE_IDS, type RouteId } from "../router.ts";
+import { boop, canAct, inviteToMyInstance, myInstance, requestInvite } from "../social-actions.ts";
 import { app } from "../state/app.svelte.ts";
 import { prefs } from "../state/prefs.svelte.ts";
 import { theme } from "../state/theme.svelte.ts";
 import { registerDirectCommands } from "./direct.svelte.ts";
 import type { CommandHost } from "./host.ts";
+import { parseTarget } from "./targets.ts";
 
 export type { CommandHost };
 
@@ -82,6 +89,37 @@ function firstLocated(): string | null {
     (entry) => entry.currentLocation !== null && !parseLocation(entry.currentLocation).opaque,
   );
   return session?.currentLocation ?? null;
+}
+
+/**
+ * The palette argument all three social actions share: a user id, pasted.
+ *
+ * Validated live rather than only on submit, so a half-pasted id shows its own error instead of
+ * looking like the command is broken. The name shown in the confirmation afterwards is the id: the
+ * palette never loaded a profile, and inventing a display name it has not seen would be worse than
+ * echoing what the user typed.
+ */
+const USER_ARGUMENT = {
+  placeholder: "usr_… or a vrchat.com profile link",
+  hint: "The person this happens to. Paste an id or a profile link.",
+  initial: (): string => "",
+  validate: (value: string): string | null => {
+    if (value.trim() === "") return null;
+    return parseTarget(value)?.kind === "user" ? null : "That is not a user id or profile link.";
+  },
+};
+
+function asUserId(argument: string, host: CommandHost): string | null {
+  const target = parseTarget(argument);
+  if (target === null || target.kind !== "user") {
+    host.notify(
+      "warning",
+      "That is not a user id",
+      "Paste a `usr_…` id or a vrchat.com profile link.",
+    );
+    return null;
+  }
+  return target.id;
 }
 
 export function registerBuiltinCommands(host: CommandHost): () => void {
@@ -257,41 +295,46 @@ export function registerBuiltinCommands(host: CommandHost): () => void {
     },
     {
       id: "instant.invite",
-      title: "Invite a friend to your instance",
-      subtitle: "No daemon endpoint yet. Waiting on POST /api/invites.",
+      title: "Invite someone to your instance",
+      subtitle: "Sends them an invite to wherever a running client is",
       group: "Instant actions",
       keywords: ["invite", "bring", "friend"],
-      run: (): void => {
-        host.notImplemented(
-          "Invite a friend",
-          "The daemon has no invite endpoint yet. The command is registered now so it appears the day the route lands.",
-        );
+      // Hidden rather than disabled when there is nowhere to invite anyone to. A command that is
+      // always listed and always refuses teaches people to ignore it.
+      enabled: (): boolean => myInstance() !== null,
+      argument: USER_ARGUMENT,
+      run: (argument): void => {
+        const userId = asUserId(argument, host);
+        if (userId === null) return;
+        void inviteToMyInstance(userId, userId);
       },
     },
     {
       id: "instant.invite-request",
-      title: "Ask a friend for an invite",
-      subtitle: "No daemon endpoint yet. Waiting on POST /api/invite-requests.",
+      title: "Ask someone for an invite",
+      subtitle: "Puts a request in their notifications, from you",
       group: "Instant actions",
       keywords: ["request", "invite me", "join"],
-      run: (): void => {
-        host.notImplemented(
-          "Request an invite",
-          "The daemon has no invite-request endpoint yet. The command is registered now so it appears the day the route lands.",
-        );
+      enabled: (): boolean => canAct(),
+      argument: USER_ARGUMENT,
+      run: (argument): void => {
+        const userId = asUserId(argument, host);
+        if (userId === null) return;
+        void requestInvite(userId, userId);
       },
     },
     {
       id: "instant.boop",
-      title: "Boop a friend",
-      subtitle: "No daemon endpoint yet. VRChat's interaction API is not wired up.",
+      title: "Boop someone",
+      subtitle: "A greeting with no content, which is the appeal",
       group: "Instant actions",
       keywords: ["poke", "wave", "hello"],
-      run: (): void => {
-        host.notImplemented(
-          "Boop",
-          "VRChat's interaction API is not wired into the daemon yet. The command is registered now so it appears the day it is.",
-        );
+      enabled: (): boolean => canAct(),
+      argument: USER_ARGUMENT,
+      run: (argument): void => {
+        const userId = asUserId(argument, host);
+        if (userId === null) return;
+        void boop(userId, userId);
       },
     },
   ]);

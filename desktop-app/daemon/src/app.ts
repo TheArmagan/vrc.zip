@@ -343,6 +343,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     consent,
     pipelineMirror,
     meter,
+    webhooks,
     connectPipeline,
     ...(env !== undefined ? { env } : {}),
     onSettingsSaved: (next) => saveSettings(next, env),

@@ -50,6 +50,7 @@ import {
   type RetentionUpdate,
   type TwoFactorMethod,
   type VerifyTwoFactorResult,
+  type WebhookSummary,
 } from "@vrcz/shared";
 import { API_BASE } from "./config.ts";
 
@@ -108,6 +109,7 @@ export {
   type RetentionUpdate,
   type TwoFactorMethod,
   type VerifyTwoFactorResult,
+  type WebhookSummary,
 };
 
 /** Local aliases so this module's own signatures read the way its callers do. */
@@ -1036,6 +1038,46 @@ export const api = {
         method: "POST",
         body: { location },
       }),
+
+    /*
+     * The three things you can do *to another person*, all of which arrive in their inbox with the
+     * user's name on it. That is why the account is in the path rather than inferred: with two
+     * clients signed in, which of them is asking is the whole question, and guessing would put the
+     * wrong person's name on the invite.
+     *
+     * 403 means VRChat will not deliver it — invites off, or blocked — and 404 means they are gone.
+     * Both are answers rather than faults, and the daemon keeps them apart so a screen can say
+     * which happened.
+     */
+    invite: (
+      accountId: string,
+      userId: string,
+      location: string,
+      messageSlot?: number,
+    ): Promise<{ readonly status: "ok" }> =>
+      request<{ readonly status: "ok" }>(`/accounts/${encodeURIComponent(accountId)}/invite`, {
+        method: "POST",
+        body: { userId, location, ...(messageSlot === undefined ? {} : { messageSlot }) },
+      }),
+
+    requestInvite: (
+      accountId: string,
+      userId: string,
+      requestSlot?: number,
+    ): Promise<{ readonly status: "ok" }> =>
+      request<{ readonly status: "ok" }>(
+        `/accounts/${encodeURIComponent(accountId)}/request-invite`,
+        {
+          method: "POST",
+          body: { userId, ...(requestSlot === undefined ? {} : { requestSlot }) },
+        },
+      ),
+
+    boop: (accountId: string, userId: string): Promise<{ readonly status: "ok" }> =>
+      request<{ readonly status: "ok" }>(`/accounts/${encodeURIComponent(accountId)}/boop`, {
+        method: "POST",
+        body: { userId },
+      }),
   },
 
   /**
@@ -1107,6 +1149,19 @@ export const api = {
         query: { limit: query.limit, before: query.before },
         ...withSignal(signal),
       }),
+  },
+
+  /*
+   * The user's oversight view of outbound webhooks. Read and delete only — there is no create call,
+   * because a webhook is something an app asks for through the proxy after the user approved it at
+   * consent, not something the Settings screen hands out.
+   */
+  webhooks: {
+    list: (signal?: AbortSignal): Promise<WebhookSummary[]> =>
+      request<WebhookSummary[]>("/webhooks", withSignal(signal)),
+
+    remove: (webhookId: string): Promise<void> =>
+      request<void>(`/webhooks/${encodeURIComponent(webhookId)}`, { method: "DELETE" }),
   },
 
   sessions: (signal?: AbortSignal): Promise<GameSession[]> =>

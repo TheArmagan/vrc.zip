@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import type { DaemonStatus, RetentionSettings, RetentionUpdate } from "@vrcz/shared";
+import type {
+  DaemonStatus,
+  RetentionSettings,
+  RetentionUpdate,
+  WebhookSummary,
+} from "@vrcz/shared";
 import { APP_VERSION } from "@vrcz/shared";
 import { emptySeries, WINDOW_SECONDS } from "../net/request-meter.ts";
 import { TOKEN_HEADER } from "../security/guards.ts";
@@ -48,6 +53,25 @@ const ICON_URL_FULL = "https://api.vrchat.cloud/api/1/file/file_icon/1/1024";
 
 /** The one grant `fakeDeps` knows about, so an unknown id has something to be unknown against. */
 const GRANT_ID = "grant_00000000";
+
+/** One registered webhook. Note the absence of a secret: the store only ever holds a hash of one. */
+const WEBHOOK: WebhookSummary = {
+  id: "wh_1",
+  grantId: GRANT_ID,
+  appName: "MyApp",
+  url: "https://example.test/hook",
+  kinds: ["friend.*"],
+  accountId: "usr_a",
+  createdAt: 1_700_000_000_000,
+  disabledAt: null,
+  disabledReason: null,
+  deliveredCount: 12,
+  deadCount: 0,
+  lastDeliveryAt: 1_700_000_100_000,
+  lastStatus: 200,
+  lastError: null,
+  pending: 0,
+};
 
 /** One connected app, as `PUT /api/apps/:id/budgets/:scope` returns it after a write. */
 const CONNECTED_APP: ConnectedApp = {
@@ -369,6 +393,7 @@ interface Recorder {
   retentionUpdates: RetentionUpdate[];
   retentionRuns: number;
   budgetWrites: { grantId: string; scope: string; limit: number | null }[];
+  webhooksDeleted: string[];
   sentActions: {
     kind: string;
     accountId: string;
@@ -406,6 +431,7 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     retentionUpdates: [],
     retentionRuns: 0,
     budgetWrites: [],
+    webhooksDeleted: [],
     sentActions: [],
   };
   let settings: Settings = { theme: "dark" };
@@ -456,6 +482,10 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
       seen.sentActions.push({ kind: "boop", accountId, userId });
     },
     listConnectedApps: async () => [],
+    listWebhooks: async () => [WEBHOOK],
+    deleteWebhook: async (webhookId) => {
+      seen.webhooksDeleted.push(webhookId);
+    },
     setAppBudget: async (grantId, scope, limit) => {
       if (grantId !== GRANT_ID) throw new ControlError(404, "unknown_app", "no such app");
       seen.budgetWrites.push({ grantId, scope, limit });
@@ -2053,5 +2083,43 @@ describe("the two authentication models on one port", () => {
     // bit more than an unauthenticated client should be able to learn about this surface.
     const { deps } = fakeDeps();
     expect((await call(deps, "/app/nope")).status).toBe(401);
+  });
+});
+
+describe("webhook oversight", () => {
+  test("GET lists every webhook, whoever registered it", async () => {
+    // Deliberately not scoped to a grant the way `/app/webhooks` is: an app sees its own, the
+    // person who owns the machine sees all of them. That asymmetry is the point of this route.
+    const { deps } = fakeDeps();
+    const res = await call(deps, "/api/webhooks");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([WEBHOOK]);
+  });
+
+  test("the listing never carries a signing secret", async () => {
+    const { deps } = fakeDeps();
+    const body = await (await call(deps, "/api/webhooks")).text();
+    expect(body).not.toContain("secret");
+    expect(body).not.toContain("whsec_");
+  });
+
+  test("DELETE is a 204 and is idempotent", async () => {
+    const { deps, seen } = fakeDeps();
+    expect((await call(deps, "/api/webhooks/wh_1", { method: "DELETE" })).status).toBe(204);
+    // An id that was never there answers the same way: the outcome asked for is the outcome.
+    expect((await call(deps, "/api/webhooks/wh_gone", { method: "DELETE" })).status).toBe(204);
+    expect(seen.webhooksDeleted).toEqual(["wh_1", "wh_gone"]);
+  });
+
+  test("there is no route that creates one", async () => {
+    // A webhook is something an app asks for at `/app/webhooks` after the user approved it at
+    // consent. A create button here would be a different feature wearing this one's clothes.
+    const { deps } = fakeDeps();
+    const res = await call(deps, "/api/webhooks", {
+      method: "POST",
+      body: JSON.stringify({ url: "https://example.test/x" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(res.status).toBe(404);
   });
 });

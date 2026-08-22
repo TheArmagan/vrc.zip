@@ -17,6 +17,8 @@
  * remembered for the tab only, alongside the session token.
  */
 
+import { TOKEN_QUERY_PARAM } from "@vrcz/shared";
+
 const OVERRIDE_KEY = "vrcz.api-base";
 const DEFAULT_BASE = "/api";
 
@@ -46,6 +48,6 @@ export const API_BASE: string = resolveBase();
 export function streamUrl(token: string | null): string {
   const url = new URL(`${API_BASE}/stream`, window.location.href);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  if (token !== null) url.searchParams.set("token", token);
+  if (token !== null) url.searchParams.set(TOKEN_QUERY_PARAM, token);
   return url.toString();
 }

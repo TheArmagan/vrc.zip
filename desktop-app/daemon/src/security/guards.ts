@@ -1,3 +1,4 @@
+import { SESSION_COOKIE, TOKEN_HEADER, TOKEN_QUERY_PARAM } from "@vrcz/shared";
 import type { Context, MiddlewareHandler } from "hono";
 import { getCookie } from "hono/cookie";
 import { sessionTokensMatch } from "./session-token.ts";
@@ -12,11 +13,9 @@ import { sessionTokensMatch } from "./session-token.ts";
 /** Hostnames a loopback request may legitimately arrive under. */
 export const ALLOWED_HOSTNAMES = ["127.0.0.1", "localhost", "local.vrc.zip"] as const;
 
-/** Header the UI sends when it would rather not put the token in a query string. */
-export const TOKEN_HEADER = "X-Vrcz-Token";
-
-/** Query parameter the launch URL carries, so the first navigation can authenticate itself. */
-export const TOKEN_QUERY_PARAM = "token";
+// The token's transport names are defined in `@vrcz/shared` because the UI has to spell them the
+// same way, and re-exported here so the daemon's existing importers keep their import path.
+export { SESSION_COOKIE, TOKEN_HEADER, TOKEN_QUERY_PARAM } from "@vrcz/shared";
 
 export function allowedHosts(port: number): string[] {
   return ALLOWED_HOSTNAMES.map((name) => `${name}:${port}`);
@@ -77,10 +76,9 @@ export type TokenSource = () => string | Promise<string>;
  * - `X-Vrcz-Token: <token>` — the UI's own fetches, once it has the token in memory.
  * - `?token=<token>` — the launch URL, which is the only way the very first navigation can carry
  *   credentials at all. The UI strips it from the address bar immediately after boot.
+ *
+ * A fourth transport, the post-launch `SESSION_COOKIE`, is handled in `extractSessionToken`.
  */
-/** Set once the launch URL's `?token=` has been validated, so subresources authenticate too. */
-export const SESSION_COOKIE = "vrcz_session";
-
 export function sessionAuth(getToken: TokenSource): MiddlewareHandler {
   return async function sessionAuthMiddleware(c, next) {
     const presented = extractSessionToken(c);

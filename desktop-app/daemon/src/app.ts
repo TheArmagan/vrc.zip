@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { launchUrl as buildLaunchUrl } from "@vrcz/shared";
 import { AccountManager } from "./accounts/manager.ts";
 import { NotificationService } from "./accounts/notifications.ts";
 import { PresenceService } from "./accounts/presence.ts";
@@ -281,7 +282,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     env,
   );
 
-  const launchUrl = `${servers.urls.uiUrl}/?token=${sessionToken}`;
+  const launchUrl = buildLaunchUrl(servers.urls.uiUrl, sessionToken);
 
   // --- getting a consent request in front of the user -----------------------
   // Which channel runs depends on whether anyone is watching; see `wiring/consent-alert.ts`. The
@@ -291,8 +292,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     bus,
     consent,
     uiConnected: () => deps.streamClientCount() > 0,
-    consentUrl: (pairingId) =>
-      `${servers.urls.uiUrl}/?token=${sessionToken}#/consent/${encodeURIComponent(pairingId)}`,
+    consentUrl: (pairingId) => `${launchUrl}#/consent/${encodeURIComponent(pairingId)}`,
     openBrowser: () => settings.openBrowserOnStart,
   });
 

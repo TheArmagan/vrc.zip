@@ -1,3 +1,10 @@
+import {
+  DEFAULT_CONTROL_PORT,
+  DEFAULT_HOSTNAME,
+  DEFAULT_PROXY_PORT,
+  DEFAULT_UI_PORT,
+  launchUrl as sharedLaunchUrl,
+} from "@vrcz/shared";
 import type { Server, WebSocketHandler } from "bun";
 import { type EgressViolation, filterResponse } from "../proxy/egress-filter.ts";
 import type { ProxyDeps } from "../proxy/handshake.ts";
@@ -24,12 +31,14 @@ import { createUiApp } from "./ui.ts";
 /** `Bun.serve` returns a generic `Server`; the daemon never attaches per-socket data of its own. */
 type BunServer = Server<unknown>;
 
-export const DEFAULT_UI_PORT = 7773;
-export const DEFAULT_PROXY_PORT = 7774;
-export const DEFAULT_CONTROL_PORT = 7775;
-
-/** Loopback by name resolves to 127.0.0.1; binding the literal keeps IPv6 out of the picture. */
-export const DEFAULT_HOSTNAME = "127.0.0.1";
+// Defined in `@vrcz/shared` so the settings defaults and the UI agree on the same numbers, and
+// re-exported here because `servers/index.ts` and the rest of the daemon import them from `bind`.
+export {
+  DEFAULT_CONTROL_PORT,
+  DEFAULT_HOSTNAME,
+  DEFAULT_PROXY_PORT,
+  DEFAULT_UI_PORT,
+} from "@vrcz/shared";
 
 /**
  * The shape `Bun.serve` needs from an app. Structural rather than `Hono`-typed, because each
@@ -235,5 +244,5 @@ export async function bindServers(options: BindServersOptions): Promise<BoundSer
 
 /** The URL to open in the browser: the UI origin with the session token attached. */
 export function launchUrl(uiUrl: string, sessionToken: string): string {
-  return `${uiUrl}/?token=${encodeURIComponent(sessionToken)}`;
+  return sharedLaunchUrl(uiUrl, sessionToken);
 }

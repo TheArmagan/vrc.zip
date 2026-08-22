@@ -12,6 +12,8 @@
  * `/api/stream` takes the token as a query parameter. See `stream.ts`.
  */
 
+import { TOKEN_QUERY_PARAM } from "@vrcz/shared";
+
 const STORAGE_KEY = "vrcz.session-token";
 
 let cached: string | null = null;
@@ -39,11 +41,11 @@ function writeStored(token: string): void {
  */
 export function adoptTokenFromLocation(): void {
   const url = new URL(window.location.href);
-  const fromQuery = url.searchParams.get("token");
+  const fromQuery = url.searchParams.get(TOKEN_QUERY_PARAM);
   if (fromQuery !== null && fromQuery !== "") {
     cached = fromQuery;
     writeStored(fromQuery);
-    url.searchParams.delete("token");
+    url.searchParams.delete(TOKEN_QUERY_PARAM);
     window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
   }
 }

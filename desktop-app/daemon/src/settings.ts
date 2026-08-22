@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { DEFAULT_CONTROL_PORT, DEFAULT_PROXY_PORT, DEFAULT_UI_PORT } from "@vrcz/shared";
 import { settingsPath } from "./paths.ts";
 
 /**
@@ -26,7 +27,7 @@ export interface Settings {
 
 export const DEFAULT_SETTINGS: Settings = {
   contact: "",
-  ports: { ui: 7773, proxy: 7774, control: 7775 },
+  ports: { ui: DEFAULT_UI_PORT, proxy: DEFAULT_PROXY_PORT, control: DEFAULT_CONTROL_PORT },
   useLocalDomain: false,
   logDirectories: [],
   openBrowserOnStart: true,

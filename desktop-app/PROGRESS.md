@@ -2978,6 +2978,45 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      window by definition, and detaching to spawn a new one would be hostile to whoever typed the
      command.
 
+199. **The executable gets a console of its own, and every step of that was measured rather than
+     assumed.** "It opens with PowerShell" was accurate: a console-subsystem binary is handed a
+     window by the user's *default terminal application*, which on Windows 11 is Windows Terminal
+     painting it with its default profile — PowerShell's icon, PowerShell's title.
+
+     The fix is `--windows-hide-console` (a GUI-subsystem binary Windows gives no console at all)
+     plus `AllocConsole` at startup. **Measured: a console allocated that way comes back as class
+     `ConsoleWindowClass`** — the classic `conhost`, which takes its icon from the process that owns
+     it. Four things had to be found by probing, each of which would have shipped broken:
+
+     - **`GetFileType` is not "do I have output".** A GUI process launched from Explorer arrives
+       with a non-null stdout of type `FILE_TYPE_CHAR` — the NUL device. The first version treated
+       that as usable, skipped allocating, and ran headless with its output going nowhere.
+       `GetConsoleMode` is the honest question: it succeeds only for a real console.
+     - **Output does not follow the console.** Bun binds `process.stdout` at startup and
+       `SetStdHandle` afterwards does not rebuild it. Verified by reading the console screen buffer
+       back: after `AllocConsole`, `console.log` left the screen empty while `WriteConsoleW` on the
+       same handle painted. So `console.*` is rerouted through `WriteConsoleW`.
+     - **Chalk turns itself off.** It reads `process.stdout.isTTY`, which is `undefined` here, and
+       settles on level 0 — every style a no-op. The window handles truecolor perfectly well, so the
+       level is set by hand on that path only, never as a blanket `FORCE_COLOR` that would also
+       paint a pipe.
+     - **The icon was already right; the *selection* was not.** The `.ico` carries ten natively
+       rendered sizes including a real 256, and pulling the resources back out of the built `.exe`
+       confirmed all ten ship. But an `.ico` is a directory, and code paths that take the *first*
+       entry were getting the 16 and scaling it. It is ordered largest-first now, and the console
+       window's `ICON_SMALL`/`ICON_BIG` are set explicitly at the sizes `GetSystemMetrics` reports,
+       so Windows picks a matching entry instead of resampling one.
+
+     Also here: the VZ mark as a banner, `O` and `F` to open the app and the proxy setup page
+     (the decoder for `INPUT_RECORD` is a pure function with tests, because a console cannot be
+     typed into from a test but a buffer of bytes can be built by hand), and `--help`/`--version`
+     answered before anything touches disk.
+
+     **What is still not ours:** a console the app was *launched into*. Running from PowerShell
+     borrows PowerShell's window by definition, and detaching to spawn a new one would be hostile to
+     whoever typed the command. A window with our own chrome means shipping a GUI, which is a Phase
+     5 question rather than a formatting one.
+
 ---
 
 ## Gotchas

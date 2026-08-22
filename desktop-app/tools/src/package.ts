@@ -137,6 +137,16 @@ async function main(): Promise<void> {
       // `dist/…` whatever the path here looks like. See EMBEDDED_UI_PREFIX in @vrcz/shared.
       `--asset=${UI_DIST}`,
       `--outfile=${outfile}`,
+      /*
+       * GUI subsystem: no console from Windows, so the app can make its own.
+       *
+       * A console-subsystem binary gets a window from the user's *default terminal application*,
+       * which on Windows 11 is usually Windows Terminal painting it with its default profile —
+       * PowerShell's icon and title. Double-clicking vrc.zip looked like opening PowerShell.
+       * `daemon/src/os/console.ts` allocates a `conhost` window instead, which takes its icon from
+       * this executable, and reroutes output into it.
+       */
+      "--windows-hide-console",
       `--windows-icon=${ICON_PATH}`,
       `--windows-title=${APP_NAME} (UNOFFICIAL)`,
       `--windows-publisher=${APP_NAME}`,

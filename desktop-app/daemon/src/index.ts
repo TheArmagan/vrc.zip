@@ -1,6 +1,20 @@
 import { APP_NAME, APP_VERSION } from "@vrcz/shared";
-import { attention, banner, helpText, note, startupSummary, versionText } from "./cli/banner.ts";
-import { enableAnsiColour, setConsoleTitle } from "./os/console.ts";
+import {
+  attention,
+  banner,
+  forceColour,
+  helpText,
+  note,
+  startupSummary,
+  versionText,
+} from "./cli/banner.ts";
+import {
+  applyWindowIcon,
+  claimConsole,
+  enableAnsiColour,
+  onConsoleKey,
+  setConsoleTitle,
+} from "./os/console.ts";
 import { startDaemon } from "./app.ts";
 import { openUrl, shouldOpenBrowser } from "./os/open-url.ts";
 import { isPackaged } from "./servers/embedded-ui.ts";
@@ -77,8 +91,29 @@ async function main(): Promise<void> {
    * to the executable, which is both ugly and a way to put somebody's home directory in a
    * screenshot.
    */
-  enableAnsiColour();
+  /*
+   * A console of our own, before anything is printed into it.
+   *
+   * The executable is built GUI-subsystem (`--windows-hide-console`), so Windows gives it no console
+   * and the one it would have given belonged to the user's default terminal — Windows Terminal,
+   * wearing PowerShell's icon and title. `claimConsole` asks for a `conhost` window instead, which
+   * takes its icon from this executable, and reroutes `console.*` into it because Bun's streams were
+   * bound before that window existed. It does nothing at all when output already goes somewhere.
+   */
+  const console_ = claimConsole();
+  const colour = enableAnsiColour();
   setConsoleTitle(`${APP_NAME} ${APP_VERSION}`);
+  // Asks for the icon at the exact sizes this display's scaling wants, so Windows picks a matching
+  // entry out of the directory rather than scaling whichever one it was handed.
+  applyWindowIcon();
+  /*
+   * Colour has to be switched on by hand for a console we allocated.
+   *
+   * Chalk reads `process.stdout.isTTY`, which is `undefined` here because Bun bound stdout before
+   * the window existed — it settles on level 0 and every style becomes a no-op. The window itself
+   * handles truecolor perfectly well, which is why this is a correction rather than a workaround.
+   */
+  if (console_ !== null && colour) forceColour();
 
   const code = await runSubcommand(process.argv.slice(2));
   if (code !== null) {
@@ -118,12 +153,51 @@ async function main(): Promise<void> {
 
   for (const line of daemon.startupNotes) console.log(note(line));
 
+  /*
+   * Keys, for the window nobody can type a URL into.
+   *
+   * Somebody who double-clicked has a console holding two long `http://127.0.0.1:…` links and no
+   * shell to paste them into — and the UI one carries a session token, so retyping it is not an
+   * option either. `O` and `F` are what that window is for.
+   *
+   * Only offered when there is something to read keys from: with output redirected there is no
+   * console and no keyboard, and a hint about keys that do nothing is worse than no hint.
+   */
+  const stopKeys = onConsoleKey((key) => {
+    const pressed = key.toLowerCase();
+    if (pressed === "o") {
+      console.log(note("opening the app…"));
+      void openUrl(daemon.launchUrl);
+      return;
+    }
+    if (pressed === "f" && daemon.forwardProxy !== null) {
+      console.log(note("opening the forward proxy setup page…"));
+      void openUrl(`${daemon.forwardProxy.url}/`);
+    }
+  });
+
+  if (stopKeys !== null) {
+    console.log("");
+    console.log(
+      note(
+        daemon.forwardProxy === null
+          ? "Press O to open the app."
+          : "Press O to open the app, F for the forward proxy setup page.",
+      ),
+    );
+  }
+
+  // Re-applied after the startup output: Bun sets the console title from the script name on some
+  // paths, and whichever of us runs last is what the user reads on the title bar.
+  setConsoleTitle(`${APP_NAME} ${APP_VERSION}`);
+
   let stopping = false;
   const shutdown = (signal: string): void => {
     // A second Ctrl-C during shutdown should not start a second one; the flush is not reentrant.
     if (stopping) return;
     stopping = true;
 
+    stopKeys?.();
     console.log(`\n${APP_NAME}: ${signal} received, shutting down...`);
     daemon
       .stop()

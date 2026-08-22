@@ -32,7 +32,19 @@ const OUT_PATH = join(ROOT, "tools", "assets", "vrczip.ico");
  * nearest larger entry, badly, and the result is the blur that makes an icon look cheap. Each one
  * here is rendered from the geometry instead, so nothing is ever a resample.
  */
-const SIZES = [16, 20, 24, 32, 40, 48, 64, 96, 128, 256] as const;
+const SIZES = [256, 128, 96, 64, 48, 40, 32, 24, 20, 16] as const;
+
+/*
+ * Largest first, and that ordering is the fix for a real complaint rather than tidiness.
+ *
+ * Every entry here is rendered from the geometry at its own size, so none of them is a resample and
+ * the 256 is genuinely sharp — verified by pulling it back out of the built `.exe`. But an `.ico` is
+ * a *directory*, and while `LookupIconIdFromDirectoryEx` picks by size, plenty of code paths simply
+ * take the first entry they find. Smallest-first meant those paths got the 16, scaled up to
+ * whatever they needed, which is exactly what "blurry" looks like.
+ *
+ * Windows' own selection is unaffected by the order, so this costs nothing and removes the failure.
+ */
 
 /** Amber tile, near-black mark. Kept to two colours so it still reads at 16px. */
 const TILE = { r: 0xf5, g: 0xc4, b: 0x51 } as const;

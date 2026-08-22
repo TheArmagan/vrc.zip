@@ -38,13 +38,41 @@ const BRAND_YELLOW = "#f5c454";
 const accent = chalk.hex(BRAND_YELLOW);
 
 /**
- * The wordmark.
+ * Turns colour on for a console we allocated ourselves.
  *
- * Small on purpose. A full-width ASCII-art logo looks charming once and then wastes the top third of
- * every terminal it appears in — and under `bun --watch` it appears on every save.
+ * Chalk decides its level from `process.stdout.isTTY`, and in a GUI-subsystem process that is
+ * `undefined` — Bun's stdout was bound before any console existed. Measured: `chalk.level` comes
+ * back **0**, so every style is a no-op and the output is plain no matter what the window can do.
+ *
+ * The window *can* do truecolor: `enableAnsiColour` has already asked it to interpret escapes, and
+ * reading the screen buffer back shows the sequences consumed rather than printed. So the level is
+ * set by hand, and only on the path where the host is known — never as a blanket `FORCE_COLOR`,
+ * which would also paint a pipe somebody is redirecting into a file.
+ */
+export function forceColour(): void {
+  chalk.level = 3;
+}
+
+/**
+ * The wordmark: VZ, in block characters.
+ *
+ * Six lines, which is the size at which the mark reads without becoming the thing you scroll past.
+ * Drawn with box-drawing characters rather than plain ASCII because the console is written to with
+ * `WriteConsoleW` — UTF-16 all the way down — and the default console font renders them; an
+ * ASCII-only fallback would be uglier everywhere to protect a raster-font case nobody is in.
+ *
+ * It prints on every start, including each restart under `bun --watch`. That is the cost of having
+ * one, and it is why it is six lines and not sixteen.
  */
 export function banner(): string {
   return [
+    "",
+    accent("  ██╗   ██╗███████╗"),
+    accent("  ██║   ██║╚══███╔╝"),
+    accent("  ██║   ██║  ███╔╝ "),
+    accent("  ╚██╗ ██╔╝ ███╔╝  "),
+    accent("   ╚████╔╝ ███████╗"),
+    accent("    ╚═══╝  ╚══════╝"),
     "",
     `  ${accent.bold("vrc.zip")} ${chalk.dim(`v${APP_VERSION}`)}`,
     `  ${chalk.dim("VRChat companion daemon.")} ${accent("UNOFFICIAL")} ${chalk.dim("— not affiliated with VRChat Inc.")}`,

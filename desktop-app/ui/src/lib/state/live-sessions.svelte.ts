@@ -29,7 +29,8 @@ export interface ObservedPlayer {
 }
 
 interface LogSession {
-  streamId: string;
+  /** The store's `sessions` row id, the same identifier `GameSession.id` carries. */
+  sessionId: number;
   accountId: string | null;
   displayName: string | null;
   startedAt: number | null;
@@ -63,19 +64,19 @@ function str(source: Record<string, unknown> | null, key: string): string | null
 
 export class LiveSessionsState {
   /** Keyed by the log watcher's string session id. */
-  readonly #byStreamId = new SvelteMap<string, LogSession>();
+  readonly #bySessionId = new SvelteMap<number, LogSession>();
 
   /** Sessions the socket has seen but that are not (yet) in `/api/sessions`. Diagnostic only. */
   get observedCount(): number {
-    return this.#byStreamId.size;
+    return this.#bySessionId.size;
   }
 
   clear(): void {
-    this.#byStreamId.clear();
+    this.#bySessionId.clear();
   }
 
-  #ensure(streamId: string, ts: number): LogSession {
-    const existing = this.#byStreamId.get(streamId);
+  #ensure(sessionId: number, ts: number): LogSession {
+    const existing = this.#bySessionId.get(sessionId);
     if (existing !== undefined) {
       existing.lastEventAt = Math.max(existing.lastEventAt, ts);
       return existing;
@@ -83,7 +84,7 @@ export class LiveSessionsState {
     /*
      * `$state`, and it is load-bearing rather than stylistic.
      *
-     * `#byStreamId` being a `SvelteMap` makes *structural* change reactive — a client appearing or
+     * `#bySessionId` being a `SvelteMap` makes *structural* change reactive — a client appearing or
      * going away. It says nothing about the objects inside it. Almost everything this class does is
      * mutate an entry that is already in the map (`entry.players = [...]` on a player join, the
      * world name, the location), and on a plain object those writes are invisible to Svelte: the
@@ -92,7 +93,7 @@ export class LiveSessionsState {
      * session refreshed it.
      */
     const created: LogSession = $state({
-      streamId,
+      sessionId,
       accountId: null,
       displayName: null,
       startedAt: null,
@@ -103,17 +104,17 @@ export class LiveSessionsState {
       lastEventAt: ts,
       ended: false,
     });
-    this.#byStreamId.set(streamId, created);
+    this.#bySessionId.set(sessionId, created);
     return created;
   }
 
   /** Feeds one socket frame in. Frames without a session id are ignored. */
   apply(frame: StreamFrame): void {
-    const streamId = frame.payload?.sessionId ?? null;
-    if (streamId === null) return;
+    const sessionId = frame.payload?.sessionId ?? null;
+    if (sessionId === null) return;
 
     const data = record(frame.payload?.data);
-    const entry = this.#ensure(streamId, frame.ts);
+    const entry = this.#ensure(sessionId, frame.ts);
     if (frame.payload?.accountId != null) entry.accountId = frame.payload.accountId;
 
     switch (frame.type) {
@@ -187,17 +188,16 @@ export class LiveSessionsState {
     }
   }
 
-  /** The observed record for a REST session. An exact id match — see the note at the top. */
-  #correlate(session: GameSession): LogSession | null {
-    return this.#byStreamId.get(String(session.id)) ?? null;
-  }
-
   /**
-   * The socket's session id for a REST session, or null when the two could not be correlated.
-   * The game log screen needs this to filter live lines by client.
+   * The observed record for a REST session.
+   *
+   * A plain lookup now. It used to be `get(String(session.id))`, because the socket's session id
+   * was typed `string` in the UI while the store's row id was a number - the same identifier in two
+   * shapes, converted at the seam. One type on both sides removed the conversion and the class of
+   * bug that goes with it.
    */
-  streamIdFor(session: GameSession): string | null {
-    return this.#correlate(session)?.streamId ?? null;
+  #correlate(session: GameSession): LogSession | null {
+    return this.#bySessionId.get(session.id) ?? null;
   }
 
   merge(sessions: readonly GameSession[]): MergedSession[] {

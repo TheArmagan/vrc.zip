@@ -10,7 +10,7 @@ import type {
   User,
   World,
 } from "@vrcz/api/types";
-import { isScope, SCOPES } from "@vrcz/shared";
+import { isScope, type JsonValue, SCOPES } from "@vrcz/shared";
 import type { Account, AccountSnapshot } from "../accounts/account.ts";
 import type { AccountManager } from "../accounts/manager.ts";
 import { type PresenceService, trustLevelOf } from "../accounts/presence.ts";
@@ -1678,6 +1678,10 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
     subscribeEvents(listener: (event: StreamEvent) => void): () => void {
       streamClients += 1;
       const subscription = bus.subscribe((event) => {
+        // No casts: the envelope is `StreamEnvelope` from `@vrcz/shared` and the UI reads the same
+        // interface, so a field added on one side without the other now fails to compile. `data` is
+        // the one place a cast survives, because the bus deliberately types `payload` as `unknown`
+        // - a producer may put anything there - while the wire can only carry JSON.
         listener({
           type: event.kind,
           ts: event.ts,
@@ -1686,8 +1690,8 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
             sessionId: event.sessionId ?? null,
             subjectId: event.subjectId ?? null,
             location: event.location ?? null,
-            data: (event.payload ?? null) as StreamEvent["payload"],
-          } as StreamEvent["payload"],
+            data: (event.payload ?? null) as JsonValue,
+          },
         });
       });
 

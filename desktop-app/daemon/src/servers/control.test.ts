@@ -1237,8 +1237,21 @@ describe("GET /api/stream", () => {
     const pushed = new Promise<string>((resolvePromise) => {
       socket.addEventListener("message", (event) => resolvePromise(String(event.data)));
     });
-    seen.listeners[0]?.({ type: "event.appended", ts: 1_700_000_000_000, payload: { id: 1 } });
-    expect(JSON.parse(await pushed)).toMatchObject({ type: "event.appended" });
+    // A real kind and a real envelope. This test is about the socket plumbing rather than the
+    // frame's contents, but a fixture that could not exist on the wire is one nobody can trust when
+    // it fails.
+    seen.listeners[0]?.({
+      type: "friend.online",
+      ts: 1_700_000_000_000,
+      payload: {
+        accountId: "usr_a",
+        sessionId: null,
+        subjectId: "usr_friend",
+        location: null,
+        data: { userId: "usr_friend" },
+      },
+    });
+    expect(JSON.parse(await pushed)).toMatchObject({ type: "friend.online" });
 
     socket.close();
     await Bun.sleep(50);

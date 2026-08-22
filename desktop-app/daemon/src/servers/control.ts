@@ -1,4 +1,19 @@
-import { APP_VERSION, type JsonValue } from "@vrcz/shared";
+import {
+  APP_VERSION,
+  type ControlAccount,
+  type EventQuery,
+  type FeedEvent,
+  type FriendPresence,
+  type GameSession,
+  type JsonValue,
+  type LoginInput,
+  type LoginResult,
+  type RateLimitSnapshot,
+  type StatusSnapshot,
+  type StreamFrame,
+  type TwoFactorMethod,
+  type VerifyTwoFactorInput,
+} from "@vrcz/shared";
 import type { ServerWebSocket } from "bun";
 import { Hono } from "hono";
 import { createBunWebSocket } from "hono/bun";
@@ -16,74 +31,25 @@ import { hostGuard, originGuard, sessionAuth, type TokenSource } from "../securi
  * set of async methods, which is also what makes them testable with a fake in a few lines.
  */
 
-/** The 2FA challenges VRChat issues. `otp` is a one-time recovery code. */
-export type TwoFactorMethod = "totp" | "emailOtp" | "otp";
-
-export interface ControlAccount {
-  id: string;
-  displayName: string;
-  /** Unix milliseconds, integer. */
-  addedAt: number;
-  enabled: boolean;
-  /** Unix milliseconds, integer, or null when never seen. */
-  lastSeenAt: number | null;
-  /** Pipeline/login state, as the UI's status dot renders it. */
-  connection: "connected" | "connecting" | "disconnected" | "needs-2fa";
-  /**
-   * An absolute VRChat image URL, or null. **The UI must load it through `GET /api/image`, never
-   * directly** — `api.vrchat.cloud` image URLs require the account's auth cookie and the mandatory
-   * User-Agent, neither of which a browser can supply, so a bare `<img src>` gets a 403.
-   */
-  iconUrl: string | null;
-}
-
-export interface RateLimitSnapshot {
-  /** Requests permitted per second across all accounts. */
-  limit: number;
-  /** Tokens currently available. */
-  remaining: number;
-  /** Requests waiting on the limiter right now. */
-  queued: number;
-  /** Unix milliseconds when a 429 backoff lifts, or null when not backing off. */
-  retryAfter: number | null;
-}
-
-/** Everything `GET /api/status` reports that this module cannot work out for itself. */
-export interface StatusSnapshot {
-  /** True when the master key sits in a plain file rather than the OS keychain. */
-  degradedKeychain: boolean;
-  /** Which keychain backend is in use, for the settings screen. */
-  backend: string;
-  /** Number of configured accounts. */
-  accounts: number;
-  rateLimit: RateLimitSnapshot;
-}
-
-export interface LoginInput {
-  username: string;
-  password: string;
-}
-
-export type LoginResult =
-  | { status: "ok"; account: ControlAccount }
-  | { status: "requires-2fa"; accountId: string; methods: TwoFactorMethod[] };
-
-export interface VerifyTwoFactorInput {
-  method: TwoFactorMethod;
-  code: string;
-}
-
-/** A live VRChat game-client session, as reconstructed from the log watcher. */
-export interface GameSession {
-  id: number;
-  accountId: string | null;
-  displayName: string | null;
-  /** Unix milliseconds, integer. */
-  startedAt: number;
-  vrMode: string | null;
-  currentLocation: string | null;
-  currentWorldId: string | null;
-}
+/*
+ * The wire shapes live in `@vrcz/shared` and are re-exported here, so every existing importer -
+ * `wiring/control-deps.ts`, `servers/index.ts`, the tests - keeps its import path unchanged while
+ * there is exactly one definition. See the header of `packages/shared/src/wire.ts` for what the two
+ * hand-copied sets had drifted into.
+ */
+export type {
+  ControlAccount,
+  EventQuery,
+  FeedEvent,
+  FriendPresence,
+  GameSession,
+  LoginInput,
+  LoginResult,
+  RateLimitSnapshot,
+  StatusSnapshot,
+  TwoFactorMethod,
+  VerifyTwoFactorInput,
+};
 
 /**
  * An instance a self-invite can be aimed at, split the way VRChat's path template wants it:
@@ -98,50 +64,6 @@ export interface InviteTarget {
   readonly instanceId: string;
 }
 
-/** One row of the unified feed. */
-export interface FeedEvent {
-  id: number;
-  /**
-   * Null for events from a VRChat client signed into an account vrc.zip does not manage. That is a
-   * normal state, not an error — see PLAN.md §1.7 on unlinked sessions.
-   */
-  accountId: string | null;
-  /** Unix milliseconds, integer. */
-  ts: number;
-  sessionId: number | null;
-  kind: string;
-  subjectId: string | null;
-  location: string | null;
-  payload: JsonValue;
-}
-
-/**
- * A feed query.
- *
- * `accountId`, `sessionId`, and `subjectId` are **mutually exclusive selectors** — each names a
- * different axis of "which rows", and the route rejects any two of them together with a 400 rather
- * than picking a winner. Silently ignoring one would be the same class of bug as the ghost session
- * rows: an answer that looks right and is about something else. `kind`, `before`, and `limit`
- * apply to whichever selector was chosen.
- *
- * With none of the three, the query is every account *and* the rows with no account at all.
- */
-export interface EventQuery {
-  accountId?: string;
-  /**
-   * One game client, `sessions.id`. Every stored `gamelog.*` row carries a real session id, so
-   * this is the filter that separates two VRChat clients running side by side (PLAN.md §1.7).
-   */
-  sessionId?: number;
-  /** One user/world/group id — everything ever recorded about them, across every account. */
-  subjectId?: string;
-  kind?: string;
-  /** Already clamped by the route. */
-  limit?: number;
-  /** Unix milliseconds; return events strictly older than this. Feeds the infinite scroll. */
-  before?: number;
-}
-
 /** A pending or recent VRChat notification: an invite, a friend request, a group announcement. */
 export interface NotificationItem {
   id: string;
@@ -154,25 +76,6 @@ export interface NotificationItem {
   message: string | null;
   seen: boolean;
   data: JsonValue;
-}
-
-export interface FriendPresence {
-  id: string;
-  displayName: string;
-  /** VRChat's own status string: `active`, `join me`, `ask me`, `busy`, `offline`. */
-  status: string;
-  statusDescription: string | null;
-  location: string | null;
-  worldId: string | null;
-  platform: string | null;
-  /**
-   * An absolute VRChat image URL, or null. **The UI must load it through `GET /api/image`, never
-   * directly** — `api.vrchat.cloud` image URLs require the account's auth cookie and the mandatory
-   * User-Agent, neither of which a browser can supply, so a bare `<img src>` gets a 403.
-   */
-  iconUrl: string | null;
-  /** Unix milliseconds, integer, or null when unknown. */
-  lastSeenAt: number | null;
 }
 
 /** A user's local note, as stored in `notes` and echoed back by both routes that touch it. */
@@ -669,13 +572,16 @@ export const MAX_USER_IDS = 80;
 export type Settings = { readonly [key: string]: JsonValue };
 export type SettingsPatch = { readonly [key: string]: JsonValue };
 
-/** A message pushed down `GET /api/stream`. */
-export interface StreamEvent {
-  type: string;
-  /** Unix milliseconds, integer. */
-  ts: number;
-  payload: JsonValue;
-}
+/**
+ * A message pushed down `GET /api/stream`.
+ *
+ * `StreamFrame` from `@vrcz/shared`, under the name the daemon already used. It was
+ * `{ type: string; ts: number; payload: JsonValue }` here, which is not a description of the wire
+ * so much as an admission that nobody had written one: the envelope inside `payload` had no type at
+ * all and was produced through two `as` casts in `control-deps.ts`. The UI held the only written
+ * description of the daemon's own frame format.
+ */
+export type StreamEvent = StreamFrame;
 
 /**
  * The daemon capabilities the control API needs, and nothing else.
@@ -1316,27 +1222,23 @@ export function createControlApp({ port, deps, token }: ControlAppOptions) {
      * `EventQuery`. `kind`, `before` and `limit` narrow and page whichever was chosen.
      */
     .get("/api/events", async (c) => {
-      const query: EventQuery = { limit: clampLimit(c.req.query("limit")) };
-
       const accountId = nonEmpty(c.req.query("accountId"));
-      if (accountId !== undefined) query.accountId = accountId;
 
       // Rejected rather than clamped or ignored: a `sessionId` that failed to parse would
       // otherwise silently widen the query from one game client to every event in the database,
       // which looks like data corruption from the UI side.
       const rawSession = nonEmpty(c.req.query("sessionId"));
+      let sessionId: number | undefined;
       if (rawSession !== undefined) {
-        const sessionId = integerParam(rawSession);
+        sessionId = integerParam(rawSession);
         if (sessionId === undefined || sessionId < 0) {
           throw new ControlError(400, "invalid_query", "sessionId must be a non-negative integer");
         }
-        query.sessionId = sessionId;
       }
 
       const subjectId = nonEmpty(c.req.query("subjectId"));
-      if (subjectId !== undefined) query.subjectId = subjectId;
 
-      const selectors = [query.accountId, query.sessionId, query.subjectId].filter(
+      const selectors = [accountId, sessionId, subjectId].filter(
         (value) => value !== undefined,
       ).length;
       if (selectors > 1) {
@@ -1347,10 +1249,17 @@ export function createControlApp({ port, deps, token }: ControlAppOptions) {
         );
       }
 
-      const kind = nonEmpty(c.req.query("kind"));
-      if (kind !== undefined) query.kind = kind;
-      const before = integerParam(c.req.query("before"));
-      if (before !== undefined) query.before = before;
+      // Built in one expression rather than mutated into shape: `EventQuery` is a wire type and
+      // wire types are `readonly`. Every field is spelled out because `exactOptionalPropertyTypes`
+      // distinguishes "absent" from "present and undefined", and `listEvents` branches on absence.
+      const query: EventQuery = {
+        limit: clampLimit(c.req.query("limit")),
+        accountId,
+        sessionId,
+        subjectId,
+        kind: nonEmpty(c.req.query("kind")),
+        before: integerParam(c.req.query("before")),
+      };
       return c.json(await deps.listEvents(query));
     })
 

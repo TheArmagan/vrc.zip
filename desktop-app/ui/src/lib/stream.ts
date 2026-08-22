@@ -16,29 +16,19 @@
  * not keep retrying while the tab is hidden — it retries immediately on `visibilitychange`.
  */
 
+import type { StreamEnvelope, StreamFrame } from "@vrcz/shared";
 import { streamUrl } from "./config.ts";
 import { getToken } from "./session.ts";
 
-/** The envelope every non-`ready` frame carries in `payload`. */
-export interface StreamPayload {
-  readonly accountId: string | null;
-  /**
-   * The log watcher's *string* session id on `gamelog.*` and `session.*` frames. Note this is a
-   * different identifier space from `GameSession.id`, which is the store's integer row id.
-   */
-  readonly sessionId: string | null;
-  readonly subjectId: string | null;
-  readonly location: string | null;
-  /** The kind-specific body. Untyped on purpose; screens narrow what they actually read. */
-  readonly data: unknown;
-}
-
-export interface StreamFrame {
-  /** The bus kind, or the literal `"ready"` for the handshake frame. */
-  readonly type: string;
-  readonly ts: number;
-  readonly payload: StreamPayload | null;
-}
+/*
+ * The frame and its envelope are `@vrcz/shared`'s, re-exported under the names this app uses.
+ *
+ * `StreamPayload` used to be declared here, and it was the *only* written description of the
+ * daemon's own frame format - the daemon built the envelope inline through two `as` casts. It also
+ * typed `sessionId` as `string`, stringifying a number on the way in that `events.ts` parsed back
+ * out one function later. Both sides now read one interface and the id stays a number throughout.
+ */
+export type { StreamEnvelope as StreamPayload, StreamFrame };
 
 export type StreamState = "connecting" | "open" | "reconnecting" | "closed" | "unauthorized";
 
@@ -50,21 +40,26 @@ export interface StreamHandlers {
 const BASE_DELAY_MS = 500;
 const MAX_DELAY_MS = 15_000;
 
-function asPayload(value: unknown): StreamPayload | null {
+function asPayload(value: unknown): StreamEnvelope | null {
   if (typeof value !== "object" || value === null) return null;
   const record = value as Record<string, unknown>;
   return {
     accountId: typeof record.accountId === "string" ? record.accountId : null,
-    sessionId:
-      typeof record.sessionId === "string"
-        ? record.sessionId
-        : typeof record.sessionId === "number"
-          ? String(record.sessionId)
-          : null,
+    // Tolerant of a string on purpose. The daemon sends a number and always did, but this parser is
+    // the boundary with a process that ships separately, and coercing one field is cheaper than a
+    // whole screen of sessions failing to group.
+    sessionId: asSessionId(record.sessionId),
     subjectId: typeof record.subjectId === "string" ? record.subjectId : null,
     location: typeof record.location === "string" ? record.location : null,
-    data: record.data ?? null,
+    data: (record.data ?? null) as StreamEnvelope["data"],
   };
+}
+
+function asSessionId(value: unknown): number | null {
+  if (typeof value === "number") return Number.isInteger(value) ? value : null;
+  if (typeof value !== "string") return null;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) ? parsed : null;
 }
 
 /** Narrows an arbitrary parsed frame, dropping anything without a usable `type`. */

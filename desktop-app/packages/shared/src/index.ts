@@ -6,6 +6,16 @@
  */
 
 export {
+  DEFAULT_CONTROL_PORT,
+  DEFAULT_HOSTNAME,
+  DEFAULT_PROXY_PORT,
+  DEFAULT_UI_PORT,
+  launchUrl,
+  SESSION_COOKIE,
+  TOKEN_HEADER,
+  TOKEN_QUERY_PARAM,
+} from "./config.ts";
+export {
   type AccountEventKind,
   BUS_EVENT_KINDS,
   type BusEventKind,
@@ -39,3 +49,24 @@ export {
   type ScopeDefinition,
 } from "./scopes.ts";
 export { APP_NAME, APP_VERSION, PLUGIN_API_PROTOCOL_MAJOR } from "./version.ts";
+export {
+  type AccountConnection,
+  type ControlAccount,
+  type DaemonStatus,
+  type EventQuery,
+  type FeedEvent,
+  type FriendPresence,
+  type FriendStatus,
+  type GameSession,
+  type LoginInput,
+  type LoginResult,
+  type RateLimitSnapshot,
+  STREAM_READY,
+  type StatusSnapshot,
+  type StreamEnvelope,
+  type StreamFrame,
+  type TwoFactorMethod,
+  type VerifyTwoFactorInput,
+  type VerifyTwoFactorResult,
+  type VrchatImageUrl,
+} from "./wire.ts";

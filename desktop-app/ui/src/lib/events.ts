@@ -7,19 +7,18 @@
  * into the row shape here, once.
  */
 
+import { STREAM_READY } from "@vrcz/shared";
 import type { FeedEvent } from "./api.ts";
 import type { StreamFrame } from "./stream.ts";
 
 /**
- * A feed row plus the one thing a stored row cannot carry: the log watcher's string session id.
- * `FeedEvent.sessionId` is the store's integer row id and is null on every persisted row today.
+ * A feed row, plus whether it arrived live.
+ *
+ * It used to carry a second `streamSessionId: string` as well, because the socket's session id was
+ * typed as a string while the store's was a number. They were always the same identifier; the alias
+ * and its conversion are gone, and `sessionId` is populated on live rows and stored rows alike.
  */
 export interface LiveEvent extends FeedEvent {
-  /**
-   * Deprecated alias kept only so nothing reads a missing field during a refactor; `sessionId` is
-   * now populated for live frames too. See `frameToEvent`.
-   */
-  readonly streamSessionId: string | null;
   /** True for rows that arrived over the socket rather than out of the store. */
   readonly live: boolean;
 }
@@ -44,14 +43,8 @@ export const EPHEMERAL_KINDS: ReadonlySet<string> = new Set([
 let nextSyntheticId = -1;
 
 /** The wire carries the session row id as a string; the rest of the app treats it as a number. */
-function toSessionId(value: string | null): number | null {
-  if (value === null) return null;
-  const parsed = Number(value);
-  return Number.isInteger(parsed) ? parsed : null;
-}
-
 export function frameToEvent(frame: StreamFrame): LiveEvent | null {
-  if (frame.type === "ready" || frame.payload === null) return null;
+  if (frame.type === STREAM_READY || frame.payload === null) return null;
   nextSyntheticId -= 1;
   return {
     id: nextSyntheticId,
@@ -64,18 +57,17 @@ export function frameToEvent(frame: StreamFrame): LiveEvent | null {
      * client by discarding all history. `stream.ts` stringifies the id on the way in; it is a
      * number in the database and a number here.
      */
-    sessionId: toSessionId(frame.payload.sessionId),
+    sessionId: frame.payload.sessionId,
     kind: frame.type,
     subjectId: frame.payload.subjectId,
     location: frame.payload.location,
     payload: frame.payload.data,
-    streamSessionId: frame.payload.sessionId,
     live: true,
   };
 }
 
 export function rowToEvent(row: FeedEvent): LiveEvent {
-  return { ...row, streamSessionId: null, live: false };
+  return { ...row, live: false };
 }
 
 /** Newest first, with a stable tiebreak so a re-sort never reshuffles equal timestamps. */

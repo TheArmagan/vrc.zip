@@ -15,11 +15,23 @@
  */
 
 import {
+  type AccountConnection,
+  type ControlAccount,
+  type DaemonStatus,
   EVENT_FAMILIES,
   type EventFamily,
   type EventKind,
+  type EventQuery,
+  type FeedEvent,
+  type FriendPresence,
+  type FriendStatus,
   familyOf,
+  type GameSession,
   type KnownEventKind,
+  type LoginResult,
+  type RateLimitSnapshot,
+  type TwoFactorMethod,
+  type VerifyTwoFactorResult,
 } from "@vrcz/shared";
 import { API_BASE } from "./config.ts";
 import { getToken } from "./session.ts";
@@ -28,134 +40,41 @@ import { getToken } from "./session.ts";
 // Wire types
 // ---------------------------------------------------------------------------
 
-/**
- * How the daemon currently stands with an account. This is about credentials and the pipeline
- * socket, never about a running game client — those are `GameSession`s, a different set.
- */
-export type AccountConnection = "connected" | "connecting" | "disconnected" | "needs-2fa";
-
-/** A VRChat account the daemon holds credentials for. */
-export interface Account {
-  readonly id: string;
-  readonly displayName: string;
-  /** Unix ms the account was added to vrc.zip. */
-  readonly addedAt: number;
-  readonly enabled: boolean;
-  /** Unix ms of the last pipeline frame attributed to this account, or null when never seen. */
-  readonly lastSeenAt: number | null;
-  readonly connection: AccountConnection;
-  /**
-   * Absolute VRChat user-icon URL, or null when the account has none cached yet. Never put this
-   * in an `<img src>` directly — VRChat's image host wants the account's auth cookie and a
-   * User-Agent the browser cannot set, and answers a bare request with 401/403. Run it through
-   * `imageUrl()` below, which points at the daemon's same-origin streaming proxy.
-   */
-  readonly iconUrl: string | null;
-}
-
-export interface RateLimitStatus {
-  /** Requests permitted per second across all accounts. */
-  readonly limit: number;
-  /** Tokens currently available. */
-  readonly remaining: number;
-  /** Requests waiting on the limiter right now. */
-  readonly queued: number;
-  /** Unix ms at which a 429 backoff lifts, or null when not backing off. */
-  readonly retryAfter: number | null;
-}
-
-export interface DaemonStatus {
-  readonly version: string;
-  /**
-   * True when the OS keychain was unavailable and the master key fell back to a plain 0600 file.
-   * The UI must say so loudly and permanently while it holds — see `KeychainWarning.svelte`.
-   */
-  readonly degradedKeychain: boolean;
-  /** Which secret backend is in use. A free-form name from the daemon, shown as-is in settings. */
-  readonly backend: string;
-  readonly accounts: number;
-  readonly rateLimit: RateLimitStatus;
-}
-
-/** The 2FA challenges VRChat issues. `otp` is a one-time recovery code, not an app code. */
-export type TwoFactorMethod = "totp" | "emailOtp" | "otp";
-
-export type LoginResult =
-  | { readonly status: "ok"; readonly account: Account }
-  | {
-      readonly status: "requires-2fa";
-      readonly accountId: string;
-      readonly methods: readonly TwoFactorMethod[];
-    };
-
-export interface VerifyTwoFactorResult {
-  readonly status: "ok";
-  readonly account: Account;
-}
-
-/**
- * A running VRChat game client, reconstructed from its log file.
- *
- * Sessions and accounts are different sets. A client can run without the daemon knowing which
- * account it belongs to (`accountId: null` — "unlinked"), and an account can be signed in with no
- * client running at all. Six accounts and two sessions is a normal state, and no screen in this
- * app is allowed to imply otherwise.
- */
-export interface GameSession {
-  /** The store's integer row id. Not the identifier the event stream uses — see `stream.ts`. */
-  readonly id: number;
-  readonly accountId: string | null;
-  /** The display name the client authenticated as, or null while the log has not said yet. */
-  readonly displayName: string | null;
-  readonly startedAt: number;
-  /** The raw VR mode string out of the log (`Standalone`, `Oculus`, `None`, …), or null. */
-  readonly vrMode: string | null;
-  /** Full instance location, e.g. `wrld_xxx:12345~friends(usr_xxx)`. */
-  readonly currentLocation: string | null;
-  readonly currentWorldId: string | null;
-}
-
 /*
- * The bus-kind vocabulary is `@vrcz/shared`'s, re-exported so screens keep importing it from here.
+ * The wire shapes and the bus-kind vocabulary are `@vrcz/shared`'s, re-exported under the names
+ * this app already uses so every screen keeps importing them from here.
+ *
+ * The two aliases are kept rather than renamed through forty screens: `Friend` reads better than
+ * `FriendPresence` inside a friends list, and the drift the separate names used to hide is gone now
+ * that both sides resolve to one declaration. See `packages/shared/src/wire.ts` for what the two
+ * hand-copied sets had drifted into.
+ *
  * `EventKind` stays widened (`KnownEventKind | (string & {})`) on purpose: an event from a daemon
  * newer than this bundle must still list in the feed and still match a filter rather than vanish.
  */
-export { EVENT_FAMILIES, type EventFamily, type EventKind, familyOf, type KnownEventKind };
+export {
+  type AccountConnection,
+  type ControlAccount as Account,
+  type DaemonStatus,
+  EVENT_FAMILIES,
+  type EventFamily,
+  type EventKind,
+  type EventQuery,
+  type FeedEvent,
+  type FriendPresence as Friend,
+  type FriendStatus,
+  familyOf,
+  type GameSession,
+  type KnownEventKind,
+  type LoginResult,
+  type RateLimitSnapshot as RateLimitStatus,
+  type TwoFactorMethod,
+  type VerifyTwoFactorResult,
+};
 
-/** One row of the unified feed. `payload` is the bus event's payload, shape-per-kind. */
-export interface FeedEvent {
-  readonly id: number;
-  /** Null for a client signed into an account vrc.zip does not manage. Normal, not an error. */
-  readonly accountId: string | null;
-  readonly ts: number;
-  /**
-   * Null on every stored row today — the feed writer does not yet resolve the log watcher's string
-   * session id onto the store's integer row id. Live stream frames do carry one.
-   */
-  readonly sessionId: number | null;
-  readonly kind: EventKind;
-  readonly subjectId: string | null;
-  readonly location: string | null;
-  readonly payload: unknown;
-}
-
-/** VRChat's own presence strings. Anything else is passed through and rendered as unknown. */
-export type FriendStatus = "active" | "join me" | "ask me" | "busy" | "offline" | (string & {});
-
-export interface Friend {
-  readonly id: string;
-  readonly displayName: string;
-  readonly status: FriendStatus;
-  readonly statusDescription: string | null;
-  /** `offline`, `private`, `traveling`, or a full instance id. Null when unknown. */
-  readonly location: string | null;
-  readonly worldId: string | null;
-  /** `standalonewindows`, `android`, … or null. */
-  readonly platform: string | null;
-  readonly lastSeenAt: number | null;
-  /** Absolute VRChat user-icon URL, or null. Load it through `imageUrl()`, never directly. */
-  readonly iconUrl: string | null;
-}
+/** Local aliases so this module's own signatures read the way its callers do. */
+type Account = ControlAccount;
+type Friend = FriendPresence;
 
 /**
  * One VRChat user, merged from VRChat's own profile and vrc.zip's local record of them.
@@ -955,31 +874,6 @@ function decodeInstanceDetail(body: unknown, location: string): InstanceDetail {
 // ---------------------------------------------------------------------------
 // Endpoints
 // ---------------------------------------------------------------------------
-
-export interface EventQuery {
-  readonly accountId?: string | undefined;
-  /** An exact bus kind. The daemon has no prefix filter, so `gamelog.*` is filtered client-side. */
-  readonly kind?: string | undefined;
-  /**
-   * Everything vrc.zip ever recorded *about* one subject, newest first. A subject is usually a
-   * user id, but the bus also files world, group, and notification ids here — see `subjectOf` in
-   * `daemon/src/wiring/`. The user modal only ever passes a `usr_…`.
-   */
-  readonly subjectId?: string | undefined;
-  /**
-   * One game client, by its `sessions.id`. Stored `gamelog.*` rows have always carried this; the
-   * game log used to filter client-side on live frames only, on the false belief that the column
-   * was null.
-   *
-   * `accountId`, `sessionId`, and `subjectId` are **mutually exclusive** — the daemon 400s on any
-   * two together rather than silently picking one, so a caller can never get a confident answer
-   * about a different axis than it asked for.
-   */
-  readonly sessionId?: number | undefined;
-  readonly limit?: number | undefined;
-  /** Unix ms. Returns events strictly older than this, for backwards pagination. */
-  readonly before?: number | undefined;
-}
 
 /** `exactOptionalPropertyTypes` makes `{ signal }` with an undefined signal a type error. */
 function withSignal(signal: AbortSignal | undefined): RequestOptions {

@@ -597,6 +597,43 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     the union with a `satisfies` in one direction and an `Exclude`-based marker
     (`EVENT_KIND_COVERAGE_NOTE`) in the other, so the two cannot drift apart in either direction.
 
+64. **`ui/` gets Vitest, and the root `bun test` stops globbing it.** The UI had no test runner and
+    no tests, and the gap was not theoretical — the duplicate-`{#each}`-key crash, the resolver
+    that re-requested on render, the `SvelteMap` that froze the live roster, and the blank feed
+    label for an unlabelled kind all shipped through it. Vitest rather than `bun test` because the
+    modules under test are `.svelte.ts`: runes are *compiler syntax*, so they need the Vite plugin
+    pipeline, which `bun test` has no way to run. Two consequences worth knowing before writing the
+    next one:
+    - `ui/vitest.config.ts` is a second config, not a `test` block on `vite.config.ts` — a unit run
+      wants neither Tailwind nor the `/api` proxy, and it needs `resolve.conditions: ["browser"]`,
+      which the dev server gets for free.
+    - The root `test` script is now `bun test packages daemon tools`, and `test:ui` runs the UI
+      suite. Bun's runner globs `**/*.test.ts` from the root and would otherwise try to execute
+      Vitest files with no `vi`, no `describe` and no rune compilation. Naming the three
+      directories is the smallest fix that keeps one command per runner.
+
+65. **Constants that both sides need live in `@vrcz/shared/config`, and the launch URL had a real
+    escaping bug behind the duplication.** `TOKEN_QUERY_PARAM` was a named constant in
+    `security/guards.ts` and a bare `"token"` literal in three UI call sites; the three default ports
+    were declared in `servers/bind.ts` and re-declared numerically in `settings.ts`. Hoisting them
+    turned up the thing duplication usually hides: `app.ts` had reimplemented `bind.ts`'s
+    `launchUrl` inline and **dropped the `encodeURIComponent`**. That string is what the daemon
+    prints as "Open: …" and stores on `RunningDaemon.launchUrl`, so a session token containing `+`,
+    `&`, or `#` arrived back altered, failed `sessionTokensMatch`, and dropped the user into an
+    unauthenticated UI with nothing on screen explaining why. One `launchUrl()` in shared now, with
+    a test that pins the escaping.
+
+66. **The wire types are `@vrcz/shared`'s, and the daemon had been typing its *deps* rather than its
+    *routes*.** That distinction is the whole finding. `ControlDeps.verifyTwoFactor` was typed as
+    returning a `ControlAccount`, but the route wrapped it in `{status, account}` — so the shape that
+    actually crossed the wire was written down only in `ui/src/lib/api.ts`. The stream envelope was
+    worse: it had no type at all on the daemon side, built inline through two `as` casts, leaving the
+    UI holding the only description of the daemon's own frame format. Both sides now build and read
+    one interface. Wire types are `readonly` throughout, which forced `GET /api/events` to build its
+    `EventQuery` in one expression instead of mutating an object into shape — a better route anyway,
+    since `exactOptionalPropertyTypes` makes "absent" and "present and undefined" different things
+    and `listEvents` branches on absence.
+
 ---
 
 ## Gotchas
@@ -604,6 +641,18 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **`sessionId` was the same identifier in two shapes, and the seam between them was a round trip.**
+  The bus and the store both call it an integer `sessions` row id, and `event-bus.ts` has a comment
+  explaining at length why it must be the store's id and not the watcher's internal string. The UI
+  nonetheless typed the stream's `sessionId` as `string`, stringified it on arrival in `stream.ts`,
+  and parsed it back to a number one function later in `events.ts` — whose own comment admitted the
+  round trip was pointless. Downstream, `LiveSessions` keyed its map by string and correlated with
+  `get(String(session.id))`, and `LiveEvent` carried a second `streamSessionId` field described as a
+  "deprecated alias kept only so nothing reads a missing field during a refactor". Nothing read it.
+  One type on both sides deleted the conversion, the alias, the string-keyed map, and a dead
+  `streamIdFor()` with no callers. Duplication does not just risk drift; it accretes machinery whose
+  only job is reconciling the copies.
 
 - **The event-kind taxonomy had drifted in four directions at once, and nothing could see it.** The
   two `wiring/*` bridges typed their kind maps as `Record<string, string>`, `ui/src/lib/api.ts` held
@@ -918,6 +967,29 @@ Carried in from research, not yet verified against running code:
   account — filenames carry a timestamp, not an identity. Everything before that line in a fresh log
   is unattributed until it appears.
 
+### Testing the UI under Vitest
+
+- **Runes only exist in `.svelte.ts` (and `.svelte`) files.** `$state` in a plain `*.test.ts` is a
+  `ReferenceError: $state is not defined` at runtime — the Vite Svelte plugin compiles runes by
+  filename, and a test file is not on that list. So a test that needs reactive scaffolding puts it
+  in a `*.svelte.ts` helper beside the test and imports it. Driving an existing state class from a
+  plain test file is fine: its `$state` fields were compiled where they were *declared*.
+- **`$state` and `$derived` work outside any effect root.** Constructing a state class, mutating a
+  field and reading a `$derived` all behave, so the state modules are directly unit-testable — no
+  component, no `mount`, no root.
+- **`$effect` is the exception and needs both `$effect.root()` and `flushSync()` from `svelte`.**
+  Effects do not run on assignment; `flushSync()` is what makes them fire, and the disposer returned
+  by `$effect.root` must be called or the effect outlives the test.
+- **Without `resolve.conditions: ["browser"]`, `$effect` silently never runs.** Vitest resolves
+  Svelte's *server* build by default, whose effects are no-ops — it does not throw, it does not warn,
+  the assertion just observes nothing. Measured, not assumed. This is the single most expensive
+  thing to get wrong here, because the failure mode is a test that passes for the wrong reason.
+- The state modules are **module-level singletons** (`worldNames`, the `suspended` back stack).
+  Reset them in `beforeEach`/`afterEach` or one test reads another's leftovers as history.
+- Fake only `Date` (`vi.useFakeTimers({ toFake: ["Date"] })`) when testing the resolvers: their
+  flush is a `queueMicrotask`, which no timer mock intercepts, and faking `setTimeout` deadlocks any
+  helper that awaits one.
+
 ---
 
 ## Conventions
@@ -951,6 +1023,9 @@ Carried in from research, not yet verified against running code:
 cd desktop-app
 bun install
 bun daemon/src/index.ts      # prints a launch URL carrying the session token
+
+bun run test                 # daemon + packages + tools, under bun test
+bun run test:ui              # the ui workspace, under vitest (cd ui && bun run test:watch to iterate)
 ```
 
 Set `VRCZIP_STATE_DIR` to redirect the whole state tree (secrets, DB, `state.json`) somewhere

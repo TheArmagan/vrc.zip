@@ -8,6 +8,7 @@ import {
 import type { Server, WebSocketHandler } from "bun";
 import { type EgressViolation, filterResponse } from "../proxy/egress-filter.ts";
 import type { ProxyDeps } from "../proxy/handshake.ts";
+import type { ProxyLogger } from "../proxy/request-log.ts";
 import type { TokenSource } from "../security/guards.ts";
 import { type ControlDeps, controlWebSocketHandler, createControlApp } from "./control.ts";
 import { createProxyApp } from "./proxy.ts";
@@ -172,6 +173,8 @@ export interface BindServersOptions {
    * the port must exist either way, because the "three separate instances" property is structural.
    */
   proxyDeps?: ProxyDeps | undefined;
+  /** Opt-in request logging for the mirror. See `proxy/request-log.ts`. */
+  proxyLogger?: ProxyLogger | undefined;
   /** Resolves the session token every port accepts for this run. */
   token: TokenSource;
   ports?: {
@@ -194,7 +197,15 @@ export interface BoundServers {
 }
 
 export async function bindServers(options: BindServersOptions): Promise<BoundServers> {
-  const { deps, proxyDeps, token, ports, hostname = DEFAULT_HOSTNAME, uiDistDir } = options;
+  const {
+    deps,
+    proxyDeps,
+    proxyLogger,
+    token,
+    ports,
+    hostname = DEFAULT_HOSTNAME,
+    uiDistDir,
+  } = options;
 
   // Control first: its URL goes on the UI's placeholder page.
   const control = bindServer({
@@ -212,7 +223,11 @@ export async function bindServers(options: BindServersOptions): Promise<BoundSer
     hostname,
     createApp: (port) =>
       egressGuarded(
-        createProxyApp({ port, ...(proxyDeps === undefined ? {} : { deps: proxyDeps }) }),
+        createProxyApp({
+          port,
+          ...(proxyDeps === undefined ? {} : { deps: proxyDeps }),
+          ...(proxyLogger === undefined ? {} : { logger: proxyLogger }),
+        }),
       ),
   });
 

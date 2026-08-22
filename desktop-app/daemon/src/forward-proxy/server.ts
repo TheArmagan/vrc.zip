@@ -1,5 +1,6 @@
 import { DEFAULT_FORWARD_PROXY_PORT, DEFAULT_HOSTNAME } from "@vrcz/shared";
 import type { Socket, TCPSocketListener } from "bun";
+import { createProxyLogger, type ProxyLogger } from "../proxy/request-log.ts";
 import { loadOrCreateTlsMaterial, normaliseHosts } from "./ca.ts";
 import {
   HttpParseError,
@@ -57,6 +58,8 @@ export interface ForwardProxyOptions {
    * is also what stops the client from coalescing an unlisted origin onto an open connection.
    */
   interceptHosts?: readonly string[];
+  /** Opt-in request logging. Omitted, nothing is logged. See `proxy/request-log.ts`. */
+  logger?: ProxyLogger | undefined;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -81,6 +84,7 @@ export async function startForwardProxy(options: ForwardProxyOptions): Promise<F
     port: options.mirrorPort,
   };
   const interceptHosts = normaliseHosts(options.interceptHosts ?? DEFAULT_INTERCEPT_HOSTS);
+  const log = options.logger ?? createProxyLogger({});
   const tls = await loadOrCreateTlsMaterial(interceptHosts, options.env);
   const intercepted = new Set(interceptHosts);
 
@@ -92,7 +96,7 @@ export async function startForwardProxy(options: ForwardProxyOptions): Promise<F
     hostname: DEFAULT_HOSTNAME,
     port: 0,
     tls: { key: tls.leafKeyPem, cert: tls.chainPem },
-    socket: clientHandlers((conn, head) => routeToMirror(conn, head, mirror, intercepted)),
+    socket: clientHandlers((conn, head) => routeToMirror(conn, head, mirror, intercepted, log)),
   });
   const mitmPort = mitm.port;
 
@@ -113,6 +117,7 @@ export async function startForwardProxy(options: ForwardProxyOptions): Promise<F
       mitmPort,
       caCertPem: tls.caCertPem,
       page,
+      log,
     }),
   );
 
@@ -302,6 +307,7 @@ interface PublicPolicy {
   readonly mitmPort: number;
   readonly caCertPem: string;
   readonly page: () => string;
+  readonly log: ProxyLogger;
 }
 
 function routePublic(conn: Conn, head: RequestHead, policy: PublicPolicy): void {
@@ -315,9 +321,17 @@ function routePublic(conn: Conn, head: RequestHead, policy: PublicPolicy): void 
     // An intercepted host is spliced into the internal TLS listener; everything else goes to the
     // real server untouched. Either way the proxy writes the 200 only once the far side is up, so
     // a client never starts a handshake against a tunnel that failed to open.
-    const target = policy.intercepted.has(authority.host)
+    const isIntercepted = policy.intercepted.has(authority.host);
+    const target = isIntercepted
       ? { hostname: DEFAULT_HOSTNAME, port: policy.mitmPort }
       : { hostname: authority.host, port: authority.port };
+
+    // The single most useful line when an app "does not work through the proxy": whether its traffic
+    // was ever ours to answer, or went straight to VRChat untouched.
+    policy.log.line(
+      "fwd",
+      `CONNECT ${authority.host}:${String(authority.port)} -> ${isIntercepted ? "intercept" : "tunnel"}`,
+    );
 
     conn.connect(target, () => {
       conn.toClient.write(new TextEncoder().encode("HTTP/1.1 200 Connection Established\r\n\r\n"));
@@ -339,7 +353,9 @@ function routePublic(conn: Conn, head: RequestHead, policy: PublicPolicy): void 
     conn.framer.tunnel();
 
     if (policy.intercepted.has(absolute.host)) {
-      routeToMirror(conn, oneShot, policy.mirror, policy.intercepted, { host: absolute.host });
+      routeToMirror(conn, oneShot, policy.mirror, policy.intercepted, policy.log, {
+        host: absolute.host,
+      });
       return;
     }
 
@@ -389,6 +405,7 @@ function routeToMirror(
   head: RequestHead,
   mirror: { hostname: string; port: number },
   intercepted: ReadonlySet<string>,
+  log: ProxyLogger,
   known?: { host: string },
 ): void {
   const host = known?.host ?? hostOf(head);
@@ -409,6 +426,12 @@ function routeToMirror(
     withoutHeader(withHeader(head, "Host", `${mirror.hostname}:${String(mirror.port)}`), "Origin"),
     "Proxy-Connection",
   );
+
+  log.line(
+    "fwd",
+    `${head.method} ${head.target} host=${host} -> ${mirror.hostname}:${String(mirror.port)}`,
+  );
+  log.headers("req", new Headers(head.headers.map(([name, value]) => [name, value])));
 
   conn.connect(mirror);
   conn.toUpstream.write(serializeHead(withHeader(rewritten, "X-Vrcz-Forwarded-Host", host)));

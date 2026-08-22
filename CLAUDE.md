@@ -59,9 +59,16 @@ cd ui && bun run check       # svelte-check — the gate for .svelte files; Biom
 cd ui && bun run test        # vitest; `test:watch` for the watcher
 ```
 
-`VRCZIP_STATE_DIR` redirects the entire state tree (secrets, SQLite DB, `state.json`). Use it for
-any manual run so a smoke test never touches the real credential store. `VRCZIP_STABLE_TOKEN=1`
-keeps the session token across restarts (implied under `--watch`/`--hot`).
+`VRCZIP_STATE_DIR` redirects the entire state tree (secrets, SQLite DB, `state.json`, the forward
+proxy's TLS material). Use it for any manual run so a smoke test never touches the real credential
+store. `VRCZIP_STABLE_TOKEN=1` keeps the session token across restarts (implied under
+`--watch`/`--hot`). `VRCZIP_PROXY_LOG=basic|headers|body` logs what reaches `:7774` and `:7776` —
+`basic` is the level to leave on while debugging a third-party app, since it names the resolved
+operation and tells a route-table gap (`404 (no route)`) apart from VRChat's own 404. Redaction is
+the logger's job, never a call site's; see `daemon/src/proxy/request-log.ts`.
+
+All three are read from `.env`, which Bun loads automatically and which is gitignored.
+`desktop-app/.env.example` documents them.
 
 Verification is `bun run test` + `bun run test:ui` + `bun run typecheck` + `bun run lint` +
 `cd ui && bun run check`. CI runs all five: `.github/workflows/desktop-app.yml` at the repo root,

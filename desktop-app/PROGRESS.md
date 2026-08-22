@@ -766,6 +766,25 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     `/file/` or `/image/` fetch, so without it the default grant produces an app whose every picture
     is a 403 — technically a correct minimal grant and practically a broken client.
 
+79. **Proxy request logging is opt-in via `VRCZIP_PROXY_LOG`, and redaction lives in the logger.**
+    Three levels: `basic` (one line per request), `headers`, `body`. It exists because every bug
+    reported against this proxy so far was diagnosed by reconstructing that line by hand, and because
+    the facts that matter are all inside the daemon — which operation a path resolved to, whether a
+    grant was found, what upstream actually said. The line that earns it is `-> 404 (no route)`,
+    which distinguishes a route-table gap from VRChat's own 404; those are the same three digits and
+    completely different problems, and confusing them is what hid the missing `/file/` and `/image/`
+    routes.
+
+    **Redaction is the logger's responsibility, not its callers'** — the same rule PLAN.md states for
+    the egress filter, for the same reason: a call site that has to remember will eventually forget,
+    and the consequence is a real VRChat session in a log the user pastes into a bug report. So it
+    takes whole `Headers` and whole bodies. Cookie values are never printed, only names plus whether
+    the value was ours or a real VRChat credential; `Authorization` shows its scheme only, because on
+    the login path it decodes to the user's real password; every `authcookie_` run is replaced
+    wherever it appears; and `password`/`code`/`secret` fields in JSON bodies are blanked, the
+    pairing code being a consent credential. Startup warns when it is on, since what survives
+    redaction still shows which accounts and apps are in use.
+
 ---
 
 ## Gotchas

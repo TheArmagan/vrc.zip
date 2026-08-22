@@ -12,6 +12,7 @@ import { buildUserAgent } from "./net/user-agent.ts";
 import { databasePath, ensureStateDir } from "./paths.ts";
 import { PipelineClient } from "./pipeline/index.ts";
 import { ConsentRegistry } from "./proxy/consent.ts";
+import { createProxyLogger, PROXY_LOG_ENV } from "./proxy/request-log.ts";
 import { loadOrCreateMasterKey } from "./security/keychain.ts";
 import { SecretsStore } from "./security/secrets.ts";
 import { resolveSessionToken } from "./security/session-token.ts";
@@ -220,6 +221,16 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
   // half of it: the sheet, the account picker, and the six-digit code all live on the control API,
   // and a registry buried inside the mirror would have to be reached back into from there. It is
   // built here, above the control deps, because both sides read the same instance.
+  // Opt-in, off by default, and built here so both proxy ports share one instance and one level.
+  // Redaction lives inside it rather than at the call sites — see `proxy/request-log.ts`.
+  const proxyLogger = createProxyLogger(env ?? process.env);
+  if (proxyLogger.enabled) {
+    console.warn(
+      `[vrc.zip] ${PROXY_LOG_ENV}=${proxyLogger.level} — proxy requests are being logged. ` +
+        "Credentials are redacted, but the log still shows which accounts and apps are in use.",
+    );
+  }
+
   const consent = new ConsentRegistry({ store, bus });
 
   // The identity unauthenticated pass-through calls are charged to. Not a real account and never
@@ -278,6 +289,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
   const servers = await bindServers({
     deps,
     proxyDeps,
+    proxyLogger,
     token: () => sessionToken,
     ports: settings.ports,
     // `new URL(...).pathname` yields "/C:/Users/..." on Windows, which no fs call resolves — the
@@ -301,6 +313,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
         hostname: DEFAULT_HOSTNAME,
         mirrorPort: servers.proxy.port,
         interceptHosts: settings.forwardProxy.interceptHosts,
+        logger: proxyLogger,
         ...(env !== undefined ? { env } : {}),
       });
       for (const line of forwardProxyBanner({

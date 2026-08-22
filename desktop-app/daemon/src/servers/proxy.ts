@@ -9,6 +9,7 @@ import {
   verifyTwoFactor,
 } from "../proxy/handshake.ts";
 import { passthrough } from "../proxy/passthrough.ts";
+import { createProxyLogger, type ProxyLogger, proxyAccessLog } from "../proxy/request-log.ts";
 import { matchRoute } from "../proxy/route-table.ts";
 import { vrchatError, vrczipError } from "../proxy/vrchat-shapes.ts";
 import { hostGuard, originGuard } from "../security/guards.ts";
@@ -40,6 +41,9 @@ import { hostGuard, originGuard } from "../security/guards.ts";
 /** VRChat's own base path. An app changes its base URL and nothing else. */
 export const MIRROR_PREFIX = "/api/1";
 
+/** The logger every caller that does not want one gets. Its `enabled` is false, so nothing runs. */
+const NO_LOGGING: ProxyLogger = createProxyLogger({});
+
 export interface ProxyAppOptions {
   /** The port this instance will be bound to. The `Host` allowlist is built from it. */
   port: number;
@@ -48,12 +52,25 @@ export interface ProxyAppOptions {
    * offer, in which case every route answers 503 rather than half-working.
    */
   deps?: ProxyDeps | undefined;
+  /** Opt-in request logging. Omitted, nothing is logged and nothing is even built. */
+  logger?: ProxyLogger | undefined;
 }
 
-export function createProxyApp({ port, deps }: ProxyAppOptions) {
+export function createProxyApp({ port, deps, logger }: ProxyAppOptions) {
   const app = new Hono()
     .use(hostGuard(port))
     .use(originGuard(port))
+    // After the guards, so a rejected `Host` is logged as the 403 it became rather than as a request
+    // that was served. See `proxy/request-log.ts`.
+    .use(
+      proxyAccessLog(logger ?? NO_LOGGING, (method, path) => {
+        const inside = mirrorPath(path);
+        if (inside === null) return "(not the mirror)";
+        // Naming the two 404s apart is the whole reason this resolver exists: a path that maps to no
+        // operation is a route table gap, and a path that maps to one is VRChat's own answer.
+        return matchRoute(method, inside)?.route.operationId ?? "(no route)";
+      }),
+    )
 
     // --- the handshake ------------------------------------------------------
     .get(`${MIRROR_PREFIX}/auth/user`, (c) => withDeps(deps, (d) => getCurrentUser(request(c), d)))

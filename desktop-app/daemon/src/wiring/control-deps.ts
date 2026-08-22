@@ -15,7 +15,7 @@ import type {
   User,
   World,
 } from "@vrcz/api/types";
-import { isScope, type JsonValue, SCOPES } from "@vrcz/shared";
+import { isScope, type JsonValue, type RateFrame, SCOPES, STREAM_RATE } from "@vrcz/shared";
 import type { Account, AccountSnapshot } from "../accounts/account.ts";
 import type { AccountManager } from "../accounts/manager.ts";
 import { type PresenceService, trustLevelOf } from "../accounts/presence.ts";
@@ -23,6 +23,7 @@ import type { EventBus } from "../bus/event-bus.ts";
 import { ImageCache } from "../net/image-cache.ts";
 import type { RateLimiter } from "../net/rate-limiter.ts";
 import { vrcFetch } from "../net/request.ts";
+import { emptySeries, type RequestMeter, WINDOW_SECONDS } from "../net/request-meter.ts";
 import { pickUserImageUrl, pickUserImageUrlFull } from "../net/user-image.ts";
 import type { ConsentRegistry, PendingConsent } from "../proxy/consent.ts";
 import type { PipelineMirror } from "../proxy/pipeline-mirror.ts";
@@ -101,6 +102,11 @@ export interface ControlDepsOptions {
    * before it survives until the app reconnects — which is the wrong half to lose, hence the wiring.
    */
   readonly pipelineMirror?: PipelineMirror | undefined;
+  /**
+   * What the daemon is actually spending, per second. Optional; absent, every rate reads as an
+   * empty series rather than as a missing field, so the UI has nothing to branch on.
+   */
+  readonly meter?: RequestMeter | undefined;
   readonly settings: Settings;
   readonly env?: NodeJS.ProcessEnv;
   readonly connectPipeline: (accountId: string) => void;
@@ -651,7 +657,11 @@ function readUserCache(data: string): CachedUser | null {
   return { user: parsed as User, representedGroup: null, profileCard: null };
 }
 
-function toControlAccount(snapshot: AccountSnapshot, addedAt: number): ControlAccount {
+function toControlAccount(
+  snapshot: AccountSnapshot,
+  addedAt: number,
+  meter: RequestMeter | null,
+): ControlAccount {
   return {
     id: snapshot.id,
     displayName: snapshot.displayName ?? snapshot.username,
@@ -660,6 +670,9 @@ function toControlAccount(snapshot: AccountSnapshot, addedAt: number): ControlAc
     lastSeenAt: snapshot.state === "online" ? Date.now() : null,
     connection: connectionOf(snapshot),
     iconUrl: snapshot.iconUrl,
+    // An empty series rather than a missing field when nothing is metered: the card draws a flat
+    // line, which is true, instead of branching on whether the daemon happens to be measuring.
+    rate: meter?.account(snapshot.id) ?? emptySeries(),
   };
 }
 
@@ -673,6 +686,39 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
    * browser tab on top of that is the kind of "help" that trains people to dismiss things unread.
    */
   let streamClients = 0;
+
+  /**
+   * The once-a-second reading, built fresh per tick.
+   *
+   * Only non-zero keys are carried. An idle daemon with six accounts and four connected apps sends
+   * `{total:0,accounts:{},grants:{}}` rather than ten zeroes, and a key's absence means zero — the
+   * same statement, an order of magnitude smaller, every second, forever.
+   */
+  function rateFrame(): RateFrame {
+    const meter = options.meter;
+    const accountRates: Record<string, number> = {};
+    const grantRates: Record<string, number> = {};
+
+    if (meter !== undefined) {
+      for (const snapshot of accounts.list()) {
+        const rate = meter.currentAccount(snapshot.id);
+        if (rate > 0) accountRates[snapshot.id] = rate;
+      }
+      for (const grant of store.listGrants()) {
+        if (grant.revoked_at !== null) continue;
+        const rate = meter.currentGrant(grant.id);
+        if (rate > 0) grantRates[grant.id] = rate;
+      }
+    }
+
+    return {
+      total: meter?.currentTotal() ?? 0,
+      accounts: accountRates,
+      grants: grantRates,
+      limit: limiter.globalRatePerSecond,
+      retryAfter: limiter.isBackingOff ? Date.now() + limiter.backoffRemainingMs : null,
+    };
+  }
 
   // One cache for the whole daemon. Its de-duplication only works if every caller shares it, and a
   // per-request instance would also re-run the eviction sweep on every avatar.
@@ -1104,12 +1150,18 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
           remaining: limiter.isBackingOff ? 0 : limiter.globalRatePerSecond,
           queued: 0,
           retryAfter: limiter.isBackingOff ? Date.now() + limiter.backoffRemainingMs : null,
+          // The measured half. `limit` is a constant off the configuration and always was; this is
+          // what the daemon is doing with it, and it is what the shell's reading now comes from.
+          used: options.meter?.total() ?? emptySeries(),
+          windowSeconds: WINDOW_SECONDS,
         },
       };
     },
 
     async listAccounts(): Promise<ControlAccount[]> {
-      return accounts.list().map((s) => toControlAccount(s, accountRowAddedAt(s.id)));
+      return accounts
+        .list()
+        .map((s) => toControlAccount(s, accountRowAddedAt(s.id), options.meter ?? null));
     },
 
     async login(input): Promise<LoginResult> {
@@ -1132,7 +1184,11 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         connectPipeline(account.id);
         return {
           status: "ok",
-          account: toControlAccount(account.snapshot(), accountRowAddedAt(account.id)),
+          account: toControlAccount(
+            account.snapshot(),
+            accountRowAddedAt(account.id),
+            options.meter ?? null,
+          ),
         };
       } catch (error) {
         // A wrong password is a 401, not a 500 — the UI shows it inline on the form. The upstream
@@ -1157,7 +1213,11 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
 
       ensureAccountRow(account.snapshot());
       connectPipeline(account.id);
-      return toControlAccount(account.snapshot(), accountRowAddedAt(account.id));
+      return toControlAccount(
+        account.snapshot(),
+        accountRowAddedAt(account.id),
+        options.meter ?? null,
+      );
     },
 
     async removeAccount(accountId): Promise<void> {
@@ -1457,7 +1517,15 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
           // button to offer, and listing it greyed out would make "is this thing still connected?"
           // harder to answer rather than easier.
           .filter((grant) => grant.revoked_at === null)
-          .map((grant) => toConnectedApp(grant, accounts, store, options.pipelineMirror ?? null))
+          .map((grant) =>
+            toConnectedApp(
+              grant,
+              accounts,
+              store,
+              options.pipelineMirror ?? null,
+              options.meter ?? null,
+            ),
+          )
           .sort((a, b) => b.createdAt - a.createdAt)
       );
     },
@@ -2011,6 +2079,21 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
 
     subscribeEvents(listener: (event: StreamEvent) => void): () => void {
       streamClients += 1;
+
+      /*
+       * A `rate` frame every second, for as long as this client is attached.
+       *
+       * Per client rather than one shared ticker fanned out, because the interval is the thing that
+       * has to stop: a daemon nobody is watching should not be sampling a meter once a second
+       * forever, and tying the timer's life to the socket's makes that automatic rather than
+       * another counter to keep in step with `streamClients`.
+       *
+       * `unref` so it cannot hold the process open on the way out.
+       */
+      const ticker = setInterval(() => {
+        listener({ type: STREAM_RATE, ts: Date.now(), payload: rateFrame() });
+      }, 1000);
+      ticker.unref?.();
       const subscription = bus.subscribe((event) => {
         // No casts: the envelope is `StreamEnvelope` from `@vrcz/shared` and the UI reads the same
         // interface, so a field added on one side without the other now fails to compile. `data` is
@@ -2031,6 +2114,7 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
 
       let released = false;
       return () => {
+        clearInterval(ticker);
         // Guarded because `onClose` and an explicit teardown can both fire for one socket, and a
         // count that drifts below zero would make `streamClientCount() > 0` permanently false —
         // silently disabling every OS notification for the rest of the run.
@@ -2063,6 +2147,7 @@ function toConnectedApp(
   accounts: AccountManager,
   store: Store,
   mirror: PipelineMirror | null,
+  meter: RequestMeter | null,
 ): ConnectedApp {
   let scopes: string[] = [];
   try {
@@ -2097,6 +2182,7 @@ function toConnectedApp(
     createdAt: grant.created_at,
     lastUsedAt: grant.last_used_at,
     liveSockets: mirror?.socketsForGrant(grant.id) ?? 0,
+    rate: meter?.grant(grant.id) ?? emptySeries(),
   };
 }
 

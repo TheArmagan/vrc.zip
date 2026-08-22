@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import type { DaemonStatus } from "@vrcz/shared";
 import { APP_VERSION } from "@vrcz/shared";
+import { emptySeries, WINDOW_SECONDS } from "../net/request-meter.ts";
 import { TOKEN_HEADER } from "../security/guards.ts";
 import { generateSessionToken } from "../security/session-token.ts";
 import type { ControlDeps } from "./control.ts";
@@ -48,6 +50,7 @@ const ACCOUNT: ControlAccount = {
   enabled: true,
   lastSeenAt: null,
   connection: "connected",
+  rate: emptySeries(),
   iconUrl: ICON_URL,
 };
 
@@ -352,7 +355,14 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
       degradedKeychain: false,
       backend: "windows-credential-manager",
       accounts: 1,
-      rateLimit: { limit: 20, remaining: 20, queued: 0, retryAfter: null },
+      rateLimit: {
+        limit: 20,
+        remaining: 20,
+        queued: 0,
+        retryAfter: null,
+        used: emptySeries(),
+        windowSeconds: WINDOW_SECONDS,
+      },
     }),
     listAccounts: async () => [ACCOUNT],
     listPendingConsent: async () => [],
@@ -599,13 +609,20 @@ describe("control API routes", () => {
   test("GET /api/status reports the app version alongside the daemon snapshot", async () => {
     const { deps } = fakeDeps();
     const res = await call(deps, "/api/status");
-    expect(await res.json()).toEqual({
+    // `used.history` is 600 zeroes and asserting it inline would bury everything else, so the
+    // measured half is checked by shape and the rest by value.
+    const body = (await res.json()) as DaemonStatus;
+    const { rateLimit, ...rest } = body;
+    expect(rest).toEqual({
       version: APP_VERSION,
       degradedKeychain: false,
       backend: "windows-credential-manager",
       accounts: 1,
-      rateLimit: { limit: 20, remaining: 20, queued: 0, retryAfter: null },
     });
+    expect(rateLimit).toMatchObject({ limit: 20, remaining: 20, queued: 0, retryAfter: null });
+    expect(rateLimit.windowSeconds).toBe(WINDOW_SECONDS);
+    expect(rateLimit.used.history).toHaveLength(WINDOW_SECONDS);
+    expect(rateLimit.used.current).toBe(0);
   });
 
   test("GET /api/accounts lists accounts", async () => {

@@ -39,10 +39,14 @@ import {
   type KnownEventKind,
   type LoginResult,
   type RateLimitSnapshot,
+  type RateSeries,
   type TwoFactorMethod,
   type VerifyTwoFactorResult,
 } from "@vrcz/shared";
 import { API_BASE } from "./config.ts";
+
+export type { RateSeries };
+
 import { getToken } from "./session.ts";
 
 // ---------------------------------------------------------------------------
@@ -498,6 +502,8 @@ export interface ConnectedApp {
   readonly lastUsedAt: number | null;
   /** Live pipeline sockets this grant holds right now. */
   readonly liveSockets: number;
+  /** Ten minutes of one-second request counts, oldest first. Seeds the card's sparkline. */
+  readonly rate: RateSeries;
 }
 
 export interface SettingsPorts {

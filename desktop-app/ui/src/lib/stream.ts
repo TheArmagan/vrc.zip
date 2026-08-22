@@ -16,7 +16,14 @@
  * not keep retrying while the tab is hidden — it retries immediately on `visibilitychange`.
  */
 
-import type { StreamEnvelope, StreamFrame } from "@vrcz/shared";
+import {
+  type EventKind,
+  type RateFrame,
+  STREAM_RATE,
+  STREAM_READY,
+  type StreamEnvelope,
+  type StreamFrame,
+} from "@vrcz/shared";
 import { streamUrl } from "./config.ts";
 import { getToken } from "./session.ts";
 
@@ -40,9 +47,11 @@ export interface StreamHandlers {
 const BASE_DELAY_MS = 500;
 const MAX_DELAY_MS = 15_000;
 
-function asPayload(value: unknown): StreamEnvelope | null {
-  if (typeof value !== "object" || value === null) return null;
-  const record = value as Record<string, unknown>;
+function asPayload(value: unknown): StreamEnvelope {
+  const record =
+    typeof value === "object" && value !== null
+      ? (value as Record<string, unknown>)
+      : ({} as Record<string, unknown>);
   return {
     accountId: typeof record.accountId === "string" ? record.accountId : null,
     // Tolerant of a string on purpose. The daemon sends a number and always did, but this parser is
@@ -62,6 +71,34 @@ function asSessionId(value: unknown): number | null {
   return Number.isInteger(parsed) ? parsed : null;
 }
 
+/**
+ * The `rate` frame's payload, or null if it is not one.
+ *
+ * Every field is defaulted rather than required. The daemon omits zero-valued keys from `accounts`
+ * and `grants` on purpose — an idle daemon with ten series would otherwise send ten zeroes a second
+ * forever — so "absent" is a normal, meaningful shape here rather than a malformed one.
+ */
+function asRateFrame(value: unknown): RateFrame | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  return {
+    total: typeof record.total === "number" ? record.total : 0,
+    accounts: asCounts(record.accounts),
+    grants: asCounts(record.grants),
+    limit: typeof record.limit === "number" ? record.limit : 0,
+    retryAfter: typeof record.retryAfter === "number" ? record.retryAfter : null,
+  };
+}
+
+function asCounts(value: unknown): Record<string, number> {
+  if (typeof value !== "object" || value === null) return {};
+  const out: Record<string, number> = {};
+  for (const [key, count] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof count === "number") out[key] = count;
+  }
+  return out;
+}
+
 /** Narrows an arbitrary parsed frame, dropping anything without a usable `type`. */
 export function parseFrame(raw: string): StreamFrame | null {
   let parsed: unknown;
@@ -73,9 +110,24 @@ export function parseFrame(raw: string): StreamFrame | null {
   if (typeof parsed !== "object" || parsed === null) return null;
   const record = parsed as Record<string, unknown>;
   if (typeof record.type !== "string" || record.type === "") return null;
+
+  const ts = typeof record.ts === "number" ? record.ts : Date.now();
+
+  if (record.type === STREAM_READY) return { type: STREAM_READY, ts, payload: null };
+
+  if (record.type === STREAM_RATE) {
+    const payload = asRateFrame(record.payload);
+    // A `rate` frame with no readable payload is dropped rather than passed on as zeroes: a missed
+    // sample leaves the last value on screen for a second, and inventing a zero would draw a dip
+    // that never happened.
+    return payload === null ? null : { type: STREAM_RATE, ts, payload };
+  }
+
   return {
-    type: record.type,
-    ts: typeof record.ts === "number" ? record.ts : Date.now(),
+    // Widened for the same reason `EventKind` is: a kind this build has not heard of is still a
+    // real frame, and the screens that do not know it simply ignore it.
+    type: record.type as EventKind,
+    ts,
     payload: asPayload(record.payload),
   };
 }

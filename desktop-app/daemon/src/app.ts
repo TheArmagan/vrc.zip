@@ -8,6 +8,7 @@ import { EventBus } from "./bus/event-bus.ts";
 import { type ForwardProxy, forwardProxyBanner, startForwardProxy } from "./forward-proxy/index.ts";
 import { discoverLogDirectories, LogWatcher } from "./game-logs/index.ts";
 import { RateLimiter } from "./net/rate-limiter.ts";
+import { RequestMeter } from "./net/request-meter.ts";
 import { buildUserAgent } from "./net/user-agent.ts";
 import { databasePath, ensureStateDir } from "./paths.ts";
 import { PipelineClient } from "./pipeline/index.ts";
@@ -89,6 +90,14 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
   });
 
   const limiter = new RateLimiter();
+  // The limiter knows the ceiling; this is what the daemon actually spends against it, per account
+  // and per connected app. See `net/request-meter.ts` — without it the shell can only ever render
+  // the configured limit and call it a reading.
+  const meter = new RequestMeter();
+  // Hourly, jittered like everything else that runs on a clock here, and `unref`ed so it cannot
+  // hold the process open. Nothing breaks if it never runs; idle series simply stay allocated.
+  const meterPrune = setInterval(() => meter.prune(), 3_600_000 + Math.random() * 600_000);
+  meterPrune.unref?.();
 
   // First run has no contact string, so no honest User-Agent can be built. The daemon still starts
   // — the user needs the UI in order to supply one — but nothing may talk to VRChat until they do.
@@ -99,6 +108,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     secrets,
     bus,
     limiter,
+    meter,
     userAgent: userAgent ?? "",
     ...(options.baseUrl !== undefined ? { baseUrl: options.baseUrl } : {}),
   });
@@ -272,7 +282,13 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     pipeline: pipelineMirror,
     passthrough: {
       grants: store,
-      context: (accountId: string) => accounts.get(accountId)?.context() ?? null,
+      context: (accountId: string, grantId?: string) => {
+        const context = accounts.get(accountId)?.context();
+        if (context === undefined) return null;
+        // Tagging here rather than inside `Account` is what keeps the account unaware of grants:
+        // it is the pass-through that knows an app asked for this, and only on that path.
+        return grantId === undefined ? context : { ...context, grantId };
+      },
       // A cookie jar of its own, created once and never fed a `Set-Cookie` that matters: the
       // unauthenticated endpoints have no session to keep, and sharing a real account's jar would
       // attach a signed-in user to a call that did not need one.
@@ -284,6 +300,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
               jar: anonymousJar,
               userAgent,
               limiter,
+              meter,
               ...(options.baseUrl !== undefined ? { baseUrl: options.baseUrl } : {}),
             },
     },
@@ -299,6 +316,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     presence,
     consent,
     pipelineMirror,
+    meter,
     connectPipeline,
     ...(env !== undefined ? { env } : {}),
     onSettingsSaved: (next) => saveSettings(next, env),
@@ -419,6 +437,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
       presence.stop();
       notificationSync.stop();
       retention.stop();
+      clearInterval(meterPrune);
       for (const client of pipelines.values()) client.dispose();
       feedWriter.detach();
       notifications.detach();

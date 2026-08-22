@@ -18,6 +18,7 @@
  * says the player list has not been observed rather than inventing an empty one.
  */
 
+import { isEventFrame } from "@vrcz/shared";
 import { SvelteMap } from "svelte/reactivity";
 import type { GameSession } from "../api.ts";
 import type { StreamFrame } from "../stream.ts";
@@ -110,12 +111,13 @@ export class LiveSessionsState {
 
   /** Feeds one socket frame in. Frames without a session id are ignored. */
   apply(frame: StreamFrame): void {
-    const sessionId = frame.payload?.sessionId ?? null;
+    if (!isEventFrame(frame)) return;
+    const sessionId = frame.payload.sessionId;
     if (sessionId === null) return;
 
-    const data = record(frame.payload?.data);
+    const data = record(frame.payload.data);
     const entry = this.#ensure(sessionId, frame.ts);
-    if (frame.payload?.accountId != null) entry.accountId = frame.payload.accountId;
+    if (frame.payload.accountId !== null) entry.accountId = frame.payload.accountId;
 
     switch (frame.type) {
       case "session.start": {

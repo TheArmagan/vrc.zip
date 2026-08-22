@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { emptySeries, WINDOW_SECONDS } from "../net/request-meter.ts";
 import { ConsentRegistry } from "../proxy/consent.ts";
 import type { ProxyDeps } from "../proxy/handshake.ts";
 import { generateSessionToken } from "../security/session-token.ts";
@@ -14,7 +15,14 @@ const deps: ControlDeps = {
     degradedKeychain: false,
     backend: "file",
     accounts: 0,
-    rateLimit: { limit: 20, remaining: 20, queued: 0, retryAfter: null },
+    rateLimit: {
+      limit: 20,
+      remaining: 20,
+      queued: 0,
+      retryAfter: null,
+      used: emptySeries(),
+      windowSeconds: WINDOW_SECONDS,
+    },
   }),
   listAccounts: async () => [],
   listPendingConsent: async () => [],

@@ -7,7 +7,7 @@
  * into the row shape here, once.
  */
 
-import { STREAM_READY } from "@vrcz/shared";
+import { isEventFrame } from "@vrcz/shared";
 import type { FeedEvent } from "./api.ts";
 import type { StreamFrame } from "./stream.ts";
 
@@ -44,7 +44,7 @@ let nextSyntheticId = -1;
 
 /** The wire carries the session row id as a string; the rest of the app treats it as a number. */
 export function frameToEvent(frame: StreamFrame): LiveEvent | null {
-  if (frame.type === STREAM_READY || frame.payload === null) return null;
+  if (!isEventFrame(frame)) return null;
   nextSyntheticId -= 1;
   return {
     id: nextSyntheticId,

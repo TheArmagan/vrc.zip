@@ -1,6 +1,7 @@
 import { BASE_URL } from "@vrcz/api";
 import type { CookieJar } from "../accounts/cookie-jar.ts";
 import { parseRetryAfter, type RateClass, type RateLimiter } from "./rate-limiter.ts";
+import type { RequestMeter } from "./request-meter.ts";
 import { USER_AGENT_HEADER } from "./user-agent.ts";
 
 /**
@@ -31,6 +32,19 @@ export interface RequestContext {
    * would otherwise force every test double to fake something it never uses.
    */
   readonly fetch?: (input: string, init?: RequestInit) => Promise<Response>;
+  /**
+   * Counts what actually goes out. Optional so a test needs no meter, and absent means unmetered
+   * rather than unsent — nothing here fails because nobody is watching.
+   */
+  readonly meter?: RequestMeter | undefined;
+  /**
+   * The grant this request is being made for, when a third-party app asked for it.
+   *
+   * Set by the pass-through and nowhere else. It is what makes "which app is eating the budget" a
+   * question with an answer, which PLAN.md §Phase 3 names as the sharpest edge in the system: the
+   * user gets rate-limited for an app's behaviour and blames vrc.zip.
+   */
+  readonly grantId?: string | undefined;
 }
 
 export interface RequestOptions extends Omit<RequestInit, "headers"> {
@@ -96,6 +110,15 @@ export async function vrcFetch(
 
   for (let attempt = 0; ; attempt++) {
     await ctx.limiter.acquire(ctx.accountId, options.rateClass ?? "api");
+
+    // After the limiter, before the send: this counts requests that are actually going out, which is
+    // what a "requests per second" reading has to mean. Counting before `acquire` would report the
+    // rate the daemon *wanted*, and the gap between the two is exactly what the limiter is for. A
+    // 429 retry passes here again, and should — it is another request that really left.
+    ctx.meter?.record({
+      accountId: ctx.accountId,
+      ...(ctx.grantId === undefined ? {} : { grantId: ctx.grantId }),
+    });
 
     const headers = new Headers(options.headers);
 

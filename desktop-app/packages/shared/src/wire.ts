@@ -59,6 +59,14 @@ export interface ControlAccount {
   readonly connection: AccountConnection;
   /** See {@link VrchatImageUrl} — not loadable directly by a browser. */
   readonly iconUrl: VrchatImageUrl;
+  /**
+   * What this account is spending, per second, over the last ten minutes.
+   *
+   * On the card because "which account is eating the budget" is a question the user asks when six
+   * accounts share one IP ceiling — see PLAN.md §1.4, where the per-IP bucket is the load-bearing
+   * one precisely because per-account limiting is structurally unable to see it.
+   */
+  readonly rate: RateSeries;
 }
 
 export interface LoginInput {
@@ -379,18 +387,98 @@ export interface StreamEnvelope {
 /** The literal first frame after a successful upgrade. There is no version handshake. */
 export const STREAM_READY = "ready";
 
+/** A once-a-second reading of what the daemon is spending. See {@link RateFrame}. */
+export const STREAM_RATE = "rate";
+
+/**
+ * How many one-second buckets a rate history carries. Ten minutes.
+ *
+ * Here rather than in the daemon's meter because both sides have to agree on it: the daemon fills
+ * the array and the UI right-aligns the seed into a buffer of exactly this length, and a mismatch
+ * would silently shift every sparkline rather than fail.
+ */
+export const RATE_WINDOW_SECONDS = 600;
+
+/**
+ * One series' worth of request rate, as a card draws it.
+ *
+ * `history` is the seed: ten minutes of one-second buckets, oldest first, fetched once with the
+ * card. The live frame that follows carries **only the newest value**, which the UI appends. Sending
+ * the whole window every second would be two kilobytes per series per second to say one number
+ * changed, and the client already has the rest of it.
+ */
+export interface RateSeries {
+  /** Requests in the last **complete** second. The second in progress reads low, so it is excluded. */
+  readonly current: number;
+  /** Oldest to newest, one entry per second, `windowSeconds` long. */
+  readonly history: readonly number[];
+  /** The highest single second in the window. What a sparkline scales to. */
+  readonly peak: number;
+  /** Every request in the window. */
+  readonly total: number;
+}
+
+/**
+ * The `rate` frame, once a second while anyone is watching.
+ *
+ * Per-account and per-grant maps carry only keys that moved, so an idle daemon sends
+ * `{total: 0, accounts: {}, grants: {}}` rather than a row of zeroes per account. A key's absence
+ * means zero, which is the same thing and much smaller.
+ */
+export interface RateFrame {
+  /** Requests in the last complete second, across every account. */
+  readonly total: number;
+  /** Per account, non-zero only. */
+  readonly accounts: Readonly<Record<string, number>>;
+  /** Per grant, non-zero only. */
+  readonly grants: Readonly<Record<string, number>>;
+  /** The IP-wide ceiling the daemon holds itself to, so the UI can draw load against capacity. */
+  readonly limit: number;
+  /** Unix ms at which a 429 backoff lifts, or null when not backing off. */
+  readonly retryAfter: number | null;
+}
+
 /**
  * One frame on the event socket.
  *
  * `type` is widened to `string` for the same reason {@link EventKind} is: a frame whose kind this
  * build has never heard of must still reach a subscriber rather than being dropped at the parser.
  */
-export interface StreamFrame {
-  readonly type: EventKind | typeof STREAM_READY;
-  /** Unix milliseconds, integer. */
-  readonly ts: number;
-  /** Null on the `ready` frame, and only there. */
-  readonly payload: StreamEnvelope | null;
+export type StreamFrame =
+  | {
+      readonly type: EventKind;
+      /** Unix milliseconds, integer. */
+      readonly ts: number;
+      readonly payload: StreamEnvelope;
+    }
+  | { readonly type: typeof STREAM_READY; readonly ts: number; readonly payload: null }
+  /**
+   * The rate reading. Its own member rather than a bus kind, because it is not an *event* — nothing
+   * happened, this is a sample. Putting it in `EventKind` would have put it in the feed, the
+   * retention config, and the webhook payloads, none of which want a heartbeat.
+   */
+  | { readonly type: typeof STREAM_RATE; readonly ts: number; readonly payload: RateFrame };
+
+/** A frame carrying a bus event, as opposed to the `ready` handshake or a `rate` sample. */
+export type StreamEventFrame = Extract<StreamFrame, { payload: StreamEnvelope }>;
+
+/**
+ * Narrows a frame to the event-carrying kind.
+ *
+ * Exported rather than re-derived per consumer because the union has three members and only one of
+ * them has an envelope — every screen that reads `payload.accountId` needs this exact check, and
+ * writing it once is what stops the fourth member (whenever there is one) from being handled in
+ * three subtly different ways.
+ */
+export function isEventFrame(frame: StreamFrame): frame is StreamEventFrame {
+  return frame.type !== STREAM_READY && frame.type !== STREAM_RATE;
+}
+
+/** Narrows a frame to a `rate` sample. */
+export function isRateFrame(
+  frame: StreamFrame,
+): frame is Extract<StreamFrame, { payload: RateFrame }> {
+  return frame.type === STREAM_RATE;
 }
 
 // ---------------------------------------------------------------------------
@@ -415,6 +503,16 @@ export interface RateLimitSnapshot {
   readonly queued: number;
   /** Unix milliseconds at which a 429 backoff lifts, or null when not backing off. */
   readonly retryAfter: number | null;
+  /**
+   * What the daemon is actually spending, against that ceiling.
+   *
+   * The shell used to render `limit` as though it were a live reading, which it never was — it is a
+   * constant read off the configuration. This is the measured half, and it is what makes the number
+   * beside it mean something.
+   */
+  readonly used: RateSeries;
+  /** How many seconds of history `used` carries. */
+  readonly windowSeconds: number;
 }
 
 /** Everything `GET /api/status` reports that the control module cannot work out for itself. */

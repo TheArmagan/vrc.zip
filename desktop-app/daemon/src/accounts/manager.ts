@@ -1,6 +1,7 @@
 import type { CurrentUser, TwoFactorAuthType } from "@vrcz/api/types";
 import type { EventBus } from "../bus/event-bus.ts";
 import type { RateLimiter } from "../net/rate-limiter.ts";
+import type { RequestMeter } from "../net/request-meter.ts";
 import type { SecretsStore } from "../security/secrets.ts";
 import { Account, type AccountDeps, type AccountSnapshot } from "./account.ts";
 import { AuthError, type LoginResult } from "./auth.ts";
@@ -19,6 +20,8 @@ export interface AccountManagerDeps {
   readonly userAgent: string;
   readonly baseUrl?: string;
   readonly fetch?: (input: string, init?: RequestInit) => Promise<Response>;
+  /** Counts what every account spends. See `net/request-meter.ts`. */
+  readonly meter?: RequestMeter | undefined;
 }
 
 /** Ids for accounts added but not yet successfully logged in, before VRChat tells us the real one. */
@@ -159,6 +162,7 @@ export class AccountManager {
       },
       ...(this.deps.baseUrl !== undefined ? { baseUrl: this.deps.baseUrl } : {}),
       ...(this.deps.fetch !== undefined ? { fetch: this.deps.fetch } : {}),
+      ...(this.deps.meter !== undefined ? { meter: this.deps.meter } : {}),
     };
     return deps;
   }

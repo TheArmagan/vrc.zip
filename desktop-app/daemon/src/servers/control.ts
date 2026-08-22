@@ -18,6 +18,7 @@ import {
   type LoginInput,
   type LoginResult,
   type RateLimitSnapshot,
+  type RateSeries,
   type StatusSnapshot,
   type StreamFrame,
   type TwoFactorMethod,
@@ -675,6 +676,14 @@ export interface ConnectedApp {
   readonly lastUsedAt: number | null;
   /** Live pipeline sockets this grant currently holds. */
   readonly liveSockets: number;
+  /**
+   * What this app is spending, per second, over the last ten minutes.
+   *
+   * PLAN.md §Phase 3 calls the rate budget the sharpest edge in the system: an app polling too hard
+   * gets *the user* rate-limited, and the user blames vrc.zip. Naming who is eating it is the half
+   * that makes the revoke button beside it an informed decision rather than a guess.
+   */
+  readonly rate: RateSeries;
 }
 
 /** One requested scope, as the consent sheet renders it. */

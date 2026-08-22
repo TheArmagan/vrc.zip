@@ -30,8 +30,10 @@ import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
 import { Separator } from "$lib/components/ui/separator/index.js";
 import { api, type ConnectedApp } from "$lib/api.ts";
+import Sparkline from "$lib/components/Sparkline.svelte";
 import { fullTimestamp, timeAgo } from "$lib/format.ts";
 import { clock } from "$lib/state/clock.svelte.ts";
+import { rates } from "$lib/state/rates.svelte.ts";
 
 let apps = $state<ConnectedApp[]>([]);
 let loading = $state(true);
@@ -61,6 +63,8 @@ async function load(): Promise<void> {
   loading = true;
   try {
     apps = await api.apps.list();
+    // Seed each card's history; the live socket extends them from here.
+    for (const entry of apps) rates.seedGrant(entry.id, entry.rate);
     loadError = null;
   } catch (error) {
     loadError = error instanceof Error ? error.message : String(error);
@@ -77,6 +81,9 @@ async function revoke(app: ConnectedApp): Promise<void> {
     // Removed locally rather than by refetching: the answer is not in doubt, and a list that
     // flickers through a loading state on every revoke makes revoking several feel unreliable.
     apps = apps.filter((entry) => entry.id !== app.id);
+    // Its history must not outlive it: a revoked grant's id could be reused by nothing, but a
+    // series nobody reads is one the live frame keeps advancing forever.
+    rates.forgetGrant(app.id);
   } catch (error) {
     actionError = error instanceof Error ? error.message : String(error);
   } finally {
@@ -94,12 +101,30 @@ async function revokeAll(): Promise<void> {
   actionError = null;
   try {
     await api.apps.revokeAll();
+    for (const entry of apps) rates.forgetGrant(entry.id);
     apps = [];
   } catch (error) {
     actionError = error instanceof Error ? error.message : String(error);
   } finally {
     busy = null;
   }
+}
+
+/** The last complete second. The live socket appends to the end of the array. */
+function latest(history: readonly number[]): number {
+  return history[history.length - 1] ?? 0;
+}
+
+/**
+ * Requests across the whole window.
+ *
+ * Summed from the live history rather than read off `entry.rate.total`, which was true when the
+ * page loaded and is a minute stale by the time anyone looks at it.
+ */
+function windowTotal(history: readonly number[]): number {
+  let sum = 0;
+  for (const value of history) sum += value;
+  return sum;
 }
 
 /** Scopes worth a second look, listed separately exactly as the consent sheet lists them. */
@@ -163,6 +188,8 @@ function ordinary(app: ConnectedApp): readonly { scope: string; description: str
         {#each apps as entry (entry.id)}
           {@const danger = dangerous(entry)}
           {@const plain = ordinary(entry)}
+          <!-- `{@const}` is only legal as an immediate child of a block, hence up here. -->
+          {@const history = rates.grant(entry.id)}
           <li class="rounded-lg border border-border bg-card p-4">
             <header class="flex items-start justify-between gap-3">
               <div class="min-w-0">
@@ -220,6 +247,23 @@ function ordinary(app: ConnectedApp): readonly { scope: string; description: str
               {:else if danger.length === 0}
                 <p class="text-muted-foreground">No permissions recorded for this app.</p>
               {/if}
+
+              <!--
+                What this app is costing, which is the fact that makes the Revoke button beside it
+                an informed decision rather than a guess. PLAN.md §Phase 3: an app polling too hard
+                gets *the user* rate-limited, and the user blames vrc.zip.
+              -->
+              <div class="flex items-center gap-3">
+                <Sparkline
+                  values={history}
+                  height={18}
+                  class="w-24"
+                  label="{entry.app.name} requests per second over the last ten minutes"
+                />
+                <span class="tabular text-xs text-muted-foreground">
+                  {latest(history)}/s now · {windowTotal(history)} in the last 10 min
+                </span>
+              </div>
 
               <p class="text-xs text-muted-foreground">
                 Connected <span title={fullTimestamp(entry.createdAt)}

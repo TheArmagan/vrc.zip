@@ -3,6 +3,7 @@ import type { EventBus } from "../bus/event-bus.ts";
 import type { RateLimiter } from "../net/rate-limiter.ts";
 import type { RequestContext } from "../net/request.ts";
 import { vrcFetch } from "../net/request.ts";
+import type { RequestMeter } from "../net/request-meter.ts";
 import { pickUserImageUrl } from "../net/user-image.ts";
 import type { AccountSecret } from "../security/secrets.ts";
 import {
@@ -52,6 +53,8 @@ export interface AccountDeps {
   readonly bus: EventBus;
   readonly baseUrl?: string;
   readonly fetch?: (input: string, init?: RequestInit) => Promise<Response>;
+  /** Counts what this account spends. Optional; absent means unmetered, never unsent. */
+  readonly meter?: RequestMeter | undefined;
   /** Called whenever cookies change, so the caller can persist them. */
   readonly onSecretChanged?: (id: string, secret: AccountSecret) => void | Promise<void>;
 }
@@ -145,6 +148,7 @@ export class Account {
       limiter: this.deps.limiter,
       ...(this.deps.baseUrl !== undefined ? { baseUrl: this.deps.baseUrl } : {}),
       ...(this.deps.fetch !== undefined ? { fetch: this.deps.fetch } : {}),
+      ...(this.deps.meter !== undefined ? { meter: this.deps.meter } : {}),
     };
     return ctx;
   }

@@ -1,3 +1,4 @@
+import { isEventFrame, isRateFrame } from "@vrcz/shared";
 /**
  * The shell's shared state: daemon status, accounts, live sessions, settings, and the live event
  * tail. Screens own their own queries; anything the sidebar, the palette, or two screens all need
@@ -32,6 +33,7 @@ import {
 import { consent } from "./consent.svelte.ts";
 import { liveSessions } from "./live-sessions.svelte.ts";
 import { prefs } from "./prefs.svelte.ts";
+import { rates } from "./rates.svelte.ts";
 
 /** How many live events the shell keeps in memory for the feed's "new since you looked" tail. */
 const LIVE_TAIL_LIMIT = 500;
@@ -126,6 +128,11 @@ class AppState {
       ]);
       this.status = status;
       this.accounts = accounts;
+      // Seed the histories the live socket will extend. Re-seeding on every refresh is deliberate:
+      // it is also the resync after a reconnect, when the socket missed however many seconds the
+      // daemon was away and the client's own tail has drifted from the truth.
+      rates.seedTotal(status.rateLimit.used, status.rateLimit.limit, status.rateLimit.retryAfter);
+      for (const account of accounts) rates.seedAccount(account.id, account.rate);
       this.sessions = sessions;
       this.settings = settings;
       this.error = null;
@@ -226,7 +233,12 @@ class AppState {
   }
 
   #ingest(frame: StreamFrame): void {
-    if (frame.type === "ready") return;
+    // A rate sample is not an event: it must not reach the feed, the notifier, or the live tail.
+    if (isRateFrame(frame)) {
+      rates.apply(frame.payload);
+      return;
+    }
+    if (!isEventFrame(frame)) return;
 
     liveSessions.apply(frame);
     this.#applySideEffects(frame);
@@ -292,12 +304,11 @@ class AppState {
    */
   #applyConsentFrame(frame: StreamFrame): void {
     void consent.refresh();
-    if (frame.type !== "consent.pending") return;
+    if (frame.type !== "consent.pending" || !isEventFrame(frame)) return;
 
-    const payload = frame.payload;
-    const data = (payload?.data ?? null) as { app?: { name?: string } } | null;
+    const data = (frame.payload.data ?? null) as { app?: { name?: string } } | null;
     const name = data?.app?.name ?? "An app";
-    const pairingId = payload?.subjectId ?? null;
+    const pairingId = frame.payload.subjectId;
     notify({
       title: `${name} wants to use your VRChat account`,
       body: "Open vrc.zip to see the code it needs.",
@@ -310,7 +321,8 @@ class AppState {
   }
 
   #applyNotificationFrame(frame: StreamFrame): void {
-    const subjectId = frame.payload?.subjectId ?? null;
+    if (!isEventFrame(frame)) return;
+    const subjectId = frame.payload.subjectId;
 
     switch (frame.type) {
       case "notification.seen":

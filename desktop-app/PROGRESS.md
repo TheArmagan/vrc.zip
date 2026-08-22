@@ -189,12 +189,13 @@ handshake, because the alternative is a login flow that mints credentials with n
       onto `:7774`; every other host is a blind byte pipe. Numbered out of order because it is a
       delivery mechanism for the mirror rather than a step toward it. Decisions 70–73.
 
-- [~] **2.8 Rate budgets + audit + kill switch** — the **kill switch and the Connected apps page are
-      done**: `GET /api/apps`, `POST /api/apps/:id/revoke`, `POST /api/apps/revoke-all`, and
+- [~] **2.8 Rate budgets + audit + kill switch** — the **kill switch, the Connected apps page, and
+      per-account/per-grant rate metering are done**: `GET /api/apps`, `POST /api/apps/:id/revoke`, `POST /api/apps/revoke-all`, and
       `ui/src/screens/ConnectedAppsScreen.svelte` behind `#/apps`. Revocation is per grant and closes
       the pipeline sockets that grant holds, since a socket authenticated once at its handshake would
       otherwise keep streaming a revoked app events. Per-grant rate budgets and the audit row per
-      mutating call are still outstanding. Decisions 86–87.
+      mutating call are still outstanding — but the *measurement* they need now exists
+      (`net/request-meter.ts`), so a budget has something to enforce against. Decisions 86–90.
 - [x] **2.9 Pipeline mirror** (`proxy/pipeline-mirror.ts`) — `wss://…:7774/` speaking VRChat's
       protocol, filtered per event type by the grant's scopes, fed from the daemon's single real
       socket per account. Frames are re-emitted **verbatim** and scanned before forwarding; a dead
@@ -879,6 +880,40 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     back to the `accounts` **table** before the raw id, because a grant outlives a signed-out session
     and `AccountManager` only knows loaded accounts; and an unrecognised scope renders as *dangerous*,
     which is the safe direction to be wrong in and is visible rather than silent.
+
+88. **The rate limiter knew the ceiling; nothing knew the load.** That is why the shell rendered
+    `80/s` whether the daemon was idle or saturated — it was a constant off the configuration wearing
+    a measurement's clothes. `RequestMeter` counts every request that leaves `vrcFetch`, tagged with
+    its account and, on the pass-through, its grant. Same reasoning as the limiter living there: one
+    path to VRChat means "everything is counted" is structural rather than a convention.
+
+    A ring of one-second buckets, ten minutes deep, per series. Counters not timestamps because the
+    answer is always a count over a window; a ring not a list because this runs for weeks. Series are
+    **pruned when they go quiet** — apps come and go and the key set is not bounded by anything the
+    daemon controls. The reading is the last *complete* second: the one in progress is a partial
+    count that only reads low, and including it makes a steady 5/s flicker with sample timing.
+
+89. **History is seeded over REST and extended over the socket.** `/api/status`, `/api/accounts` and
+    `/api/apps` each carry the full 600-bucket window for their series; the once-a-second `rate`
+    frame carries only the newest value and the UI appends. Re-sending the window every second would
+    be kilobytes to say one number changed. Two consequences worth knowing: the frame omits
+    zero-valued keys, so **absence means zero** and the client must advance *every* known series on
+    every frame or a quiet one freezes at its last busy value; and re-seeding on refresh doubles as
+    the resync after a reconnect, when the socket missed however long the daemon was away.
+
+    `rate` is its own `StreamFrame` member rather than an `EventKind`, because it is a sample and not
+    an event — as a bus kind it would have landed in the feed, the retention config and the webhook
+    payloads, none of which want a heartbeat. Making `StreamFrame` a union forced every consumer to
+    narrow, which is how `isEventFrame` came to exist.
+
+90. **A sparkline that scales to the rate limit is a flat line.** The first version drew each series
+    against the 80/s ceiling, so a real 3/s reading sat in the bottom 4% of the box — honest about
+    headroom, useless for shape, which is the only thing a chart that size can convey. It scales to
+    its own peak now, with the absolute magnitude in the number beside it. Two more things that made
+    it look coarse: a fixed 60 columns meant ten seconds per column, so a one-second spike rendered
+    as a ten-second plateau — resolution follows the measured element width instead — and
+    downsampling has to take the **maximum** per column, never the average, because a spike is
+    precisely what gets the user rate-limited and averaging is what erases it.
 
 ---
 

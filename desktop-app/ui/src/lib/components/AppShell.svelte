@@ -12,8 +12,10 @@
   import SunIcon from "@lucide/svelte/icons/sun";
   import type { Snippet } from "svelte";
   import KeychainWarning from "$lib/components/KeychainWarning.svelte";
+  import Sparkline from "$lib/components/Sparkline.svelte";
   import UnofficialBadge from "$lib/components/UnofficialBadge.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
+  import { rates } from "$lib/state/rates.svelte.ts";
   import { Badge } from "$lib/components/ui/badge/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import { Separator } from "$lib/components/ui/separator/index.js";
@@ -88,13 +90,30 @@
           </Tooltip.Root>
         {:else if rateLimit}
           <Tooltip.Root>
-            <Tooltip.Trigger class="hidden sm:block">
+            <Tooltip.Trigger class="hidden items-center gap-2 sm:flex">
+              <!--
+                Ten minutes of load behind the current reading. This used to render `limit` — a
+                constant off the daemon's configuration — as though it were a measurement, so it
+                said the same number whether the daemon was idle or saturated.
+
+                Deliberately no `max={rates.limit}` on the chart: against an 80/s ceiling a real 3/s
+                reading sits in the bottom 4% of the box and renders as a flat line. The absolute
+                magnitude is the number to its right; the picture is for the shape.
+              -->
+              <Sparkline
+                values={rates.total}
+                height={14}
+                class="w-14"
+                label="Requests per second over the last ten minutes"
+              />
               <span class="tabular text-xs text-muted-foreground"
-                >{rateLimit.limit}/s</span
+                >{rates.current}/{rates.limit}/s</span
               >
             </Tooltip.Trigger>
             <Tooltip.Content>
-              Requests per second the daemon allows itself across every account.
+              {rates.current} requests in the last second, against the {rates.limit}/s
+              the daemon allows itself across every account. Peak in the last ten minutes:
+              {rates.peak}/s.
             </Tooltip.Content>
           </Tooltip.Root>
         {/if}

@@ -42,7 +42,7 @@ export interface PassthroughDeps {
    * jar, and the 401 re-auth hook — the three things that make "nothing reaches VRChat except
    * through an Account" true rather than aspirational.
    */
-  readonly context: (accountId: string) => RequestContext | null;
+  readonly context: (accountId: string, grantId?: string) => RequestContext | null;
   /**
    * A context bound to no account, for the operations the spec marks unauthenticated.
    *
@@ -117,7 +117,11 @@ export async function passthrough(
   if (authorized instanceof Response) return authorized;
 
   const context =
-    authorized.grant === null ? deps.anonymousContext() : deps.context(authorized.grant.account_id);
+    authorized.grant === null
+      ? deps.anonymousContext()
+      : // The grant id rides along so the meter can say *which app* is spending, which is the
+        // question the Connected apps page exists to answer.
+        deps.context(authorized.grant.account_id, authorized.grant.id);
 
   if (context === null) {
     return vrczipError(

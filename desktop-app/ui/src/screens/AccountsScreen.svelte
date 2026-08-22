@@ -28,7 +28,9 @@ import { Button } from "$lib/components/ui/button/index.js";
 import * as Dialog from "$lib/components/ui/dialog/index.js";
 import { Separator } from "$lib/components/ui/separator/index.js";
 import { Skeleton } from "$lib/components/ui/skeleton/index.js";
+import Sparkline from "$lib/components/Sparkline.svelte";
 import { connectionLabel, initials } from "$lib/format.ts";
+import { rates } from "$lib/state/rates.svelte.ts";
 import { hrefFor, navigate } from "$lib/router.ts";
 import { app } from "$lib/state/app.svelte.ts";
 
@@ -107,6 +109,8 @@ async function confirmRemove(): Promise<void> {
   {:else}
     <ul class="divide-y divide-border">
       {#each app.accounts as account (account.id)}
+        <!-- `{@const}` is only legal as an immediate child of a block, hence up here. -->
+        {@const accountRate = rates.account(account.id)}
         {@const sessionsForAccount = app.sessions.filter(
           (session) => session.accountId === account.id,
         )}
@@ -146,6 +150,24 @@ async function confirmRemove(): Promise<void> {
                 <span>Last event <RelativeTime ts={account.lastSeenAt} /></span>
               {/if}
             </p>
+
+            <!--
+              What this account is spending. Worth showing per account rather than only in total,
+              because six accounts share one per-IP ceiling (PLAN.md §1.4) and the per-account
+              limiter is structurally unable to see that — so "which one is eating it" is a real
+              question with no other answer on screen.
+            -->
+            <div class="mt-1 flex items-center gap-2">
+              <Sparkline
+                values={accountRate}
+                height={14}
+                class="w-20"
+                label="{account.displayName} requests per second over the last ten minutes"
+              />
+              <span class="tabular text-xs text-muted-foreground">
+                {accountRate[accountRate.length - 1] ?? 0}/s
+              </span>
+            </div>
           </div>
 
           <span class="hidden shrink-0 text-xs text-muted-foreground sm:inline">

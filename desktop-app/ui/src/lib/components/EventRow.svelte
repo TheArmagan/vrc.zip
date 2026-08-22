@@ -85,6 +85,15 @@ const showsUser = $derived(
 );
 
 /**
+ * True when the row actually drew something before the action phrase.
+ *
+ * Not the same question as "did `describeEvent` give us a name": a `usr_…` with no name still
+ * renders as a resolved `UserName`, so the phrase after it is a continuation rather than the whole
+ * sentence. This is what the action's weight keys on.
+ */
+const showsSubject = $derived(subjectGroupId !== null || showsUser);
+
+/**
  * The picture a "switched avatar" row is about, as a file id — or null when there is not one.
  *
  * The payload of `friend.updated.avatar` and `user.updated.avatar` carries the new
@@ -194,8 +203,15 @@ const expandable = $derived(raw !== null || details.facts.length > 0 || details.
         The action reads as a sentence after the subject ("Ada joined the instance") and as a whole
         sentence without one ("Entered a world"), which is why `describeEvent` writes each phrase
         to work both ways rather than gluing a label onto a name.
+
+        The weight follows *whether a subject was drawn*, not whether `describeEvent` supplied a
+        name — and those are different. `friend.offline` carries a bare `userId`, so `subject` is
+        null while `UserName` renders the person anyway by looking the id up. Keyed on `subject`,
+        "went offline" was therefore drawn as a standalone sentence, in full-strength text beside
+        the name it belongs to, while "left the instance" one row above was muted. The phrase is
+        only carrying the sentence on its own when nothing else is.
       -->
-      <span class={subject === null ? "font-medium" : "text-muted-foreground"}>
+      <span class={showsSubject ? "text-muted-foreground" : "font-medium"}>
         {details.action}
       </span>
 

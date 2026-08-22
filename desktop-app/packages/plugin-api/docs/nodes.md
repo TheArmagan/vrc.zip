@@ -11,9 +11,9 @@
 > dispatcher answering scope-checked and account-checked **read** calls against VRChat, and the
 > events bridge.
 >
-> Not built: **lifecycle dispatch to your exported functions** (the host sends the frame; nothing
-> routes it to your `activate`), the `ctx` object those docs describe, storage, outbound actions,
-> the UI renderer, and nodes.
+> Not built: outbound actions, the UI renderer, and nodes. Lifecycle dispatch and the `ctx` object
+> (`ctx.vrchat`, `ctx.storage`, `ctx.events`) now exist — `definePlugin` from
+> `@vrcz/plugin-api/runtime`, which your bundle carries rather than the host injecting.
 >
 > These pages document what is **real today** and mark clearly what is not. Read
 > [status.md](./status.md) for the line-by-line breakdown before you build anything you are relying

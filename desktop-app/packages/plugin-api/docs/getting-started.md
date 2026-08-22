@@ -11,9 +11,9 @@
 > dispatcher answering scope-checked and account-checked **read** calls against VRChat, and the
 > events bridge.
 >
-> Not built: **lifecycle dispatch to your exported functions** (the host sends the frame; nothing
-> routes it to your `activate`), the `ctx` object those docs describe, storage, outbound actions,
-> the UI renderer, and nodes.
+> Not built: outbound actions, the UI renderer, and nodes. Lifecycle dispatch and the `ctx` object
+> (`ctx.vrchat`, `ctx.storage`, `ctx.events`) now exist — `definePlugin` from
+> `@vrcz/plugin-api/runtime`, which your bundle carries rather than the host injecting.
 >
 > These pages document what is **real today** and mark clearly what is not. Read
 > [status.md](./status.md) for the line-by-line breakdown before you build anything you are relying
@@ -276,22 +276,39 @@ show. Do not reformat it.
 
 ## Your entry module
 
-### What it will look like
+### What it looks like
 
-The intended shape, once lifecycle dispatch exists: named exports the host calls, handed a `ctx`
-carrying exactly what the user granted.
+`definePlugin` registers your lifecycle hooks and hands `activate` a `ctx` carrying exactly what the
+user granted.
 
 ```ts
-// src/index.ts — the intended shape. NOT dispatched by the host today.
-// `ctx` is typed `unknown` here on purpose: the type does not exist yet, and nothing calls this.
-export async function activate(ctx: unknown): Promise<void> {}
+// src/index.ts
+import { definePlugin } from "@vrcz/plugin-api/runtime";
 
-export async function deactivate(): Promise<void> {}
+definePlugin({
+  async activate(ctx) {
+    const last = await ctx.storage.kv.get("last-run");
+    await ctx.storage.kv.set("last-run", Date.now());
+    ctx.log(`last run: ${String(last)}`);
+  },
+
+  async deactivate() {},
+});
 ```
 
-Of the `ctx` members that shape implies, exactly one has a host-side implementation:
-**`ctx.vrchat`, and reads only.** Behind the dispatcher there are eight methods, and this is the whole
-list.
+> [!IMPORTANT]
+> **Import from `@vrcz/plugin-api/runtime`, not from `@vrcz/plugin-api`.** The package root
+> re-exports the manifest schema, which pulls in zod, which uses `eval` and `Function` internally —
+> and the install pipeline's deny-scan refuses those in a bundled plugin. Importing the root makes
+> your plugin fail to install, with the error pointing at your own bundle. Type-only imports from
+> the root are fine, because types are erased before bundling.
+>
+> This is why `definePlugin` lives in the published package rather than being injected by the host:
+> your bundle carries it, so it is compiled, scanned and hashed like the rest of your code.
+
+`ctx` carries `vrchat` (reads only), `storage`, `events`, `log`, and `call` for any method the
+façade does not wrap. **`ctx.vrchat` is reads only.** Behind the dispatcher there are eight methods,
+and this is the whole list.
 
 | Method | Scope | Account |
 |---|---|---|

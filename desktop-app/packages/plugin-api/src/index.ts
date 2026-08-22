@@ -77,6 +77,23 @@ export {
 } from "./storage.ts";
 
 // ---------------------------------------------------------------------------
+// The plugin-side runtime — `definePlugin` and the `ctx` it hands you
+// ---------------------------------------------------------------------------
+
+export {
+  definePlugin,
+  type EventsApi,
+  getContext,
+  PluginCallError,
+  type PluginContext,
+  type PluginHooks,
+  type StorageApi,
+  type SubscribeOptions,
+  type Subscription,
+  type VrchatApi,
+} from "./runtime.ts";
+
+// ---------------------------------------------------------------------------
 // Protocol — the wire between host and plugin process
 // ---------------------------------------------------------------------------
 

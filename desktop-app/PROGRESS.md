@@ -5,8 +5,8 @@ the architecture and the reasoning. This file tracks only *state*: what exists, 
 was decided along the way.
 
 **Last updated:** 2026-08-23
-**Current phase:** Phase 3 — Plugin system (3.1–3.6 done and wired, **3.0 done**; next is 3.7,
-plugin storage)
+**Current phase:** Phase 3 — Plugin system (3.0–3.6 done; **3.7 storage and the `ctx` runtime are
+built**, with only its budget readout outstanding; next is 3.8, consent and management UI)
 **Status: Phases 1 and 2 are both built.** Phase 1 was confirmed by hand on 2026-08-22 (1.10 and the
 profile card). Phase 2 closed on the same day: every numbered step is ticked, including 2.8's last
 two pieces (per-app budget overrides and a rate gauge that reports measured numbers instead of
@@ -409,7 +409,7 @@ for the life of the product.
       grant's meaning changed; see decision 183. Two things the sweep turned up beyond the cuts: the
       banner on all eight pages had been false since 3.4/3.5 were wired (see §Gotchas), and both
       `security-model.md` and `status.md` claimed an "isolation" that no built layer provides.
-- [ ] **3.7 Storage** — one SQLite file per plugin in its own data dir. Uninstall is `rm -rf`, quota
+- [~] **3.7 Storage** — one SQLite file per plugin in its own data dir. Uninstall is `rm -rf`, quota
       is a `stat`, and a plugin cannot lock or corrupt the daemon's WAL.
       **Scoped by decision 182:** capabilities become a real field on `PluginGrant` and on
       `GatedMethod` beside `scope` (the 006 column has been silently dropped by `liveGrant` all
@@ -420,6 +420,14 @@ for the life of the product.
       step's name suggests:** the prelude grows the *whole* `ctx` surface (`ctx.vrchat`,
       `ctx.storage`, `ctx.events`), which does not exist today in any form, plus 3.4's outstanding
       per-plugin budget readout.
+      **Built** (decisions 184–186): capabilities are a real field on `PluginGrant` and on
+      `GatedMethod`, refused with `E_CAPABILITY_DENIED`; `plugins/storage/` holds the minimal opener
+      and the eight `storage.*` methods; uninstall deletes the data directory unless `?keepData=1`.
+      The **`ctx` surface shipped as `@vrcz/plugin-api/runtime`** rather than in the prelude, which
+      could not hold it — read decision 185 for the number that decided it, and **decision 186
+      before adding any dependency to the published package**: importing the package root made a
+      plugin uninstallable, because zod reaches the bundle and the deny-scan refuses it.
+      **Not yet done:** 3.4's per-plugin budget readout, which needs a plugin screen to live on.
 - [ ] **3.8 Consent and management UI** — the account picker, the dangerous block behind a second
       toggle, hold-to-confirm, grants keyed immutably by
       `(pluginId, version, grantHash)`, and the dry-run lift as an explicit per-plugin per-scope
@@ -2495,6 +2503,71 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      checks that `contributes.nodes` matches the registered `NodeDefinition`s while `manifest.md`
      said it does not; the pipeline never reads `contributes` at all, so `nodes.md` was the wrong
      one.
+
+184. **3.7's first half: capabilities became real machinery, and storage is the thing that needed
+     them.** `storage` and `storage:sql` had been strings in the manifest since 3.1, persisted in
+     `plugin_grants.capabilities` since migration 006, and read by *nothing* — `PluginGrant` dropped
+     the column and `authorizeCall` knew only scopes. A plugin's private database is the first host
+     power that no scope honestly describes, so the choice was a fake scope or a real field.
+
+     `MethodDefinition` now declares a `capability` beside its `scope`, `authorizeCall` checks it,
+     and a miss is **`E_CAPABILITY_DENIED`** rather than a scope error, because the fix is a
+     different one and an author staring at a full scope list needs to be told so.
+     `PluginGrant.capabilities` is **required, not optional**: a site that forgot it would produce a
+     grant with no capabilities, which denies correctly today and reads as "this plugin asked for
+     nothing" forever after — a silent, plausible, wrong answer. Required made the compiler name
+     every construction site, which is how `liveGrant`'s dropped column was found.
+
+     The database is a minimal opener rather than `Store`, per decision 182. Two pragma choices are
+     load-bearing and neither matches the daemon's. **`auto_vacuum = FULL`**, because `E_QUOTA` tells
+     a plugin that deleting records is the fix and that is only *true* if a delete shrinks the file;
+     under the daemon's `INCREMENTAL` the pages go to a freelist and the error message becomes a lie.
+     **No WAL**, because there is one connection and `-wal`/`-shm` files are two more things the
+     quota `stat` would have to explain.
+
+     Two smaller things worth not rediscovering. The value cap is checked in **bytes, not
+     characters** — a length check passes for English and fails for anyone writing CJK or emoji, and
+     an over-cap value would then not fit in a frame. And record key prefixes are **`GLOB`-escaped**:
+     `GLOB` is what uses the index, its wildcards are `*`, `?` and `[…]`, and a plugin key containing
+     `[` would silently turn a prefix query into a character class and return the wrong rows, which
+     reads as data loss to whoever hits it.
+
+185. **The `ctx` surface cannot live in the prelude, and the reason is a hard number.** Decision 182
+     said "build the whole `ctx` now", picturing it in the injected prelude. It does not fit: the
+     prelude is passed as source to `bun -e`, Windows caps a command line at 32767 characters, and
+     `MAX_PRELUDE_SOURCE_BYTES` holds it to 16KB with a test asserting it. A request/response
+     correlator plus a subscription registry plus a façade does not fit in what remains, and the
+     alternative — materialising the prelude on disk — reintroduces precisely the TOCTOU its own
+     header rejects, on the most valuable file on the machine to win a race against.
+
+     So the runtime ships as **library code the plugin bundles** (`@vrcz/plugin-api/runtime`,
+     `definePlugin` + `ctx`), and that turns out to be the better answer rather than a consolation:
+     it is deny-scanned and content-addressed with the rest of the plugin's code, which
+     host-injected code is not; it is pinned to the protocol major the plugin compiled against; and
+     it holds no authority of its own — every frame it sends is authorised exactly as a hand-written
+     one would be.
+
+     **This also closes the gap decision 183 named**: `hostile/harness-entry.js` existed only because
+     nothing turned a `lifecycle` frame into a call on an exported function. Now something does. The
+     hostile suite keeps its bare bridge deliberately — a suite that measured the real runtime's
+     error handling would be measuring a defence instead of the host's.
+
+186. **Importing `@vrcz/plugin-api` made a plugin uninstallable, and a test found it rather than an
+     author.** The package root re-exports `manifest.ts`, which imports **zod**, which uses `eval`,
+     `Function(…)` and `require` internally. Bundled into a plugin with `external: []`, all of that
+     lands in the artifact and the deny-scan refuses it — correctly, since a scan cannot tell a
+     validator's `Function` from an attacker's. So **every plugin following the getting-started guide
+     would have failed to install**, with an error naming the author's own bundle.
+
+     The fix is a `./runtime` subpath export that pulls only the runtime, the protocol and the
+     storage types. Two tests hold it: one bundles a plugin through the real `Bun.build` + `denyScan`
+     path and asserts it passes, and one asserts the **root entry still fails**, so the reason the
+     subpath exists is pinned rather than remembered. Type-only imports from the root stay fine —
+     types are erased before bundling — and the docs now say all of this where an author will hit it.
+
+     The general shape, which is the part worth carrying forward: **the deny-scan applies to
+     dependencies, not just to the author's code.** Any dependency a plugin bundles must itself be
+     scan-clean, and that is a real constraint on what the published package may import.
 
 ---
 

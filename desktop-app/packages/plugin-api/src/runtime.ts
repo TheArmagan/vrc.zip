@@ -1,0 +1,485 @@
+/**
+ * The plugin-side runtime: `definePlugin`, and the `ctx` every doc page describes.
+ *
+ * Until now a plugin author wrote envelope frames by hand. Every guide in `docs/` showed
+ * `export async function activate(ctx)` and `ctx.vrchat.friends.list()`, and none of it existed —
+ * the only thing that turned a `lifecycle` frame into a call on an exported function was a test
+ * harness with a header explaining that it was standing in for this file.
+ *
+ * ## Why this ships in the published package rather than in the prelude
+ *
+ * The obvious place for a host-supplied client is the prelude, which already owns the wire. It
+ * cannot go there, and the reason is a hard number rather than a preference: the prelude is
+ * injected as source through `bun -e`, Windows caps a command line at 32767 characters, and
+ * `MAX_PRELUDE_SOURCE_BYTES` holds it to 16KB with a test asserting it. A request/response
+ * correlator, a subscription registry and a typed façade do not fit in what is left, and the
+ * alternative — materialising the prelude on disk — reintroduces exactly the TOCTOU the prelude's
+ * own header rejects, on the most valuable file on the machine to win a race against.
+ *
+ * So this is ordinary library code the plugin bundles. Three consequences, all of them good:
+ *
+ *  - It is compiled into the plugin's artifact by the install pipeline, which means it is
+ *    **deny-scanned and content-addressed like the rest of the plugin's code**. Host-injected code
+ *    is neither.
+ *  - It is versioned with the protocol major the plugin declares, so a plugin compiled against
+ *    protocol 1 keeps a protocol-1 client no matter what the daemon later grows.
+ *  - It has no authority of its own. Everything here is a frame the host authorises exactly as it
+ *    would authorise a hand-written one — this file is convenience, never a privilege. A plugin
+ *    that skips it and writes frames itself gets the same answers.
+ *
+ * ## The seam
+ *
+ * `globalThis.__vrczHost` is installed by the prelude before any plugin code runs: `send(frame)`,
+ * `onFrame(fn)`, `log(message)`, `pluginId`. There is exactly one `onFrame` slot, so exactly one
+ * thing may claim it — which is why this module is a singleton and why calling `definePlugin` twice
+ * is an error rather than a second registration.
+ */
+
+import {
+  type Deadline,
+  type DeliveryPolicy,
+  type ErrorPayload,
+  type EventFilter,
+  MAX_CREDITS,
+  type PluginEvent,
+} from "./protocol.ts";
+import type { StorageRecord, StorageUsage } from "./storage.ts";
+
+/** What the prelude installs. Declared structurally so this file imports nothing from the host. */
+interface HostSeam {
+  readonly pluginId: string;
+  readonly protocol: number;
+  send(frame: unknown): boolean;
+  onFrame(handler: (frame: Record<string, unknown>) => void): void;
+  log(message: unknown): void;
+}
+
+function seam(): HostSeam {
+  const host = (globalThis as { __vrczHost?: HostSeam }).__vrczHost;
+  if (host === undefined) {
+    throw new Error(
+      "@vrcz/plugin-api: no host seam. This module only runs inside a vrc.zip plugin process.",
+    );
+  }
+  return host;
+}
+
+/** How long a host call waits before the plugin gives up on it. The host has its own deadline. */
+const DEFAULT_CALL_TIMEOUT_MS = 30_000;
+
+interface Pending {
+  resolve(value: unknown): void;
+  reject(error: Error): void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+/** An error carrying the host's own code, so `catch` can branch on it rather than on a message. */
+export class PluginCallError extends Error {
+  readonly code: string;
+  readonly retryAfterMs: number | undefined;
+  readonly data: unknown;
+
+  constructor(payload: ErrorPayload) {
+    super(payload.message);
+    this.name = "PluginCallError";
+    this.code = payload.code;
+    this.retryAfterMs = payload.retryAfterMs;
+    this.data = payload.data;
+  }
+}
+
+/** A live subscription. `close()` unsubscribes; the host stops sending on the next tick. */
+export interface Subscription {
+  readonly id: string;
+  close(): Promise<void>;
+}
+
+export interface SubscribeOptions {
+  readonly filter?: EventFilter;
+  /**
+   * Overrides the delivery policy. The default is `{credits: 256, maxBatch: 32, overflow:
+   * "drop-oldest"}`.
+   *
+   * **`overflow: "coalesce"` needs a `keyPath`** and this refuses locally without one. The host
+   * does not: a coalesce policy with no key silently behaves as drop-oldest there, which is the
+   * shape of default that makes a plugin author believe they asked for something they did not get.
+   * `keyPath: "userId"` on `friend.location` is the motivating case — it turns 900 queued moves
+   * into each friend's current location.
+   */
+  readonly delivery?: Partial<DeliveryPolicy>;
+  /** Called when the host sheds load. Ignoring it means believing you saw everything. */
+  readonly onDropped?: (info: { count: number; reason: string; seq: number }) => void;
+}
+
+export interface PluginContext {
+  readonly pluginId: string;
+  /** Goes to the daemon's log, prefixed with your plugin id. `console.log` also works. */
+  log(message: unknown): void;
+  /** Any host method, including ones this façade does not wrap yet. */
+  call(method: string, params?: unknown, timeoutMs?: number): Promise<unknown>;
+  readonly vrchat: VrchatApi;
+  readonly storage: StorageApi;
+  readonly events: EventsApi;
+}
+
+export interface VrchatApi {
+  accounts: { list(): Promise<unknown> };
+  friends: { list(params?: { accountId?: string }): Promise<unknown> };
+  users: { get(params: { id: string; accountId?: string }): Promise<unknown> };
+  worlds: { get(params: { id: string; accountId?: string }): Promise<unknown> };
+  instances: { get(params: { id: string; accountId?: string }): Promise<unknown> };
+  groups: { get(params: { id: string; accountId?: string }): Promise<unknown> };
+}
+
+export interface StorageApi {
+  kv: {
+    get(key: string): Promise<unknown>;
+    set(key: string, value: unknown): Promise<void>;
+    delete(key: string): Promise<boolean>;
+    keys(prefix?: string, limit?: number): Promise<string[]>;
+  };
+  records: {
+    append(key: string, value: unknown): Promise<{ id: number; ts: number }>;
+    query(options?: {
+      prefix?: string;
+      since?: number;
+      until?: number;
+      limit?: number;
+    }): Promise<StorageRecord[]>;
+    delete(options: { prefix?: string; before?: number }): Promise<number>;
+  };
+  usage(): Promise<StorageUsage>;
+}
+
+export interface EventsApi {
+  subscribe(
+    handler: (event: PluginEvent) => void,
+    options?: SubscribeOptions,
+  ): Promise<Subscription>;
+}
+
+export interface PluginHooks {
+  activate?(ctx: PluginContext): unknown | Promise<unknown>;
+  deactivate?(): unknown | Promise<unknown>;
+}
+
+/** The one `onFrame` slot means one runtime. Tracked so a second `definePlugin` can say so. */
+let runtime: Runtime | null = null;
+
+class Runtime {
+  readonly #host: HostSeam;
+  readonly #hooks: PluginHooks;
+  readonly #pending = new Map<string, Pending>();
+  readonly #subscriptions = new Map<
+    string,
+    { handler: (event: PluginEvent) => void; onDropped: SubscribeOptions["onDropped"] }
+  >();
+  #nextId = 1;
+  readonly ctx: PluginContext;
+
+  constructor(host: HostSeam, hooks: PluginHooks) {
+    this.#host = host;
+    this.#hooks = hooks;
+    this.ctx = this.#buildContext();
+    host.onFrame((frame) => {
+      this.#handle(frame);
+    });
+  }
+
+  #id(prefix: string): string {
+    const id = `${prefix}${this.#nextId}`;
+    this.#nextId += 1;
+    return id;
+  }
+
+  #deadline(timeoutMs: number): Deadline {
+    return Date.now() + timeoutMs;
+  }
+
+  /**
+   * Sends a frame that expects an answer on the same id.
+   *
+   * The local timer is not the authority — the host enforces its own deadline and will answer
+   * `E_TIMEOUT` — it is what stops a promise hanging forever if the host goes away mid-call, which
+   * is a thing that happens when the daemon shuts down while a plugin is mid-await.
+   */
+  #request(frame: Record<string, unknown>, id: string, timeoutMs: number): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      if (!this.#host.send(frame)) {
+        reject(new Error("The host refused the frame. It may be too large."));
+        return;
+      }
+      const timer = setTimeout(() => {
+        this.#pending.delete(id);
+        reject(
+          new PluginCallError({
+            code: "E_TIMEOUT",
+            message: "The host did not answer before the deadline.",
+          }),
+        );
+      }, timeoutMs);
+      // Node and Bun both allow a pending timer to hold the process open. A plugin waiting on the
+      // host should not be the reason its own process refuses to exit.
+      (timer as { unref?: () => void }).unref?.();
+      this.#pending.set(id, { resolve, reject, timer });
+    });
+  }
+
+  #settle(id: string, ok: boolean, value: unknown): void {
+    const pending = this.#pending.get(id);
+    if (pending === undefined) return; // A late answer to a call we already gave up on.
+    this.#pending.delete(id);
+    clearTimeout(pending.timer);
+    if (ok) pending.resolve(value);
+    else pending.reject(new PluginCallError(value as ErrorPayload));
+  }
+
+  #handle(frame: Record<string, unknown>): void {
+    switch (frame.t) {
+      case "res":
+        this.#settle(String(frame.id), true, frame.result);
+        return;
+      case "err":
+        this.#settle(String(frame.id), false, frame.error);
+        return;
+      case "event":
+        this.#deliver(frame);
+        return;
+      case "dropped": {
+        const entry = this.#subscriptions.get(String(frame.sub));
+        entry?.onDropped?.({
+          count: Number(frame.count),
+          reason: String(frame.reason),
+          seq: Number(frame.seq),
+        });
+        return;
+      }
+      case "lifecycle":
+        void this.#lifecycle(frame);
+        return;
+      default:
+        // A frame this protocol major does not know is ignored rather than fatal: the host is
+        // entitled to grow tags, and a plugin that dies on an unfamiliar one would make every such
+        // addition a breaking change.
+        return;
+    }
+  }
+
+  /**
+   * Delivers a batch, then returns credit for exactly what was delivered.
+   *
+   * Credit is returned **after** the handlers run rather than on arrival. That is what makes the
+   * host's credit window mean "events this plugin has actually processed" instead of "events it
+   * received", which is the difference between backpressure and a counter.
+   *
+   * A handler that throws does not cost the batch: the remaining events are still delivered and the
+   * credit is still returned. A plugin whose handler throws on every event would otherwise stall
+   * its own subscription and look like a host bug.
+   */
+  #deliver(frame: Record<string, unknown>): void {
+    const sub = String(frame.sub);
+    const entry = this.#subscriptions.get(sub);
+    const events = Array.isArray(frame.events) ? (frame.events as PluginEvent[]) : [];
+    if (entry === undefined || events.length === 0) return;
+
+    for (const event of events) {
+      try {
+        entry.handler(event);
+      } catch (error) {
+        this.#host.log(`an event handler threw: ${String(error)}`);
+      }
+    }
+    this.#host.send({ t: "credit", sub, credits: Math.min(events.length, MAX_CREDITS) });
+  }
+
+  async #lifecycle(frame: Record<string, unknown>): Promise<void> {
+    const id = String(frame.id);
+    const hook = frame.phase === "activate" ? this.#hooks.activate : this.#hooks.deactivate;
+    try {
+      const result = hook === undefined ? null : await hook.call(this.#hooks, this.ctx);
+      this.#host.send({ t: "res", id, result: result === undefined ? null : result });
+    } catch (error) {
+      // The host is waiting on this id with an activation deadline. An error answered as an error
+      // is a plugin that failed to start; an error swallowed here is a plugin that hangs, and the
+      // supervisor cannot tell the second from a spin loop.
+      this.#host.send({
+        t: "err",
+        id,
+        error: { code: "E_INTERNAL", message: String((error as Error)?.message ?? error) },
+      });
+    }
+  }
+
+  #call(method: string, params?: unknown, timeoutMs = DEFAULT_CALL_TIMEOUT_MS): Promise<unknown> {
+    const id = this.#id("c");
+    return this.#request(
+      {
+        t: "req",
+        id,
+        method,
+        deadline: this.#deadline(timeoutMs),
+        ...(params === undefined ? {} : { params }),
+      },
+      id,
+      timeoutMs,
+    );
+  }
+
+  #buildContext(): PluginContext {
+    const call = (method: string, params?: unknown, timeoutMs?: number): Promise<unknown> =>
+      this.#call(method, params, timeoutMs);
+
+    const storage: StorageApi = {
+      kv: {
+        get: (key) => call("storage.kv.get", { key }),
+        set: async (key, value) => {
+          await call("storage.kv.set", { key, value });
+        },
+        delete: async (key) =>
+          ((await call("storage.kv.delete", { key })) as { deleted: boolean }).deleted,
+        keys: async (prefix = "", limit) =>
+          (await call("storage.kv.keys", {
+            prefix,
+            ...(limit === undefined ? {} : { limit }),
+          })) as string[],
+      },
+      records: {
+        append: async (key, value) =>
+          (await call("storage.records.append", { key, value })) as { id: number; ts: number },
+        query: async (options = {}) =>
+          (await call("storage.records.query", options)) as StorageRecord[],
+        delete: async (options) =>
+          ((await call("storage.records.delete", options)) as { deleted: number }).deleted,
+      },
+      usage: async () => (await call("storage.usage")) as StorageUsage,
+    };
+
+    const vrchat: VrchatApi = {
+      accounts: { list: () => call("vrchat.accounts.list") },
+      friends: { list: (params = {}) => call("vrchat.friends.list", params) },
+      users: { get: (params) => call("vrchat.users.get", params) },
+      worlds: { get: (params) => call("vrchat.worlds.get", params) },
+      instances: { get: (params) => call("vrchat.instances.get", params) },
+      groups: { get: (params) => call("vrchat.groups.get", params) },
+    };
+
+    const events: EventsApi = {
+      subscribe: async (handler, options = {}) => {
+        const overflow = options.delivery?.overflow ?? "drop-oldest";
+        const keyPath = options.delivery?.keyPath;
+        // Refused here rather than sent, because the host accepts it and quietly behaves as
+        // drop-oldest — an author would get working code that does not do what they asked.
+        if (overflow === "coalesce" && keyPath === undefined) {
+          throw new Error(
+            'overflow: "coalesce" needs a keyPath naming what an event is about, such as "userId". Without one there is nothing to coalesce on.',
+          );
+        }
+        const delivery: DeliveryPolicy = {
+          credits: options.delivery?.credits ?? 256,
+          maxBatch: options.delivery?.maxBatch ?? 32,
+          overflow,
+          ...(keyPath === undefined ? {} : { keyPath }),
+        };
+
+        const sub = this.#id("s");
+        const id = this.#id("c");
+        this.#subscriptions.set(sub, { handler, onDropped: options.onDropped });
+        try {
+          await this.#request(
+            {
+              t: "subscribe",
+              id,
+              deadline: this.#deadline(DEFAULT_CALL_TIMEOUT_MS),
+              sub,
+              filter: options.filter ?? {},
+              delivery,
+            },
+            id,
+            DEFAULT_CALL_TIMEOUT_MS,
+          );
+        } catch (error) {
+          // Registered before sending so no event can arrive before the map has a handler; removed
+          // again if the host refused, so a failed subscribe leaves nothing behind.
+          this.#subscriptions.delete(sub);
+          throw error;
+        }
+        return {
+          id: sub,
+          close: async () => {
+            this.#subscriptions.delete(sub);
+            const closeId = this.#id("c");
+            await this.#request(
+              {
+                t: "unsubscribe",
+                id: closeId,
+                deadline: this.#deadline(DEFAULT_CALL_TIMEOUT_MS),
+                sub,
+              },
+              closeId,
+              DEFAULT_CALL_TIMEOUT_MS,
+            );
+          },
+        };
+      },
+    };
+
+    return {
+      pluginId: this.#host.pluginId,
+      log: (message) => {
+        this.#host.log(message);
+      },
+      call,
+      vrchat,
+      storage,
+      events,
+    };
+  }
+}
+
+/**
+ * Registers a plugin's lifecycle hooks and returns nothing.
+ *
+ * Call it at module scope. The host sends `lifecycle: activate` once the process is up, and
+ * whatever `activate` returns is answered on that frame — so a plugin that throws from `activate`
+ * is reported as a failed activation rather than as a hang.
+ *
+ * ```ts
+ * import { definePlugin } from "@vrcz/plugin-api";
+ *
+ * definePlugin({
+ *   async activate(ctx) {
+ *     const seen = await ctx.storage.kv.get("last-seen");
+ *     await ctx.events.subscribe((event) => ctx.log(event.kind), {
+ *       filter: { kinds: ["friend.online"] },
+ *     });
+ *   },
+ * });
+ * ```
+ */
+export function definePlugin(hooks: PluginHooks): void {
+  if (runtime !== null) {
+    throw new Error(
+      "definePlugin was called twice. A plugin has one set of lifecycle hooks, because the host seam has one frame handler.",
+    );
+  }
+  runtime = new Runtime(seam(), hooks);
+}
+
+/**
+ * The context outside a lifecycle hook, for module-scope code that needs it.
+ *
+ * `activate(ctx)` is the ordinary way to get one. This exists for the plugin that wants to build
+ * something at module scope, and it throws before `definePlugin` because there is no host
+ * connection to hand out until then.
+ */
+export function getContext(): PluginContext {
+  if (runtime === null) {
+    throw new Error("getContext() was called before definePlugin().");
+  }
+  return runtime.ctx;
+}
+
+/** Test seam: forgets the singleton. Never call this from a plugin. */
+export function __resetRuntimeForTests(): void {
+  runtime = null;
+}

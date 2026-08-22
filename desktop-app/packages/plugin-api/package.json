@@ -4,7 +4,8 @@
   "description": "Public plugin API: manifest schema, wire protocol, UI vocabulary and node model. Versioned on the protocol major.",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./runtime": "./src/runtime.ts"
   },
   "license": "MIT",
   "files": [

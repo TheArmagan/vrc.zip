@@ -5,6 +5,17 @@
  */
 
 export {
+  APP_API_PREFIX,
+  type AppApi,
+  type AppApiDeps,
+  type AppGrant,
+  appWebSocketHandler,
+  canSeeEvent,
+  createAppApi,
+  parseGrantScopes,
+  visibleSessions,
+} from "./app-api.ts";
+export {
   type BindServerOptions,
   type BindServersOptions,
   type BoundServer,

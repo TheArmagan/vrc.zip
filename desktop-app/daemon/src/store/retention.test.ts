@@ -12,6 +12,7 @@ import {
   rulesFrom,
   runRetention,
   startRetentionScheduler,
+  WEBHOOK_DELIVERY_RETAIN_DAYS,
 } from "./retention.ts";
 import { MEMORY, Store } from "./store.ts";
 import type { EventsDailyRow } from "./types.ts";
@@ -446,6 +447,114 @@ describe("applyRetentionUpdate", () => {
     // the user's explicit default for a built-in constant.
     applyRetentionUpdate(store, { rules: { [GLOBAL_DEFAULT_KIND]: null } }, NOW);
     expect(describeRetention(store, { now: NOW }).defaultRetainDays).toBe(45);
+    store.close();
+  });
+});
+
+describe("webhook delivery retention", () => {
+  const WEBHOOK = "wh_test";
+
+  function seedWebhook(store: Store): void {
+    store.insertWebhook({
+      id: WEBHOOK,
+      grant_id: null,
+      url: "https://example.invalid/hook",
+      secret_hash: "hash",
+      kinds: JSON.stringify(["*"]),
+      account_id: ACCOUNT,
+      created_at: NOW - 400 * DAY,
+    });
+  }
+
+  /** Enqueues one delivery, then settles it (or doesn't) exactly the way the manager would. */
+  function delivery(
+    store: Store,
+    id: string,
+    createdAt: number,
+    settle: { delivered?: number; dead?: number; nextAttemptAt?: number } = {},
+  ): void {
+    store.enqueueWebhookDelivery({
+      id,
+      webhook_id: WEBHOOK,
+      event_id: `evt_${id}`,
+      event_kind: "friend.online",
+      payload: "{}",
+      next_attempt_at: settle.nextAttemptAt ?? createdAt,
+      created_at: createdAt,
+    });
+    if (settle.delivered !== undefined) store.markWebhookDelivered(id, settle.delivered, 200);
+    if (settle.dead !== undefined) store.markWebhookDeliveryDead(id, settle.dead, 500, "gone");
+  }
+
+  function deliveryIds(store: Store): string[] {
+    return store
+      .listWebhookDeliveries(WEBHOOK, 100)
+      .map((row) => row.id)
+      .sort();
+  }
+
+  test("prunes settled deliveries past the window and keeps everything else", () => {
+    const store = seed();
+    seedWebhook(store);
+
+    const stale = NOW - (WEBHOOK_DELIVERY_RETAIN_DAYS + 1) * DAY;
+    delivery(store, "old_delivered", stale - DAY, { delivered: stale });
+    delivery(store, "old_dead", stale - DAY, { dead: stale });
+    // Settled, but inside the window.
+    delivery(store, "recent_delivered", NOW - 2 * DAY, { delivered: NOW - DAY });
+    // Never settled and very old — the row a restart is supposed to pick up. Age must not reach it.
+    delivery(store, "ancient_pending", stale - 10 * DAY);
+    // Mid-backoff: pending, with its next attempt still in the future.
+    delivery(store, "backing_off", stale - 10 * DAY, { nextAttemptAt: NOW + 5 * 60_000 });
+
+    const result = runRetention(store, { now: NOW });
+
+    expect(result.deletedWebhookDeliveries).toBe(2);
+    expect(deliveryIds(store)).toEqual(["ancient_pending", "backing_off", "recent_delivered"]);
+    store.close();
+  });
+
+  test("a delivery is dated from when it settled, not when it was created", () => {
+    const store = seed();
+    seedWebhook(store);
+
+    // Created outside the window, but it only landed yesterday after a long backoff. That is
+    // precisely the row someone goes looking for, so it stays.
+    delivery(store, "late_lander", NOW - (WEBHOOK_DELIVERY_RETAIN_DAYS + 5) * DAY, {
+      delivered: NOW - DAY,
+    });
+
+    expect(runRetention(store, { now: NOW }).deletedWebhookDeliveries).toBe(0);
+    expect(deliveryIds(store)).toEqual(["late_lander"]);
+    store.close();
+  });
+
+  test("the count matches what the prune then removes", () => {
+    const store = seed();
+    seedWebhook(store);
+    const stale = NOW - (WEBHOOK_DELIVERY_RETAIN_DAYS + 2) * DAY;
+    delivery(store, "a", stale, { delivered: stale });
+    delivery(store, "b", stale, { dead: stale });
+    delivery(store, "c", NOW - DAY, { delivered: NOW });
+
+    const before = NOW - WEBHOOK_DELIVERY_RETAIN_DAYS * DAY;
+    expect(store.countSettledWebhookDeliveries(before)).toBe(2);
+    expect(store.pruneWebhookDeliveries(before)).toBe(2);
+    expect(store.countSettledWebhookDeliveries(before)).toBe(0);
+    store.close();
+  });
+
+  test("reported separately from the feed's own row count", () => {
+    const store = seed();
+    seedWebhook(store);
+    const stale = NOW - (WEBHOOK_DELIVERY_RETAIN_DAYS + 2) * DAY;
+    delivery(store, "a", stale, { delivered: stale });
+    addEvent(store, "gamelog.player_join", NOW - 90 * DAY);
+
+    const result = runRetention(store, { now: NOW });
+
+    expect(result.totalDeleted).toBe(1);
+    expect(result.deletedWebhookDeliveries).toBe(1);
     store.close();
   });
 });

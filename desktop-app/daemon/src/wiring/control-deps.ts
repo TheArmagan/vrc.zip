@@ -787,6 +787,74 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
   const images = new ImageCache(options.env === undefined ? {} : { env: options.env });
 
   /**
+   * The account named, if it can actually act right now.
+   *
+   * Distinct from `onlineAccount` below, which answers "whose eyes should read this?" and falls
+   * back to any signed-in account. This one never falls back: these routes act *as* a named person,
+   * so guessing which person would be the worst possible kind of helpful.
+   *
+   * Every "do a thing to another person" route needs the same two checks, and both are worth making
+   * *before* the call rather than letting `vrcFetch` discover them: an account sitting on a 2FA
+   * challenge has no auth cookie, and a 401 inside the request would trigger a re-auth into a
+   * challenge nobody is watching.
+   */
+  function actingAccount(accountId: string, doing: string): Account {
+    const account = accounts.get(accountId);
+    if (!account) throw new ControlError(404, "unknown_account");
+    if (account.snapshot().state !== "online") {
+      throw new ControlError(
+        409,
+        "account_offline",
+        `That account is not signed in, so vrc.zip cannot ${doing}.`,
+      );
+    }
+    return account;
+  }
+
+  /**
+   * A POST made in the user's name, with the three upstream answers that mean different things kept
+   * apart.
+   *
+   * 403 and 404 are *outcomes*, not faults: the person has invites off, or they are not there any
+   * more. Collapsing them into one "it failed" is what makes an app feel broken when it is in fact
+   * working and the answer is simply no. Everything else is a 502, because it is VRChat's problem
+   * and the user can do nothing about it.
+   */
+  async function sendAsUser(
+    account: Account,
+    path: string,
+    body: Record<string, JsonValue>,
+    what: string,
+  ): Promise<void> {
+    const response = await vrcFetch(account.context(), path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    // Drained either way: an undrained body holds the connection open, and the success signal here
+    // is the status rather than the notification object VRChat hands back.
+    const text = await response.text().catch(() => "");
+    if (response.ok) return;
+
+    if (response.status === 403) {
+      throw new ControlError(
+        403,
+        "send_forbidden",
+        `VRChat will not deliver that ${what}. They may not accept them from you.`,
+      );
+    }
+    if (response.status === 404) {
+      throw new ControlError(404, "unknown_target", "VRChat does not know that user any more.");
+    }
+    throw new ControlError(
+      502,
+      "send_failed",
+      `VRChat returned ${String(response.status)}${text === "" ? "" : `: ${text.slice(0, 200)}`}`,
+    );
+  }
+
+  /**
    * Instance records, keyed `accountId\nlocation`, serving both the roster and the header.
    *
    * The account is **in the key**, not just in the value. VRChat fills in `users` only for the
@@ -1339,6 +1407,37 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         "invite_failed",
         `VRChat returned ${String(response.status)}${body === "" ? "" : `: ${body.slice(0, 200)}`}`,
       );
+    },
+
+    async inviteUserTo(accountId, userId, target, messageSlot): Promise<void> {
+      const account = actingAccount(accountId, "send the invite");
+      await sendAsUser(
+        account,
+        `/invite/${userId}`,
+        {
+          instanceId: `${target.worldId}:${target.instanceId}`,
+          ...(messageSlot === undefined ? {} : { messageSlot }),
+        },
+        "invite",
+      );
+    },
+
+    async requestInviteFrom(accountId, userId, requestSlot): Promise<void> {
+      const account = actingAccount(accountId, "ask for the invite");
+      await sendAsUser(
+        account,
+        `/requestInvite/${userId}`,
+        requestSlot === undefined ? {} : { requestSlot },
+        "invite request",
+      );
+    },
+
+    async boop(accountId, userId): Promise<void> {
+      const account = actingAccount(accountId, "send the boop");
+      // An empty body on purpose: `emojiId` and `inventoryItemId` decorate a boop, and neither the
+      // palette nor anything else in the UI has a picker for one yet. Sending `{}` is the plain
+      // boop, which is the thing being asked for.
+      await sendAsUser(account, `/users/${userId}/boop`, {}, "boop");
     },
 
     async listInstanceUsers(target, accountId): Promise<InstanceRoster> {

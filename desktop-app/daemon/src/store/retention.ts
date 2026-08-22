@@ -8,11 +8,16 @@ import type { RetentionConfigRow } from "./types.ts";
 /**
  * Retention.
  *
- * Only `events` is ever pruned, and only after the expiring rows have been folded into
+ * `events` is pruned per configured window, and only after the expiring rows have been folded into
  * `events_daily`, so the long-run shape of someone's history survives even when the individual
  * rows do not. Everything a user typed, everything that is a record rather than a stream, and the
  * user cache that keeps names resolvable are listed in {@link NEVER_DELETED_TABLES} and are not
  * touched by any code path here regardless of configuration.
+ *
+ * `webhook_deliveries` is pruned too, on a fixed window of its own — see
+ * {@link WEBHOOK_DELIVERY_RETAIN_DAYS}. It is deliberately **not** in {@link NEVER_DELETED_TABLES}:
+ * a delivery row is a log of one outbound send, not a record the user authored, and the health of
+ * an endpoint outlives the individual sends that measured it (the counters live on `webhooks`).
  */
 export const NEVER_DELETED_TABLES = [
   "friend_log",
@@ -29,6 +34,28 @@ export const GLOBAL_DEFAULT_KIND = "*";
 export const FALLBACK_RETAIN_DAYS = 90;
 
 const DAY_MS = 86_400_000;
+
+/**
+ * How long a **settled** webhook delivery is kept. Fourteen days, and not user-configurable.
+ *
+ * Sized against what the table is actually for, which is answering "why did my endpoint stop
+ * working" — a question someone asks days after they notice, not months. Two weeks survives a
+ * holiday and a long weekend on either side of the failure, and it is the same order as the
+ * dead-letter history a person can reasonably act on. Longer would mean a busy multi-account install
+ * carrying hundreds of thousands of rendered JSON bodies for deliveries that already succeeded;
+ * shorter would age out the evidence before the user goes looking for it. The endpoint's long-run
+ * health is unaffected either way: `webhooks.delivered_count` / `dead_count` / `consecutive_dead`
+ * are counters, precisely so they outlive this prune.
+ *
+ * Not in the configurable `retention_config`, because that table is keyed by *event kind* and these
+ * rows are not events; a window per webhook would be a setting nobody would ever tune.
+ *
+ * **Settled only.** A pending row — both `delivered_at` and `dead_at` null, including one sitting
+ * mid-backoff with `next_attempt_at` days out — is a send the daemon still owes another program, and
+ * the queue is a table specifically so that survives a restart. It is never eligible here at any
+ * age; the predicate that guarantees it lives in `SQL.deleteSettledWebhookDeliveries`.
+ */
+export const WEBHOOK_DELIVERY_RETAIN_DAYS = 14;
 
 /** kind (or `prefix.*` pattern, or `'*'`) -> retain_days. */
 export type RetentionRules = ReadonlyMap<string, number>;
@@ -56,6 +83,12 @@ export type RetentionResult = {
   now: number;
   deletedByKind: Record<string, number>;
   totalDeleted: number;
+  /**
+   * Settled webhook deliveries pruned. Reported separately from `totalDeleted`, which is about the
+   * feed and is what the UI renders as "rows deleted" — folding a delivery-queue prune into that
+   * number would make the feed look like it lost history it did not lose.
+   */
+  deletedWebhookDeliveries: number;
   durationMs: number;
 };
 
@@ -173,13 +206,20 @@ export function runRetention(store: Store, options: RetentionOptions = {}): Rete
     totalDeleted += deleted;
   }
 
-  if (totalDeleted > 0) store.incrementalVacuum();
+  // Outside the per-kind loop and on its own fixed window: the delivery queue is not keyed by event
+  // kind, so none of the configured rules apply to it. See WEBHOOK_DELIVERY_RETAIN_DAYS.
+  const deletedWebhookDeliveries = store.pruneWebhookDeliveries(
+    plan.now - WEBHOOK_DELIVERY_RETAIN_DAYS * DAY_MS,
+  );
+
+  if (totalDeleted > 0 || deletedWebhookDeliveries > 0) store.incrementalVacuum();
   store.setMeta(LAST_RUN_META_KEY, String(plan.now));
 
   return {
     now: plan.now,
     deletedByKind,
     totalDeleted,
+    deletedWebhookDeliveries,
     durationMs: Date.now() - startedAt,
   };
 }

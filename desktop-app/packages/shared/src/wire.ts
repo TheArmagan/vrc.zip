@@ -742,3 +742,65 @@ export interface RetentionRunResult {
   /** The state after the pass, so the screen never has to re-fetch to redraw. */
   readonly settings: RetentionSettings;
 }
+
+// ---------------------------------------------------------------------------
+// Webhooks
+// ---------------------------------------------------------------------------
+
+/**
+ * One registered webhook, as the control API returns it and the UI lists it.
+ *
+ * The secret is **not** here and never will be. It is handed back once by
+ * {@link WebhookRegistered} at registration and is not recoverable afterwards — the same posture
+ * grants take with their tokens, for the same reason: a listing endpoint that returns live signing
+ * keys is a listing endpoint that leaks them.
+ */
+export interface WebhookSummary {
+  readonly id: string;
+  /** The grant that registered it, or null for one the user added in the UI. */
+  readonly grantId: string | null;
+  /** The app's name, resolved from the grant. Null when there is no grant behind it. */
+  readonly appName: string | null;
+  readonly url: string;
+  /** Kind patterns: an exact kind, a `family.*` prefix, or `*`. */
+  readonly kinds: readonly string[];
+  /** The account this webhook is scoped to, or null for every account. */
+  readonly accountId: string | null;
+  readonly createdAt: number;
+  /** Set when delivery has been switched off — by the user, or automatically. */
+  readonly disabledAt: number | null;
+  /** Why it was disabled, in words meant to be read. Null while it is live. */
+  readonly disabledReason: string | null;
+  readonly deliveredCount: number;
+  /** Deliveries that exhausted their retries. The number that says an endpoint is broken. */
+  readonly deadCount: number;
+  readonly lastDeliveryAt: number | null;
+  readonly lastStatus: number | null;
+  readonly lastError: string | null;
+  /** Deliveries still queued or mid-backoff. Survives a daemon restart — the queue is on disk. */
+  readonly pending: number;
+}
+
+/**
+ * The answer to `POST /api/webhooks`, and the only time the signing secret exists on the wire.
+ *
+ * Split from {@link WebhookSummary} rather than being an optional field on it, so that "the secret
+ * is present" is a fact about the *type* rather than about which call happened to produce it.
+ */
+export interface WebhookRegistered {
+  readonly webhook: WebhookSummary;
+  /** `whsec_…`. Shown once. The daemon stores only a hash of it. */
+  readonly secret: string;
+}
+
+/** The body of `POST /api/webhooks`. */
+export interface WebhookRegistration {
+  readonly url: string;
+  /**
+   * Kind patterns to deliver. Omitted means everything the caller is allowed to see, which is a
+   * defensible default only because a webhook is already scoped to one grant's account.
+   */
+  readonly kinds?: readonly string[];
+  /** Restrict to one account. A grant-registered webhook is pinned to its grant's account anyway. */
+  readonly accountId?: string | null;
+}

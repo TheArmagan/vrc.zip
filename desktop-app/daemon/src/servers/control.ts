@@ -35,6 +35,7 @@ import type { ServerWebSocket } from "bun";
 import { Hono } from "hono";
 import { createBunWebSocket } from "hono/bun";
 import { hostGuard, originGuard, sessionAuth, type TokenSource } from "../security/guards.ts";
+import { APP_API_PREFIX, type AppApi, type AppApiDeps, createAppApi } from "./app-api.ts";
 
 /**
  * The control API — the private surface the vrc.zip UI and CLI talk to. See PLAN.md §1.8.
@@ -767,6 +768,47 @@ export interface ControlDeps {
   inviteSelfTo(accountId: string, target: InviteTarget): Promise<void>;
 
   /**
+   * Invites someone else to an instance, **as the user**.
+   *
+   * The counterpart to {@link inviteSelfTo}, and a materially different act: that one moves a
+   * client the user already owns, this one puts a notification in a stranger's inbox with the
+   * user's name on it. It is behind the same `invite:send` scope the proxy budgets for exactly that
+   * reason — see `DEFAULT_GRANT_BUDGETS` — and the UI reaches it with the user's own session, so
+   * nothing here is budgeted; the user clicking a button is not an app spending their reputation.
+   *
+   * `target` has already passed `parseInviteLocation`, and `userId` `parseUserId`, because both are
+   * interpolated into a VRChat path.
+   *
+   * `messageSlot` picks one of the user's saved invite messages. Absent means VRChat's default
+   * wording, which is what almost every caller wants.
+   */
+  inviteUserTo(
+    accountId: string,
+    userId: string,
+    target: InviteTarget,
+    messageSlot?: number,
+  ): Promise<void>;
+
+  /**
+   * Asks someone for an invite to wherever they are.
+   *
+   * The mirror image of {@link inviteUserTo} and the one people actually use: you cannot join a
+   * friend in a friends-only instance without one, and the alternative is asking them in a text
+   * chat they are not reading because they are in VR.
+   */
+  requestInviteFrom(accountId: string, userId: string, requestSlot?: number): Promise<void>;
+
+  /**
+   * Boops someone.
+   *
+   * A greeting with no content, which is the whole appeal — and the reason it is here rather than
+   * waiting for something larger. It costs one call, it is `friends:write` (budgeted for apps,
+   * unbudgeted for the person at the keyboard), and it is the single friendliest thing this API
+   * can do.
+   */
+  boop(accountId: string, userId: string): Promise<void>;
+
+  /**
    * The roster of one instance — trust rank, age verification, and friendship per head — in a
    * single upstream call.
    *
@@ -1072,6 +1114,14 @@ export interface ControlAppOptions {
   /** The port this instance will be bound to. The `Host` allowlist is built from it. */
   port: number;
   deps: ControlDeps;
+  /**
+   * The third-party surface from `app-api.ts`, mounted at `/app`.
+   *
+   * Passed in rather than constructed here so this module keeps one authentication model per path
+   * prefix and no knowledge of the other's. Omit it and `/app` does not exist — which is the right
+   * answer for a daemon with no grant store, and for every test that only exercises `/api`.
+   */
+  appApi?: AppApi | undefined;
   /** Resolves the session token. A function, so a rotated token needs no re-wiring. */
   token: TokenSource;
 }
@@ -1377,10 +1427,45 @@ const { upgradeWebSocket, websocket } = createBunWebSocket<ServerWebSocket>();
 /** The Bun websocket handler for this app. `bind.ts` hands it to `Bun.serve`. */
 export const controlWebSocketHandler = websocket;
 
-export function createControlApp({ port, deps, token }: ControlAppOptions) {
+/**
+ * The `/app` surface for a daemon that has no grant store behind it.
+ *
+ * Every method refuses rather than being absent, so the sub-app is always mounted and always the
+ * same type. The alternative — mounting it conditionally — would make `/app` a 404 in one build and
+ * a 401 in another, and "the route does not exist" is a different and less honest answer than "you
+ * are not authenticated", especially to a client trying to work out which it is.
+ */
+const NO_APP_ACCESS: AppApiDeps = {
+  resolveGrant: async () => null,
+  watchGrant: () => () => {},
+  listSessions: async () => [],
+  subscribeEvents: () => () => {},
+  registerWebhook: () => Promise.reject(new Error("no grant store")),
+  listWebhooks: async () => [],
+  deleteWebhook: async () => false,
+};
+
+export function createControlApp({ port, deps, appApi, token }: ControlAppOptions) {
   const app = new Hono()
     .use(hostGuard(port))
     .use(originGuard(port))
+
+    /*
+     * The third-party surface, mounted **before** `sessionAuth` and therefore never reached by it.
+     *
+     * That ordering is the whole security model of this port, not an implementation detail. Hono
+     * applies middleware in registration order, so `/app/…` authenticates itself against a proxy
+     * grant and `/api/…` authenticates against the session token, and neither can ever accept the
+     * other's credential. The alternative — one auth middleware that accepts both, plus a list of
+     * which `/api/` routes an app may reach — fails open: the day someone adds a route and forgets
+     * the list, a third-party app can read the user's whole account. This way a new `/api/` route
+     * is app-unreachable by construction.
+     *
+     * Optional, because a Phase 1 test constructing this app has no grants to serve; absent, `/app`
+     * simply does not exist and falls through to the same 404 as any other unknown path.
+     */
+    .route(APP_API_PREFIX, appApi ?? createAppApi({ deps: NO_APP_ACCESS }))
+
     .use(sessionAuth(token))
 
     .get("/api/status", async (c) => {
@@ -1428,6 +1513,36 @@ export function createControlApp({ port, deps, token }: ControlAppOptions) {
       const body = await readJsonObject(c.req.raw);
       const target = parseInviteLocation(stringField(body, "location"));
       await deps.inviteSelfTo(c.req.param("id"), target);
+      return c.json({ status: "ok" as const });
+    })
+
+    /*
+     * The three "do a thing to another person" actions the command palette has carried as stubs
+     * since Phase 1. They sit beside `invite-self` because they are the same slot: an account in
+     * the path, because *which* account acts is the whole question when two are signed in, and a
+     * validated target because every one of these is interpolated into a VRChat path.
+     */
+    .post("/api/accounts/:id/invite", async (c) => {
+      const body = await readJsonObject(c.req.raw);
+      const userId = parseUserId(stringField(body, "userId"));
+      const target = parseInviteLocation(stringField(body, "location"));
+      const messageSlot = parseSlot(body?.messageSlot, "messageSlot");
+      await deps.inviteUserTo(c.req.param("id"), userId, target, messageSlot);
+      return c.json({ status: "ok" as const });
+    })
+
+    .post("/api/accounts/:id/request-invite", async (c) => {
+      const body = await readJsonObject(c.req.raw);
+      const userId = parseUserId(stringField(body, "userId"));
+      const requestSlot = parseSlot(body?.requestSlot, "requestSlot");
+      await deps.requestInviteFrom(c.req.param("id"), userId, requestSlot);
+      return c.json({ status: "ok" as const });
+    })
+
+    .post("/api/accounts/:id/boop", async (c) => {
+      const body = await readJsonObject(c.req.raw);
+      const userId = parseUserId(stringField(body, "userId"));
+      await deps.boop(c.req.param("id"), userId);
       return c.json({ status: "ok" as const });
     })
 
@@ -1965,6 +2080,32 @@ function parseRetainDays(value: JsonValue, kind: string): number {
       400,
       "invalid_body",
       `"${kind}" must be a whole number of days between ${String(RETENTION_MIN_DAYS)} and ${String(RETENTION_MAX_DAYS)}`,
+    );
+  }
+  return value;
+}
+
+/**
+ * An optional invite-message slot.
+ *
+ * VRChat exposes twelve slots per message type and numbers them from zero. Rejected rather than
+ * clamped: a slot the user did not mean sends *different words* in their name, which is not the
+ * kind of mistake to paper over with a nearest-valid-value.
+ */
+export const MAX_INVITE_SLOT = 11;
+
+function parseSlot(value: JsonValue | undefined, field: string): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < 0 ||
+    value > MAX_INVITE_SLOT
+  ) {
+    throw new ControlError(
+      400,
+      "invalid_body",
+      `${field} must be a whole number between 0 and ${String(MAX_INVITE_SLOT)}`,
     );
   }
   return value;

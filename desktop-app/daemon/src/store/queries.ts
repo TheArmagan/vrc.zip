@@ -440,6 +440,35 @@ export const SQL = {
       attempts = attempts + 1, dead_at = ?, last_status = ?, last_error = ?
     WHERE id = ? AND delivered_at IS NULL AND dead_at IS NULL`,
 
+  /* --- webhook delivery retention (see `store/retention.ts`) ---------------
+   *
+   * `COALESCE(delivered_at, dead_at)` is the row's *settle* time, and the predicate keys on it
+   * rather than on `created_at` for one reason: a delivery that spent ten minutes backing off before
+   * it finally landed is exactly the row someone wants to look at, and dating it from when the event
+   * happened would age it out earlier than the successes around it.
+   *
+   * A row where both columns are null is pending — mid-backoff, or waiting on the next scan — and
+   * `IS NOT NULL` is what keeps it out of the delete. That is not a nicety: the queue is a table
+   * precisely so a promise the daemon made survives a restart, and a prune that could reach a
+   * pending row would quietly undo the whole reason for it.
+   */
+  /*
+   * Deliveries still owed to one webhook: neither delivered nor dead, whether it is waiting on the
+   * next scan or sitting out a backoff. It is the number that tells a user "your endpoint is down
+   * and vrc.zip is still trying", which is different from `dead_count`, where it has given up.
+   */
+  countPendingWebhookDeliveries: `
+    SELECT COUNT(*) AS n FROM webhook_deliveries
+    WHERE webhook_id = ? AND delivered_at IS NULL AND dead_at IS NULL`,
+  countSettledWebhookDeliveries: `
+    SELECT COUNT(*) AS count FROM webhook_deliveries
+    WHERE COALESCE(delivered_at, dead_at) IS NOT NULL
+      AND COALESCE(delivered_at, dead_at) < ?`,
+  deleteSettledWebhookDeliveries: `
+    DELETE FROM webhook_deliveries
+    WHERE COALESCE(delivered_at, dead_at) IS NOT NULL
+      AND COALESCE(delivered_at, dead_at) < ?`,
+
   // -- meta / housekeeping --------------------------------------------------
   getMeta: `SELECT value FROM meta WHERE key = ?`,
   setMeta: `

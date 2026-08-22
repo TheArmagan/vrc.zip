@@ -76,6 +76,15 @@ const deps: ControlDeps = {
   listGroupPosts: async () => ({ posts: [], hasMore: false }),
   listGroupInstances: async () => ({ instances: [] }),
   listGroupGalleryImages: async () => ({ images: [], hasMore: false }),
+  inviteUserTo: async () => {
+    throw new Error("unused");
+  },
+  requestInviteFrom: async () => {
+    throw new Error("unused");
+  },
+  boop: async () => {
+    throw new Error("unused");
+  },
   setAppBudget: async () => {
     throw new Error("unused");
   },

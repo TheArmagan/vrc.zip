@@ -102,4 +102,7 @@ export {
   type VerifyTwoFactorInput,
   type VerifyTwoFactorResult,
   type VrchatImageUrl,
+  type WebhookRegistered,
+  type WebhookRegistration,
+  type WebhookSummary,
 } from "./wire.ts";

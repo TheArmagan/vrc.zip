@@ -369,6 +369,13 @@ interface Recorder {
   retentionUpdates: RetentionUpdate[];
   retentionRuns: number;
   budgetWrites: { grantId: string; scope: string; limit: number | null }[];
+  sentActions: {
+    kind: string;
+    accountId: string;
+    userId: string;
+    target?: InviteTarget;
+    slot?: number | undefined;
+  }[];
 }
 
 function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; seen: Recorder } {
@@ -399,6 +406,7 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     retentionUpdates: [],
     retentionRuns: 0,
     budgetWrites: [],
+    sentActions: [],
   };
   let settings: Settings = { theme: "dark" };
   let retention: RetentionSettings = {
@@ -437,6 +445,16 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
       throw new Error("unused");
     },
     denyConsent: async () => {},
+    inviteUserTo: async (accountId, userId, target, messageSlot) => {
+      if (accountId !== ACCOUNT.id) throw new ControlError(404, "unknown_account", "no");
+      seen.sentActions.push({ kind: "invite", accountId, userId, target, slot: messageSlot });
+    },
+    requestInviteFrom: async (accountId, userId, requestSlot) => {
+      seen.sentActions.push({ kind: "request-invite", accountId, userId, slot: requestSlot });
+    },
+    boop: async (accountId, userId) => {
+      seen.sentActions.push({ kind: "boop", accountId, userId });
+    },
     listConnectedApps: async () => [],
     setAppBudget: async (grantId, scope, limit) => {
       if (grantId !== GRANT_ID) throw new ControlError(404, "unknown_app", "no such app");
@@ -1920,5 +1938,120 @@ describe("PUT /api/apps/:id/budgets/:scope", () => {
     const res = await call(deps, "/api/apps/grant_nope/budgets/invite:send", put({ limit: 10 }));
     expect(res.status).toBe(404);
     expect(await res.json()).toMatchObject({ error: "unknown_app" });
+  });
+});
+
+describe("acting on another person", () => {
+  const post = (body: unknown) => ({
+    method: "POST",
+    body: JSON.stringify(body),
+    headers: { "content-type": "application/json" },
+  });
+  const FRIEND = "usr_11111111-1111-1111-1111-111111111111";
+  const LOCATION = "wrld_aaaa:12345~hidden(usr_x)~region(eu)";
+
+  test("invite passes the user, the target and the slot through", async () => {
+    const { deps, seen } = fakeDeps();
+    const res = await call(
+      deps,
+      `/api/accounts/${ACCOUNT.id}/invite`,
+      post({ userId: FRIEND, location: LOCATION, messageSlot: 3 }),
+    );
+    expect(res.status).toBe(200);
+    expect(seen.sentActions).toEqual([
+      {
+        kind: "invite",
+        accountId: ACCOUNT.id,
+        userId: FRIEND,
+        target: { worldId: "wrld_aaaa", instanceId: "12345~hidden(usr_x)~region(eu)" },
+        slot: 3,
+      },
+    ]);
+  });
+
+  test("an absent slot stays absent rather than becoming zero", async () => {
+    // Slot 0 is a real slot holding real words. Defaulting an omitted slot to it would send a
+    // message the user never chose, in their name.
+    const { deps, seen } = fakeDeps();
+    await call(
+      deps,
+      `/api/accounts/${ACCOUNT.id}/invite`,
+      post({ userId: FRIEND, location: LOCATION }),
+    );
+    expect(seen.sentActions[0]?.slot).toBeUndefined();
+  });
+
+  test("request-invite and boop reach their deps", async () => {
+    const { deps, seen } = fakeDeps();
+    await call(
+      deps,
+      `/api/accounts/${ACCOUNT.id}/request-invite`,
+      post({ userId: FRIEND, requestSlot: 0 }),
+    );
+    await call(deps, `/api/accounts/${ACCOUNT.id}/boop`, post({ userId: FRIEND }));
+    expect(seen.sentActions.map((action) => action.kind)).toEqual(["request-invite", "boop"]);
+    // Zero survives: it is a slot, not a missing value.
+    expect(seen.sentActions[0]?.slot).toBe(0);
+  });
+
+  test.each([
+    ["a missing userId", "/invite", { location: LOCATION }],
+    ["a userId that is not one", "/invite", { userId: "../../admin", location: LOCATION }],
+    ["a missing location", "/invite", { userId: FRIEND }],
+    ["a location that is not one", "/invite", { userId: FRIEND, location: "not/a/location" }],
+    [
+      "a slot past the last one",
+      "/invite",
+      { userId: FRIEND, location: LOCATION, messageSlot: 12 },
+    ],
+    ["a negative slot", "/invite", { userId: FRIEND, location: LOCATION, messageSlot: -1 }],
+    ["a fractional slot", "/invite", { userId: FRIEND, location: LOCATION, messageSlot: 1.5 }],
+    ["a slot that is a string", "/request-invite", { userId: FRIEND, requestSlot: "1" }],
+    ["a missing userId on boop", "/boop", {}],
+  ])("%s is a 400 and sends nothing", async (_name, path, body) => {
+    const { deps, seen } = fakeDeps();
+    const res = await call(deps, `/api/accounts/${ACCOUNT.id}${path}`, post(body));
+    expect(res.status).toBe(400);
+    expect(seen.sentActions).toEqual([]);
+  });
+
+  test("an unknown account is the dep's 404, not a silent fallback to another account", async () => {
+    const { deps } = fakeDeps();
+    const res = await call(
+      deps,
+      "/api/accounts/usr_nope/invite",
+      post({ userId: FRIEND, location: LOCATION }),
+    );
+    expect(res.status).toBe(404);
+  });
+});
+
+/*
+ * The mounting order, asserted rather than assumed.
+ *
+ * `/app` authenticates against a proxy grant and `/api` against the session token, and the whole
+ * safety of this port rests on neither ever accepting the other's credential. That is a property of
+ * *registration order* inside `createControlApp` — a refactor that moves one `.use()` above another
+ * would break it silently and every other test would still pass.
+ */
+describe("the two authentication models on one port", () => {
+  test("a valid session token does not open the third-party surface", async () => {
+    const { deps } = fakeDeps();
+    const res = await call(deps, "/app/sessions");
+    expect(res.status).toBe(401);
+  });
+
+  test("the host guard still runs in front of it", async () => {
+    const { deps } = fakeDeps();
+    const res = await call(deps, "/app/sessions", { headers: { host: "evil.example" } });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ error: "forbidden_host" });
+  });
+
+  test("an unknown path under /app is a 401, not a fall-through to the session-authed 404", async () => {
+    // A 404 here would say "no such route" to a caller who has not proved anything, which is one
+    // bit more than an unauthenticated client should be able to learn about this surface.
+    const { deps } = fakeDeps();
+    expect((await call(deps, "/app/nope")).status).toBe(401);
   });
 });

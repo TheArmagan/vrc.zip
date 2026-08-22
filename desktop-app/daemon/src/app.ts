@@ -19,15 +19,18 @@ import { loadOrCreateMasterKey } from "./security/keychain.ts";
 import { SecretsStore } from "./security/secrets.ts";
 import { resolveSessionToken } from "./security/session-token.ts";
 import { readStateFile, removeStateFile, writeStateFile } from "./security/state-file.ts";
-import { type BoundServers, bindServers } from "./servers/index.ts";
+import { type BoundServers, bindServers, createAppApi } from "./servers/index.ts";
 import { loadSettings, needsFirstRun, type Settings, saveSettings } from "./settings.ts";
 import { type RetentionScheduler, Store, startRetentionScheduler } from "./store/index.ts";
+import { WebhookManager } from "./webhooks/index.ts";
+import { createAppApiDeps } from "./wiring/app-api-deps.ts";
 import { attachConsentAlerts } from "./wiring/consent-alert.ts";
 import { createControlDeps } from "./wiring/control-deps.ts";
 import { FeedWriter } from "./wiring/feed-writer.ts";
 import { createLogSink } from "./wiring/log-bridge.ts";
 import { NotificationSink } from "./wiring/notification-sink.ts";
 import { publishPipelineEvent } from "./wiring/pipeline-bridge.ts";
+import { attachWebhookBridge } from "./wiring/webhook-bridge.ts";
 
 /**
  * The composition root. Everything is constructed here and nowhere else, which is what makes the
@@ -60,6 +63,12 @@ export interface RunningDaemon {
   /** Null when the forward proxy is switched off in settings, or when it failed to start. */
   readonly forwardProxy: ForwardProxy | null;
   readonly settings: Settings;
+  /**
+   * The outbound webhook subsystem. Exposed for the same reason `servers` is: the control API's
+   * webhook routes are mounted against this instance, and a second `WebhookManager` over the same
+   * store would be a second scanner racing the first for the same delivery rows.
+   */
+  readonly webhooks: WebhookManager;
   readonly sessionToken: string;
   readonly launchUrl: string;
   stop(): Promise<void>;
@@ -227,6 +236,23 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
   // --- retention ------------------------------------------------------------
   const retention: RetentionScheduler = startRetentionScheduler(store);
 
+  // --- outbound webhooks ----------------------------------------------------
+  // Constructed after the store and the bus and before the servers, because the control API is
+  // handed this instance to mount `register`/`list`/`remove` against.
+  //
+  // `start()` only begins the scan loop that drains the durable queue; a delivery left pending by
+  // the previous run — including one that was mid-backoff when the daemon stopped — is picked up by
+  // the first scan, which is the entire reason that queue is a table. Attaching the bridge before
+  // starting the scanner is harmless in either order: `onEvent` writes rows, it never sends.
+  const webhooks = new WebhookManager({
+    store,
+    onError: (error, context) => {
+      console.error(`[webhooks] ${context}:`, error);
+    },
+  });
+  const detachWebhooks = attachWebhookBridge({ bus, manager: webhooks });
+  webhooks.start();
+
   // --- servers --------------------------------------------------------------
   // Must read `state.json` before `writeStateFile` below overwrites it. Fresh token by default;
   // the previous run's only under `--watch` / `--hot` / `VRCZIP_STABLE_TOKEN=1`.
@@ -322,8 +348,18 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     onSettingsSaved: (next) => saveSettings(next, env),
   });
 
+  /*
+   * The third-party surface at `/app` on the control port, and the reason it is built here rather
+   * than inside `bindServers`: it needs the webhook manager, and there must be exactly one of those
+   * per store — two would be two scanners racing the same delivery rows.
+   */
+  const appApi = createAppApi({
+    deps: createAppApiDeps({ store, bus, webhooks }),
+  });
+
   const servers = await bindServers({
     deps,
+    appApi,
     proxyDeps,
     proxyLogger,
     token: () => sessionToken,
@@ -427,6 +463,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     servers,
     forwardProxy,
     settings,
+    webhooks,
     sessionToken,
     launchUrl,
     async stop() {
@@ -437,6 +474,13 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
       presence.stop();
       notificationSync.stop();
       retention.stop();
+      // Detach before stopping the scanner, in that order and for the stated reason: unsubscribing
+      // first means nothing new is enqueued, and stopping second lets a scan already in flight
+      // finish and write its outcome. A delivery abandoned mid-attempt is simply pending again on
+      // the next start, so nothing is lost either way — but a row enqueued after the scanner has
+      // stopped would sit undelivered until then for no reason.
+      detachWebhooks();
+      webhooks.stop();
       clearInterval(meterPrune);
       for (const client of pipelines.values()) client.dispose();
       feedWriter.detach();

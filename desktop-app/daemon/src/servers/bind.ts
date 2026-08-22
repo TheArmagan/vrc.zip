@@ -10,6 +10,7 @@ import { type EgressViolation, filterResponse } from "../proxy/egress-filter.ts"
 import type { ProxyDeps } from "../proxy/handshake.ts";
 import type { ProxyLogger } from "../proxy/request-log.ts";
 import type { TokenSource } from "../security/guards.ts";
+import type { AppApi } from "./app-api.ts";
 import { type ControlDeps, controlWebSocketHandler, createControlApp } from "./control.ts";
 import { createProxyApp, proxyWebSocketHandler } from "./proxy.ts";
 import { createUiApp } from "./ui.ts";
@@ -168,6 +169,11 @@ function reportEgressViolation(
 export interface BindServersOptions {
   deps: ControlDeps;
   /**
+   * The third-party surface mounted at `/app` on the control port. Absent, `/app` answers 401 to
+   * everything rather than 404 — see `NO_APP_ACCESS` in `control.ts`.
+   */
+  appApi?: AppApi | undefined;
+  /**
    * The mirror's collaborators. Omitted, `:7774` binds and answers 503 rather than half-working —
    * the port must exist either way, because the "three separate instances" property is structural.
    */
@@ -198,6 +204,7 @@ export interface BoundServers {
 export async function bindServers(options: BindServersOptions): Promise<BoundServers> {
   const {
     deps,
+    appApi,
     proxyDeps,
     proxyLogger,
     token,
@@ -210,7 +217,10 @@ export async function bindServers(options: BindServersOptions): Promise<BoundSer
   const control = bindServer({
     port: ports?.control ?? DEFAULT_CONTROL_PORT,
     hostname,
-    createApp: (port) => egressGuarded(createControlApp({ port, deps, token })),
+    createApp: (port) =>
+      egressGuarded(
+        createControlApp({ port, deps, token, ...(appApi === undefined ? {} : { appApi }) }),
+      ),
     // Hono's Bun adapter parameterises the socket on its own `BunWebSocketData`, which it sets
     // during the upgrade. Bun's own handler type is parameterised on the caller's data, and the two
     // only meet through a cast.

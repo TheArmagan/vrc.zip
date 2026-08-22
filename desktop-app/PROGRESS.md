@@ -256,15 +256,21 @@ handshake, because the alternative is a login flow that mints credentials with n
       `sessions:unlinked` scope; `GET`/`PUT /api/retention` and a real per-event-type Settings
       control land here, and the retention types move to `@vrcz/shared` with them; and the
       `invite-request` / `boop` palette stubs get their routes.
-      **Landed so far:** retention is done end to end (decision 119) — `GET`/`PUT /api/retention`,
+      **2.10 is now built.** The grant-authenticated surface is `/app/…` on the same port
+      (decisions 122–124): `GET /app/sessions` behind `sessions:read` with unlinked sessions gated
+      on `sessions:unlinked`, `GET /app/stream` carrying the enriched envelope through a
+      default-deny per-event scope filter and closing when the grant is revoked, and
+      `POST`/`GET`/`DELETE /app/webhooks`. The webhook subsystem is wired: the bus feeds it through
+      `wiring/webhook-bridge.ts`, `app.ts` owns its lifecycle, and settled delivery rows are pruned
+      by the retention pass after fourteen days. The three palette actions got their routes
+      (decision 125). Retention is done end to end (decision 119) — `GET`/`PUT /api/retention`,
       `POST /api/retention/run`, the shared wire types, and a real Settings control that previews
       what a window would delete before anyone saves it, replacing the paragraph that used to
       apologise for its own absence. `StreamEnvelope` now carries `displayName` on every event
       (decision 121), and vrc.zip's own scopes exist (decision 120): `sessions:read`,
-      `sessions:unlinked`, `webhooks:write`. **Still outstanding:** the grant-authenticated surface
-      itself (a third-party app reaching `:7775` with its proxy token and being filtered by scope,
-      including `sessions:unlinked`), webhook registration routes and wiring, and the
-      `invite-request` / `boop` palette stubs.
+      `sessions:unlinked`, `webhooks:write`. **Still outstanding:** the UI half — the palette stubs
+      and the user menu still do not call the three action routes, and there is no screen listing
+      the webhooks an app has registered — plus an end-to-end run against a real third-party client.
       **Alongside it (2026-08-22):** the command palette grew direct access — clipboard-first entry
       for any user, world, instance or group id or VRChat link, argument prompts for the same by
       hand, and the rest of the actions this build already supports (mark every notification seen,
@@ -1334,6 +1340,40 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      with less thought, not more convenience — so the command opens the screen and says where the
      confirmation is. "Run the retention pass now" *does* act, because a pass that deletes only what
      is already past its window is the schedule running early, not a new decision.
+
+122. **The third-party surface is a separate path prefix, not a flag on the existing routes.**
+     `:7775` now serves two audiences with two credentials: `/api/…` takes the session token and is
+     the user's own UI, `/app/…` takes a proxy grant and is a third-party app. They are separate
+     Hono instances mounted in a deliberate order — `hostGuard`, `originGuard`, then `/app`, then
+     `sessionAuth` — so neither can ever accept the other's credential. The rejected alternative was
+     one auth middleware accepting both plus a list of which `/api/` routes an app may reach, and it
+     fails open in the worst way: the day somebody adds a route and forgets the list, an app reads
+     the user's whole account. This way a new `/api/` route is app-unreachable *by construction*.
+     There is a test asserting the ordering, because it is a property of registration order that
+     every other test would keep passing without.
+
+123. **The stream's per-event scope filter is default-deny and keyed on event family.** `canSeeEvent`
+     applies three independent gates — the event's account must be the grant's, an event with no
+     account at all needs `sessions:unlinked`, and the kind must map to a scope the grant holds — and
+     an unmapped family is dropped rather than passed. Family rather than exact kind because that is
+     the granularity the consent sentences already speak in, so what the user read is what the
+     filter enforces. `sessions:unlinked` is deliberately *not* a bypass of the kind gate.
+
+124. **A `/app` webhook is pinned to its grant's account twice, and deleting another grant's is a
+     404.** The route 403s a registration naming a different account rather than silently rewriting
+     it, and the wiring then forces the account anyway — the route refuses the lie, the wiring makes
+     it unactionable even if the route ever forgets. Delete reports another grant's webhook as
+     *absent* rather than forbidden, because a 403 confirms the id exists, and that is enough to
+     enumerate what other apps on the machine are listening to.
+
+125. **The palette's three action stubs are real routes now** (decision 104's slot):
+     `POST /api/accounts/:id/{invite,request-invite,boop}`. They sit beside `invite-self` because
+     they are the same shape — the account is in the path, since *which* account acts is the whole
+     question when two are signed in, and every argument is validated before it is interpolated into
+     a VRChat path. An absent message slot stays absent rather than becoming 0: slot 0 is a real slot
+     holding real words, and defaulting to it would send a message the user never chose, in their
+     name. 403 and 404 from VRChat keep their own codes, because "they do not accept invites from
+     you" and "they are gone" are answers, not faults.
 
 ---
 

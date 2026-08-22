@@ -724,6 +724,26 @@ export class Store {
     return this.stmts.markWebhookDeliveryDead.run(at, status, error, id).changes > 0;
   }
 
+  // --- webhook delivery retention (see `store/retention.ts`) ----------------
+
+  /** How many settled deliveries a prune at `before` would remove. Reads only. */
+  /** Deliveries still owed to one webhook — queued or mid-backoff. */
+  countPendingWebhookDeliveries(webhookId: string): number {
+    return this.stmts.countPendingWebhookDeliveries.get(webhookId)?.n ?? 0;
+  }
+
+  countSettledWebhookDeliveries(before: number): number {
+    return this.stmts.countSettledWebhookDeliveries.get(before)?.count ?? 0;
+  }
+
+  /**
+   * Drops settled deliveries — delivered or dead-lettered — that settled before `before`, and
+   * returns how many went. Pending rows are unreachable from here by construction; see the SQL.
+   */
+  pruneWebhookDeliveries(before: number): number {
+    return this.stmts.deleteSettledWebhookDeliveries.run(before).changes;
+  }
+
   // -- meta / housekeeping --------------------------------------------------
 
   getMeta(key: string): string | null {
@@ -966,6 +986,11 @@ function prepareAll(db: Database) {
     markWebhookDeliveryDead: q<void, [number, number | null, string | null, string]>(
       SQL.markWebhookDeliveryDead,
     ),
+    countPendingWebhookDeliveries: q<{ n: number }, [string]>(SQL.countPendingWebhookDeliveries),
+    countSettledWebhookDeliveries: q<{ count: number }, [number]>(
+      SQL.countSettledWebhookDeliveries,
+    ),
+    deleteSettledWebhookDeliveries: q<void, [number]>(SQL.deleteSettledWebhookDeliveries),
 
     getMeta: q<{ value: string }, [string]>(SQL.getMeta),
     setMeta: q<void, [string, string]>(SQL.setMeta),

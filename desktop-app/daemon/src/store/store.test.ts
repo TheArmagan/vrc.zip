@@ -218,6 +218,65 @@ describe("events", () => {
     store.close();
   });
 
+  test("the filtered page narrows by kinds, family prefix and free text in SQL", () => {
+    const store = seed();
+    const base = {
+      account_id: ACCOUNT,
+      ts: T0,
+      session_id: null,
+      subject_id: null,
+      location: null,
+      payload: null,
+    };
+    store.insertEvent({ ...base, ts: T0 + 1, kind: "friend.online", subject_id: "usr_a" });
+    store.insertEvent({ ...base, ts: T0 + 2, kind: "friend.offline", subject_id: "usr_b" });
+    store.insertEvent({
+      ...base,
+      ts: T0 + 3,
+      kind: "gamelog.player_join",
+      payload: JSON.stringify({ displayName: "Ada Lovelace" }),
+    });
+    // A kind from a daemon newer than this build. It still belongs to the `gamelog` family, and a
+    // family filter assembled from a hardcoded kind list is exactly what would drop it.
+    store.insertEvent({ ...base, ts: T0 + 4, kind: "gamelog.invented_later" });
+
+    const byKinds = store.listEventsFiltered({
+      kinds: ["friend.online", "friend.offline"],
+      before: T0 + 99,
+      limit: 10,
+    });
+    expect(byKinds.map((event) => event.kind)).toEqual(["friend.offline", "friend.online"]);
+
+    const byFamily = store.listEventsFiltered({
+      families: ["gamelog"],
+      before: T0 + 99,
+      limit: 10,
+    });
+    expect(byFamily.map((event) => event.kind)).toEqual([
+      "gamelog.invented_later",
+      "gamelog.player_join",
+    ]);
+
+    // Case-insensitive, and it reaches into the payload — which is where a player's name lives.
+    const bySearch = store.listEventsFiltered({ search: "ada lov", before: T0 + 99, limit: 10 });
+    expect(bySearch.map((event) => event.ts)).toEqual([T0 + 3]);
+
+    // A LIKE metacharacter is a literal, not a wildcard: `%` must not match everything.
+    expect(store.listEventsFiltered({ search: "%", before: T0 + 99, limit: 10 })).toHaveLength(0);
+
+    // Kinds and families intersect rather than union. The game log scopes itself to a family and
+    // then offers per-kind checkboxes inside it; ORed, ticking one would widen the query back to
+    // the whole family and the filter would appear to do nothing.
+    const both = store.listEventsFiltered({
+      kinds: ["gamelog.player_join", "friend.online"],
+      families: ["gamelog"],
+      before: T0 + 99,
+      limit: 10,
+    });
+    expect(both.map((event) => event.kind)).toEqual(["gamelog.player_join"]);
+    store.close();
+  });
+
   test("bulk insert runs in one transaction and rolls back whole on failure", () => {
     const store = seed();
     const good = {

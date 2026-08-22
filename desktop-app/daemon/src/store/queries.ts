@@ -214,6 +214,8 @@ export const SQL = {
   listNotifications: `
     SELECT * FROM notifications WHERE account_id = ? ORDER BY ts DESC LIMIT ?`,
   markNotificationSeen: `UPDATE notifications SET seen = 1 WHERE id = ?`,
+  countNotificationsByType: `
+    SELECT type, COUNT(*) AS count FROM notifications GROUP BY type ORDER BY count DESC`,
 
   // -- avatar history -------------------------------------------------------
   recordAvatarSeen: `
@@ -624,19 +626,29 @@ export function buildEventPage(filter: EventPageFilter): BuiltQuery {
     params.push(filter.subjectId);
   }
 
+  /*
+   * Kinds and families each narrow, and they narrow *independently* — the two clauses are ANDed.
+   *
+   * The alternative, ORing them into one clause, reads as the more permissive and therefore safer
+   * choice and is neither. The game log scopes itself with `families=gamelog` and then offers
+   * per-kind checkboxes inside that scope; ORed, ticking "player joined" widens the query back to
+   * every game-log kind, and the filter appears to do nothing at all. Within a family the two are
+   * an intersection in the ordinary sense: these kinds, out of that family.
+   *
+   * Each family is its own OR term because a *list* of families is genuinely alternatives.
+   */
   const kinds = filter.kinds ?? [];
+  if (kinds.length > 0) {
+    where.push(`kind IN (${kinds.map(() => "?").join(", ")})`);
+    params.push(...kinds);
+  }
+
   const families = filter.families ?? [];
-  if (kinds.length > 0 || families.length > 0) {
-    const clauses: string[] = [];
-    if (kinds.length > 0) {
-      clauses.push(`kind IN (${kinds.map(() => "?").join(", ")})`);
-      params.push(...kinds);
-    }
+  if (families.length > 0) {
+    where.push(`(${families.map(() => "kind LIKE ? ESCAPE '\\'").join(" OR ")})`);
     for (const family of families) {
-      clauses.push("kind LIKE ? ESCAPE '\\'");
       params.push(`${family.replace(/[\\%_]/g, (char) => `\\${char}`)}.%`);
     }
-    where.push(`(${clauses.join(" OR ")})`);
   }
 
   if (filter.search !== undefined && filter.search !== "") {
@@ -651,6 +663,66 @@ export function buildEventPage(filter: EventPageFilter): BuiltQuery {
   params.push(filter.limit);
   return {
     sql: `SELECT * FROM events WHERE ${where.join(" AND ")} ORDER BY ts DESC, id DESC LIMIT ?`,
+    params,
+  };
+}
+
+/** What the inbox can be narrowed by. Every field narrows; none of them widen. */
+export interface NotificationPageFilter {
+  readonly accountId?: string | undefined;
+  /** VRChat's own `type` strings. Empty or absent means every type. */
+  readonly types?: readonly string[] | undefined;
+  /** `false` hides what has been read. Absent shows both. */
+  readonly seen?: boolean | undefined;
+  /** Case-insensitive substring over the sender, message, type and raw payload. */
+  readonly search?: string | undefined;
+  readonly before: number;
+  readonly limit: number;
+}
+
+/**
+ * One page of the inbox, newest first.
+ *
+ * Same cursor discipline as {@link buildEventPage}, and for the same reason: this replaced a fan-out
+ * that took fifty rows per account and sorted them in JS, which is a fixed window rather than a
+ * page — the fifty-first notification on a busy account could not be reached at all.
+ *
+ * `id` is the tiebreak because notification ids are VRChat's strings rather than an autoincrement,
+ * so it orders by value rather than by insertion. That is fine for a tiebreak: it only has to be
+ * *stable*, so that paging past a run of equal timestamps neither repeats nor skips a row.
+ */
+export function buildNotificationPage(filter: NotificationPageFilter): BuiltQuery {
+  const where: string[] = ["ts < ?"];
+  const params: (string | number)[] = [filter.before];
+
+  if (filter.accountId !== undefined) {
+    where.push("account_id = ?");
+    params.push(filter.accountId);
+  }
+
+  const types = filter.types ?? [];
+  if (types.length > 0) {
+    where.push(`type IN (${types.map(() => "?").join(", ")})`);
+    params.push(...types);
+  }
+
+  if (filter.seen !== undefined) {
+    where.push("seen = ?");
+    params.push(filter.seen ? 1 : 0);
+  }
+
+  if (filter.search !== undefined && filter.search !== "") {
+    const term = likeTerm(filter.search);
+    where.push(
+      "(type LIKE ? ESCAPE '\\' OR sender_display_name LIKE ? ESCAPE '\\'" +
+        " OR message LIKE ? ESCAPE '\\' OR data LIKE ? ESCAPE '\\')",
+    );
+    params.push(term, term, term, term);
+  }
+
+  params.push(filter.limit);
+  return {
+    sql: `SELECT * FROM notifications WHERE ${where.join(" AND ")} ORDER BY ts DESC, id DESC LIMIT ?`,
     params,
   };
 }

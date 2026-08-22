@@ -58,6 +58,7 @@ import {
   initials,
   isUserId,
   platformLabel,
+  shortId,
   statusLabel,
   trustClass,
   trustLabel,
@@ -78,16 +79,35 @@ let {
    * would otherwise grow a clickable name that resolves to nothing.
    */
   userId?: string | null;
-  name: string;
+  /**
+   * The name the caller already has, or **null when it has only an id**.
+   *
+   * Null is a request, not a blank: it says "I have a `usr_…` and no name, find one". That is the
+   * one case this component fetches on render rather than on hover — see the effect below.
+   */
+  name: string | null;
   /** The account this name was seen through; see `OpenUserOptions.accountId`. */
   accountId?: string | null;
   class?: string;
 } = $props();
 
 const openable = $derived(isUserId(userId));
-const actions = $derived(
-  openable && userId !== null ? userActions({ userId, name, accountId }) : [],
-);
+
+/*
+ * The one exception to "look up on hover, never on render", and it is narrow on purpose.
+ *
+ * A raw `usr_a1b2c3…` in a feed row tells the reader nothing — it is the one case where showing
+ * *something* requires asking VRChat. So a name of `null` triggers a lookup, and a name the caller
+ * already has never does. That keeps the cost proportional to how often a payload arrives without
+ * a name (rare: VRChat has shipped `OnPlayerJoined` both ways, and a few event kinds carry an id
+ * alone) rather than proportional to rows on screen, which is what the hover rule exists to stop.
+ *
+ * `ensure` is de-duplicated per user and refuses to re-ask inside its freshness window, so several
+ * rows about one person cost one request, and a 404 is remembered rather than retried.
+ */
+$effect(() => {
+  if (name === null && openable) userProfiles.ensure(userId, accountId);
+});
 
 /*
  * Pure reads. `userProfiles.get`/`entry` start nothing, which is what makes it safe for every name
@@ -97,6 +117,27 @@ const actions = $derived(
 const profile = $derived(userProfiles.get(userId, accountId));
 const entry = $derived(userProfiles.entry(userId, accountId));
 
+/**
+ * What to actually render: the caller's name, then VRChat's, then a placeholder.
+ *
+ * The order matters at the tail. While a lookup is in flight the shortened id is shown, because it
+ * is true and it is about to be replaced. Once the lookup has *settled with nothing* — VRChat does
+ * not know the id, or there is no signed-in account to ask through — it becomes "Unknown user":
+ * a raw `usr_a1b2c3…` in a row tells the reader nothing at all, and pretending it is a name is
+ * worse than admitting there isn't one. The id itself stays on the hover card, where somebody
+ * looking for exactly that can find it.
+ */
+const settledWithNothing = $derived(
+  entry !== null && entry.profile === null && entry.fetchedAt !== null,
+);
+const label = $derived(
+  name ?? profile?.displayName ?? (settledWithNothing ? "Unknown user" : shortId(userId, 12)),
+);
+
+const actions = $derived(
+  openable && userId !== null ? userActions({ userId, name: label, accountId }) : [],
+);
+
 const trust = $derived(trustLabel(profile?.trustLevel ?? null));
 const age = $derived(
   profile === null ? null : ageVerifiedLabel(profile.ageVerificationStatus, profile.ageVerified),
@@ -104,7 +145,7 @@ const age = $derived(
 const platform = $derived(platformLabel(profile?.platform ?? null));
 
 /** The name VRChat currently has, which can be newer than the one the caller passed in. */
-const cardName = $derived(profile?.displayName ?? name);
+const cardName = $derived(profile?.displayName ?? label);
 
 /**
  * Why there is nothing to show, in the ordinary muted voice.
@@ -145,10 +186,10 @@ function onOpenChange(open: boolean): void {
                   // Names live inside rows that are themselves clickable in places. Opening the
                   // modal is the whole intent of the click, so it stops there.
                   event.stopPropagation();
-                  userModal.openUser(userId, { name, accountId });
+                  userModal.openUser(userId, { name: label, accountId });
                 }}
               >
-                {name}
+                {label}
               </button>
             {/snippet}
           </Tooltip.Trigger>
@@ -261,7 +302,7 @@ function onOpenChange(open: boolean): void {
         `Label`, not `GroupHeading`: bits-ui's heading reads its group from context and throws
         outright when there is no `Menu.Group` above it. This is a caption, not a group.
       -->
-      <ContextMenu.Label class="truncate font-medium text-foreground">{name}</ContextMenu.Label>
+      <ContextMenu.Label class="truncate font-medium text-foreground">{label}</ContextMenu.Label>
       <ContextMenu.Separator />
       {#each actions as action (action.id)}
         {#if action.separatorBefore}
@@ -275,5 +316,5 @@ function onOpenChange(open: boolean): void {
     </ContextMenu.Content>
   </ContextMenu.Root>
 {:else}
-  <span class={className}>{name}</span>
+  <span class={className}>{label}</span>
 {/if}

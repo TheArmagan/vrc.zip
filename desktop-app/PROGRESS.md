@@ -1574,6 +1574,55 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      definitions typecheck and hash, and the counts (48 scopes, 52 event kinds, 28 UI node types, 12
      frames, 14 error codes) were read out of the modules rather than transcribed.
 
+143. **Every list filter narrows in SQL, and the filter *vocabulary* describes the store rather than
+     the loaded page.** The feed's family tabs were counted from the rows it had just fetched and
+     applied with `.filter()` over the same rows. Both halves are wrong in the same direction: a
+     family only got a tab once it appeared among the newest 150 rows, and the tab then vanished as
+     those rows aged out, while "load older" walked history it immediately discarded. `GET
+     /api/events` gained `kinds`, `families` and `q`; `GET /api/notifications` gained `types`,
+     `seen`, `q`, `limit` and `before` (it had none at all); and `GET /api/event-kinds` and
+     `GET /api/notification-types` serve the vocabulary from one `GROUP BY`. Families are matched as
+     a **kind prefix**, not as a list of known kinds, so a kind from a newer daemon still lands in
+     its family instead of being silently dropped by a hardcoded list.
+
+144. **Kinds and families intersect; a *list* of families is alternatives.** ORing them reads as the
+     safer choice and is not. The game log scopes itself with `families=gamelog` and then offers
+     per-kind checkboxes inside that scope — ORed, ticking "player joined" widens the query straight
+     back to every game-log kind and the filter visibly does nothing. Caught by running it; the test
+     came after.
+
+145. **Rendering is windowed as well as paged.** A page is 200 rows and history is unbounded, so a
+     minute of scrolling used to put thousands of rows in the DOM and keep them there. One scroll
+     sentinel drives both halves: it grows the render window first and asks the daemon for another
+     page only once the window has caught up, so the DOM holds what the reader has actually
+     scrolled past. The friends list is windowed but deliberately **not** paged — it is a presence
+     cache where every row is live state, and a cursor page would go stale the moment somebody
+     logged in.
+
+146. **A row shows what the payload holds, and expands to the payload itself.** `eventLabel` maps a
+     dotted kind onto a noun phrase, which is the same six words whether someone walked into your
+     instance or VRChat refused a join. `event-details.ts` and `notification-details.ts` read the
+     fields that were there all along — the join failure's reason, the screenshot's file, the
+     announcement's title, the notification's actual type — and every row expands to the ids, the
+     exact timestamp and the raw JSON. The interpretation stays checkable, and a field this build
+     has never heard of is still visible somewhere. The expander is a real `<button>` and the row is
+     not clickable: a row already carries names, world links and a join affordance, and an `<li>`
+     with a click handler either nests interactive elements or is unreachable from a keyboard.
+
+147. **A bare `usr_…` is never left on screen.** `UserName` takes `name: string | null`, and null is
+     a request rather than a blank: it means "I have an id and no name, find one". That is the one
+     place the app looks a profile up on render instead of on hover, and it is narrow on purpose —
+     the cost is proportional to how often a payload arrives without a name, not to rows on screen.
+     When the lookup settles with nothing (no signed-in account, or VRChat does not know the id) the
+     row reads "Unknown user" and the id moves to the hover card, because a raw id in a sentence is
+     not a name and pretending otherwise is worse than admitting there isn't one.
+
+148. **The friends list groups by *place*, not only by status.** "In your world" cannot be derived
+     from presence — a friend standing next to you shows as `active` like every other online friend
+     — so without a section of its own the fact is not on the screen anywhere. It comes from the
+     game log rather than from VRChat: `sessions.current_location` is the only source that knows
+     what *this machine* is doing, and it is a set because several clients can be up at once.
+
 ---
 
 ## Gotchas
@@ -1603,6 +1652,25 @@ Found by running code. Each of these contradicted an assumption, and most were s
   session and were indistinguishable from the real thing. Under `bun --watch` it is one full replay
   of the user's entire log history per code edit, which is why a development database accumulated
   them so fast. Decisions 131 and 132.
+
+- **An `$effect` that calls `ensure()` on a cached loader re-runs when the cache lands, and its
+  cleanup runs first.** Both new list screens started as one effect doing `eventKinds.ensure()` and
+  returning `() => feed.dispose()`. `ensure` reads `loaded`, so the effect re-ran the moment the
+  catalogue arrived — and re-running an effect runs its cleanup first, which aborted the feed's
+  in-flight first page. The abort landed *after* the response headers, so it surfaced not as an
+  abort but as a half-read body: "The daemon sent a response this build cannot read", on every
+  single load. Teardown belongs in its own effect that reads nothing reactive.
+
+- **A `$derived` class field that reads a constructor argument is a TypeScript error, not just a
+  smell.** Class field initialisers run before the constructor body, so `x = $derived(this.#options…)`
+  reads a field that has not been assigned yet. It *works*, because a derived is lazy and nothing
+  reads it until long after construction — and `svelte-check` rejects it as "used before its
+  initialization", correctly. Declare the field and assign the `$derived` in the constructor.
+
+- **Collapsing a run of identical rows must be bounded against the whole run, not against the
+  previous row.** Comparing each event to its immediate predecessor lets a run *chain*: forty world
+  entries two minutes apart folded into one row claiming eighty minutes. Found by looking at the
+  screen with a real filter applied, not by a test.
 
 - **A gamelog payload cannot be compared whole to detect a replay.** It carries the *watcher's*
   per-run session UUID, so two reads of one line never produce identical payload text. The dedupe

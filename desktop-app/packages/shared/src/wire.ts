@@ -351,10 +351,43 @@ export interface EventQuery {
   /** One user/world/group id — everything ever recorded about them, across every account. */
   readonly subjectId?: string | undefined;
   readonly kind?: string | undefined;
+  /**
+   * Several exact kinds at once — what a filter with checkboxes actually needs. `kind` stays for
+   * the single-kind callers that already exist; when both are given, both narrow.
+   */
+  readonly kinds?: readonly string[] | undefined;
+  /**
+   * Dotted families (`gamelog`), matched as a `kind` **prefix**.
+   *
+   * Not the same thing as listing that family's known kinds: a kind from a daemon newer than the
+   * caller still belongs to its family, and a filter built from a hardcoded list would silently
+   * drop it. Family filtering used to happen in the UI over the loaded page, which meant a family
+   * tab showed only whatever that family had contributed to the newest N rows.
+   */
+  readonly families?: readonly string[] | undefined;
+  /**
+   * Case-insensitive substring over the kind, subject, location and raw payload.
+   *
+   * Server-side because a search that only sees the loaded page is not a search — it answers
+   * "is this in the last 150 rows", which is a question nobody asked.
+   */
+  readonly search?: string | undefined;
   /** Clamped by the route regardless of what is asked for. */
   readonly limit?: number | undefined;
   /** Unix milliseconds; return events strictly older than this. Feeds the infinite scroll. */
   readonly before?: number | undefined;
+}
+
+/**
+ * One entry of `GET /api/event-kinds`: a kind in the store and how many rows it has.
+ *
+ * The vocabulary a filter list is built from. Counting the fetched page instead — which is what
+ * the feed's family tabs used to do — offers a filter only while that kind happens to be in the
+ * newest rows, and withdraws it as those rows age out.
+ */
+export interface EventKindCount {
+  readonly kind: string;
+  readonly count: number;
 }
 
 // ---------------------------------------------------------------------------

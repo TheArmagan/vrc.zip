@@ -2,6 +2,7 @@ import {
   APP_VERSION,
   type AppAuditEntry,
   type ControlAccount,
+  type EventKindCount,
   type EventQuery,
   type FeedEvent,
   type FriendPresence,
@@ -59,6 +60,7 @@ import { APP_API_PREFIX, type AppApi, type AppApiDeps, createAppApi } from "./ap
 export type {
   AppAuditEntry,
   ControlAccount,
+  EventKindCount,
   EventQuery,
   FeedEvent,
   FriendPresence,
@@ -105,6 +107,33 @@ export interface NotificationItem {
   message: string | null;
   seen: boolean;
   data: JsonValue;
+}
+
+/**
+ * How the inbox is narrowed and paged.
+ *
+ * Every field narrows. `GET /api/notifications` used to take no parameters at all and answer with
+ * a fixed window — fifty rows per account, merged and sorted in the daemon — which is not a page:
+ * there was no cursor, so the fifty-first notification on a busy account could not be asked for.
+ */
+export interface NotificationQuery {
+  readonly accountId?: string | undefined;
+  /** VRChat's own `type` strings. Absent means every type. */
+  readonly types?: readonly string[] | undefined;
+  /** `false` hides what has been read. Absent shows both. */
+  readonly seen?: boolean | undefined;
+  /** Case-insensitive substring over the sender, message, type and raw payload. */
+  readonly search?: string | undefined;
+  /** Clamped by the route regardless of what is asked for. */
+  readonly limit?: number | undefined;
+  /** Unix milliseconds; return notifications strictly older than this. */
+  readonly before?: number | undefined;
+}
+
+/** One entry of `GET /api/notification-types`: a type in the store and how many rows it has. */
+export interface NotificationTypeCount {
+  readonly type: string;
+  readonly count: number;
 }
 
 /** A user's local note, as stored in `notes` and echoed back by both routes that touch it. */
@@ -830,10 +859,14 @@ export interface ControlDeps {
   /** Live game-client sessions — the ones with no `ended_at`. */
   listSessions(): Promise<GameSession[]>;
   listEvents(query: EventQuery): Promise<FeedEvent[]>;
+  /** Every kind in the store with its row count — what a filter list is built from. */
+  listEventKinds(): Promise<EventKindCount[]>;
   /** `null` means every account. */
   listFriends(accountId: string | null): Promise<FriendPresence[]>;
-  /** `null` means every account. Notifications are state, not feed history — see the sink. */
-  listNotifications(accountId: string | null): Promise<NotificationItem[]>;
+  /** One page of the inbox. Notifications are state, not feed history — see the sink. */
+  listNotifications(query: NotificationQuery): Promise<NotificationItem[]>;
+  /** Every notification type in the store with its row count. The type filter's vocabulary. */
+  listNotificationTypes(): Promise<NotificationTypeCount[]>;
   markNotificationSeen(id: string): Promise<void>;
 
   /**
@@ -1619,10 +1652,26 @@ export function createControlApp({ port, deps, appApi, token }: ControlAppOption
         sessionId,
         subjectId,
         kind: nonEmpty(c.req.query("kind")),
+        kinds: csvParam(c.req.query("kinds")),
+        families: csvParam(c.req.query("families")),
+        search: nonEmpty(c.req.query("q")),
         before: integerParam(c.req.query("before")),
       };
       return c.json(await deps.listEvents(query));
     })
+
+    /*
+     * The filter vocabulary: what kinds are actually in this database, and how many of each.
+     *
+     * The feed used to build its family tabs by counting the page it had just fetched, which meant
+     * a family only offered a tab once it happened to appear in the newest rows — and the tab then
+     * disappeared as that row aged out. A filter list has to describe the whole store, not the
+     * window, or picking a filter and finding nothing is indistinguishable from a bug.
+     *
+     * One `GROUP BY` over an indexed column, and no per-kind expiry arithmetic, which is what
+     * makes this cheap enough to call on screen load where `GET /api/retention` would not be.
+     */
+    .get("/api/event-kinds", async (c) => c.json(await deps.listEventKinds()))
 
     /*
      * Attributes for many users in one request — the roster's fallback when VRChat will not
@@ -1798,10 +1847,28 @@ export function createControlApp({ port, deps, appApi, token }: ControlAppOption
       return c.json(await deps.listFriends(accountId));
     })
 
+    /*
+     * The inbox, paged and filtered the same way the feed is: `limit`/`before` for the cursor,
+     * `types`/`q`/`seen` to narrow, all of it applied in SQL.
+     *
+     * `seen` is tri-state and the parsing says so: absent shows both, `seen=false` hides what has
+     * been read. An unparseable value is treated as absent rather than as `false` — silently
+     * hiding read notifications because a query string was malformed is the kind of wrong answer
+     * that reads as data loss.
+     */
     .get("/api/notifications", async (c) => {
-      const accountId = nonEmpty(c.req.query("accountId")) ?? null;
-      return c.json(await deps.listNotifications(accountId));
+      const query: NotificationQuery = {
+        limit: clampLimit(c.req.query("limit")),
+        accountId: nonEmpty(c.req.query("accountId")),
+        types: csvParam(c.req.query("types")),
+        seen: booleanParam(c.req.query("seen")),
+        search: nonEmpty(c.req.query("q")),
+        before: integerParam(c.req.query("before")),
+      };
+      return c.json(await deps.listNotifications(query));
     })
+
+    .get("/api/notification-types", async (c) => c.json(await deps.listNotificationTypes()))
 
     .post("/api/notifications/:id/seen", async (c) => {
       await deps.markNotificationSeen(c.req.param("id"));
@@ -2019,6 +2086,33 @@ function isTwoFactorMethod(value: string | undefined): value is TwoFactorMethod 
 
 function nonEmpty(raw: string | undefined): string | undefined {
   return raw === undefined || raw === "" ? undefined : raw;
+}
+
+/**
+ * A comma-separated list parameter, or `undefined` when nothing usable was given.
+ *
+ * Capped, deduplicated and empty-filtered. The cap is not ceremony: every entry becomes a bound
+ * placeholder in the assembled `WHERE`, and SQLite has a hard limit on how many a statement may
+ * carry. A filter with more than fifty kinds ticked is also not a filter.
+ */
+function csvParam(raw: string | undefined): readonly string[] | undefined {
+  if (raw === undefined || raw === "") return undefined;
+  const values = [...new Set(raw.split(",").map((value) => value.trim()))]
+    .filter((value) => value !== "")
+    .slice(0, 50);
+  return values.length === 0 ? undefined : values;
+}
+
+/**
+ * A tri-state boolean parameter: `true`, `false`, or absent.
+ *
+ * Anything unrecognised is absent rather than `false`. A filter that silently engages because a
+ * query string was malformed hides rows, and hidden rows read as lost data.
+ */
+function booleanParam(raw: string | undefined): boolean | undefined {
+  if (raw === "true" || raw === "1") return true;
+  if (raw === "false" || raw === "0") return false;
+  return undefined;
 }
 
 function clampLimit(raw: string | undefined): number {

@@ -10,8 +10,14 @@ import type { Store } from "../store/index.ts";
  * this subscriber does is push onto an array.
  */
 
-/** Kinds that are UI state, not history. Writing them would bloat the feed with noise. */
-const EPHEMERAL = new Set([
+/**
+ * Kinds that are UI state, not history. Writing them would bloat the feed with noise.
+ *
+ * Exported because the control API's filter vocabulary has to agree with it: a filter chip for a
+ * kind no screen renders is a chip that turns the list blank, and a second copy of this list is a
+ * second thing to forget to update.
+ */
+export const EPHEMERAL: ReadonlySet<string> = new Set([
   "account.state",
   "session.update",
   "pipeline.state",

@@ -23,6 +23,7 @@ import {
   EVENT_FAMILIES,
   type EventFamily,
   type EventKind,
+  type EventKindCount,
   type EventQuery,
   type FeedEvent,
   type FriendPresence,
@@ -83,6 +84,7 @@ export {
   EVENT_FAMILIES,
   type EventFamily,
   type EventKind,
+  type EventKindCount,
   type EventQuery,
   type FeedEvent,
   type FriendPresence as Friend,
@@ -374,6 +376,31 @@ export interface NotificationItem {
   readonly message: string | null;
   readonly seen: boolean;
   readonly data: unknown;
+}
+
+/**
+ * How the inbox is narrowed and paged. Read off `NotificationQuery` in
+ * `daemon/src/servers/control.ts`.
+ *
+ * Every field narrows, and every one of them is applied in SQL. The screen used to filter a fixed
+ * fifty-per-account window in the browser, which meant "show read" and the account filter searched
+ * only the newest rows and nothing older could be reached at all.
+ */
+export interface NotificationQuery {
+  readonly accountId?: string | undefined;
+  readonly types?: readonly string[] | undefined;
+  /** `false` hides what has been read. Absent shows both. */
+  readonly seen?: boolean | undefined;
+  readonly search?: string | undefined;
+  readonly limit?: number | undefined;
+  /** Unix milliseconds; return notifications strictly older than this. */
+  readonly before?: number | undefined;
+}
+
+/** One entry of `GET /api/notification-types`. */
+export interface NotificationTypeCount {
+  readonly type: string;
+  readonly count: number;
 }
 
 /**
@@ -1167,11 +1194,28 @@ export const api = {
   sessions: (signal?: AbortSignal): Promise<GameSession[]> =>
     request<GameSession[]>("/sessions", withSignal(signal)),
 
+  /**
+   * A page of the feed.
+   *
+   * `kinds`, `families` and `search` narrow in **SQL**, not here. Filtering a fetched page in the
+   * browser silently changes what paging means: the daemon returns the newest N rows, the screen
+   * throws most of them away, and "load older" walks history it then discards — so a filter looks
+   * like an empty history rather than like a filter.
+   */
   events: (query: EventQuery = {}, signal?: AbortSignal): Promise<FeedEvent[]> =>
     request<FeedEvent[]>("/events", {
       query: {
         accountId: query.accountId,
         kind: query.kind,
+        // Comma-joined because that is what the route parses; the daemon trims, deduplicates and
+        // caps the list.
+        kinds:
+          query.kinds === undefined || query.kinds.length === 0 ? undefined : query.kinds.join(","),
+        families:
+          query.families === undefined || query.families.length === 0
+            ? undefined
+            : query.families.join(","),
+        q: query.search,
         subjectId: query.subjectId,
         sessionId: query.sessionId,
         limit: query.limit,
@@ -1179,6 +1223,15 @@ export const api = {
       },
       ...withSignal(signal),
     }),
+
+  /**
+   * The kinds actually present in the store, with row counts. What a filter list is built from.
+   *
+   * Counting the fetched page instead — which the feed's family tabs used to do — offers a filter
+   * only while that kind happens to be among the newest rows, and withdraws it as they age out.
+   */
+  eventKinds: (signal?: AbortSignal): Promise<EventKindCount[]> =>
+    request<EventKindCount[]>("/event-kinds", withSignal(signal)),
 
   users: {
     /**
@@ -1443,11 +1496,32 @@ export const api = {
     }),
 
   notifications: {
-    list: (accountId?: string, signal?: AbortSignal): Promise<NotificationItem[]> =>
+    /**
+     * A page of the inbox. Every filter narrows in SQL, for the same reason the feed's do.
+     *
+     * `seen` is tri-state: omitted shows both, `false` hides what has been read. It is stringified
+     * explicitly rather than left to the URL builder, so `seen: false` reaches the daemon as
+     * `seen=false` and not as an omitted parameter.
+     */
+    list: (query: NotificationQuery = {}, signal?: AbortSignal): Promise<NotificationItem[]> =>
       request<NotificationItem[]>("/notifications", {
-        query: { accountId },
+        query: {
+          accountId: query.accountId,
+          types:
+            query.types === undefined || query.types.length === 0
+              ? undefined
+              : query.types.join(","),
+          seen: query.seen === undefined ? undefined : String(query.seen),
+          q: query.search,
+          limit: query.limit,
+          before: query.before,
+        },
         ...withSignal(signal),
       }),
+
+    /** Types present in the store with row counts — what the inbox's type filter is built from. */
+    types: (signal?: AbortSignal): Promise<NotificationTypeCount[]> =>
+      request<NotificationTypeCount[]>("/notification-types", withSignal(signal)),
 
     markSeen: (id: string): Promise<void> =>
       request<void>(`/notifications/${encodeURIComponent(id)}/seen`, { method: "POST" }),

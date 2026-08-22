@@ -5,81 +5,122 @@
   content at all, so the daemon cannot know which rows it meant and refuses to guess. That is the
   right call, and it is why this screen filters on `seen` and defaults to hiding what has been
   read, instead of waiting for rows to vanish.
+
+  ## What changed, and why
+
+  **The filters were browser-side over a fixed window.** `GET /api/notifications` took no parameters
+  and answered with fifty rows per account; "show read" and the account filter then narrowed *that*
+  in JS. So both searched only the newest fifty, and the fifty-first notification on a busy account
+  could not be reached from the UI at all. Every filter is now a query parameter, and paging is a
+  `before` cursor with a scroll sentinel — the same shape as the feed and the game log.
+
+  **Rows said less than the payload held.** A group announcement's title lives in `data.title` and
+  was never shown; an invite's world lives in `data.worldId` and was never shown; a vote-to-kick
+  read exactly like a friend request. `notification-details.ts` reads those, and a row expands to
+  the full message and the raw payload for the ones that do not fit on a line.
 -->
 <script lang="ts">
 import BellIcon from "@lucide/svelte/icons/bell";
 import CheckIcon from "@lucide/svelte/icons/check";
 import AccountFilter from "$lib/components/AccountFilter.svelte";
 import EmptyState from "$lib/components/EmptyState.svelte";
-import RelativeTime from "$lib/components/RelativeTime.svelte";
+import ErrorNote from "$lib/components/ErrorNote.svelte";
+import NotificationRow from "$lib/components/NotificationRow.svelte";
+import ScrollSentinel from "$lib/components/ScrollSentinel.svelte";
+import SearchField from "$lib/components/SearchField.svelte";
 import SectionHeader from "$lib/components/SectionHeader.svelte";
-import UserName from "$lib/components/UserName.svelte";
-import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
 import { Label } from "$lib/components/ui/label/index.js";
-import { Separator } from "$lib/components/ui/separator/index.js";
+import * as Select from "$lib/components/ui/select/index.js";
 import { Skeleton } from "$lib/components/ui/skeleton/index.js";
 import { Switch } from "$lib/components/ui/switch/index.js";
-import { shortId } from "$lib/format.ts";
+import { dateHeading } from "$lib/format.ts";
+import { notificationTypeLabel } from "$lib/notification-details.ts";
 import { app } from "$lib/state/app.svelte.ts";
+import { NotificationFeed } from "$lib/state/notification-feed.svelte.ts";
+import { notificationTypes } from "$lib/state/notification-types.svelte.ts";
+import { prefs } from "$lib/state/prefs.svelte.ts";
 
 let showSeen = $state(false);
 let accountFilter = $state("");
-let loading = $state(app.notifications.length === 0);
+let search = $state("");
+/** Types the reader has ticked. Empty means every type. */
+let picked = $state<string[]>([]);
+
+const feed = new NotificationFeed();
 
 $effect(() => {
-  void app.refreshNotifications().finally(() => {
-    loading = false;
+  feed.apply({
+    ...(accountFilter === "" ? {} : { accountId: accountFilter }),
+    ...(picked.length === 0 ? {} : { types: picked }),
+    // Tri-state on the wire: absent shows both. "Show read" off means unread only, which is a
+    // predicate the daemon can apply — not a `.filter()` over rows it already chose to send.
+    ...(showSeen ? {} : { seen: false }),
+    ...(search.trim() === "" ? {} : { search: search.trim() }),
   });
 });
 
-/**
- * VRChat's `type` is an open set, so this map is a courtesy rather than a contract. Anything not
- * listed keeps its raw type, spaced out, instead of being dropped or shown as "Unknown".
- */
-const TYPE_LABELS: Readonly<Record<string, string>> = {
-  friendRequest: "Friend request",
-  invite: "Invite",
-  inviteResponse: "Invite response",
-  requestInvite: "Invite request",
-  requestInviteResponse: "Invite request answered",
-  message: "Message",
-  votetokick: "Vote to kick",
-  "group.announcement": "Group announcement",
-  "group.informative": "Group notice",
-  "group.invite": "Group invite",
-  "group.joinRequest": "Group join request",
-  "group.queueReady": "Group queue ready",
-};
+$effect(() => {
+  notificationTypes.ensure();
+});
 
-function typeLabel(type: string): string {
-  const known = TYPE_LABELS[type];
-  if (known !== undefined) return known;
-  const spaced = type
-    .replace(/[._-]/g, " ")
-    .replace(/([a-z])([A-Z])/g, "$1 $2")
-    .trim();
-  return spaced === "" ? type : spaced.charAt(0).toUpperCase() + spaced.slice(1);
-}
-
-const filtered = $derived(
-  app.notifications.filter(
-    (item) =>
-      (showSeen || !item.seen) && (accountFilter === "" || item.accountId === accountFilter),
-  ),
-);
+/** Teardown only. See the same split in `FeedScreen` for why it is its own effect. */
+$effect(() => () => {
+  feed.dispose();
+});
 
 const unseenCount = $derived(app.unseenNotifications.length);
+const filtered = $derived(
+  picked.length > 0 || search.trim() !== "" || accountFilter !== "" || !showSeen,
+);
 
+const typesLabel = $derived(
+  picked.length === 0
+    ? "All types"
+    : picked.length === 1
+      ? notificationTypeLabel(picked[0] ?? "")
+      : `${String(picked.length)} types`,
+);
+
+/** Day headings, computed once per render rather than per row. */
+const days = $derived.by(() => {
+  const out: { heading: string; items: typeof feed.visible }[] = [];
+  for (const item of feed.visible) {
+    const heading = dateHeading(item.ts);
+    const last = out.at(-1);
+    if (last !== undefined && last.heading === heading) last.items.push(item);
+    else out.push({ heading, items: [item] });
+  }
+  return out;
+});
+
+function toggleType(type: string): void {
+  picked = picked.includes(type) ? picked.filter((entry) => entry !== type) : [...picked, type];
+}
+
+function clearFilters(): void {
+  picked = [];
+  search = "";
+  accountFilter = "";
+  showSeen = true;
+}
+
+/**
+ * Marks everything the *shell* knows is unread.
+ *
+ * Deliberately not "everything matching the filter": that could be thousands of rows the screen
+ * has never loaded, and a button that fires an unbounded number of requests is not a button. The
+ * shell's list is the newest few hundred, which is what "all" means to someone looking at a badge.
+ */
 async function markAllSeen(): Promise<void> {
   const pending = app.unseenNotifications.map((item) => item.id);
-  await Promise.all(pending.map((id) => app.markNotificationSeen(id)));
+  await Promise.all(pending.map((id) => feed.markSeen(id)));
 }
 </script>
 
 <SectionHeader
   title="Notifications"
-  count={filtered.length}
+  count={feed.rows.length}
   description={unseenCount === 0 ? "Nothing unread" : `${String(unseenCount)} unread`}
 >
   {#snippet actions()}
@@ -97,20 +138,63 @@ async function markAllSeen(): Promise<void> {
   {/snippet}
 </SectionHeader>
 
+<div class="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-border px-4 py-2">
+  <Select.Root type="multiple" bind:value={picked}>
+    <Select.Trigger size="sm" class="w-44" aria-label="Filter by notification type">
+      {typesLabel}
+    </Select.Trigger>
+    <Select.Content>
+      {#each notificationTypes.types as entry (entry.type)}
+        <Select.Item
+          value={entry.type}
+          label={`${notificationTypeLabel(entry.type)} (${String(entry.count)})`}
+        />
+      {/each}
+    </Select.Content>
+  </Select.Root>
+
+  {#if picked.length > 0}
+    <div class="flex flex-wrap items-center gap-1">
+      {#each picked as type (type)}
+        <button
+          type="button"
+          class="rounded-sm border border-border px-2 py-0.5 text-xs text-muted-foreground hover:bg-muted"
+          onclick={() => toggleType(type)}
+          title="Stop filtering by this type"
+        >
+          {notificationTypeLabel(type)} ×
+        </button>
+      {/each}
+    </div>
+  {/if}
+
+  <div class="ml-auto w-full sm:w-64">
+    <SearchField
+      bind:value={search}
+      placeholder="Search senders and messages"
+      label="Search notifications"
+    />
+  </div>
+</div>
+
 <div class="min-h-0 flex-1 overflow-y-auto">
-  {#if loading}
-    <div class="space-y-2 p-4">
+  {#if feed.phase === "error"}
+    <div class="p-4">
+      <ErrorNote message={feed.error ?? "The inbox could not be loaded."} />
+    </div>
+  {:else if feed.phase === "loading" || feed.phase === "idle"}
+    <div class="space-y-2 p-4" aria-busy="true">
       {#each [0, 1, 2, 3] as index (index)}
         <Skeleton class="h-16 w-full" />
       {/each}
     </div>
-  {:else if app.notifications.length === 0}
+  {:else if feed.isEmpty && !filtered}
     <EmptyState
       icon={BellIcon}
       title="Your inbox is empty"
       description="Invites, friend requests, and group announcements land here as VRChat pushes them to the daemon."
     />
-  {:else if filtered.length === 0}
+  {:else if feed.isEmpty && !showSeen && picked.length === 0 && search.trim() === ""}
     <EmptyState
       icon={CheckIcon}
       title="Everything is read"
@@ -127,69 +211,53 @@ async function markAllSeen(): Promise<void> {
         </Button>
       {/snippet}
     </EmptyState>
+  {:else if feed.isEmpty}
+    <EmptyState
+      icon={BellIcon}
+      title="Nothing matches this filter"
+      description="No notification matches, across the whole inbox vrc.zip holds."
+    >
+      {#snippet action()}
+        <Button variant="outline" onclick={clearFilters}>Clear the filters</Button>
+      {/snippet}
+    </EmptyState>
   {:else}
-    <ul class="divide-y divide-border">
-      {#each filtered as item (item.id)}
-        {@const account = app.accountById(item.accountId)}
-        <li class="flex items-start gap-3 px-4 py-3 {item.seen ? 'opacity-60' : ''}">
-          <span
-            class="mt-2 size-2 shrink-0 rounded-full {item.seen
-              ? 'bg-transparent'
-              : 'bg-status-join-me'}"
-            aria-hidden="true"
-          ></span>
+    {#each days as day (day.heading)}
+      <div
+        class="sticky top-0 z-[1] border-b border-border bg-background/90 px-4 py-1.5 text-xs font-medium tracking-wide text-muted-foreground uppercase backdrop-blur"
+      >
+        {day.heading}
+      </div>
+      <ul class="divide-y divide-border/50">
+        {#each day.items as item (item.id)}
+          <NotificationRow
+            {item}
+            dense={prefs.denseFeed}
+            onMarkSeen={(id) => void feed.markSeen(id)}
+          />
+        {/each}
+      </ul>
+    {/each}
 
-          <div class="min-w-0 flex-1 space-y-1">
-            <p class="flex flex-wrap items-baseline gap-2 text-sm">
-              <span class="font-medium">{typeLabel(item.type)}</span>
-              {#if item.senderDisplayName}
-                <!-- Group announcements have a sender name and no sender id; that degrades. -->
-                <UserName
-                  userId={item.senderUserId}
-                  name={item.senderDisplayName}
-                  accountId={item.accountId}
-                />
-              {:else if item.senderUserId}
-                <!-- An id and no name: still a person, and the modal is how you find out who. -->
-                <UserName
-                  userId={item.senderUserId}
-                  name={shortId(item.senderUserId, 12)}
-                  accountId={item.accountId}
-                  class="font-mono text-xs text-muted-foreground"
-                />
-              {/if}
-              <RelativeTime ts={item.ts} class="text-xs text-muted-foreground" />
-            </p>
-            {#if item.message}
-              <p class="text-sm text-muted-foreground">{item.message}</p>
-            {/if}
-            {#if account !== null && app.accounts.length > 1}
-              <Badge variant="outline">
-                To <UserName userId={account.id} name={account.displayName} accountId={account.id} />
-              </Badge>
-            {/if}
-          </div>
+    {#if feed.moreError !== null}
+      <div class="flex items-center justify-between gap-3 border-t border-border bg-muted/40 p-3">
+        <p class="text-sm text-muted-foreground">{feed.moreError}</p>
+        <Button variant="outline" size="sm" onclick={() => feed.retry()}>Try again</Button>
+      </div>
+    {:else if feed.loadingMore}
+      <div class="space-y-2 p-4" aria-busy="true">
+        <Skeleton class="h-16 w-full" />
+      </div>
+    {:else if !feed.hasMore && !feed.hasUnrendered}
+      <p class="p-4 text-center text-sm text-muted-foreground">
+        That is the whole inbox vrc.zip holds. Answering an invite or a friend request still happens
+        in VRChat; this reads the inbox and tracks what you have read.
+      </p>
+    {/if}
 
-          {#if !item.seen}
-            <Button
-              size="sm"
-              variant="ghost"
-              class="shrink-0 text-muted-foreground"
-              onclick={() => void app.markNotificationSeen(item.id)}
-            >
-              <CheckIcon />
-              Mark read
-            </Button>
-          {/if}
-        </li>
-      {/each}
-    </ul>
-
-    <Separator />
-
-    <p class="px-4 py-4 text-sm text-muted-foreground">
-      Answering an invite or a friend request still happens in VRChat. vrc.zip reads the inbox and
-      tracks what you have read.
-    </p>
+    <ScrollSentinel
+      enabled={(feed.hasUnrendered || feed.hasMore) && !feed.loadingMore && feed.moreError === null}
+      onVisible={() => feed.advance()}
+    />
   {/if}
 </div>

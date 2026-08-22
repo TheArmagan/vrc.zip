@@ -9,6 +9,7 @@
 
 import { isEventFrame } from "@vrcz/shared";
 import type { FeedEvent } from "./api.ts";
+import { subjectName } from "./format.ts";
 import type { StreamFrame } from "./stream.ts";
 
 /**
@@ -37,6 +38,11 @@ export const EPHEMERAL_KINDS: ReadonlySet<string> = new Set([
   // Emitted when a live profile read corrects the presence map — a cache reconciliation, not
   // something that happened to anyone. Its whole job is to send the friends list for a refetch.
   "friend.presence",
+  // "the friend-list poll came back". It fires per account on every refresh cycle and no screen
+  // has ever rendered it, so on a two-account setup it was several hundred rows a day saying
+  // nothing had happened. The daemon stopped persisting it too; migration 007 deletes the
+  // backlog. It stays here because a stored database from before that migration still has them.
+  "friend.list_refreshed",
 ]);
 
 /** Synthetic ids for socket-borne rows. Negative and decreasing, so they never collide with rows. */
@@ -88,4 +94,85 @@ export function mergeEvents(stored: readonly LiveEvent[], live: readonly LiveEve
     (event) => !seen.has(`${event.kind}|${String(event.ts)}|${event.subjectId ?? ""}`),
   );
   return [...extra, ...stored].sort(byNewest);
+}
+
+// ---------------------------------------------------------------------------
+// Collapsing repeats
+// ---------------------------------------------------------------------------
+
+/** One row as the list renders it: an event, plus how many identical ones it stands for. */
+export interface EventGroup {
+  /** The newest of the run — the one whose timestamp and payload the row shows. */
+  readonly event: LiveEvent;
+  /** How many events this row stands for. `1` for an ordinary row. */
+  readonly repeats: number;
+  /** Timestamp of the oldest event in the run. Equal to `event.ts` when `repeats` is 1. */
+  readonly oldestTs: number;
+}
+
+/**
+ * What makes two rows "the same thing happening again".
+ *
+ * Not the payload, and deliberately so: a game-log payload carries the watcher's per-run session
+ * id, so two records of one line are never byte-identical. What identifies a repeat is what the
+ * *reader* would call identical — same kind, same client, same subject, same place.
+ */
+function repeatKey(event: LiveEvent): string {
+  return [
+    event.kind,
+    event.accountId ?? "",
+    event.sessionId ?? "",
+    event.subjectId ?? "",
+    event.location ?? "",
+    subjectName(event.payload) ?? "",
+  ].join("|");
+}
+
+/** The longest span one collapsed row may cover. */
+const DEFAULT_REPEAT_WINDOW_MS = 10 * 60_000;
+
+/**
+ * Collapses runs of identical adjacent events into one row carrying a count.
+ *
+ * The display half of deduplication. The daemon no longer *records* the same log line twice — see
+ * migration 007 — but plenty of genuinely distinct events are still identical to read: a friend
+ * whose connection flaps produces a dozen real `friend.online` events, and a portal that is
+ * re-dropped every few seconds is a dozen real portal spawns. A list that prints each of them in
+ * full is a list nobody can scan.
+ *
+ * Two constraints keep this honest:
+ *
+ *  - **Adjacent only.** A run is broken by anything that happened in between, so collapsing can
+ *    never reorder the timeline or imply two events were consecutive when they were not.
+ *  - **Windowed, against the whole run and not against the previous row.** Two identical events an
+ *    hour apart are two things that happened, not one thing that happened twice. Comparing each
+ *    event against its immediate predecessor looks equivalent and is not: it lets a run *chain*,
+ *    so forty world entries two minutes apart fold into a single row covering eighty minutes. The
+ *    span a row claims is therefore bounded by construction.
+ *
+ * Input must be sorted newest-first, which is what `mergeEvents` returns.
+ */
+export function collapseRepeats(
+  events: readonly LiveEvent[],
+  windowMs: number = DEFAULT_REPEAT_WINDOW_MS,
+): EventGroup[] {
+  const out: EventGroup[] = [];
+  let key: string | null = null;
+
+  for (const event of events) {
+    const eventKey = repeatKey(event);
+    const last = out.at(-1);
+    if (last !== undefined && key === eventKey && last.event.ts - event.ts <= windowMs) {
+      out[out.length - 1] = {
+        event: last.event,
+        repeats: last.repeats + 1,
+        oldestTs: event.ts,
+      };
+      continue;
+    }
+    out.push({ event, repeats: 1, oldestTs: event.ts });
+    key = eventKey;
+  }
+
+  return out;
 }

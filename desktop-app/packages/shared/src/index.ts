@@ -60,6 +60,7 @@ export {
   type AuditOutcome,
   type ControlAccount,
   type DaemonStatus,
+  type EventKindCount,
   type EventQuery,
   type FeedEvent,
   type FriendPresence,

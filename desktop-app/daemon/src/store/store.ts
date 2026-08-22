@@ -1,6 +1,12 @@
 import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
 import { migrate } from "./migrate.ts";
-import { buildEventPage, type EventPageFilter, SQL } from "./queries.ts";
+import {
+  buildEventPage,
+  buildNotificationPage,
+  type EventPageFilter,
+  type NotificationPageFilter,
+  SQL,
+} from "./queries.ts";
 import type { Migration } from "./schema/index.ts";
 import type {
   AccountRow,
@@ -436,6 +442,22 @@ export class Store {
 
   listNotifications(accountId: string, limit = 100): NotificationRow[] {
     return this.stmts.listNotifications.all(accountId, limit);
+  }
+
+  /**
+   * One page of the inbox, newest first, across one account or all of them.
+   *
+   * The paged counterpart to {@link listNotifications}, which serves a fixed window per account.
+   * See {@link buildNotificationPage}.
+   */
+  listNotificationsFiltered(filter: NotificationPageFilter): NotificationRow[] {
+    const { sql, params } = buildNotificationPage(filter);
+    return this.db.query<NotificationRow, SQLQueryBindings[]>(sql).all(...params);
+  }
+
+  /** Row count per notification type — what the inbox's type filter is built from. */
+  countNotificationsByType(): { type: string; count: number }[] {
+    return this.stmts.countNotificationsByType.all();
   }
 
   markNotificationSeen(id: string): void {
@@ -1040,6 +1062,7 @@ function prepareAll(db: Database) {
     >(SQL.putNotification),
     listNotifications: q<NotificationRow, [string, number]>(SQL.listNotifications),
     markNotificationSeen: q<void, [string]>(SQL.markNotificationSeen),
+    countNotificationsByType: q<{ type: string; count: number }, []>(SQL.countNotificationsByType),
 
     recordAvatarSeen: q<void, [string, string, number, number]>(SQL.recordAvatarSeen),
     listAvatarHistory: q<AvatarHistoryRow, [string, number]>(SQL.listAvatarHistory),

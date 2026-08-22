@@ -96,6 +96,7 @@ import {
 } from "../store/index.ts";
 import type { GrantRow } from "../store/types.ts";
 import type { WebhookManager } from "../webhooks/index.ts";
+import { EPHEMERAL } from "./feed-writer.ts";
 import { webhookSummary } from "./webhook-summary.ts";
 
 /**
@@ -1601,8 +1602,31 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
        * silently omitted exactly the rows the game log exists to show. It also merged N pages of
        * `limit` rows and sliced, which spends N× the work to return one page.
        */
-      const rows =
-        query.sessionId !== undefined
+      /*
+       * Anything the fixed statements cannot express — several kinds, a family prefix, a text
+       * search — goes through the assembled page instead. The narrowing still happens in SQL:
+       * filtering a page after `LIMIT` returns short pages and then an empty one, which the
+       * infinite scroll reads as the end of history.
+       */
+      const filtered =
+        (query.kinds?.length ?? 0) > 0 ||
+        (query.families?.length ?? 0) > 0 ||
+        (query.search ?? "") !== "";
+
+      const rows = filtered
+        ? store.listEventsFiltered({
+            ...(query.accountId === undefined ? {} : { accountId: query.accountId }),
+            ...(query.sessionId === undefined ? {} : { sessionId: query.sessionId }),
+            ...(query.subjectId === undefined ? {} : { subjectId: query.subjectId }),
+            // A single `kind` and a `kinds` list both narrow; folding them into one list is what
+            // makes "both were given" mean the union rather than one silently winning.
+            kinds: [...(kind === null ? [] : [kind]), ...(query.kinds ?? [])],
+            ...(query.families === undefined ? {} : { families: query.families }),
+            ...(query.search === undefined ? {} : { search: query.search }),
+            before,
+            limit,
+          })
+        : query.sessionId !== undefined
           ? store.listEventsBySession(query.sessionId, before, limit, kind)
           : query.subjectId !== undefined
             ? store.listEventsBySubject(query.subjectId, before, limit, kind)
@@ -1620,6 +1644,16 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         location: row.location,
         payload: row.payload === null ? null : (JSON.parse(row.payload) as FeedEvent["payload"]),
       }));
+    },
+
+    async listEventKinds() {
+      // Bookkeeping kinds are excluded, not because they are secret but because a filter chip for
+      // a kind nothing renders is a chip that turns the list blank. The feed writer refuses to
+      // store them today; older databases still hold rows for them.
+      return store
+        .countEventsByKind()
+        .filter((row) => !EPHEMERAL.has(row.kind))
+        .map((row) => ({ kind: row.kind, count: row.count }));
     },
 
     async listFriends(accountId): Promise<FriendPresence[]> {
@@ -1640,12 +1674,28 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       }));
     },
 
-    async listNotifications(accountId): Promise<NotificationItem[]> {
-      const ids = accountId === null ? accounts.list().map((s) => s.id) : [accountId];
+    async listNotificationTypes() {
+      return store.countNotificationsByType();
+    },
 
-      return ids
-        .flatMap((id) => store.listNotifications(id))
-        .sort((a, b) => b.ts - a.ts)
+    async listNotifications(query): Promise<NotificationItem[]> {
+      /*
+       * One query, not a fan-out over the accounts.
+       *
+       * The fan-out this replaces took `limit` rows *per account* and sorted them here, which
+       * cannot be paged: the merged result is a fixed newest-N window, and asking for the next
+       * page would have meant a cursor per account. It also spent N queries to answer one, exactly
+       * as `listAllEvents` used to.
+       */
+      return store
+        .listNotificationsFiltered({
+          ...(query.accountId === undefined ? {} : { accountId: query.accountId }),
+          ...(query.types === undefined ? {} : { types: query.types }),
+          ...(query.seen === undefined ? {} : { seen: query.seen }),
+          ...(query.search === undefined ? {} : { search: query.search }),
+          before: query.before ?? Date.now() + 1,
+          limit: query.limit ?? 100,
+        })
         .map((row) => ({
           id: row.id,
           accountId: row.account_id,

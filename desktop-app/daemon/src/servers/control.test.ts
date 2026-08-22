@@ -28,6 +28,7 @@ import {
   type InviteTarget,
   MAX_USER_IDS,
   MAX_WORLD_IDS,
+  type NotificationQuery,
   type PageQuery,
   parseInviteLocation,
   parseUserId,
@@ -367,7 +368,7 @@ interface Recorder {
   worldBatches: string[][];
   instanceLookups: { target: InviteTarget; accountId: string | null }[];
   friendQueries: (string | null)[];
-  notificationQueries: (string | null)[];
+  notificationQueries: NotificationQuery[];
   notificationsSeen: string[];
   imageUrls: string[];
   userLookups: { userId: string; accountId: string | null }[];
@@ -542,14 +543,19 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
       seen.eventQueries.push(query);
       return [];
     },
+    listEventKinds: async () => [
+      { kind: "friend.online", count: 12 },
+      { kind: "gamelog.player_join", count: 340 },
+    ],
     listFriends: async (accountId) => {
       seen.friendQueries.push(accountId);
       return [];
     },
-    listNotifications: async (accountId) => {
-      seen.notificationQueries.push(accountId);
+    listNotifications: async (query) => {
+      seen.notificationQueries.push(query);
       return [];
     },
+    listNotificationTypes: async () => [{ type: "invite", count: 4 }],
     markNotificationSeen: async (id) => {
       seen.notificationsSeen.push(id);
     },
@@ -873,6 +879,41 @@ describe("control API routes", () => {
         before: 1_700_000_000_000,
       },
       { limit: 10, sessionId: 0 },
+    ]);
+  });
+
+  test("GET /api/notifications pages and filters like the feed does", async () => {
+    const { deps, seen } = fakeDeps();
+    await call(deps, "/api/notifications");
+    await call(deps, "/api/notifications?accountId=usr_1&types=invite,friendRequest&seen=false");
+    // `seen` is tri-state: an unparseable value is absent, never `false`. Quietly hiding read
+    // notifications because a query string was malformed reads as data loss.
+    await call(deps, "/api/notifications?seen=perhaps&q=pug&before=1700000000000&limit=99999");
+
+    expect(seen.notificationQueries).toEqual([
+      { limit: 100 },
+      { limit: 100, accountId: "usr_1", types: ["invite", "friendRequest"], seen: false },
+      { limit: 500, search: "pug", before: 1_700_000_000_000 },
+    ]);
+  });
+
+  test("GET /api/notification-types serves the filter vocabulary", async () => {
+    const { deps } = fakeDeps();
+    const body = (await (await call(deps, "/api/notification-types")).json()) as unknown;
+    expect(body).toEqual([{ type: "invite", count: 4 }]);
+  });
+
+  test("GET /api/events forwards the multi-kind, family and search filters", async () => {
+    const { deps, seen } = fakeDeps();
+    await call(deps, "/api/events?kinds=gamelog.player_join,gamelog.player_leave");
+    await call(deps, "/api/events?families=gamelog,friend&q=Ada");
+    // Deduplicated, trimmed, and empty entries dropped, so a trailing comma is not a filter for "".
+    await call(deps, "/api/events?kinds=friend.online,%20friend.online,,friend.offline&q=");
+
+    expect(seen.eventQueries).toEqual([
+      { limit: 100, kinds: ["gamelog.player_join", "gamelog.player_leave"] },
+      { limit: 100, families: ["gamelog", "friend"], search: "Ada" },
+      { limit: 100, kinds: ["friend.online", "friend.offline"] },
     ]);
   });
 

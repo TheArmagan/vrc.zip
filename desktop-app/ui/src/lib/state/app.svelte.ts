@@ -167,7 +167,15 @@ class AppState {
 
   async refreshNotifications(): Promise<void> {
     try {
-      this.notifications = await api.notifications.list();
+      /*
+       * The shell's copy: the newest few hundred, across every account.
+       *
+       * It is what the sidebar badge counts and what the Notifications screen merges in as its
+       * live tail, so it wants to be recent rather than complete — the screen pages the rest on a
+       * cursor. The limit is explicit because the route's default is a hundred, and a hundred is a
+       * single busy day on two accounts.
+       */
+      this.notifications = await api.notifications.list({ limit: 300 });
     } catch {
       /* the badge stays at its last known value; the screen shows its own error */
     }

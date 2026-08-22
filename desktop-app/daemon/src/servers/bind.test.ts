@@ -49,6 +49,8 @@ const deps: ControlDeps = {
   },
   listSessions: async () => [],
   listEvents: async () => [],
+  listEventKinds: async () => [],
+  listNotificationTypes: async () => [],
   listFriends: async () => [],
   listNotifications: async () => [],
   fetchImage: async () => null,

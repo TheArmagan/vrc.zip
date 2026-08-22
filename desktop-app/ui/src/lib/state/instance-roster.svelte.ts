@@ -47,6 +47,20 @@
  * it has nothing, only for ids the log actually recovered, and only for people not already
  * described. The daemon caches per viewer, so a room that stays put stops costing anything within a
  * few polls.
+ *
+ * **And it is capped.** `EAGER_FILL_LIMIT` people are described on sight; the rest are *deferred*
+ * and hydrate on hover, which is the same rule the other resolvers follow — fetch on hover, never
+ * on render. A room of eighty strangers nobody has looked at is the traffic pattern in this app
+ * most likely to draw a 429 (PROGRESS.md decision 102), and the honest observation is that nobody
+ * reads eighty rows of chips: they scan the top and point at whoever they recognise. On the daemon
+ * side these calls are charged at `"low"` priority, so even the capped batch cannot starve presence
+ * or a re-auth.
+ *
+ * The cap has one interaction that has to be got right: `#missesSomeone` treats an undescribed
+ * player as grounds to refetch, and a deliberately deferred id is undescribed forever. Left alone
+ * it would refetch every `JOIN_FLOOR_MS`, turning a cap meant to cut traffic into a permanent poll.
+ * So `deferred` is carried on the entry and excluded from that check — a deferred id is a decision,
+ * not a gap.
  */
 
 import { SvelteMap } from "svelte/reactivity";
@@ -94,6 +108,15 @@ export interface RosterEntry {
   /** Set only when `status === "error"`. */
   error: string | null;
   users: readonly InstanceUser[];
+  /**
+   * Ids the fallback deliberately did not look up, past `EAGER_FILL_LIMIT`. They hydrate on hover
+   * through `ensureUser`.
+   *
+   * Held on the entry rather than in a side map because `#missesSomeone` has to see them: an id in
+   * here is undescribed *on purpose*, and must not count as the incomplete snapshot that drives a
+   * refetch.
+   */
+  deferred: readonly string[];
   /** Unix ms of the last completed attempt, successful or not. Null while the first is in flight. */
   fetchedAt: number | null;
 }
@@ -132,6 +155,23 @@ const FRESH_MS = 15_000;
  */
 const JOIN_FLOOR_MS = 3_000;
 
+/**
+ * How many undescribed players the fallback will look up without being asked.
+ *
+ * Roughly a screenful. The number is not load-bearing — anything between "a screenful" and "half a
+ * room" would do — but the shape is: a bounded eager batch plus hover for the rest, rather than a
+ * batch that scales with the size of the room.
+ */
+const EAGER_FILL_LIMIT = 24;
+
+/**
+ * How long a hover miss is left alone before the same person may be asked about again.
+ *
+ * A miss is a cooldown rather than a verdict — the usual reason VRChat says nothing about someone
+ * is this moment, not that person.
+ */
+const MISS_COOLDOWN_MS = 30_000;
+
 function keyFor(location: string, accountId: string | null): string {
   // `\0` as the separator, written as an escape rather than as a literal NUL byte. The raw byte
   // was in this file, and it made every tool treat the source as binary — `grep -r` skipped it
@@ -152,6 +192,10 @@ class InstanceRosterState {
   readonly #inFlight = new Set<string>();
   /** Pending join-driven retries, one per instance. See `#armRetry`. */
   readonly #retries = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Hover-requested ids awaiting their microtask flush, per instance. See `ensureUser`. */
+  readonly #pending = new Map<string, Set<string>>();
+  /** `key\0userId` → unix ms before which a miss will not be asked about again. */
+  readonly #misses = new Map<string, number>();
 
   /**
    * What is known about `location` right now. Pure — safe to call from a `$derived`. It never
@@ -226,6 +270,10 @@ class InstanceRosterState {
   #missesSomeone(entry: RosterEntry, observedIds: readonly string[]): boolean {
     if (observedIds.length === 0) return false;
     const described = new Set(entry.users.map((user) => user.id));
+    // A deferred id is undescribed because we chose not to ask, so it is not a stale snapshot and
+    // must not drive a refetch — see the note on `deferred`. Without this the cap would refetch on
+    // every `JOIN_FLOOR_MS` forever.
+    for (const id of entry.deferred) described.add(id);
     return observedIds.some((id) => !described.has(id));
   }
 
@@ -264,6 +312,82 @@ class InstanceRosterState {
     this.#retries.delete(key);
   }
 
+  /**
+   * Looks up one deferred person, on hover.
+   *
+   * The other half of `EAGER_FILL_LIMIT`: the eager batch stops at a screenful and this is how the
+   * rest arrive. Safe to call on every `mouseenter` — an id that is already described, already
+   * pending, or recently missing costs nothing, and ids raised in the same tick go out as **one**
+   * request, which is what stops dragging the pointer down a roster from being eighty of them.
+   *
+   * A miss is a cooldown, not a verdict (`MISS_COOLDOWN_MS`): VRChat returning nothing for someone
+   * is usually about this moment rather than about them, and a permanent no would make the row
+   * un-hydratable for as long as the room is open.
+   */
+  ensureUser(location: string | null, accountId: string | null, userId: string | null): void {
+    if (location === null || location === "" || userId === null || userId === "") return;
+
+    const key = keyFor(location, accountId);
+    const entry = this.#byKey.get(key);
+    // Nothing to merge into yet. `ensure()` runs first from the screen's own effect, and until it
+    // has answered there is no roster for this person to be part of.
+    if (entry === undefined) return;
+    if (entry.users.some((user) => user.id === userId)) return;
+
+    const missKey = `${key}\0${userId}`;
+    const until = this.#misses.get(missKey);
+    if (until !== undefined && Date.now() < until) return;
+
+    let batch = this.#pending.get(key);
+    if (batch === undefined) {
+      batch = new Set();
+      this.#pending.set(key, batch);
+      // The microtask is the batching window. Everything a pointer sweep raises in one tick lands
+      // in this set before the flush reads it.
+      queueMicrotask(() => void this.#flushPending(key, accountId));
+    }
+    batch.add(userId);
+  }
+
+  async #flushPending(key: string, accountId: string | null): Promise<void> {
+    const batch = this.#pending.get(key);
+    this.#pending.delete(key);
+    if (batch === undefined || batch.size === 0) return;
+
+    const entry = this.#byKey.get(key);
+    if (entry === undefined) return;
+
+    const wanted = [...batch];
+    let found: readonly InstanceUser[] = [];
+    try {
+      found = await api.users.batch(wanted, accountId);
+    } catch (cause) {
+      if (isAbort(cause)) return;
+      // Deliberately quiet. This is decoration the user asked for by moving a pointer; a failed
+      // hover is not worth a toast, and the row keeps the name and join time it already had.
+      found = [];
+    }
+
+    // The entry is re-read rather than reused across the await: `clear()` may have run while the
+    // request was in flight, and merging into an object no longer in the map would write rows that
+    // nothing renders and that nothing can clear.
+    if (this.#byKey.get(key) !== entry) return;
+
+    const byId = new Set(found.map((user) => user.id));
+    const now = Date.now();
+    for (const id of wanted) {
+      if (!byId.has(id)) this.#misses.set(`${key}\0${id}`, now + MISS_COOLDOWN_MS);
+    }
+
+    if (found.length > 0) {
+      entry.users = [...entry.users, ...found];
+      entry.filledIndividually = true;
+    }
+    // Asked about, so no longer deferred either way — a miss is held off by its cooldown instead.
+    // Leaving them here would make `#missesSomeone` keep treating them as a deliberate omission.
+    entry.deferred = entry.deferred.filter((id) => !batch.has(id));
+  }
+
   #ensureEntry(key: string): RosterEntry {
     const existing = this.#byKey.get(key);
     if (existing !== undefined) return existing;
@@ -278,6 +402,7 @@ class InstanceRosterState {
       reason: null,
       error: null,
       users: [],
+      deferred: [],
       fetchedAt: null,
       filledIndividually: false,
     });
@@ -331,8 +456,11 @@ class InstanceRosterState {
       if (answer.source !== "instance" && observedIds.length > 0) {
         const described = new Set(entry.users.map((user) => user.id));
         const wanted = observedIds.filter((id) => !described.has(id));
-        if (wanted.length > 0) {
-          const individually = await api.users.batch(wanted, accountId);
+        // Bounded on sight; the tail hydrates on hover through `ensureUser`. See `EAGER_FILL_LIMIT`.
+        const eager = wanted.slice(0, EAGER_FILL_LIMIT);
+        entry.deferred = wanted.slice(EAGER_FILL_LIMIT);
+        if (eager.length > 0) {
+          const individually = await api.users.batch(eager, accountId);
           if (individually.length > 0) {
             entry.users = [...entry.users, ...individually];
             entry.filledIndividually = true;
@@ -367,6 +495,12 @@ class InstanceRosterState {
   clear(): void {
     for (const key of [...this.#retries.keys()]) this.#clearRetry(key);
     this.#byKey.clear();
+    // The hover state goes too, or `clear()` does not mean what it says. In the app the difference
+    // is invisible — the singleton outlives every caller and a miss key is location-scoped — but a
+    // half-cleared singleton is untestable, and "forget everything" is the only useful contract for
+    // a method with this name.
+    this.#pending.clear();
+    this.#misses.clear();
   }
 }
 

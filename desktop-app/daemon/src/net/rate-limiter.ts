@@ -28,6 +28,12 @@ export interface RateLimiterOptions {
   readonly fileRatePerSecond?: number;
   /** How many file requests may be spent at once across every account. */
   readonly fileBurst?: number;
+  /**
+   * How many tokens a `"low"` priority call must leave behind in whichever bucket it draws from.
+   *
+   * Defaults to a quarter of each burst. See `RatePriority`.
+   */
+  readonly lowPriorityReserve?: number;
   /** First backoff step after a 429. PLAN.md §Guardrails: exponential from 1s. */
   readonly baseBackoffMs?: number;
   /** Ceiling on the backoff, so a long outage doesn't park us for an hour. */
@@ -67,6 +73,30 @@ export const VRCHAT_RATE_LIMIT_FILES_PER_IP_PER_SECOND = 300;
 export type RateClass = "api" | "file";
 
 /**
+ * How willing a call is to be the one that waits.
+ *
+ * `"low"` is for work that is *bulk, speculative and never urgent* — today that is the roster's
+ * per-user fallback, which can be eighty `GET /users/{id}` on first sight of a busy public instance
+ * (PROGRESS.md decision 102). Left at `"normal"` it is structurally able to drain the account bucket
+ * and leave presence polling, a pipeline re-auth, or the thing the user just clicked queued behind
+ * decoration.
+ *
+ * **It is a reserve, not a queue.** A `"low"` call may only take a token while the bucket still
+ * holds `lowPriorityReserve` more than it needs, so there is always headroom for a `"normal"` one.
+ * That is deliberately weaker than priority ordering: this limiter has no queue to order — callers
+ * race for tokens as they refill — and the requirement decision 102 actually names is headroom, not
+ * fairness. Guaranteeing that a `"normal"` call never waits *behind* bulk work is what a reserve
+ * gives; guaranteeing it goes first would mean building a queue, which is a much larger change to a
+ * load-bearing component for a property nothing yet needs.
+ *
+ * The trade to know about: sustained `"normal"` traffic at the full configured rate would starve
+ * `"low"` indefinitely. That is the correct direction to fail in — and it is not reachable in
+ * practice, because the buckets refill at 16/s per account while normal traffic is a small fraction
+ * of that.
+ */
+export type RatePriority = "normal" | "low";
+
+/**
  * Both defaults are **80% of the corresponding ceiling**, and the headroom is deliberate: a limit
  * is what VRChat *enforces*, not a target to sit on, and our clock and theirs do not agree on
  * where a second starts. Backing off from a 429 we caused is strictly worse than being slightly
@@ -82,6 +112,16 @@ const DEFAULTS = {
   baseBackoffMs: 1_000,
   maxBackoffMs: 60_000,
 } as const;
+
+/**
+ * A quarter of the burst, in whichever bucket is being drawn from.
+ *
+ * Big enough that a `"normal"` call arriving during bulk work finds a token waiting rather than a
+ * refill to sit through, and small enough that bulk work still gets three quarters of the budget
+ * when nothing else is asking. Expressed as a fraction of each burst rather than a flat count so
+ * the account bucket (20) and the IP bucket (100) both get a proportionate floor.
+ */
+const LOW_PRIORITY_RESERVE_FRACTION = 0.25;
 
 interface Bucket {
   tokens: number;
@@ -114,6 +154,7 @@ export class RateLimiter {
   readonly #globalBurst: number;
   readonly #fileRate: number;
   readonly #fileBurst: number;
+  readonly #lowPriorityReserve: number;
   readonly #baseBackoffMs: number;
   readonly #maxBackoffMs: number;
   readonly #now: () => number;
@@ -132,6 +173,11 @@ export class RateLimiter {
     this.#globalBurst = options.globalBurst ?? DEFAULTS.globalBurst;
     this.#fileRate = options.fileRatePerSecond ?? DEFAULTS.fileRatePerSecond;
     this.#fileBurst = options.fileBurst ?? DEFAULTS.fileBurst;
+    // Derived from the burst rather than defaulted to a constant, so a caller that shrinks the
+    // burst for a test does not accidentally get a reserve larger than the bucket — which would
+    // make every low-priority call wait forever.
+    this.#lowPriorityReserve =
+      options.lowPriorityReserve ?? Math.ceil(this.#burst * LOW_PRIORITY_RESERVE_FRACTION);
     this.#baseBackoffMs = options.baseBackoffMs ?? DEFAULTS.baseBackoffMs;
     this.#maxBackoffMs = options.maxBackoffMs ?? DEFAULTS.maxBackoffMs;
     this.#now = options.now ?? Date.now;
@@ -177,8 +223,17 @@ export class RateLimiter {
    * stops both. That is deliberate, and it is the safe direction to be wrong in. VRChat may well
    * throttle the tiers independently, but if we are being told to slow down we would rather pause
    * more than we strictly must than keep hammering one tier while apologising on the other.
+   *
+   * `priority` decides how much of the bucket this call is willing to leave alone — see
+   * `RatePriority`. The breaker is honoured first either way: nothing outranks a 429.
    */
-  async acquire(accountId: string, rateClass: RateClass = "api"): Promise<void> {
+  async acquire(
+    accountId: string,
+    rateClass: RateClass = "api",
+    priority: RatePriority = "normal",
+  ): Promise<void> {
+    const floor = priority === "low" ? this.#lowPriorityReserve : 0;
+
     // Loop rather than compute once: while we were waiting out the breaker, another response may
     // have arrived and extended it.
     for (;;) {
@@ -188,7 +243,8 @@ export class RateLimiter {
         continue;
       }
 
-      const wait = rateClass === "file" ? this.#reserveFile() : this.#reserve(accountId);
+      const wait =
+        rateClass === "file" ? this.#reserveFile(floor) : this.#reserve(accountId, floor);
       if (wait === 0) return;
       await this.#sleep(wait);
     }
@@ -197,15 +253,19 @@ export class RateLimiter {
   /**
    * Takes one token from the file bucket alone. No account bucket is consulted — see `#files`.
    */
-  #reserveFile(): number {
+  #reserveFile(floor: number): number {
     const now = this.#now();
     refill(this.#files, now, this.#fileRate, this.#fileBurst);
 
-    if (this.#files.tokens >= 1) {
+    // `1 + floor` throughout: a low-priority call needs its own token *plus* the headroom it has
+    // promised to leave. The wait it computes is the wait until that is true, not until one token
+    // exists — otherwise it would wake, find the floor still unmet, and spin.
+    const needed = 1 + floor;
+    if (this.#files.tokens >= needed) {
       this.#files.tokens -= 1;
       return 0;
     }
-    return Math.max(1, Math.ceil(((1 - this.#files.tokens) / this.#fileRate) * 1000));
+    return Math.max(1, Math.ceil(((needed - this.#files.tokens) / this.#fileRate) * 1000));
   }
 
   /**
@@ -216,7 +276,7 @@ export class RateLimiter {
    * would leak tokens on every contended call and quietly let the effective rate drift above the
    * configured one.
    */
-  #reserve(accountId: string): number {
+  #reserve(accountId: string, floor: number): number {
     const now = this.#now();
     const bucket = this.#buckets.get(accountId) ?? { tokens: this.#burst, lastRefillAt: now };
 
@@ -224,15 +284,22 @@ export class RateLimiter {
     refill(this.#global, now, this.#globalRate, this.#globalBurst);
     this.#buckets.set(accountId, bucket);
 
-    if (bucket.tokens >= 1 && this.#global.tokens >= 1) {
+    // The floor applies to both buckets. Reserving headroom on the account bucket alone would leave
+    // eighty roster fetches across six accounts free to drain the shared IP bucket, which is the
+    // same starvation one level up.
+    const needed = 1 + floor;
+    if (bucket.tokens >= needed && this.#global.tokens >= needed) {
       bucket.tokens -= 1;
       this.#global.tokens -= 1;
       return 0;
     }
 
-    const accountWait = bucket.tokens >= 1 ? 0 : ((1 - bucket.tokens) / this.#rate) * 1000;
+    const accountWait =
+      bucket.tokens >= needed ? 0 : ((needed - bucket.tokens) / this.#rate) * 1000;
     const globalWait =
-      this.#global.tokens >= 1 ? 0 : ((1 - this.#global.tokens) / this.#globalRate) * 1000;
+      this.#global.tokens >= needed
+        ? 0
+        : ((needed - this.#global.tokens) / this.#globalRate) * 1000;
     return Math.max(1, Math.ceil(Math.max(accountWait, globalWait)));
   }
 

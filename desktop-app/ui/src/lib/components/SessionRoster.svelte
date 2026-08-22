@@ -272,7 +272,21 @@ const refreshing = $derived(entry?.status === "loading");
         <ul class="divide-y divide-border/60">
           {#each sorted as row (row.key)}
             {@const status = chosenStatus(row.attributes?.status)}
-            <li class="flex items-center gap-3 px-4 py-2">
+            <!--
+              `onmouseenter` hydrates a row the fallback deliberately skipped past its cap, which is
+              the same rule the resolvers follow: fetch on hover, never on render. It is safe to fire
+              on every row and every pass — `ensureUser` ignores anyone already described, already
+              pending, or recently missing, and batches a pointer sweep into one request.
+
+              On the `<li>` rather than on the name, so the whole row is the target. No keyboard
+              equivalent is needed: the interactive thing in the row is the name button below, and
+              focusing it opens the modal, which fetches this person in full anyway.
+            -->
+            <li
+              class="flex items-center gap-3 px-4 py-2"
+              onmouseenter={() =>
+                instanceRoster.ensureUser(session.currentLocation, session.accountId, row.userId)}
+            >
               <!-- alt="" deliberately: the name is the next column, so announcing it twice is noise. -->
               <Avatar class="size-8 shrink-0">
                 <AvatarImage src={imageUrl(row.attributes?.iconUrl)} alt="" loading="lazy" />

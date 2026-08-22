@@ -233,8 +233,11 @@ handshake, because the alternative is a login flow that mints credentials with n
       control-deps test** (decision 103) did not reproduce — seven consecutive full runs and
       eighteen targeted ones — and reading the path ruled out the usual mechanisms, so what landed
       is a hardening rather than a fix: it asserts on request *paths* instead of counts, so the next
-      failure names the extra request instead of printing "expected 2, received 3". Still
-      outstanding: **cap + budget the roster fallback** (decision 102).
+      failure names the extra request instead of printing "expected 2, received 3". The
+      **roster fallback is capped and budgeted** (decision 102): the eager batch stops at
+      `EAGER_FILL_LIMIT` (24) and the tail hydrates on hover, and every one of those calls is
+      charged at `"low"` priority, which reserves a quarter of each bucket for everything else.
+      Decisions 112 and 113.
 - [ ] **2.10 Control API** (`:7775`) — consent status, grant list/revoke, the enriched event stream
       with `sessionId`/`accountId`/`displayName` on every `gamelog.*`, and webhook registration.
       **Scoped by the 2026-08-22 planning pass (decisions 97, 98, 99, 104):** webhooks ship *with*
@@ -1146,6 +1149,41 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      out to whatever is around. And **downloading an executable into `%LOCALAPPDATA%` and spawning it
      is a textbook malware shape**, so expect AV heuristics to have opinions, on first run especially.
 
+112. **Low priority in the rate limiter is a *reserve*, not a queue.** `acquire()` takes a
+     `RatePriority`, and `"low"` may only spend a token while the bucket still holds
+     `lowPriorityReserve` more than it needs — a quarter of the burst by default, applied to the
+     per-account bucket *and* the shared IP bucket, since eighty fetches across six accounts drain
+     the latter while every account looks well-behaved. The property this buys is the one decision
+     102 actually asks for: a `"normal"` call always finds a token waiting, so bulk speculative work
+     cannot leave presence polling, a pipeline re-auth, or something the user just clicked queued
+     behind decoration.
+
+     Priority *ordering* was the obvious alternative and was not built. This limiter has no queue to
+     order — callers race for tokens as they refill — so ordering would mean adding queueing and
+     fairness to a load-bearing component for a property nothing yet needs, where headroom is
+     already sufficient. The trade to know: sustained `"normal"` traffic at the full configured rate
+     would starve `"low"` forever. That is the right direction to fail in and is not reachable in
+     practice, since the buckets refill at 16/s per account and normal traffic is a small fraction
+     of that. Two implementation notes that are load-bearing rather than incidental: a blocked
+     low-priority call computes its wait against `1 + floor` rather than against one token, or it
+     would wake to find the floor still unmet and spin; and the default reserve is derived from the
+     burst rather than being a constant, so shrinking the burst in a test cannot produce a reserve
+     larger than the bucket, which would make every low-priority call wait forever.
+
+113. **The roster's eager fill is capped at a screenful; the rest hydrates on hover.** Nobody reads
+     eighty rows of chips — people scan the top and point at whoever they recognise — so
+     `EAGER_FILL_LIMIT` describes 24 on sight and `ensureUser` fetches the rest on `mouseenter`,
+     batched within a microtask so a pointer dragged down the list costs one request rather than
+     forty. A hover miss is a cooldown (30s), not a verdict.
+
+     **The interaction worth writing down is the one that nearly made this worse than the problem.**
+     `#missesSomeone` treats an undescribed player as grounds to refetch, and a deliberately deferred
+     id is undescribed forever — so a naive cap would have refetched every `JOIN_FLOOR_MS` for as
+     long as the room stayed open, converting a traffic cut into a permanent poll. The deferred ids
+     are therefore carried on the entry and excluded from that check: a deferred id is a decision,
+     not a gap. Anything a cap defers has to be invisible to whatever the code uses to detect
+     incompleteness, and that check is rarely in the same file as the cap.
+
 ---
 
 ## Gotchas
@@ -1153,6 +1191,19 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **The NUL byte got back into `instance-roster.svelte.ts`, in the comment explaining the NUL byte.**
+  `keyFor` uses ` ` as a key separator, and the file already carries a note saying the *raw* byte
+  was once in this source and made every tool treat it as binary — `grep -r` skipping it silently.
+  Writing the new hover-miss key through a script put three real NUL bytes back, and the tell was
+  immediate and identical: `grep` answering "Binary file ... matches" instead of a line. Two things
+  worth keeping. First, `grep` reporting a source file as binary is never a curiosity — it means the
+  file has quietly left every text search in the repo. Second, the byte arrived through a *tooling*
+  layer rather than through a typo: a ` ` written into a heredoc survives one round of escaping and
+  not two, and the same script then reported a successful replacement while changing nothing,
+  because the repair string was mangled the same way the original was. Byte-level checks
+  (`count(b" ")`) are the only honest confirmation; a re-`grep` of the escaped form cannot
+  distinguish the two.
 
 - **`useLocalDomain` was a toggle wired to nothing.** Removing `local.vrc.zip` (decision 101) turned
   up that the setting was persisted, merged field-by-field on load, accepted by `PUT /api/settings`,
@@ -1631,10 +1682,11 @@ below in one line, because a question closed without a trace is a question that 
   fix — the assertions now compare whole path arrays instead of counts, so **the next occurrence
   identifies itself**. A test timeout under a loaded full run remains the leading hypothesis and is
   the first thing to check if it fires again.
-- **The per-user roster fallback still wants a real measurement**, even though its design is now
-  decided (decision 102: cap the eager batch, hover-hydrate the rest, low-priority budget under the
-  account bucket). The number worth having is what a busy public instance actually costs against the
-  20/s ceiling *after* the cap — to size the cap, not to decide whether to have one.
+- **The per-user roster fallback still wants a real measurement**, now that it is *built* rather
+  than merely decided (decisions 112, 113: cap at 24, hover for the tail, `"low"` priority under
+  both buckets). The number worth having is what a busy public instance actually costs against the
+  20/s ceiling *after* the cap — to size `EAGER_FILL_LIMIT`, which was picked as "roughly a
+  screenful" and has nothing behind it but that. `net/request-meter.ts` can answer it.
 - **Type hoisting: done, except for two candidates that turned out not to be duplicates.** The third,
   the retention types, is now a *pending* move rather than a non-duplicate — decision 99 puts them on
   the wire with 2.10, and everything on the wire lives in `@vrcz/shared`. The two that stay put:

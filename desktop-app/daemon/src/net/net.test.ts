@@ -248,6 +248,96 @@ describe("RateLimiter", () => {
     expect(slept).toBeGreaterThanOrEqual(1_000);
   });
 
+  /*
+   * The roster's per-user fallback can be eighty `GET /users/{id}` on first sight of a busy public
+   * instance. PROGRESS.md decision 102: it runs at `"low"` priority, which reserves headroom rather
+   * than ordering a queue — the limiter has no queue to order.
+   */
+  test("low priority leaves a reserve; normal priority spends the whole burst", async () => {
+    const { limiter, slept } = harness({ burst: 8, lowPriorityReserve: 3 });
+
+    // Five of the eight, then the floor stops it: the reserve is what a normal call will find.
+    for (let i = 0; i < 5; i++) await limiter.acquire("usr_a", "api", "low");
+    expect(slept).toEqual([]);
+
+    await limiter.acquire("usr_a", "api", "low");
+    expect(slept).toHaveLength(1);
+
+    // The same bucket, asked normally, hands over the reserve without waiting at all.
+    const normal = harness({ burst: 8, lowPriorityReserve: 3 });
+    for (let i = 0; i < 8; i++) await normal.limiter.acquire("usr_a");
+    expect(normal.slept).toEqual([]);
+  });
+
+  test("a normal call never waits behind bulk low-priority work", async () => {
+    // The point of the reserve, stated as the property it exists for.
+    const { limiter, slept } = harness({ burst: 8, lowPriorityReserve: 3 });
+    for (let i = 0; i < 5; i++) await limiter.acquire("usr_a", "api", "low");
+
+    const before = slept.length;
+    await limiter.acquire("usr_a");
+    expect(slept.length).toBe(before);
+  });
+
+  test("the reserve applies to the IP bucket too, not only the account's own", async () => {
+    // Otherwise eighty fetches across six accounts drain the shared bucket instead — the same
+    // starvation one level up, invisible to per-account limiting.
+    const { limiter, slept } = harness({
+      burst: 1000,
+      ratePerSecond: 1000,
+      globalBurst: 8,
+      globalRatePerSecond: 1,
+      lowPriorityReserve: 3,
+    });
+
+    for (let i = 0; i < 5; i++) await limiter.acquire(`usr_${String(i)}`, "api", "low");
+    expect(slept).toEqual([]);
+
+    await limiter.acquire("usr_x", "api", "low");
+    expect(slept).toHaveLength(1);
+  });
+
+  test("a blocked low-priority call waits for the floor, not for one token", async () => {
+    // Waiting for a single token would wake it while the floor is still unmet, and it would spin.
+    // One sleep, then through — never a sequence of them.
+    const { limiter, slept } = harness({ burst: 4, ratePerSecond: 1, lowPriorityReserve: 3 });
+    await limiter.acquire("usr_a", "api", "low"); // 4 -> 3, at the floor
+    expect(slept).toEqual([]);
+
+    await limiter.acquire("usr_a", "api", "low");
+    expect(slept).toEqual([1000]);
+  });
+
+  test("the file tier honours priority as well, so `low` is never a silent no-op", async () => {
+    const { limiter, slept } = harness({
+      fileBurst: 4,
+      fileRatePerSecond: 1,
+      lowPriorityReserve: 3,
+    });
+    await limiter.acquire("usr_a", "file", "low");
+    expect(slept).toEqual([]);
+    await limiter.acquire("usr_a", "file", "low");
+    expect(slept).toEqual([1000]);
+  });
+
+  test("the default reserve is a quarter of the burst and never exceeds it", async () => {
+    // A reserve larger than the bucket would make every low-priority call wait forever, which is
+    // why it is derived from the burst rather than defaulted to a constant.
+    const { limiter, slept } = harness({ burst: 4, ratePerSecond: 1 });
+    await limiter.acquire("usr_a", "api", "low");
+    await limiter.acquire("usr_a", "api", "low");
+    await limiter.acquire("usr_a", "api", "low");
+    expect(slept).toEqual([]);
+
+    await limiter.acquire("usr_a", "api", "low");
+    expect(slept).toHaveLength(1);
+
+    // burst 1 -> reserve 1: still reachable for a normal call, and low priority simply waits.
+    const tiny = harness({ burst: 1, ratePerSecond: 1 });
+    await tiny.limiter.acquire("usr_a");
+    expect(tiny.slept).toEqual([]);
+  });
+
   test("a success resets the counter fully rather than decaying", () => {
     const { limiter } = harness();
     limiter.record429();

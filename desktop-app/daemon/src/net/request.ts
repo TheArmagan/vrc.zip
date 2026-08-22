@@ -1,6 +1,11 @@
 import { BASE_URL } from "@vrcz/api";
 import type { CookieJar } from "../accounts/cookie-jar.ts";
-import { parseRetryAfter, type RateClass, type RateLimiter } from "./rate-limiter.ts";
+import {
+  parseRetryAfter,
+  type RateClass,
+  type RateLimiter,
+  type RatePriority,
+} from "./rate-limiter.ts";
 import type { RequestMeter } from "./request-meter.ts";
 import { USER_AGENT_HEADER } from "./user-agent.ts";
 
@@ -62,6 +67,13 @@ export interface RequestOptions extends Omit<RequestInit, "headers"> {
    * queues presence and friend polling behind pictures.
    */
   readonly rateClass?: RateClass;
+  /**
+   * How willing this call is to be the one that waits. Defaults to `"normal"`.
+   *
+   * `"low"` leaves a reserve in whichever bucket it draws from, so bulk speculative work cannot
+   * starve presence, a re-auth, or something the user just clicked. See `RatePriority`.
+   */
+  readonly priority?: RatePriority;
 }
 
 /** How many times a single call may be re-sent after a 429. */
@@ -109,7 +121,11 @@ export async function vrcFetch(
   let retriedAuth = false;
 
   for (let attempt = 0; ; attempt++) {
-    await ctx.limiter.acquire(ctx.accountId, options.rateClass ?? "api");
+    await ctx.limiter.acquire(
+      ctx.accountId,
+      options.rateClass ?? "api",
+      options.priority ?? "normal",
+    );
 
     // After the limiter, before the send: this counts requests that are actually going out, which is
     // what a "requests per second" reading has to mean. Counting before `acquire` would report the

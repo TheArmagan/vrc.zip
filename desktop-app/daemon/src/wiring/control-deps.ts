@@ -1734,7 +1734,13 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
          */
         let user: User;
         try {
-          const response = await vrcFetch(account.context(), `/users/${userId}`);
+          // `"low"` on purpose. Sequential ordering keeps the queue legible, but ordering alone
+          // does not stop eighty of these draining the account bucket; the priority leaves a
+          // reserve so presence polling, a re-auth, or something the user just clicked always
+          // finds a token waiting. See PROGRESS.md decision 102.
+          const response = await vrcFetch(account.context(), `/users/${userId}`, {
+            priority: "low",
+          });
           const body = await response.text();
           // Left out rather than thrown, per the contract on `ControlDeps.listUsers`.
           if (!response.ok) continue;

@@ -21,7 +21,7 @@
 import CalendarIcon from "@lucide/svelte/icons/calendar";
 import ShirtIcon from "@lucide/svelte/icons/shirt";
 import { toast } from "svelte-sonner";
-import { api, describeError } from "$lib/api.ts";
+import { api, describeError, imageUrl } from "$lib/api.ts";
 import DetailGrid from "$lib/components/DetailGrid.svelte";
 import EntityFooter from "$lib/components/EntityFooter.svelte";
 import EntityModal, { type ModalTab } from "$lib/components/EntityModal.svelte";
@@ -29,12 +29,18 @@ import FailureNote from "$lib/components/FailureNote.svelte";
 import RawJsonPanel from "$lib/components/RawJsonPanel.svelte";
 import RelativeTime from "$lib/components/RelativeTime.svelte";
 import UserName from "$lib/components/UserName.svelte";
+import {
+  Avatar,
+  AvatarFallback,
+  AvatarImage,
+} from "$lib/components/ui/avatar/index.js";
 import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
+import * as Popover from "$lib/components/ui/popover/index.js";
 import { Separator } from "$lib/components/ui/separator/index.js";
 import { Skeleton } from "$lib/components/ui/skeleton/index.js";
 import * as Tabs from "$lib/components/ui/tabs/index.js";
-import { calendarDay } from "$lib/format.ts";
+import { calendarDay, initials } from "$lib/format.ts";
 import {
   AVATAR_MODAL_TAB_LABELS,
   AVATAR_MODAL_TABS,
@@ -63,46 +69,52 @@ const seenBy = $derived.by(() => {
  * Wearing it.
  *
  * The only control in any of the entity modals that changes something on VRChat's side about *you*,
- * so it is deliberately explicit rather than a quiet icon: it names the account it will dress
- * whenever more than one is signed in, because with two accounts "wear this" is ambiguous and
- * guessing would put the wrong person in it.
+ * and the account it dresses is the whole question. The button is an icon and the *popover* is
+ * where the account is chosen, rather than the button naming one it picked: an action this small
+ * should not spend header width on a name, and an action that changes your account should not
+ * decide whose account on your behalf.
  *
- * There is no confirmation step. Wearing an avatar is instantly reversible by wearing another, and
- * a dialog in front of a one-click, one-click-back action is friction rather than safety. What it
- * does have is an honest result: VRChat's own refusal comes back as its own sentence, because a 403
- * here means the account is not entitled to this avatar and that is worth reading rather than
- * flattening into "something went wrong".
+ * That also does the work a confirmation dialog would, without being one. Wearing an avatar is
+ * undone by wearing another, so a yes/no prompt in front of it is friction rather than safety —
+ * but a list you pick a name out of makes the consequence explicit at the moment of choosing.
+ *
+ * Only signed-in accounts can act. An offline one is listed and disabled rather than hidden,
+ * because "why is my other account not here" is a worse question than a row that says it is not
+ * connected.
  */
-let wearing = $state(false);
+let wearingId = $state<string | null>(null);
+let wearOpen = $state(false);
 
-/** The account that would wear it: the one this modal was opened through, or the one that saw it. */
-const wearingAccountId = $derived(avatarModal.accountId ?? avatar?.seenByAccountId ?? null);
-const wearingAccount = $derived(
-  wearingAccountId === null ? null : (app.accountById(wearingAccountId) ?? null),
-);
-/** Named on the button only when there is another account it could have been. */
-const wearLabel = $derived(
-  app.accounts.length > 1 && wearingAccount !== null
-    ? `Wear as ${wearingAccount.displayName}`
-    : "Wear this avatar",
+/** The account the modal was opened through, or the one that could see the avatar. Offered first. */
+const preferredAccountId = $derived(avatarModal.accountId ?? avatar?.seenByAccountId ?? null);
+
+/**
+ * Every account, the likely one first.
+ *
+ * Sorted rather than filtered: the reader picks, so the list has to be all of them, and putting the
+ * probable answer at the top is as far as a guess should go.
+ */
+const wearChoices = $derived(
+  app.accounts.toSorted(
+    (left, right) =>
+      Number(right.id === preferredAccountId) - Number(left.id === preferredAccountId),
+  ),
 );
 
-async function wear(): Promise<void> {
+async function wearAs(accountId: string, displayName: string): Promise<void> {
   const avatarId = avatarModal.avatarId;
-  if (avatarId === null || wearingAccountId === null) return;
-  wearing = true;
+  if (avatarId === null) return;
+  wearOpen = false;
+  wearingId = accountId;
   try {
-    await api.avatars.select(avatarId, wearingAccountId);
+    await api.avatars.select(avatarId, accountId);
     toast.success(`Now wearing ${avatarModal.title}`, {
-      description:
-        wearingAccount === null
-          ? "VRChat has switched the avatar."
-          : `${wearingAccount.displayName} is wearing it. A running client picks it up on its own.`,
+      description: `${displayName} is wearing it. A running client picks it up on its own.`,
     });
   } catch (cause) {
     toast.error("Could not wear this avatar", { description: describeError(cause) });
   } finally {
-    wearing = false;
+    wearingId = null;
   }
 }
 
@@ -181,11 +193,48 @@ const FAILURE_BODIES: Record<string, string> = {
   tabsLabel="What to show about this avatar"
 >
   {#snippet actions()}
-    {#if avatar !== null && wearingAccountId !== null}
-      <Button variant="outline" size="sm" class="shrink-0" disabled={wearing} onclick={() => void wear()}>
-        <ShirtIcon />
-        {wearing ? "Switching" : wearLabel}
-      </Button>
+    {#if avatar !== null && app.accounts.length > 0}
+      <Popover.Root bind:open={wearOpen}>
+        <Popover.Trigger>
+          {#snippet child({ props })}
+            <Button
+              {...props}
+              variant="outline"
+              size="icon-sm"
+              class="shrink-0"
+              aria-label="Wear this avatar"
+              title="Wear this avatar"
+              disabled={wearingId !== null}
+            >
+              <ShirtIcon />
+            </Button>
+          {/snippet}
+        </Popover.Trigger>
+
+        <Popover.Content class="w-64 p-1" align="end">
+          <p class="px-2 py-1.5 text-xs text-muted-foreground">Wear this avatar as</p>
+          <!-- Keyed by account id, which is unique by construction. -->
+          {#each wearChoices as account (account.id)}
+            {@const offline = account.connection !== "connected"}
+            <button
+              type="button"
+              class="flex w-full cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={offline || wearingId !== null}
+              onclick={() => void wearAs(account.id, account.displayName)}
+            >
+              <!-- alt="" deliberately: the name is the next element in the same control. -->
+              <Avatar class="size-5 shrink-0">
+                <AvatarImage src={imageUrl(account.iconUrl)} alt="" loading="lazy" />
+                <AvatarFallback class="text-[8px]">{initials(account.displayName)}</AvatarFallback>
+              </Avatar>
+              <span class="min-w-0 flex-1 truncate">{account.displayName}</span>
+              {#if offline}
+                <span class="shrink-0 text-xs text-muted-foreground">Not signed in</span>
+              {/if}
+            </button>
+          {/each}
+        </Popover.Content>
+      </Popover.Root>
     {/if}
   {/snippet}
 

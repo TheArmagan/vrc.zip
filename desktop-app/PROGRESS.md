@@ -1839,13 +1839,22 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 
      **`accountId` is required, and a missing one is a 400 rather than a default.** With two
      accounts signed in, "wear this" means nothing until it says who, and picking the first online
-     account would silently dress the wrong person. The UI names the account on the button whenever
-     more than one is signed in, for the same reason.
+     account would silently dress the wrong person.
 
-     **No confirmation step.** Wearing an avatar is undone by wearing another, so a dialog in front
-     of a one-click, one-click-back action is friction rather than safety. What it has instead is an
-     honest result: a 403 comes back as its own sentence, because it means the account is not
-     entitled to that avatar and that is worth reading rather than flattening into "it failed".
+     **The control is an icon, and the account is chosen in a popover rather than named on the
+     button.** An action this small should not spend header width on a display name, and an action
+     that changes your account should not decide whose on your behalf. The list is sorted with the
+     likely account first — the one the modal was opened through, or the one that could see the
+     avatar — because putting the probable answer at the top is as far as a guess should go when the
+     reader is the one picking. Offline accounts are listed and disabled rather than hidden: "why is
+     my other account not here" is a worse question than a row saying it is not connected.
+
+     **No confirmation step**, and the popover is why one is not needed. Wearing an avatar is undone
+     by wearing another, so a yes/no prompt in front of it is friction rather than safety, but a
+     list you pick a name out of makes the consequence explicit at the moment of choosing. What it
+     has instead of a prompt is an honest result: a 403 comes back as its own sentence, because it
+     means the account is not entitled to that avatar and that is worth reading rather than
+     flattening into "it failed".
 
      **It is not a monetization end-run** (PLAN.md §Guardrails). VRChat decides entitlement and
      answers 403 when the account may not wear it; vrc.zip neither checks that itself nor works

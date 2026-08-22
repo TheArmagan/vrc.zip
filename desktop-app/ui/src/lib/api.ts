@@ -468,6 +468,13 @@ export interface InstanceInfo {
   readonly worldId: string;
   /** The instance id *with* its tags, as VRChat quotes it. */
   readonly instanceId: string;
+  /**
+   * The name whoever opened the instance gave it, or null. Group instances are the case that
+   * matters: "Movie Night" is what the people in the room call it, and the instance number is not.
+   */
+  readonly displayName: string | null;
+  /** VRChat's own `name`, usually the instance number again. Rarely worth printing. */
+  readonly name: string | null;
   /** `public`, `hidden`, `friends`, `private`, `group` — VRChat's own word, not `parseLocation`'s. */
   readonly type: string | null;
   readonly ownerId: string | null;
@@ -599,6 +606,14 @@ export interface Settings {
   /** Overrides log discovery. Empty means "whatever discovery found". */
   readonly logDirectories: readonly string[];
   readonly openBrowserOnStart: boolean;
+  /**
+   * Whether the daemon may ask avtr.zip to turn an image file id into an avatar id.
+   *
+   * The only request vrc.zip makes to anything other than VRChat, which is why it is a setting at
+   * all rather than a detail. VRChat exposes no avatar id on a public user, so without it a feed
+   * row can say "switched avatar" and nothing more. See `daemon/src/net/avatar-ids.ts`.
+   */
+  readonly resolveAvatarIds: boolean;
 }
 
 /** The subset of `Settings` that `PUT /api/settings` accepts. Ports are read-only over the wire. */
@@ -606,6 +621,7 @@ export interface SettingsPatch {
   readonly contact?: string;
   readonly logDirectories?: readonly string[];
   readonly openBrowserOnStart?: boolean;
+  readonly resolveAvatarIds?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -1004,6 +1020,9 @@ function decodeInstanceDetail(body: unknown, location: string): InstanceDetail {
     instance: {
       worldId: rosterStr(raw, "worldId") ?? "",
       instanceId: rosterStr(raw, "instanceId") ?? "",
+      // `rosterStr` already treats "" as absent, which is what an unnamed instance sends.
+      displayName: rosterStr(raw, "displayName"),
+      name: rosterStr(raw, "name"),
       type: rosterStr(raw, "type"),
       ownerId: rosterStr(raw, "ownerId"),
       region: rosterStr(raw, "region"),

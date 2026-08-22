@@ -1731,6 +1731,43 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      empty array means "all" in both single and multiple modes, and each screen maps that onto its
      own state.
 
+156. **The world's instance list reads the world once per signed-in account.** `World.instances` is
+     documented "always an empty list when unauthenticated", and *what* it contains depends on who
+     asked: a friends-only instance is listed for an account that may enter it and withheld from one
+     that may not. Reading it through a single account would present one account's view as the whole
+     picture, which is the exact failure a multi-account app exists to avoid. So the list now merges
+     three partial sources — the world record per account, friends' presence, and this machine's
+     game clients — and each row carries `sources` and `seenByAccountIds` so the UI can say which
+     vouched for it and when only some accounts were shown it.
+
+     This stops the list being free: it is now one upstream request per signed-in account per open,
+     where before it was a read of the daemon's own memory. That is the right trade for real data,
+     and every comment claiming it cost nothing was corrected rather than left. **One account
+     failing never fails the list** — a stale cookie or a rate-limited account is ordinary, and the
+     other accounts' answers are the entire point of asking several; `failedAccountIds` names them
+     so a partial view is not presented as a whole one. A 403 is an *answer*, not a failure.
+
+     Each row then reads its own instance record for the head count and the name somebody gave the
+     room, which is affordable only because of 150: `instanceInfo.ensure` queues three at a time and
+     caches. `userCount` is never `friends.length` — that is a floor, and printing it as occupancy
+     would say a public room with forty strangers holds one person.
+
+157. **A control cannot contain another control, and a row that names people must open them.** The
+     instance row put its friends' names inside the selecting `<button>` as text, which made them
+     unclickable and was invalid markup besides. The row is now the identity line only, with the
+     join affordance beside it and the friends as their own `UserName` buttons on a second line.
+     Every friend is listed rather than the first few: a "+3 more" is three people the row told you
+     about and then refused to open.
+
+     Selecting a row also scrolls the detail panel into view. The panel sits above the list, so
+     picking the ninth row updated something off-screen and read as nothing happening.
+
+158. **Consent, connected apps and settings joined the row system**, and two things fell out of
+     doing it: `consent.error` was being fetched and silently dropped, and a settings switch had no
+     accessible name. Both are the ordinary yield of replacing four hand-written copies of a pattern
+     with one component. The connected-app row also moved its audit fetch onto the expander, so the
+     screen stopped maintaining a map of activity for rows nobody had opened.
+
 ---
 
 ## Gotchas

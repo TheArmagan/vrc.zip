@@ -571,6 +571,36 @@ function toWorldSummary(raw: Partial<World> | null | undefined): WorldSummary | 
 }
 
 /** The full world record. `cached` and `fetchedAt` carry the same meaning as on `UserDetail`. */
+/**
+ * `World.instances`, which the spec types as `Array<[unknown, unknown]>` and means it.
+ *
+ * There is no item schema upstream, so every element is validated rather than trusted: in practice
+ * each is `[instanceId, occupantCount]`, but a build that assumed that and met something else would
+ * throw inside a list route. Anything unrecognisable is skipped, because one malformed tuple is not
+ * a reason to lose the instances that did decode.
+ *
+ * The instance id arrives *with* its tags (`12345~region(eu)`), which is what makes
+ * `${worldId}:${instanceId}` a real location string rather than a prefix of one.
+ */
+function readWorldInstances(
+  world: { instances?: unknown } | null,
+): { instanceId: string; userCount: number | null }[] {
+  const raw = world?.instances;
+  if (!Array.isArray(raw)) return [];
+
+  const out: { instanceId: string; userCount: number | null }[] = [];
+  for (const entry of raw) {
+    if (!Array.isArray(entry)) continue;
+    const [id, count] = entry as [unknown, unknown];
+    if (typeof id !== "string" || id === "") continue;
+    out.push({
+      instanceId: id,
+      userCount: typeof count === "number" && Number.isFinite(count) ? count : null,
+    });
+  }
+  return out;
+}
+
 function toWorldDetail(raw: World, fetchedAt: number, cached: boolean): WorldDetail {
   const summary = toWorldSummary(raw);
 
@@ -644,6 +674,11 @@ function toInstanceInfo(raw: Partial<Instance>, worldId: string, instanceId: str
     // halves have already been through the allowlist, and the body's have not.
     worldId,
     instanceId,
+    // The name a group instance was given, when it has one. `name` is usually the instance number
+    // again, so it is passed through separately rather than folded in: a caller that wants a
+    // heading wants `displayName` or nothing, not the number twice.
+    displayName: emptyToNull(raw.displayName),
+    name: emptyToNull(raw.name),
     type: emptyToNull(raw.type),
     ownerId: emptyToNull(raw.ownerId),
     region: emptyToNull(raw.region),
@@ -1863,14 +1898,18 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
      * The instances of one world that vrc.zip can currently see.
      *
      * **Derived, not fetched.** VRChat has no "list the instances of this world" endpoint — only
-     * `GET /instances/{worldId}:{instanceId}`, which needs an id you already hold — so there is
-     * nothing to pass through and this spends no upstream request at all. What it can see is what
-     * vrc.zip already knows: where friends are, from the in-memory presence cache, and where your
-     * own clients are, from the game log. Both are already in memory, which is why this is instant.
+     * `GET /instances/{worldId}:{instanceId}`, which needs an id you already hold. So the list is
+     * assembled from three partial sources, and `sources` on each row says which ones vouched for
+     * it. See {@link WorldInstanceList} for what each can and cannot see.
      *
-     * The honest consequence rides along on the wire as `sources`: a busy public instance with
-     * nobody you know in it does not appear here, and its absence is not a claim that it is not
-     * there. See {@link WorldInstanceList}.
+     * **The world record is read once per signed-in account, not once.** `World.instances` is empty
+     * for an unauthenticated caller and differs by *which* caller: a friends-only instance is listed
+     * for an account that may enter it and withheld from one that may not. Reading it through a
+     * single account would therefore silently present one account's view as the whole picture, which
+     * is exactly the failure a multi-account app exists to avoid.
+     *
+     * One account failing never fails the list. A stale cookie or a rate-limited account is an
+     * ordinary state, and the other accounts' answers are the entire point of asking several.
      */
     async listWorldInstances(worldId, accountId): Promise<WorldInstanceList> {
       interface Draft {
@@ -1878,6 +1917,8 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         readonly instanceId: string | null;
         readonly friends: Map<string, WorldInstanceOccupant>;
         readonly clientSessionIds: number[];
+        readonly seenBy: Set<string>;
+        userCount: number | null;
       }
 
       const drafts = new Map<string, Draft>();
@@ -1900,10 +1941,57 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
           instanceId: parsed.instanceId,
           friends: new Map(),
           clientSessionIds: [],
+          seenBy: new Set(),
+          userCount: null,
         };
         drafts.set(location, created);
         return created;
       };
+
+      /*
+       * The world record, through every signed-in account.
+       *
+       * `allSettled` rather than `all`: one rejection must not discard the accounts that answered,
+       * and which ones failed is reported rather than swallowed. The rate limiter serialises these
+       * per account, so N accounts is N requests spread across N buckets rather than a burst on one.
+       */
+      const asking =
+        accountId === null
+          ? accounts
+              .list()
+              .filter((snapshot) => snapshot.state === "online")
+              .map((snapshot) => snapshot.id)
+          : [accountId];
+
+      const failedAccountIds: string[] = [];
+      await Promise.all(
+        asking.map(async (id) => {
+          const account = accounts.get(id);
+          if (account === undefined || account.snapshot().state !== "online") return;
+          try {
+            const response = await vrcFetch(account.context(), `/worlds/${worldId}`);
+            // A 404 is a deleted world and a 403 is one this account may not see. Neither is a
+            // fault worth reporting as a failed account: the account answered, with "nothing".
+            if (response.status === 404 || response.status === 403) return;
+            if (!response.ok) throw new Error(`VRChat returned ${String(response.status)}`);
+            const world = JSON.parse(await response.text()) as { instances?: unknown };
+            for (const entry of readWorldInstances(world)) {
+              const draft = draftFor(`${worldId}:${entry.instanceId}`);
+              if (draft === null) continue;
+              draft.seenBy.add(id);
+              // The largest count any account reported. They should agree; when they do not, the
+              // bigger number is the one that saw more of the room.
+              if (entry.userCount !== null) {
+                draft.userCount = Math.max(draft.userCount ?? 0, entry.userCount);
+              }
+            }
+          } catch {
+            // Deliberately swallowed and named instead. See the method comment: a partial answer
+            // is the normal outcome across several accounts and is worth more than a failure.
+            failedAccountIds.push(id);
+          }
+        }),
+      );
 
       const records = accountId === null ? presence.listAll() : presence.list(accountId);
       for (const record of records) {
@@ -1926,6 +2014,7 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
 
       const instances: WorldInstanceSummary[] = [...drafts.values()].map((draft) => {
         const sources: WorldInstanceSource[] = [];
+        if (draft.seenBy.size > 0) sources.push("vrchat");
         if (draft.friends.size > 0) sources.push("friend");
         if (draft.clientSessionIds.length > 0) sources.push("client");
         return {
@@ -1938,22 +2027,27 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
             left.displayName.localeCompare(right.displayName),
           ),
           clientSessionIds: draft.clientSessionIds,
+          userCount: draft.userCount,
+          seenByAccountIds: [...draft.seenBy],
         };
       });
 
-      // The room you are already in first, then the one with the most friends in it. Both beat
-      // alphabetical, because both are the reason somebody opened this list.
+      /*
+       * The room you are already in, then the busiest, then the one with the most friends in it.
+       *
+       * `userCount` outranks `friends.length` because it is a count and the other is a floor: an
+       * instance VRChat says holds thirty belongs above one where two friends are standing, even
+       * though the second is the one this app knows more about.
+       */
       instances.sort(
         (left, right) =>
           Number(right.clientSessionIds.length > 0) - Number(left.clientSessionIds.length > 0) ||
+          (right.userCount ?? -1) - (left.userCount ?? -1) ||
           right.friends.length - left.friends.length ||
           left.location.localeCompare(right.location),
       );
 
-      return {
-        instances,
-        accountsConsulted: accountId === null ? accounts.list().length : 1,
-      };
+      return { instances, accountsConsulted: asking.length, failedAccountIds };
     },
 
     async listNotificationTypes() {

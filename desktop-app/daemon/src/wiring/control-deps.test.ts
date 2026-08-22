@@ -2271,13 +2271,122 @@ describe("listWorldInstances", () => {
     h.stop();
   });
 
+  test("reads the world once per signed-in account, not once", async () => {
+    /*
+     * The whole reason this is not a single fetch. `World.instances` is empty for an
+     * unauthenticated caller and differs by *which* caller, so asking through one account would
+     * present one account's view as the whole picture.
+     */
+    const h = harness({
+      located: [],
+      world: (worldId, call) =>
+        Response.json(
+          worldBody(worldId, { instances: [[`${String(call)}~region(eu)`, call * 3]] }),
+        ),
+    });
+    await resumeAll(h);
+
+    const { instances, accountsConsulted, failedAccountIds } = await h.deps.listWorldInstances(
+      WORLD,
+      null,
+    );
+
+    expect(accountsConsulted).toBe(2);
+    expect(failedAccountIds).toEqual([]);
+    expect(h.requests.filter((path) => path.includes("/worlds/"))).toHaveLength(2);
+
+    // Two accounts, two different rooms, each vouched for by exactly one of them.
+    expect(instances).toHaveLength(2);
+    for (const instance of instances) {
+      expect(instance.sources).toEqual(["vrchat"]);
+      expect(instance.seenByAccountIds).toHaveLength(1);
+    }
+    expect(new Set(instances.flatMap((i) => i.seenByAccountIds))).toEqual(new Set([VIEWER, OTHER]));
+    h.stop();
+  });
+
+  test("one account failing does not fail the list, and is named", async () => {
+    const h = harness({
+      located: [],
+      world: (worldId, call) =>
+        call === 1
+          ? new Response("nope", { status: 500 })
+          : Response.json(worldBody(worldId, { instances: [["77~region(us)", 4]] })),
+    });
+    await resumeAll(h);
+
+    const { instances, failedAccountIds } = await h.deps.listWorldInstances(WORLD, null);
+
+    // The surviving account's answer is the entire point of asking several.
+    expect(failedAccountIds).toHaveLength(1);
+    expect(instances).toHaveLength(1);
+    // `instanceId` is the bare id; the tags stay on the location, which is what a join takes.
+    expect(instances[0]?.instanceId).toBe("77");
+    expect(instances[0]?.location).toBe(`${WORLD}:77~region(us)`);
+    expect(instances[0]?.userCount).toBe(4);
+    h.stop();
+  });
+
+  test("a 403 is an answer, not a failure", async () => {
+    // The account was asked and said "you may not see this". That is a fact about access, and
+    // reporting it as a failed account would tell the reader the view is broken when it is not.
+    const h = harness({ located: [], world: () => new Response("", { status: 403 }) });
+    await resumeAll(h);
+
+    expect(await h.deps.listWorldInstances(WORLD, null)).toMatchObject({
+      instances: [],
+      failedAccountIds: [],
+      accountsConsulted: 2,
+    });
+    h.stop();
+  });
+
+  test("VRChat's count and a friend in the room describe one instance, not two", async () => {
+    const h = harness({
+      located: [located({ id: "usr_a", displayName: "Ada", location: ROOM })],
+      world: (worldId) =>
+        Response.json(worldBody(worldId, { instances: [["12345~region(eu)", 9]] })),
+    });
+    await resumeAll(h);
+
+    const { instances } = await h.deps.listWorldInstances(WORLD, null);
+    expect(instances).toHaveLength(1);
+    // Both vouched for it, and the count is VRChat's rather than the number of friends seen.
+    expect(instances[0]?.sources).toEqual(["vrchat", "friend"]);
+    expect(instances[0]?.userCount).toBe(9);
+    expect(instances[0]?.friends).toHaveLength(1);
+    h.stop();
+  });
+
+  test("skips a malformed instances tuple instead of losing the whole list", async () => {
+    // The spec types these as `Array<[unknown, unknown]>` and gives no item schema, so every
+    // element is validated. One bad tuple must not cost the ones that decoded.
+    const h = harness({
+      located: [],
+      world: (worldId) =>
+        Response.json(
+          worldBody(worldId, {
+            instances: [null, ["", 1], [42, 1], ["55~region(eu)"], ["12345~region(eu)", 7]],
+          }),
+        ),
+    });
+    await resumeAll(h);
+
+    const { instances } = await h.deps.listWorldInstances(WORLD, null);
+    expect(instances.map((i) => i.instanceId).toSorted()).toEqual(["12345", "55"]);
+    // A tuple with no count is an instance with an unknown count, never a zero.
+    expect(instances.find((i) => i.instanceId === "55")?.userCount).toBeNull();
+    h.stop();
+  });
+
   test("answers with an empty list rather than throwing when nothing is signed in", async () => {
     // It reaches VRChat for nothing, so `no_account` is not a failure mode it has. An empty list
     // is a true statement about what can be seen.
     const h = harness({ located: [] });
     expect(await h.deps.listWorldInstances(WORLD, null)).toEqual({
       instances: [],
-      accountsConsulted: 2,
+      accountsConsulted: 0,
+      failedAccountIds: [],
     });
     h.stop();
   });

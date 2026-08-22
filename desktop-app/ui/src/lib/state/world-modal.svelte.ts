@@ -138,11 +138,36 @@ class WorldModalState extends EntityModalState {
     const worldId = this.worldId;
     if (worldId === null) return { items: [], hasMore: false };
     const answer = await api.worlds.instances(worldId, this.accountId, signal);
+    // Carried out of the fetcher because `PagedList` only models rows, and these two describe the
+    // *completeness* of the list rather than anything in it. Without them a partial answer is
+    // indistinguishable from a whole one, which is the failure this whole list has to avoid.
+    this.accountsConsulted = answer.accountsConsulted;
+    this.failedAccountIds = answer.failedAccountIds;
     return { items: answer.instances, hasMore: false };
   });
 
-  /** The name for the title bar: the loaded one, the caller's hint, or the short id. */
-  title = $derived(this.world?.name ?? this.hintName ?? shortId(this.worldId, 18));
+  /** How many signed-in accounts the daemon asked. Zero means nothing was asked of VRChat at all. */
+  accountsConsulted = $state(0);
+  /** Accounts that were asked and could not answer. Non-empty means the list is known-incomplete. */
+  failedAccountIds = $state<readonly string[]>([]);
+
+  /**
+   * The name for the title bar: the loaded one, the caller's hint, the resolver's, or the short id.
+   *
+   * The resolver is consulted third and it matters. `WorldLink` resolves names on render through
+   * `world-names.svelte.ts`, which batches fifty ids into one request and caches them for the
+   * session, so by the time somebody clicks a world link the name is usually already held. Without
+   * this branch the dialog opened from that link showed a raw `wrld_…` in its heading while the
+   * link that opened it read "The Great Pug" — the same world, named two different ways, one of
+   * them badly. It also covers the case the record cannot be fetched at all: a cached name is still
+   * a name, and a 503 on the full record is no reason to forget it.
+   */
+  title = $derived(
+    this.world?.name ??
+      this.hintName ??
+      worldNames.get(this.worldId)?.name ??
+      shortId(this.worldId, 18),
+  );
 
   /** The parsed half of the selected location, so the panel can name it without re-parsing. */
   parsed = $derived(parseLocation(this.selected));
@@ -264,6 +289,8 @@ class WorldModalState extends EntityModalState {
     // Aborts whatever was in flight and returns the list to `idle`, which is the only state its
     // own `ensure` guard will run from again.
     this.instances.reset();
+    this.accountsConsulted = 0;
+    this.failedAccountIds = [];
   }
 
   async #load(worldId: string): Promise<void> {

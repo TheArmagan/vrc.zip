@@ -234,7 +234,16 @@ export type WorldInstanceSource =
   /** A friend of one of your accounts is standing in it. */
   | "friend"
   /** One of your own VRChat clients is standing in it, per the game log. */
-  | "client";
+  | "client"
+  /**
+   * VRChat itself listed it on the world record, through at least one signed-in account.
+   *
+   * `World.instances` is documented "always an empty list when unauthenticated", and what it holds
+   * depends on **who asked** — a friends-only instance appears for an account that may enter it and
+   * not for one that may not. That is why the daemon reads the world once per signed-in account
+   * rather than once, and why {@link WorldInstanceSummary.seenByAccountIds} is on the wire.
+   */
+  | "vrchat";
 
 /** One person vrc.zip can see in an instance. Deduplicated by id across accounts. */
 export interface WorldInstanceOccupant {
@@ -258,6 +267,22 @@ export interface WorldInstanceSummary {
   readonly friends: readonly WorldInstanceOccupant[];
   /** `sessions.id` for each of your clients standing here. Empty for an instance you are not in. */
   readonly clientSessionIds: readonly number[];
+  /**
+   * VRChat's own head count for this instance, when a world record carried one.
+   *
+   * Null for an instance only presence or the game log revealed — and null is the honest answer
+   * there, because `friends.length` is a floor rather than a count. A public room with forty
+   * strangers and one friend in it would otherwise read as holding one person.
+   */
+  readonly userCount: number | null;
+  /**
+   * Which signed-in accounts VRChat listed this instance for.
+   *
+   * Empty when nothing but presence or the game log revealed it. A short list where others are
+   * longer is the interesting case: it means the instance is visible to some of your accounts and
+   * not others, which is a fact about access rather than about the room.
+   */
+  readonly seenByAccountIds: readonly string[];
 }
 
 /**
@@ -265,18 +290,37 @@ export interface WorldInstanceSummary {
  *
  * **This is not a public listing, and VRChat has no endpoint that would make one.** There is no
  * "instances of this world" call upstream — only `GET /instances/{worldId}:{instanceId}`, which
- * needs an instance id you already hold. So this is derived entirely from what vrc.zip has already
- * seen: friends' locations in the presence cache, and your own running clients from the game log.
- * It costs no upstream request at all, which is why it is instant.
+ * needs an instance id you already hold. So the list is assembled from three sources, none of which
+ * is complete on its own:
  *
- * The consequence has to be stated wherever this renders: a busy public instance with nobody you
- * know in it is invisible here, and its absence is not a claim that it does not exist. That is the
- * same rule the rest of the app follows about absence, applied to a list rather than to a badge.
+ *  - **the world record**, once per signed-in account. `World.instances` is populated only for an
+ *    authenticated caller and differs by *which* caller, so one account's answer is one account's
+ *    view. This is the only source that carries a head count.
+ *  - **friends' locations**, from the in-memory presence cache. Reveals rooms the world record did
+ *    not list for any of your accounts, and is the only source that says who is in one.
+ *  - **your own running clients**, from the game log. The only source that can reveal a room you
+ *    are standing in alone.
+ *
+ * The consequence has to be stated wherever this renders: a busy public instance that no account
+ * was shown and nobody you know is in does not appear, and its absence is not a claim that it does
+ * not exist. That is the rule the rest of the app follows about absence, applied to a list.
  */
 export interface WorldInstanceList {
   readonly instances: readonly WorldInstanceSummary[];
-  /** How many accounts' friend lists were consulted. Zero means nothing could be seen at all. */
+  /**
+   * How many signed-in accounts were asked. Zero means nothing could be seen through VRChat at all,
+   * and whatever is in the list came from presence or the game log.
+   */
   readonly accountsConsulted: number;
+  /**
+   * Accounts that were asked and could not answer, by id.
+   *
+   * A partial answer is the normal outcome with several accounts — one may be rate-limited or its
+   * cookie stale — and it must not fail the whole list, because the other accounts' answers are
+   * exactly what makes a multi-account list worth having. Naming them lets the UI say the view is
+   * incomplete rather than quietly presenting it as whole.
+   */
+  readonly failedAccountIds: readonly string[];
 }
 
 /**

@@ -38,6 +38,7 @@ import EntityModal, { type ModalTab } from "$lib/components/EntityModal.svelte";
 import FailureNote from "$lib/components/FailureNote.svelte";
 import JoinAffordance from "$lib/components/JoinAffordance.svelte";
 import PagedSection from "$lib/components/PagedSection.svelte";
+import RawJsonPanel from "$lib/components/RawJsonPanel.svelte";
 import RelativeTime from "$lib/components/RelativeTime.svelte";
 import UserName from "$lib/components/UserName.svelte";
 import { Avatar, AvatarFallback, AvatarImage } from "$lib/components/ui/avatar/index.js";
@@ -465,11 +466,7 @@ const INSTANCE_BODIES: Record<string, string> = {
 
   <!-- Raw --------------------------------------------------------------------- -->
   <Tabs.Content value="raw" class="space-y-2">
-    <p class="text-xs text-muted-foreground">
-      Exactly what the daemon sent, plus what vrc.zip added. Nothing here is interpreted.
-    </p>
-    <pre
-      class="max-w-full overflow-x-auto border border-border bg-muted/40 p-3 font-mono text-xs leading-relaxed">{raw}</pre>
+    <RawJsonPanel json={raw} copyLabel="Group details" />
 
     <!--
       vrchat.com stays down here as the way out to everything vrc.zip does not mirror - the calendar,

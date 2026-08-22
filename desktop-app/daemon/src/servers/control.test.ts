@@ -372,6 +372,8 @@ const AVATAR_DETAIL: AvatarDetail = {
 const INSTANCE_INFO: InstanceInfo = {
   worldId: WORLD_ID,
   instanceId: "12345",
+  displayName: "Movie Night",
+  name: "12345",
   type: "hidden",
   ownerId: "usr_1",
   region: "eu",
@@ -694,9 +696,12 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
             sources: ["friend"],
             friends: [{ id: "usr_ada", displayName: "Ada", iconUrl: null, status: "active" }],
             clientSessionIds: [],
+            userCount: null,
+            seenByAccountIds: [],
           },
         ],
         accountsConsulted: 1,
+        failedAccountIds: [],
       };
     },
     listGroupGalleryImages: async (groupId, galleryId, accountId, page) => {

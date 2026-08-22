@@ -381,6 +381,17 @@ export interface InstanceInfo {
   worldId: string;
   /** The instance id *with* its tags, as VRChat quotes it. */
   instanceId: string;
+  /**
+   * The name whoever opened the instance gave it, or null.
+   *
+   * Group instances are the case that matters: VRChat lets them be titled, and "Movie Night" is
+   * what the people in it call the room. Null for the ordinary instance nobody named, which is
+   * most of them, and null is what lets a caller fall back to the instance number rather than
+   * printing an empty heading.
+   */
+  displayName: string | null;
+  /** VRChat's own `name`, which is usually the instance number again. Passed through, not merged. */
+  name: string | null;
   /** `public`, `hidden`, `friends`, `private`, `group` — VRChat's own word for the access level. */
   type: string | null;
   ownerId: string | null;

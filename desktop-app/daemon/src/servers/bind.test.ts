@@ -81,7 +81,7 @@ const deps: ControlDeps = {
   listGroupMembers: async () => ({ members: [], hasMore: false }),
   listGroupPosts: async () => ({ posts: [], hasMore: false }),
   listGroupInstances: async () => ({ instances: [] }),
-  listWorldInstances: async () => ({ instances: [], accountsConsulted: 0 }),
+  listWorldInstances: async () => ({ instances: [], accountsConsulted: 0, failedAccountIds: [] }),
   listGroupGalleryImages: async () => ({ images: [], hasMore: false }),
   inviteUserTo: async () => {
     throw new Error("unused");

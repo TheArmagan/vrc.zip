@@ -5,24 +5,37 @@
   nothing in this app works without it. VRChat requires an API client to identify itself with a
   working contact address, and the daemon will not send a single request until one is set. A user
   who cannot find this field has an app that does nothing and no explanation.
+
+  Everything below it is a group of rows in the shape the rest of the app uses: what the setting is
+  on the left, the control on the right, and the reasoning underneath. The one group with more than
+  a switch's worth of detail — the daemon's ports, which are read-only here and have a caveat that
+  takes a paragraph — puts that paragraph behind a chevron, so a screen people open to change one
+  thing is not three screens tall by default.
 -->
 <script lang="ts">
+import ChevronIcon from "@lucide/svelte/icons/chevron-down";
 import FolderOpenIcon from "@lucide/svelte/icons/folder-open";
 import PlusIcon from "@lucide/svelte/icons/plus";
 import ShieldCheckIcon from "@lucide/svelte/icons/shield-check";
 import Trash2Icon from "@lucide/svelte/icons/trash-2";
 import { toast } from "svelte-sonner";
-import { api, describeError, EVENT_FAMILIES } from "$lib/api.ts";
+import {
+  api,
+  describeError,
+  EVENT_FAMILIES,
+  type SettingsPatch,
+} from "$lib/api.ts";
 import ErrorNote from "$lib/components/ErrorNote.svelte";
 import RetentionSection from "$lib/components/RetentionSection.svelte";
 import SectionHeader from "$lib/components/SectionHeader.svelte";
+import SettingSwitchRow from "$lib/components/SettingSwitchRow.svelte";
 import * as Alert from "$lib/components/ui/alert/index.js";
 import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
 import * as Card from "$lib/components/ui/card/index.js";
 import { Input } from "$lib/components/ui/input/index.js";
 import { Label } from "$lib/components/ui/label/index.js";
-import { Switch } from "$lib/components/ui/switch/index.js";
+import { Skeleton } from "$lib/components/ui/skeleton/index.js";
 import { familyLabel } from "$lib/format.ts";
 import {
   type NotificationPermissionState,
@@ -39,6 +52,8 @@ let savingContact = $state(false);
 let error = $state<string | null>(null);
 let newDirectory = $state("");
 let permission = $state<NotificationPermissionState>("default");
+/** The ports group's caveat, which is a paragraph nobody needs on the way to a switch. */
+let portsOpen = $state(false);
 
 $effect(() => {
   permission = notificationSupport();
@@ -57,7 +72,16 @@ const contactValid = $derived(
 
 const contactDirty = $derived(contact.trim() !== (app.settings?.contact ?? ""));
 
-async function save(patch: Parameters<typeof api.settings.update>[0]): Promise<void> {
+/**
+ * The avtr.zip switch.
+ *
+ * Falls back to on rather than off, matching `DEFAULT_SETTINGS` in `daemon/src/settings.ts`: while
+ * settings are still loading the switch should show what the daemon is actually doing, and a
+ * default-off render would tell the reader the lookup is disabled when it is not.
+ */
+const resolveAvatarIds = $derived(app.settings?.resolveAvatarIds ?? true);
+
+async function save(patch: SettingsPatch): Promise<void> {
   error = null;
   try {
     const next = await api.settings.update(patch);
@@ -66,6 +90,15 @@ async function save(patch: Parameters<typeof api.settings.update>[0]): Promise<v
   } catch (cause) {
     error = describeError(cause);
     throw cause;
+  }
+}
+
+async function setResolveAvatarIds(checked: boolean): Promise<void> {
+  const patch: SettingsPatch = { resolveAvatarIds: checked };
+  try {
+    await save(patch);
+  } catch {
+    /* `error` already carries it */
   }
 }
 
@@ -139,30 +172,33 @@ async function askForNotifications(): Promise<void> {
         </Card.Description>
       </Card.Header>
       <Card.Content>
-      <div class="flex flex-wrap items-end gap-2">
-        <div class="min-w-64 flex-1 space-y-1.5">
-          <Label for="contact">Email or profile URL</Label>
-          <Input
-            id="contact"
-            bind:value={contact}
-            oninput={() => {
-              contactTouched = true;
-            }}
-            placeholder="you@example.com"
-            autocomplete="email"
-            spellcheck={false}
-          />
+        <div class="flex flex-wrap items-end gap-2">
+          <div class="min-w-64 flex-1 space-y-1.5">
+            <Label for="contact">Email or profile URL</Label>
+            <Input
+              id="contact"
+              bind:value={contact}
+              oninput={() => {
+                contactTouched = true;
+              }}
+              placeholder="you@example.com"
+              autocomplete="email"
+              spellcheck={false}
+            />
+          </div>
+          <Button
+            disabled={!contactValid || !contactDirty || savingContact}
+            onclick={() => void saveContact()}
+          >
+            {savingContact ? "Saving" : "Save"}
+          </Button>
         </div>
-        <Button disabled={!contactValid || !contactDirty || savingContact} onclick={() => void saveContact()}>
-          {savingContact ? "Saving" : "Save"}
-        </Button>
-      </div>
 
-      {#if contact.trim() !== "" && !contactValid}
-        <p class="mt-2 text-sm text-destructive">
-          That is not an address anyone could reach. Use an email address or an https link.
-        </p>
-      {/if}
+        {#if contact.trim() !== "" && !contactValid}
+          <p class="mt-2 text-sm text-destructive">
+            That is not an address anyone could reach. Use an email address or an https link.
+          </p>
+        {/if}
       </Card.Content>
     </Card.Root>
 
@@ -178,7 +214,8 @@ async function askForNotifications(): Promise<void> {
       </div>
 
       {#if app.settings === null}
-        <p class="text-sm text-muted-foreground">Loading</p>
+        <!-- Not an empty state: nothing has been read yet, so "none configured" would be a claim. -->
+        <Skeleton class="h-12 w-full" />
       {:else if app.settings.logDirectories.length === 0}
         <Alert.Root>
           <FolderOpenIcon />
@@ -233,39 +270,77 @@ async function askForNotifications(): Promise<void> {
 
       <Card.Root class="py-0">
         <div class="divide-y divide-border">
-        <div class="flex items-start gap-4 px-4 py-3">
-          <div class="min-w-0 flex-1">
-            <p class="text-sm">Open the browser at startup</p>
-            <p class="text-sm text-muted-foreground">
-              Launches this window when the daemon starts. Turn it off if you run vrc.zip headless
-              and open it yourself from the tray.
-            </p>
-          </div>
-          <Switch
+          <SettingSwitchRow
+            label="Open the browser at startup"
+            description="Launches this window when the daemon starts. Turn it off if you run vrc.zip headless and open it yourself from the tray."
             checked={app.settings?.openBrowserOnStart ?? true}
             disabled={app.settings === null}
-            onCheckedChange={(checked) => void save({ openBrowserOnStart: checked })}
-            aria-label="Open the browser at startup"
+            onChange={(checked) => void save({ openBrowserOnStart: checked })}
           />
-        </div>
+
+          <!--
+            The one setting that sends anything anywhere other than VRChat, so it says so in as many
+            words. See `daemon/src/net/avatar-ids.ts`: VRChat never reveals which avatar somebody is
+            wearing, only a picture, and turning that picture's file id into an avatar id is what a
+            third party is for.
+          -->
+          <SettingSwitchRow
+            label="Look up avatar ids at avtr.zip"
+            description="VRChat only tells you what an avatar looks like, never which avatar it is, so a 'changed avatar' row has a picture and nothing to open. avtr.zip turns the picture's file id into an avatar id. This is a third-party lookup and the only request vrc.zip makes to anything other than VRChat. Exactly one image file id leaves this machine: no account, no cookie, no user id, no display name, and nothing that says whose feed it came from. Turn it off and avatar rows stay unresolved rather than failing."
+            checked={resolveAvatarIds}
+            disabled={app.settings === null}
+            onChange={(checked) => void setResolveAvatarIds(checked)}
+          />
+
+          {#if app.settings !== null}
+            <!--
+              Ports are read-only here and the reason why is a paragraph, which is exactly the kind
+              of thing a chevron is for. The numbers themselves stay one click away rather than
+              gone: "which port is the mirror on" is a question people come to this screen with.
+            -->
+            <div class="px-4 py-3">
+              <button
+                type="button"
+                class="flex w-full cursor-pointer items-center gap-2 text-left focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
+                aria-expanded={portsOpen}
+                onclick={() => {
+                  portsOpen = !portsOpen;
+                }}
+              >
+                <span class="min-w-0 flex-1">
+                  <span class="block text-sm">Ports</span>
+                  <span class="block text-xs text-muted-foreground">
+                    Which port each of the three servers asks for.
+                  </span>
+                </span>
+                <ChevronIcon
+                  class="size-4 shrink-0 text-muted-foreground transition-transform {portsOpen
+                    ? 'rotate-180'
+                    : ''}"
+                />
+              </button>
+
+              {#if portsOpen}
+                <div class="mt-3 space-y-3 border-l-2 border-border/60 pl-3">
+                  <dl class="grid grid-cols-3 gap-3">
+                    {#each [["UI", app.settings.ports.ui], ["Mirror", app.settings.ports.proxy], ["Control API", app.settings.ports.control]] as [label, port] (label)}
+                      <div class="space-y-1.5">
+                        <dt class="text-sm text-muted-foreground">{label}</dt>
+                        <dd><Badge variant="secondary" class="tabular font-mono">{port}</Badge></dd>
+                      </div>
+                    {/each}
+                  </dl>
+                  <p class="text-xs text-muted-foreground">
+                    Ports are read-only here. The daemon falls back to an ephemeral port when one of
+                    these is taken, so the numbers above are what was requested, not necessarily
+                    what is bound. Change them in settings.json and restart.
+                  </p>
+                </div>
+              {/if}
+            </div>
+          {/if}
         </div>
       </Card.Root>
-
-      {#if app.settings !== null}
-        <dl class="grid grid-cols-3 gap-3">
-          {#each [["UI", app.settings.ports.ui], ["Mirror", app.settings.ports.proxy], ["Control API", app.settings.ports.control]] as [label, port] (label)}
-            <div class="space-y-1.5">
-              <dt class="text-sm text-muted-foreground">{label}</dt>
-              <dd><Badge variant="secondary" class="tabular font-mono">{port}</Badge></dd>
-            </div>
-          {/each}
-        </dl>
-        <p class="text-sm text-muted-foreground">
-          Ports are read-only here. The daemon falls back to an ephemeral port when one of these is
-          taken, so the numbers above are what was requested, not necessarily what is bound. Change
-          them in settings.json and restart.
-        </p>
-      {/if}
     </section>
 
     <!-- History -->
@@ -281,21 +356,14 @@ async function askForNotifications(): Promise<void> {
       </div>
 
       <div class="divide-y divide-border border border-border">
-        <div class="flex items-start gap-4 px-4 py-3">
-          <div class="min-w-0 flex-1">
-            <p class="text-sm">Dark theme</p>
-            <p class="text-xs text-muted-foreground">
-              Applied before first paint, so the window never flashes the wrong one.
-            </p>
-          </div>
-          <Switch
-            checked={theme.current === "dark"}
-            onCheckedChange={(checked) => {
-              theme.set(checked ? "dark" : "light");
-            }}
-            aria-label="Dark theme"
-          />
-        </div>
+        <SettingSwitchRow
+          label="Dark theme"
+          description="Applied before first paint, so the window never flashes the wrong one."
+          checked={theme.current === "dark"}
+          onChange={(checked) => {
+            theme.set(checked ? "dark" : "light");
+          }}
+        />
 
         <div class="px-4 py-3">
           <p class="text-sm">Desktop notifications</p>

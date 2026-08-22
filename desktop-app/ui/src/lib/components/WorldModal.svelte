@@ -20,16 +20,23 @@
   as the default: opening from a location preselects that instance and starts on this tab, because
   that instance is still the reason the dialog was opened.
 
-  **The list is derived and it says so.** VRChat has no endpoint that enumerates a world's
-  instances, so this is built from friends' presence and the game clients on this machine. An
-  instance with nobody you know in it is invisible here, and the tab has to say that out loud
-  rather than let an empty list read as an empty world. See `WorldInstanceList`.
+  **The list is assembled and it says so.** VRChat has no endpoint that enumerates a world's
+  instances, so the daemon merges three partial sources: the world record read *once per signed-in
+  account* (its `instances` field is empty when unauthenticated and differs by who asked), friends'
+  presence, and the game clients on this machine. None is complete alone, so an instance no account
+  was shown and nobody you know is in does not appear here — and the tab says that out loud rather
+  than letting a short list read as an empty world. See `WorldInstanceList`.
+
+  Each row then reads its own instance record for the head count and the name somebody gave the
+  room. That is a request per row, which is affordable only because `instance-info.svelte.ts` queues
+  them three at a time and caches; see the note there on why fetching from render is safe now.
 
   **Every number here is one VRChat sent.** There is no vrc.zip score, rank, or "popularity out of
   ten" anywhere in this file, and adding one would be worse than showing nothing: a derived number
   rendered in the same list as `visits` and `favorites` reads as a fact of the same kind.
 -->
 <script lang="ts">
+import { tick } from "svelte";
 import CalendarIcon from "@lucide/svelte/icons/calendar";
 import DoorOpenIcon from "@lucide/svelte/icons/door-open";
 import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
@@ -40,6 +47,7 @@ import EntityModal, { type ModalTab } from "$lib/components/EntityModal.svelte";
 import FailureNote from "$lib/components/FailureNote.svelte";
 import JoinAffordance from "$lib/components/JoinAffordance.svelte";
 import PagedSection from "$lib/components/PagedSection.svelte";
+import RawJsonPanel from "$lib/components/RawJsonPanel.svelte";
 import RelativeTime from "$lib/components/RelativeTime.svelte";
 import UserName from "$lib/components/UserName.svelte";
 import WorldInstanceRow from "$lib/components/WorldInstanceRow.svelte";
@@ -79,6 +87,30 @@ const myLocations = $derived(
 );
 
 const youAreHere = $derived(worldModal.selected !== null && myLocations.has(worldModal.selected));
+
+/** The detail panel, so choosing a row from further down the list can bring the answer into view. */
+let panel = $state<HTMLElement | null>(null);
+
+/**
+ * Selecting an instance, and then showing the reader what they selected.
+ *
+ * The panel sits above the list, so picking the ninth row updates something off the top of the
+ * screen and looks like nothing happened. `tick()` first because the panel may not exist yet: a
+ * world opened without a location has no selection, so the very first pick is what creates it.
+ *
+ * `scrollIntoView` acts on the nearest scrollable ancestor, which is `EntityModal`'s body, so this
+ * moves the dialog rather than the page behind it.
+ */
+async function chooseInstance(location: string): Promise<void> {
+  worldModal.selectInstance(location);
+  await tick();
+  panel?.scrollIntoView({
+    // A jump for anyone who has asked the OS for less motion; the movement is the point, not the
+    // animation, and this is a small enough courtesy to be worth the one line.
+    behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+    block: "start",
+  });
+}
 
 /**
  * The count on the Instances tab.
@@ -239,10 +271,16 @@ const INSTANCE_BODIES: Record<string, string> = {
       list is *for*: the rows are how you choose, this is the answer.
     -->
     {#if worldModal.hasInstance}
-      <section class="space-y-2 border border-border bg-muted/30 px-3 py-3">
+      <section bind:this={panel} class="space-y-2 border border-border bg-muted/30 px-3 py-3">
       <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
         <p class="text-xs tracking-wide text-muted-foreground uppercase">This instance</p>
-        <span class="tabular text-sm font-medium">{parsed.label}</span>
+        {#if instance?.displayName}
+          <!-- The room's own name when it has one, with the number kept beside it. -->
+          <span class="min-w-0 truncate text-sm font-medium">{instance.displayName}</span>
+          <span class="tabular text-xs text-muted-foreground">{parsed.label}</span>
+        {:else}
+          <span class="tabular text-sm font-medium">{parsed.label}</span>
+        {/if}
         <Badge variant="outline" class="tracking-wide uppercase">
           {accessLabel(parsed.access)}
         </Badge>
@@ -379,8 +417,9 @@ const INSTANCE_BODIES: Record<string, string> = {
             instance={entry}
             selected={entry.location === worldModal.selected}
             youAreHere={myLocations.has(entry.location)}
+            accountsConsulted={worldModal.accountsConsulted}
             accountId={worldModal.accountId}
-            onSelect={(location) => worldModal.selectInstance(location)}
+            onSelect={(location) => void chooseInstance(location)}
           />
         {/snippet}
       </PagedSection>
@@ -482,6 +521,7 @@ const INSTANCE_BODIES: Record<string, string> = {
 
   <!-- Raw JSON ---------------------------------------------------------------- -->
   <Tabs.Content value="raw" class="space-y-4">
+    <RawJsonPanel json={raw} copyLabel="World details" />
     <EntityFooter
       id={worldModal.worldId}
       href={worldModal.worldId === null

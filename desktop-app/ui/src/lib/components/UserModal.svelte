@@ -28,6 +28,7 @@ import ErrorNote from "$lib/components/ErrorNote.svelte";
 import EventRow from "$lib/components/EventRow.svelte";
 import FailureNote from "$lib/components/FailureNote.svelte";
 import LocationLine from "$lib/components/LocationLine.svelte";
+import RawJsonPanel from "$lib/components/RawJsonPanel.svelte";
 import RelativeTime from "$lib/components/RelativeTime.svelte";
 import RepresentedGroup from "$lib/components/RepresentedGroup.svelte";
 import SearchField from "$lib/components/SearchField.svelte";
@@ -683,20 +684,6 @@ const TAB_FAILURE_BODIES: Record<string, string> = {
 
   <!-- Raw -------------------------------------------------------------------- -->
   <Tabs.Content value="raw" class="space-y-2">
-    <div class="flex items-center gap-2">
-      <p class="text-xs text-muted-foreground">
-        Exactly what the daemon sent, plus what vrc.zip added. Nothing here is interpreted.
-      </p>
-      <Button
-        variant="outline"
-        size="xs"
-        class="ml-auto shrink-0"
-        onclick={() => void copyText("Details", raw)}
-      >
-        Copy
-      </Button>
-    </div>
-    <pre
-      class="max-w-full overflow-x-auto border border-border bg-muted/40 p-3 font-mono text-xs leading-relaxed">{raw}</pre>
+    <RawJsonPanel json={raw} copyLabel="Details" />
   </Tabs.Content>
 </EntityModal>

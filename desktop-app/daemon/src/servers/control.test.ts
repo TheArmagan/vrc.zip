@@ -90,9 +90,13 @@ const PENDING_CONSENT: PendingPluginConsentSummary = {
   source: "/tmp/notes",
   requestedAt: 1_700_000_000_000,
   isUpdate: true,
-  scopes: ["friends:read", "invite:send"],
-  newScopes: ["invite:send"],
-  capabilities: ["storage"],
+  scopes: [
+    { scope: "friends:read", description: "Read your friends list.", dangerous: false, isNew: false },
+    { scope: "invite:send", description: "Send invites.", dangerous: true, isNew: true },
+  ],
+  capabilities: [
+    { scope: "storage", description: "Keep its own data here.", dangerous: false, isNew: false },
+  ],
   events: ["friend.*"],
   fetchDomains: [],
   accountMode: "many",
@@ -2524,7 +2528,6 @@ describe("plugin management", () => {
         id: "pc1",
         pluginId: "acme.notes",
         isUpdate: true,
-        newScopes: ["invite:send"],
         accountMode: "many",
       }),
     ]);

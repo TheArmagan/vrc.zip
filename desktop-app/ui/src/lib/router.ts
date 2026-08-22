@@ -22,6 +22,9 @@ export const ROUTE_IDS = [
   // `#/apps` — standing app access, and the kill switch. The consent route above is one moment;
   // this is what is still connected afterwards.
   "apps",
+  // `#/plugins` — installs waiting to be approved, and what is installed. Both on one screen,
+  // unlike apps: a plugin install is something the user started here, seconds ago.
+  "plugins",
   "settings",
 ] as const;
 

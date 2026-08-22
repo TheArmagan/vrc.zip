@@ -243,6 +243,21 @@ const PRELUDE_BODY = `
   // ---------------------------------------------------------------------------------------------
 
   var frameHandler = null;
+  /*
+   * Frames that arrived before the plugin attached a handler.
+   *
+   * Measured, not theorised: the host sends a lifecycle activate frame as soon as it sees hello,
+   * and hello goes out before the bundle is imported. A plugin that registers its handler during
+   * module evaluation - which is what definePlugin does, and what every plugin will do - can
+   * therefore miss its own activation frame. Dropping it meant a 15s activation timeout, a restart,
+   * and a plugin that only worked on the second attempt.
+   *
+   * Capped, because an unbounded queue for a plugin that never attaches is a slow leak. Sixteen is
+   * far more than the handful of frames that can precede attachment; past it the oldest goes and
+   * says so.
+   */
+  var buffered = [];
+  var BUFFER_LIMIT = 16;
 
   var host = freeze({
     pluginId: pluginId,
@@ -261,6 +276,16 @@ const PRELUDE_BODY = `
     },
     onFrame: function (fn) {
       frameHandler = typeof fn === "function" ? fn : null;
+      if (frameHandler === null || buffered.length === 0) return;
+      var queued = buffered;
+      buffered = [];
+      for (var i = 0; i < queued.length; i++) {
+        try {
+          frameHandler(queued[i]);
+        } catch (e) {
+          note("[vrc.zip] the frame handler threw on a buffered frame:", e);
+        }
+      }
     },
     log: function (message) {
       note(show(message));
@@ -302,7 +327,11 @@ const PRELUDE_BODY = `
 
     var handler = frameHandler;
     if (handler === null) {
-      note("[vrc.zip] no handler is attached for a", String(frame.t), "frame");
+      if (buffered.length >= BUFFER_LIMIT) {
+        buffered.shift();
+        note("[vrc.zip] dropped a host frame that arrived before a handler was attached");
+      }
+      buffered.push(frame);
       return;
     }
     try {

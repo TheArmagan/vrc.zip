@@ -428,7 +428,7 @@ for the life of the product.
       before adding any dependency to the published package**: importing the package root made a
       plugin uninstallable, because zod reaches the bundle and the deny-scan refuses it.
       **Not yet done:** 3.4's per-plugin budget readout, which needs a plugin screen to live on.
-- [ ] **3.8 Consent and management UI** — the account picker, the dangerous block behind a second
+- [~] **3.8 Consent and management UI** — the account picker, the dangerous block behind a second
       toggle, hold-to-confirm, grants keyed immutably by
       `(pluginId, version, grantHash)`, and the dry-run lift as an explicit per-plugin per-scope
       gesture with the dry-run log beside it as evidence (decision 109).
@@ -438,6 +438,13 @@ for the life of the product.
       hold-to-confirm applies to **every** install now that signing is cut and no tier distinguishes
       anything, so `ui/` owes a press-and-hold primitive with a keyboard path; and the UI installs
       from a local path only, leaving the pinned git URL as 3.5's outstanding item.
+      **Built** (decisions 187–189): migration 011 makes `permissions.events` enforceable, install
+      parks on a consent broker that narrows and never widens, and `#/plugins` carries both the
+      sheet and the management list with a real `HoldToConfirm`. Verified against a running daemon:
+      a dangerous scope left unticked is absent from the stored grant, `ctx.storage` round-trips,
+      and uninstall deletes the data directory. **Not yet done:** the dry-run lift gesture, the
+      per-plugin budget readout (3.4's outstanding item), and decision 61's second alert channel for
+      when no UI client is connected — today that is a log line.
 - [ ] **3.9 Declarative UI renderer** — forms, tables, dialogs, context menus and
       per-node click handlers. Charts follow rather than ship with it (decision 110).
       **Scoped by decision 182:** the tree rides `/api/stream` as a new frame type carrying a
@@ -2621,6 +2628,39 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      expires in five minutes, which is the minimum honest thing while the sheet does not exist —
      decision 61's two-channel treatment (a Web Notification when a UI client is connected, an OS
      notification and a browser when none is) belongs with the screen it would open.
+
+189. **3.8's UI, and a race only a live run could find.** The consent sheet and the plugin
+     management page are one screen (`#/plugins`), unlike the app world's split between `#/consent`
+     and `#/apps`. That split exists because an app's consent arrives unprompted from a separate
+     process; a plugin install is something the user started on this page seconds ago, so sending
+     them elsewhere to answer it would be navigation for its own sake.
+
+     **`HoldToConfirm` is the new primitive**, and it guards both installing and uninstalling. A
+     hold rather than the Connected apps page's two-click arm, because an arm is undone by a second
+     click in the same place, which a person clicking through a flow produces without reading. Its
+     keyboard path is Space/Enter with `event.repeat` ignored — without that, key repeat restarts
+     the countdown on every repeat and the button reads as broken.
+
+     **Dangerous scopes start unticked**, and the sheet always sends its lists explicitly. Omitting
+     them would mean "everything asked for" at the daemon, which would silently grant exactly what
+     the sheet had left off. Verified against a running daemon: a plugin requesting `friends:read`
+     *and* `invite:send` was approved with the dangerous one unticked, and the stored grant carries
+     `["friends:read"]`.
+
+     **The race.** `lifecycle: activate` is sent as soon as the host sees `hello`, and `hello` goes
+     out *before* the bundle is imported — so a plugin registering its handler during module
+     evaluation, which is what `definePlugin` does and what every plugin will do, could miss its own
+     activation frame. The observed result was "no handler is attached for a lifecycle frame", a
+     15-second activation timeout, a restart, and a plugin that worked on the *second* attempt. The
+     prelude now buffers host frames until a handler attaches (capped at 16, oldest dropped with a
+     note). After the fix: `restarts: 0`, no failure, activated first try.
+
+     **This is the third time in Phase 3 that running the thing found what tests did not** — after
+     the verify-on-load defect (173) and the zod-in-the-bundle defect (186). All three were invisible
+     to a green suite because the suite drove the pieces rather than the sequence.
+
+     Also verified end to end on the same run: `ctx.storage` round-tripped a value through the real
+     dispatcher, gate and per-plugin SQLite file; uninstall deleted `plugin-data/<id>/`.
 
 ---
 

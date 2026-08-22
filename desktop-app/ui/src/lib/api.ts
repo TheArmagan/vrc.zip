@@ -592,6 +592,80 @@ export interface ConnectedApp {
   readonly budgets: readonly AppBudget[];
 }
 
+/**
+ * One installed plugin, as the plugins page renders it.
+ *
+ * `scopes` and `accountIds` are what the **grant** carries, not what the manifest asked for. The
+ * difference is the whole point of the consent sheet: a user who unticked something must see the
+ * narrower list here, or the page is reporting the request rather than the approval.
+ */
+export interface InstalledPlugin {
+  readonly id: string;
+  readonly name: string;
+  readonly version: string;
+  readonly publisher: string;
+  /** The supervisor's own word: `idle`, `starting`, `running`, `backoff`, `disabled`, … */
+  readonly state: string;
+  readonly installedAt: number;
+  readonly disabledReason: string | null;
+  /** `user` or `crash-loop` — whether a person or the daemon turned it off. */
+  readonly disabledBy: string | null;
+  readonly restarts: number;
+  readonly rssBytes: number | null;
+  readonly lastFailure: string | null;
+  /**
+   * Why this plugin's bundle would not load, when it would not.
+   *
+   * Distinct from `disabledReason`: a tampered artifact is not a disable, it is a refusal to run a
+   * file that no longer matches the hash it was installed under.
+   */
+  readonly refusal: string | null;
+  readonly scopes: readonly string[];
+  readonly accountIds: readonly string[];
+}
+
+/**
+ * One install waiting for an answer.
+ *
+ * The request is **parked on a socket** while this exists: the daemon's `POST /api/plugins` returns
+ * only once this is approved or denied, or five minutes pass. So a sheet that renders this and
+ * never answers it is a sheet that times the user's install out.
+ */
+export interface PendingPluginConsent {
+  readonly id: string;
+  readonly pluginId: string;
+  readonly name: string;
+  readonly version: string;
+  readonly publisher: string;
+  readonly description: string | null;
+  /** Where it is being installed from, so "which copy is this" has an answer. */
+  readonly source: string;
+  readonly requestedAt: number;
+  readonly isUpdate: boolean;
+  /**
+   * Every scope requested, described and flagged — the same shape the app consent sheet renders.
+   *
+   * `isNew` is the escalation highlight: on an update it marks what the last approved grant did not
+   * have, and on a first install nothing is new.
+   */
+  readonly scopes: readonly ConsentScope[];
+  readonly capabilities: readonly ConsentScope[];
+  readonly events: readonly string[];
+  readonly fetchDomains: readonly string[];
+  readonly accountMode: string;
+  readonly accountsOptional: boolean;
+  readonly performance: string;
+}
+
+/** What the sheet sends back. Every list narrows the request; none may exceed it. */
+export interface PluginConsentChoice {
+  readonly accountIds: readonly string[];
+  /** Omit for "everything asked for". `[]` means none of it — the two are not the same. */
+  readonly scopes?: readonly string[];
+  readonly capabilities?: readonly string[];
+  readonly events?: readonly string[];
+}
+
 /** One risky scope's hourly allowance for one app, as the Connected apps card edits it. */
 export interface AppBudget {
   readonly scope: string;
@@ -1221,6 +1295,69 @@ export const api = {
         query: { limit: query.limit, before: query.before },
         ...withSignal(signal),
       }),
+  },
+
+  /**
+   * Plugins: what is installed, and what is waiting to be installed.
+   *
+   * Note the shape of `install`. It **blocks** — the daemon parks the request until someone answers
+   * the consent sheet — so it is the one call in this file that can legitimately take minutes, and
+   * the caller must not race it with a timeout of its own. `pending()` is how the sheet finds the
+   * question that request is waiting on.
+   */
+  plugins: {
+    list: (signal?: AbortSignal): Promise<InstalledPlugin[]> =>
+      request<InstalledPlugin[]>("/plugins", withSignal(signal)),
+
+    /** Resolves when the install is approved and started, or rejects with the daemon's sentence. */
+    install: (path: string, accountIds: readonly string[] = []): Promise<InstalledPlugin> =>
+      request<InstalledPlugin>("/plugins", {
+        method: "POST",
+        body: { path, accountIds: [...accountIds] },
+      }),
+
+    enable: (pluginId: string): Promise<InstalledPlugin> =>
+      request<InstalledPlugin>(`/plugins/${encodeURIComponent(pluginId)}/enable`, {
+        method: "POST",
+      }),
+
+    disable: (pluginId: string): Promise<InstalledPlugin> =>
+      request<InstalledPlugin>(`/plugins/${encodeURIComponent(pluginId)}/disable`, {
+        method: "POST",
+      }),
+
+    /**
+     * Removes the plugin, and its data unless `keepData`.
+     *
+     * Deleting is the default because it is what a person means by "uninstall"; `keepData` is the
+     * reinstall case, where losing a plugin's settings to replace it with a newer copy of itself
+     * would be a surprise.
+     */
+    uninstall: (pluginId: string, options: { keepData?: boolean } = {}): Promise<void> =>
+      request<void>(`/plugins/${encodeURIComponent(pluginId)}`, {
+        method: "DELETE",
+        query: { keepData: options.keepData === true ? "1" : undefined },
+      }),
+
+    pending: (signal?: AbortSignal): Promise<PendingPluginConsent[]> =>
+      request<PendingPluginConsent[]>("/plugins/pending", withSignal(signal)),
+
+    /** Answers a parked install. The install request itself is what returns the outcome. */
+    approve: (id: string, choice: PluginConsentChoice): Promise<void> =>
+      request<void>(`/plugins/pending/${encodeURIComponent(id)}/approve`, {
+        method: "POST",
+        body: {
+          accountIds: [...choice.accountIds],
+          // Spread, because omitted and empty are different answers: omitted means "everything
+          // asked for", `[]` means "none of it".
+          ...(choice.scopes === undefined ? {} : { scopes: [...choice.scopes] }),
+          ...(choice.capabilities === undefined ? {} : { capabilities: [...choice.capabilities] }),
+          ...(choice.events === undefined ? {} : { events: [...choice.events] }),
+        },
+      }),
+
+    deny: (id: string): Promise<void> =>
+      request<void>(`/plugins/pending/${encodeURIComponent(id)}/deny`, { method: "POST" }),
   },
 
   /*

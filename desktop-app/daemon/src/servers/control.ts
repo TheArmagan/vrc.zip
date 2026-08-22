@@ -822,10 +822,15 @@ export interface PendingPluginConsentSummary {
   source: string;
   requestedAt: number;
   isUpdate: boolean;
-  scopes: string[];
-  /** Scopes this version asks for that the last approved one did not. Rendered first. */
-  newScopes: string[];
-  capabilities: string[];
+  /**
+   * Every scope requested, described and flagged, in the same shape the app consent sheet uses.
+   *
+   * Enriched here rather than in the UI because the descriptions live in the shared registry and
+   * the capability ones live in `@vrcz/plugin-api`, which `ui/` does not depend on. One sheet
+   * component can then render both lists.
+   */
+  scopes: ConsentScope[];
+  capabilities: ConsentScope[];
   events: string[];
   fetchDomains: string[];
   /** `one` or `many` — how many accounts the picker may let the user choose. */

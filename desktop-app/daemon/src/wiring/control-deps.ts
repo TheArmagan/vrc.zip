@@ -16,6 +16,7 @@ import type {
   User,
   World,
 } from "@vrcz/api/types";
+import { PLUGIN_CAPABILITIES } from "@vrcz/plugin-api";
 import {
   isScope,
   type JsonValue,
@@ -2406,9 +2407,22 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
             source: entry.source,
             requestedAt: entry.requestedAt,
             isUpdate: entry.isUpdate,
-            scopes: [...permissions.scopes],
-            newScopes: [...entry.newScopes],
-            capabilities: [...permissions.capabilities],
+            scopes: permissions.scopes.map((scope) => ({
+              scope,
+              description: isScope(scope) ? SCOPES[scope].description : scope,
+              // An unrecognised scope shows as dangerous: the safe direction to be wrong in, and
+              // visible rather than silent.
+              dangerous: isScope(scope) ? SCOPES[scope].dangerous : true,
+              // The escalation highlight. On a first install nothing is new, and on an update this
+              // is what the last approved grant did not have.
+              isNew: entry.newScopes.includes(scope),
+            })),
+            capabilities: permissions.capabilities.map((capability) => ({
+              scope: capability,
+              description: PLUGIN_CAPABILITIES[capability].description,
+              dangerous: PLUGIN_CAPABILITIES[capability].dangerous,
+              isNew: false,
+            })),
             events: [...permissions.events],
             fetchDomains: [...permissions.fetch.domains],
             accountMode: permissions.accounts.mode,

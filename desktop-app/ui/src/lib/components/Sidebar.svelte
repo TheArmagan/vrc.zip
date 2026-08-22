@@ -18,6 +18,7 @@ import UsersRoundIcon from "@lucide/svelte/icons/users-round";
 import { Badge } from "$lib/components/ui/badge/index.js";
 import { Separator } from "$lib/components/ui/separator/index.js";
 import KeyRoundIcon from "@lucide/svelte/icons/key-round";
+import PlugIcon from "@lucide/svelte/icons/plug";
 import PlugZapIcon from "@lucide/svelte/icons/plug-zap";
 import { hrefFor, type RouteId } from "$lib/router.ts";
 import { app } from "$lib/state/app.svelte.ts";
@@ -67,6 +68,7 @@ const items: readonly NavItem[] = [
     badgeTitle: "Apps waiting for you to approve them",
   },
   { id: "apps", label: "Connected apps", icon: KeyRoundIcon },
+  { id: "plugins", label: "Plugins", icon: PlugIcon },
   { id: "settings", label: "Settings", icon: SettingsIcon },
 ];
 </script>

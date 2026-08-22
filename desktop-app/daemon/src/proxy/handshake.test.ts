@@ -544,13 +544,15 @@ describe("device trust", () => {
 });
 
 describe("the rest of the mirror", () => {
-  test("a known operation says it is not built yet, and names itself", async () => {
+  test("a known operation with no pass-through deps says so, rather than half-working", async () => {
+    // These `deps` carry no `passthrough`, which is the shape before first-run setup: there is no
+    // honest User-Agent yet, so nothing may reach VRChat at all. See `proxy/passthrough.ts` for the
+    // authorised path, which has its own suite.
     const response = await fetchProxy("/users/usr_bob", { headers: { "User-Agent": UA } });
 
-    expect(response.status).toBe(501);
-    const body = (await response.json()) as { error: { operationId: string; scope: string } };
-    expect(body.error.operationId).toBe("getUser");
-    expect(body.error.scope).toBe("users:read");
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("not_ready");
   });
 
   test("an unknown path is VRChat's real 404, not a catch-all's guess", async () => {

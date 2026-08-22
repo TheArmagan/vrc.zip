@@ -13,9 +13,17 @@ next**, and three calls are already made for it: register every operation the ro
 the hard denials, always hit upstream rather than serving a cached body (a re-encoded body is not
 byte-faithful), and share the per-account bucket FIFO with a subordinate per-grant budget.
 
-The forward proxy on `:7776` landed on 2026-08-22 (2.11): apps that can only be *configured* with a
-proxy, VRCX above all, now reach the mirror without knowing it exists. It is a delivery mechanism for
-`:7774`, so **2.7 is still what makes any of it answer something other than 501.**
+**2.7 and 2.11 both landed on 2026-08-22, and together they make the mirror usable by a real
+client.** 2.11 is the forward proxy on `:7776`, for apps that can only be *configured* with a proxy
+rather than pointed at a base URL — VRCX above all, since it drives its HTTP through Chromium. 2.7 is
+the pass-through behind it: an operation is authorised against its grant and re-originated through
+the bound account's pipeline, with the upstream response returned untouched. Verified end to end
+against VRCX, which now gets past `GET /config` and into the consent handshake.
+
+**2.9 is the next real gap for a VRCX-shaped client**: the pipeline mirror does not exist, so
+`pipeline.vrchat.cloud` is in the intercept set but has nothing to answer it. Dropping that host from
+`forwardProxy.interceptHosts` leaves an app's event socket pointed at real VRChat while its REST
+calls come from vrc.zip, which is the useful posture until then.
 
 Before resuming 2.7, a foundations pass landed: the duplicated types and constants are hoisted into
 `@vrcz/shared` and the producers are typed against them (decisions 62, 63, 65, 66), `ui/` has a test
@@ -168,10 +176,12 @@ handshake, because the alternative is a login flow that mints credentials with n
       means the app raises its own sheet plus a Web Notification, and nothing connected means the
       daemon raises an **OS notification** and opens the browser on the consent screen
       (`os/desktop-notification.ts`, `os/open-url.ts`, `wiring/consent-alert.ts`). Decisions 59–61.
-- [ ] **2.7 Mirror routes** — one Hono route per operation from the generated route table, never a
-      catch-all, so an unknown path falls through to VRChat's real 404 and a route with no scope
-      mapping fails to register. `scopeGuard` off the route table, hard denials regardless of scope,
-      upstream `Response` passed through untouched.
+- [x] **2.7 Mirror routes** (`proxy/passthrough.ts`) — an operation the route table knows is
+      authorised against the caller's grant and then re-originated through the bound account's own
+      request pipeline, with the upstream `Response` returned untouched. Hard denials refuse with any
+      scope; a missing scope is a 403 naming it; an operation the spec marks unauthenticated needs no
+      grant **if it is a read** (decision 76). One handler behind `matchRoute` rather than 297
+      registered Hono routes — decision 74. Decisions 74–76.
 - [x] **2.11 Forward proxy** (`:7776`, `daemon/src/forward-proxy/`) — a real HTTP proxy an app is
       *configured* with, for the apps that cannot be pointed at a different base URL. VRCX is the
       motivating case: it drives its HTTP through Chromium, which takes `--proxy-server=` and nothing
@@ -712,6 +722,34 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     cannot set a proxy, cannot send `CONNECT`, and cannot write an absolute-form request line. Making
     that the non-routing case is what keeps a drive-by page off the mirror structurally, rather than
     by a header check it could satisfy.
+
+74. **The pass-through is one handler behind `matchRoute`, not 297 registered Hono routes.**
+    `PLAN.md` §1.8 asked for per-operation registration, for two properties: an unknown path must
+    reach VRChat's real 404 rather than a catch-all's guess, and an operation with no scope mapping
+    must fail to register. Both already hold — `matchRoute` returns null for a path the table does
+    not know, and the codegen test asserts every operation maps to exactly one scope — so registering
+    the table into Hono would buy nothing and cost something real: it would have to translate
+    `/instances/{worldId}:{instanceId}`, two parameters and a separator inside one segment, into a
+    router whose matching rules differ from the table's. Two matchers that have to agree is a worse
+    position than one, and the one we have is the codegen-derived, tested one.
+
+75. **The request is re-originated, never relayed.** The app's `Cookie`, `Authorization`,
+    `User-Agent` and `Origin` are all discarded and the daemon substitutes the bound account's real
+    jar and vrc.zip's own UA, so VRChat sees a vrc.zip request — which is what it is. Forwarded
+    headers are an **allowlist** (`content-type`, `accept`, `accept-language`, the two conditionals,
+    `range`) rather than a blocklist, because the failure directions are not symmetric: a header we
+    forget to forward is a feature that does not work, and a header we forget to strip can be a
+    credential reaching VRChat on the user's behalf.
+
+76. **The spec's `security` list is not a safety judgement, so the no-grant path is reads only.**
+    `GET /config` has to work without a grant — a VRChat client fetches it *before* it logs in, so
+    requiring one deadlocks every real client against a handshake it has not run, and this is exactly
+    where VRCX stopped. But 16 operations carry `security: []` in v1.20.8 and two of them are
+    `POST /auth/register` and `POST /worlds`. Reading that field alone would let an app create a
+    world through the mirror with no grant, no consent sheet, and no scope. VRChat would reject the
+    sessionless request, so it is a hole in intent rather than in effect — and a hole in intent stops
+    being harmless the moment the spec is regenerated. Requiring a grant for anything that is not a
+    read closes it once, including for operations added later.
 
 ---
 

@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { launchUrl as buildLaunchUrl, DEFAULT_HOSTNAME } from "@vrcz/shared";
+import { CookieJar } from "./accounts/cookie-jar.ts";
 import { AccountManager } from "./accounts/manager.ts";
 import { NotificationService } from "./accounts/notifications.ts";
 import { PresenceService } from "./accounts/presence.ts";
@@ -32,6 +33,9 @@ import { publishPipelineEvent } from "./wiring/pipeline-bridge.ts";
  *
  * Startup order is load-bearing in two places, both noted below.
  */
+
+/** See the `anonymousJar` comment in `startDaemon`. Never collides: real ids are `usr_<uuid>`. */
+const ANONYMOUS_ACCOUNT_ID = "vrczip:anonymous";
 
 export interface DaemonOptions {
   readonly env?: NodeJS.ProcessEnv;
@@ -218,6 +222,13 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
   // built here, above the control deps, because both sides read the same instance.
   const consent = new ConsentRegistry({ store, bus });
 
+  // The identity unauthenticated pass-through calls are charged to. Not a real account and never
+  // one: it exists so `GET /config` — which a VRChat client fetches *before* it logs in, and which
+  // would therefore deadlock against the consent handshake if it needed a grant — still passes
+  // through the rate limiter. Its own bucket, so a burst of public calls cannot starve a real
+  // account, while the per-IP ceiling still sees every one of them.
+  const anonymousJar = new CookieJar();
+
   const proxyDeps = {
     consent,
     grants: store,
@@ -227,10 +238,27 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
         ? null
         : { id: account.id, displayName: account.user?.displayName ?? account.username };
     },
-    // The account's own cached `CurrentUser`. §2.7 replaces this with a real proxied response, at
-    // which point byte-fidelity starts mattering; on the handshake there are no upstream bytes to
-    // be faithful to, because the login never reaches VRChat.
+    // The account's own cached `CurrentUser`. Still synthesised rather than proxied, and correctly
+    // so: on the handshake there are no upstream bytes to be faithful to, because the login never
+    // reaches VRChat. Byte-fidelity starts at `passthrough` below.
     currentUser: (accountId: string) => accounts.get(accountId)?.user ?? null,
+    passthrough: {
+      grants: store,
+      context: (accountId: string) => accounts.get(accountId)?.context() ?? null,
+      // A cookie jar of its own, created once and never fed a `Set-Cookie` that matters: the
+      // unauthenticated endpoints have no session to keep, and sharing a real account's jar would
+      // attach a signed-in user to a call that did not need one.
+      anonymousContext: () =>
+        userAgent === null
+          ? null
+          : {
+              accountId: ANONYMOUS_ACCOUNT_ID,
+              jar: anonymousJar,
+              userAgent,
+              limiter,
+              ...(options.baseUrl !== undefined ? { baseUrl: options.baseUrl } : {}),
+            },
+    },
   };
 
   const deps = createControlDeps({

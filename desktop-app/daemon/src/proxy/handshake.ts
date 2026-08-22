@@ -29,6 +29,7 @@ import {
   parseBasicAuth,
   parseScopeRequest,
 } from "./identity.ts";
+import type { PassthroughDeps } from "./passthrough.ts";
 import {
   invalidCredentials,
   missingCredentials,
@@ -63,6 +64,12 @@ export interface ProxyDeps {
    * stays a dep so that change lands in one place.
    */
   readonly currentUser: (accountId: string) => unknown | null;
+  /**
+   * The pass-through's collaborators. Absent before first-run setup, when there is no honest
+   * User-Agent and so nothing may reach VRChat — every non-handshake route answers 503 then, rather
+   * than sending a request VRChat would reject with `waf_code 13799` anyway.
+   */
+  readonly passthrough?: PassthroughDeps | undefined;
   readonly now?: (() => number) | undefined;
 }
 

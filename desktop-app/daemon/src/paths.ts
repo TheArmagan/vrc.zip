@@ -87,3 +87,39 @@ export function tlsDir(env?: NodeJS.ProcessEnv): string {
 export function settingsPath(env?: NodeJS.ProcessEnv): string {
   return join(stateDir(env), "settings.json");
 }
+
+/**
+ * Where installed plugins live: `plugins/<id>/`.
+ *
+ * Content-addressed inside — `plugins/<id>/<sha256>.js` — so the artifact that actually runs is
+ * named by its own hash and is verified on every load (PLAN.md §"Install-time compilation"). Two
+ * consequences worth stating: an update leaves the old artifact on disk under its own name until
+ * something prunes it, which is what makes a rollback a rename rather than a rebuild; and a
+ * tampered file cannot be loaded under the name it was installed as, because the name *is* the
+ * hash.
+ */
+export function pluginsDir(env?: NodeJS.ProcessEnv): string {
+  return join(stateDir(env), "plugins");
+}
+
+/** One plugin's installed artifacts. `id` has already been validated by the manifest schema. */
+export function pluginDir(id: string, env?: NodeJS.ProcessEnv): string {
+  return join(pluginsDir(env), id);
+}
+
+/**
+ * One plugin's own data directory, holding its own SQLite file and nothing of ours.
+ *
+ * Separate from {@link pluginDir} rather than a subdirectory of it, and that separation is the
+ * point: uninstall is `rm -rf` on the code, and *keeping* the data across an uninstall-reinstall is
+ * then a decision someone makes rather than an accident of layout. It is also what lets the quota
+ * be a `stat` on one directory (PLAN.md §"Manifest, lifecycle, storage").
+ */
+export function pluginDataDir(id: string, env?: NodeJS.ProcessEnv): string {
+  return join(stateDir(env), "plugin-data", id);
+}
+
+/** One plugin's SQLite file. Its own database — a plugin cannot lock or corrupt the daemon's WAL. */
+export function pluginDatabasePath(id: string, env?: NodeJS.ProcessEnv): string {
+  return join(pluginDataDir(id, env), "plugin.sqlite");
+}

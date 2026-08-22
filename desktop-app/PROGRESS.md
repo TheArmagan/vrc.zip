@@ -785,6 +785,26 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     pairing code being a consent credential. Startup warns when it is on, since what survives
     redaction still shows which accounts and apps are in use.
 
+80. **The `User-Agent` rule was rejecting clients VRChat itself accepts.** `PLAN.md` read VRChat's
+    *mandate* of `AppName/Version contact` as something to enforce, so anything else got VRChat's
+    `waf_code 13799` 403 — "the correct behaviour to teach". It was not: VRCX sends
+    `VRCX 2026.07.18`, no slash and no contact, and works fine against the real API. The proxy was
+    teaching something false and locking out the client the mirror most exists to serve, at the very
+    first request of a login.
+
+    The parse is now best-effort over the shapes real clients send, and the **contact is optional**.
+    That costs nothing, which is the part worth remembering: the app's UA never reaches VRChat, because
+    the request pipeline always substitutes `vrc.zip/<version> (<user contact>)` so traffic is honestly
+    attributed. The contact was therefore never part of VRChat compliance — it only labelled a consent
+    sheet, and a name and version label one fine. A placeholder contact is dropped to empty rather than
+    failing the app, the same judgement as before applied to a now-optional field.
+
+    The half of the old rule that survives is a UA naming **no app at all**: absent, or a bare HTTP
+    library (`python-requests`, `curl`, `okhttp`, …). Those name a library rather than something a
+    user could recognise on a consent sheet, and VRChat's WAF really does block several — so that 403
+    is both byte-faithful and true. The consent screen renders a missing contact and a missing version
+    explicitly, rather than trailing off into nothing.
+
 ---
 
 ## Gotchas

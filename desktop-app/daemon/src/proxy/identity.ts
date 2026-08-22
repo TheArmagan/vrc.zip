@@ -24,36 +24,111 @@ export interface AppIdentity {
 }
 
 /**
- * Parses `AppName/1.2.3 contact@example.com` — VRChat's own mandated shape, with the contact
- * optionally in parentheses, which is how most clients in the wild actually write it.
+ * Version-shaped: `1.2.3`, `v2`, `2026.07.18`, `1.0.0-beta.2`. Starts with a digit after an
+ * optional `v`, which is enough to tell a version from the rest of a User-Agent.
+ */
+const VERSION_LIKE = /^v?\d[\w.\-+]*$/;
+
+/**
+ * HTTP libraries advertising themselves rather than an app.
  *
- * Returns null for anything that does not carry all three parts. A UA that is merely *unusual* is
- * fine; a UA that cannot identify who to blame is not, because it is the whole consent subject.
+ * These are the only User-Agents still refused, and refusing them is the half of the old strict rule
+ * worth keeping: they name a library, not something a user could recognise on a consent sheet, and
+ * VRChat's own WAF blocks several of them outright — so an app that gets a 403 here learns something
+ * true about what will happen in production.
+ */
+const GENERIC_CLIENTS = [
+  "python-requests",
+  "python-urllib",
+  "urllib",
+  "axios",
+  "curl",
+  "wget",
+  "node-fetch",
+  "got",
+  "okhttp",
+  "go-http-client",
+  "java",
+  "apache-httpclient",
+  "libwww-perl",
+  "postmanruntime",
+  "insomnia",
+  "restsharp",
+  "httpie",
+  "bun",
+  "undici",
+];
+
+/**
+ * Parses the app's User-Agent into the triple a consent sheet names it by.
+ *
+ * **The strict `Name/Version contact` form was rejecting clients VRChat itself accepts.** VRCX sends
+ * `VRCX 2026.07.18` — a space, no slash, no contact — and works fine against the real API, so
+ * answering it with `waf_code 13799` taught something false and made the mirror unreachable for the
+ * app it most needed to serve. Anything that names *something* is now accepted, and the shape is
+ * parsed on a best-effort basis rather than demanded.
+ *
+ * **A missing contact costs nothing, which is why it is no longer required.** The app's User-Agent
+ * never reaches VRChat: the request pipeline always substitutes `vrc.zip/<version> (<user contact>)`
+ * so traffic is attributed to the thing actually making it (PLAN.md §Phase 2 Enforcement). So the
+ * contact here was never part of VRChat compliance — it only ever labelled a consent sheet, and a
+ * name and version label one perfectly well. A placeholder contact is dropped to empty rather than
+ * failing the whole app, which is the same judgement as before applied to a now-optional field.
+ *
+ * Still refused: nothing at all, and a bare HTTP library name. Both are cases where there is no app
+ * to put in front of the user, which is what the consent gesture needs.
  */
 export function parseAppIdentity(userAgent: string | null | undefined): AppIdentity | null {
   if (userAgent === null || userAgent === undefined) return null;
   const trimmed = userAgent.trim();
   if (trimmed === "") return null;
 
-  const match = /^([^/\s]+)\/(\S+)\s+(.+)$/.exec(trimmed);
-  if (match === null) return null;
+  const [head = "", ...rest] = trimmed.split(/\s+/);
+  const tail = rest.join(" ");
 
-  const [, name, version, rawContact] = match;
-  if (name === undefined || version === undefined || rawContact === undefined) return null;
+  // `MyApp/1.2.3 …` — VRChat's mandated form, and still the one to prefer.
+  const slash = head.indexOf("/");
+  if (slash > 0) {
+    const name = head.slice(0, slash);
+    return refuse(name)
+      ? null
+      : { name, version: head.slice(slash + 1), contact: cleanContact(tail) };
+  }
 
-  // `MyApp/1.0 (me@example.com)` and `MyApp/1.0 me@example.com` are the same claim.
-  const contact = rawContact
+  // `VRCX 2026.07.18` — a name and a version with a space between them. VRCX's actual shape.
+  const [second = "", ...after] = rest;
+  if (VERSION_LIKE.test(second)) {
+    return refuse(head)
+      ? null
+      : { name: head, version: second, contact: cleanContact(after.join(" ")) };
+  }
+
+  // A name and nothing parseable after it. Still an app, still nameable.
+  return refuse(head) ? null : { name: head, version: "", contact: cleanContact(tail) };
+}
+
+/** True for a User-Agent that names a library rather than an app. */
+function refuse(name: string): boolean {
+  const lowered = name.toLowerCase();
+  return GENERIC_CLIENTS.some(
+    (generic) => lowered === generic || lowered.startsWith(`${generic}/`),
+  );
+}
+
+/**
+ * The contact, or empty.
+ *
+ * `MyApp/1.0 (me@example.com)` and `MyApp/1.0 me@example.com` are the same claim. A placeholder is
+ * the same as none: a contact nobody reads is worse than an absent one, because it looks like
+ * something in an audit row.
+ */
+function cleanContact(raw: string): string {
+  const contact = raw
     .trim()
     .replace(/^\((.*)\)$/, "$1")
     .trim();
-  if (contact === "") return null;
-
-  // A contact nobody reads is the same as no contact. These are the two that show up constantly in
-  // copy-pasted sample code, and letting them through would make the audit log useless.
   const lowered = contact.toLowerCase();
-  if (lowered.endsWith("@example.com") || lowered === "your@email.here") return null;
-
-  return { name, version, contact };
+  return lowered.endsWith("@example.com") || lowered === "your@email.here" ? "" : contact;
 }
 
 /** The reserved usernames meaning "let the user choose which account". */

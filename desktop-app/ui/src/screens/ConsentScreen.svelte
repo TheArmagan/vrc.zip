@@ -138,7 +138,9 @@ async function deny(request: PendingConsent): Promise<void> {
             <div class="min-w-0 space-y-1">
               <div class="flex flex-wrap items-center gap-2">
                 <p class="truncate text-base font-medium text-foreground">{request.app.name}</p>
-                <Badge variant="outline">v{request.app.version}</Badge>
+                {#if request.app.version !== ""}
+                  <Badge variant="outline">v{request.app.version}</Badge>
+                {/if}
                 {#if request.escalation}
                   <Badge variant="secondary">Wants more access</Badge>
                 {/if}
@@ -146,9 +148,17 @@ async function deny(request: PendingConsent): Promise<void> {
               <!--
                 Stated as a claim on purpose. Any local process can send this User-Agent, and a
                 screen that presented it as identity would be teaching the wrong thing.
+
+                The contact is optional, because plenty of real clients do not send one and their
+                User-Agent never reaches VRChat anyway. Saying so plainly beats "Says it can be
+                reached at " trailing into nothing, which reads as a rendering bug.
               -->
               <p class="text-sm text-muted-foreground">
-                Says it can be reached at {request.app.contact}
+                {#if request.app.contact === ""}
+                  Gave no contact address
+                {:else}
+                  Says it can be reached at {request.app.contact}
+                {/if}
               </p>
             </div>
             <div class="flex items-center gap-1.5 text-sm text-muted-foreground">

@@ -473,10 +473,16 @@ app                          proxy :7774                     vrc.zip UI
   not another. The password field is universally supported by every HTTP client on earth; a custom
   header is not. An empty scope field ⇒ a minimal read-only default set. Unknown scope strings are a
   hard 400, never silently dropped.
-- **The app's identity is its `User-Agent`.** VRChat already mandates `AppName/Version contact`, so
-  every well-behaved client already sends one. The proxy parses it into `{name, version, contact}` and
-  that triple is the consent subject shown to the user. A malformed UA is rejected with VRChat's own
-  403 + `waf_code 13799` shape, which is both byte-faithful and the correct behavior to teach.
+- **The app's identity is its `User-Agent`,** parsed into `{name, version, contact}` — the consent
+  subject shown to the user. VRChat *mandates* `AppName/Version contact`, but **it does not enforce
+  it, and the proxy must not either**: VRCX sends `VRCX 2026.07.18` and works fine against the real
+  API, so refusing that shape taught something false and locked out the client the mirror most needed
+  to serve. The parse is best-effort, and the **contact is optional** — the app's UA never reaches
+  VRChat (the pipeline always substitutes ours, see §Enforcement), so it was never part of VRChat
+  compliance and only ever labelled a consent sheet, which a name and version label perfectly well.
+  What still earns VRChat's own 403 + `waf_code 13799` is a UA that names no app at all: absent, or a
+  bare HTTP library like `python-requests/2.31.0`. Those VRChat really does block, so the answer is
+  both byte-faithful and true.
 - **The issued cookie looks real but is unmistakably ours.** Real VRChat issues
   `auth=authcookie_<uuid>`; we issue `auth=authcookie_<uuid>_vrczip`. The shape keeps clients that
   sanity-check the prefix or parse the UUID working unchanged, while the suffix means a vrc.zip token

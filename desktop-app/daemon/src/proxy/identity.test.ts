@@ -23,16 +23,53 @@ describe("parseAppIdentity", () => {
     expect(parseAppIdentity("MyApp/1.0 (me@somewhere.dev)")?.contact).toBe("me@somewhere.dev");
   });
 
-  test("rejects a UA that cannot identify who to blame", () => {
-    for (const ua of [null, undefined, "", "   ", "MyApp", "MyApp/1.0", "/1.0 me@somewhere.dev"]) {
+  test("parses the space-separated shape VRCX actually sends", () => {
+    // The exact string off a real VRCX build. The strict `Name/Version contact` rule answered this
+    // with waf_code 13799, which VRChat itself does not — VRCX works against the real API with it.
+    expect(parseAppIdentity("VRCX 2026.07.18")).toEqual({
+      name: "VRCX",
+      version: "2026.07.18",
+      contact: "",
+    });
+  });
+
+  test("accepts a name with no version and no contact", () => {
+    expect(parseAppIdentity("MyApp")).toEqual({ name: "MyApp", version: "", contact: "" });
+    expect(parseAppIdentity("MyApp/1.0")).toEqual({ name: "MyApp", version: "1.0", contact: "" });
+  });
+
+  test("takes the second word as a version only when it looks like one", () => {
+    expect(parseAppIdentity("My App")).toEqual({ name: "My", version: "", contact: "App" });
+    expect(parseAppIdentity("Tool v2 me@somewhere.dev")).toEqual({
+      name: "Tool",
+      version: "v2",
+      contact: "me@somewhere.dev",
+    });
+  });
+
+  test("rejects a UA that names nothing at all", () => {
+    for (const ua of [null, undefined, "", "   "]) {
       expect(parseAppIdentity(ua)).toBeNull();
     }
   });
 
-  test("rejects the placeholder contacts from copy-pasted sample code", () => {
-    // A contact nobody reads is the same as no contact, and these two are everywhere.
-    expect(parseAppIdentity("MyApp/1.0 someone@example.com")).toBeNull();
-    expect(parseAppIdentity("MyApp/1.0 your@email.here")).toBeNull();
+  test("rejects an HTTP library advertising itself instead of an app", () => {
+    // The half of the old strict rule worth keeping: these name a library, not something a user
+    // could recognise on a consent sheet, and VRChat's WAF blocks several of them outright.
+    for (const ua of ["python-requests/2.31.0", "curl/8.4.0", "axios/1.6.2", "okhttp/4.12.0"]) {
+      expect(parseAppIdentity(ua)).toBeNull();
+    }
+  });
+
+  test("drops a placeholder contact rather than failing the whole app", () => {
+    // Same judgement as before — a contact nobody reads is the same as no contact — applied to a
+    // field that is now optional, so it costs the app its contact and not its login.
+    expect(parseAppIdentity("MyApp/1.0 someone@example.com")).toEqual({
+      name: "MyApp",
+      version: "1.0",
+      contact: "",
+    });
+    expect(parseAppIdentity("MyApp/1.0 your@email.here")?.contact).toBe("");
   });
 });
 

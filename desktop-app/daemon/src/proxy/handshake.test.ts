@@ -173,11 +173,15 @@ describe("GET /auth/user — the login", () => {
     expect(seen).toEqual(["consent.pending"]);
   });
 
-  test("a malformed User-Agent is VRChat's 403, waf_code and all", async () => {
-    // Both byte-faithful and the correct thing to teach: an app that gets this from the proxy
-    // learns it would get the same from VRChat.
+  test("a User-Agent naming no app is VRChat's 403, waf_code and all", async () => {
+    // Byte-faithful and the correct thing to teach — but only for a UA VRChat would *also* refuse.
+    // `MyApp` used to land here and no longer does: it names an app, and VRChat accepts it. A bare
+    // HTTP library name does not name an app, which is the case worth keeping the 403 for.
     const response = await fetchProxy("/auth/user", {
-      headers: { "User-Agent": "MyApp", Authorization: basic("alice@somewhere.dev", "") },
+      headers: {
+        "User-Agent": "python-requests/2.31.0",
+        Authorization: basic("alice@somewhere.dev", ""),
+      },
     });
 
     expect(response.status).toBe(403);
@@ -185,6 +189,23 @@ describe("GET /auth/user — the login", () => {
     expect(body.error.waf_code).toBe(13799);
     // VRChat double-encodes `message` — a JSON string inside the JSON.
     expect(body.error.message).toBe('"Forbidden"');
+  });
+
+  test("VRCX's own User-Agent gets a login, not a 403", async () => {
+    // The regression this all exists for: `VRCX 2026.07.18` carries no slash and no contact, works
+    // fine against the real VRChat API, and was being answered with waf_code 13799.
+    const response = await fetchProxy("/auth/user", {
+      headers: {
+        "User-Agent": "VRCX 2026.07.18",
+        Authorization: basic("alice@somewhere.dev", "hunter2"),
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ requiresTwoFactorAuth: ["totp"] });
+    // The consent sheet still has something to name the app by, which is all the contact was for.
+    const [pending] = consent.list();
+    expect(pending?.app).toMatchObject({ name: "VRCX", version: "2026.07.18", contact: "" });
   });
 
   test("an unrecognised username is a 401, never a fallback to some other account", async () => {

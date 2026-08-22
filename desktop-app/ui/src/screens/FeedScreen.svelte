@@ -131,7 +131,13 @@ const selectedFamily = $derived(tab === ALL ? null : tab);
   class="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-border px-4 py-2"
 >
   {#if showTabs}
-    <div class="min-w-0 flex-1 overflow-x-auto">
+    <!--
+      `overflow-y-hidden` is not redundant beside `overflow-x-auto`. Setting *either* axis to
+      something other than `visible` makes the other compute to `auto`, so a tab strip a couple of
+      pixels taller than its box grows a stub vertical scrollbar next to the tabs. The strip only
+      ever scrolls sideways.
+    -->
+    <div class="min-w-0 flex-1 overflow-x-auto overflow-y-hidden">
       <Tabs.Root bind:value={tab}>
         <Tabs.List variant="line" aria-label="Filter by event kind">
           <Tabs.Trigger value={ALL}>All</Tabs.Trigger>

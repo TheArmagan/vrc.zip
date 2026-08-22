@@ -270,7 +270,8 @@ function clearFilters(): void {
 </SectionHeader>
 
 {#if statusTabs.length > 1}
-  <div class="shrink-0 overflow-x-auto border-b border-border px-4 py-2">
+  <!-- `overflow-y-hidden` for the reason in `FeedScreen`: one axis set makes the other `auto`. -->
+  <div class="shrink-0 overflow-x-auto overflow-y-hidden border-b border-border px-4 py-2">
     <Tabs.Root bind:value={group}>
       <Tabs.List variant="line" aria-label="Filter by presence">
         <Tabs.Trigger value="all">

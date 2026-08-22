@@ -1653,6 +1653,11 @@ Found by running code. Each of these contradicted an assumption, and most were s
   of the user's entire log history per code edit, which is why a development database accumulated
   them so fast. Decisions 131 and 132.
 
+- **`overflow-x-auto` alone gives you a vertical scrollbar too.** CSS computes the other axis to
+  `auto` as soon as one axis is not `visible`, so a horizontally scrolling tab strip a couple of
+  pixels taller than its box grows a stub vertical scrollbar beside the tabs. `overflow-y-hidden` is
+  not redundant next to it.
+
 - **An `$effect` that calls `ensure()` on a cached loader re-runs when the cache lands, and its
   cleanup runs first.** Both new list screens started as one effect doing `eventKinds.ensure()` and
   returning `() => feed.dispose()`. `ensure` reads `loaded`, so the effect re-ran the moment the

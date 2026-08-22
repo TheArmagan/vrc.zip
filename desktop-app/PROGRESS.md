@@ -265,6 +265,11 @@ handshake, because the alternative is a login flow that mints credentials with n
       itself (a third-party app reaching `:7775` with its proxy token and being filtered by scope,
       including `sessions:unlinked`), webhook registration routes and wiring, and the
       `invite-request` / `boop` palette stubs.
+      **Alongside it (2026-08-22):** the command palette grew direct access — clipboard-first entry
+      for any user, world, instance or group id or VRChat link, argument prompts for the same by
+      hand, and the rest of the actions this build already supports (mark every notification seen,
+      run the retention pass, copy a running client's location, toggle dense feed rows). Decisions
+      122 to 125.
 
 ---
 
@@ -1291,6 +1296,44 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      would be a query per player join per open tab, so it is memoised by session row id and dropped
      on any `session.*` event: a session row exists before its log has revealed who is signed in, so
      the first null is provisional and must not be the last answer.
+
+122. **The palette gained a front door: an id or a link goes in, the thing it names opens — and the
+     clipboard is the primary way in.** Every other path to a user, world, instance or group in this
+     app is a *path*: a friend row, a feed row, a badge. That works until the id arrives from outside
+     vrc.zip — a link in Discord, a `vrchat://` copied out of the game, a `usr_…` in a bug report —
+     and until now the only way to open one was to find something that happened to mention it.
+     Ctrl+Shift+V reads the clipboard, recognises it, and opens it; pasting into the palette's own
+     search box does the same without a permission prompt, since the paste is the user's keystroke.
+     Recognition (`lib/commands/targets.ts`) is pure and tested, and it **recognises rather than
+     guesses**: an id prefix or a VRChat URL is the only evidence accepted, because VRChat's legacy
+     user ids have no prefix at all and offering to "open user 'friends'" for every search anybody
+     types would be worse than offering nothing. Recognised is also not the same as supported — an
+     `avtr_` id is unmistakable and this build has nowhere to put it, so it is listed and disabled
+     with the reason, which is a real answer where matching nothing is not.
+
+123. **A command may take an argument, and the palette becomes the prompt rather than opening one.**
+     `CommandDefinition.argument` carries a placeholder, a hint, a live `validate`, and an async
+     `initial` — the clipboard, in every case that has one — and Enter on such a command swaps the
+     list for a single input under the command's own title. Escape and a Backspace on an empty box
+     are both "back to the list", which is what keeps it one level of a palette instead of a dialog
+     stacked on one. The async prefill carries a generation counter and never overwrites something
+     already typed: a clipboard read can resolve after the reader has moved on, and the same
+     response-outliving-its-question hazard that `entity-modal.svelte.ts` documents applies to a
+     prompt too.
+
+124. **Query-derived commands come from `registerCommandSource`, and are never registered.** A
+     command for `wrld_…:12345` cannot be registered ahead of time — nobody had seen that id — so
+     sources are asked on every keystroke and their results rank above the whole registry. They are
+     built fresh each time, so ids may repeat between keystrokes and nothing has to be torn down.
+     `execute(command)` exists alongside `runCommand(id)` for exactly this: the palette runs the
+     object it is holding, since a source's command is in no map to look up.
+
+125. **"Cut off every connected app" navigates; it does not revoke.** The Connected apps screen arms
+     that button with a first click and fires it with a second, deliberately, because revoking every
+     grant is irreversible. A palette entry that did it on one Enter would be the same decision made
+     with less thought, not more convenience — so the command opens the screen and says where the
+     confirmation is. "Run the retention pass now" *does* act, because a pass that deletes only what
+     is already past its window is the schedule running early, not a new decision.
 
 ---
 

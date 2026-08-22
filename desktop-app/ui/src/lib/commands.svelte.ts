@@ -14,13 +14,36 @@
 import { SvelteMap } from "svelte/reactivity";
 
 export type CommandGroup =
+  /** Direct access: an id or a link goes in, the thing it names opens. */
+  | "Open"
   | "Navigation"
   | "Accounts"
   | "Sessions"
   | "Friends"
   | "Feed"
+  | "Notifications"
+  | "App access"
   | "Instant actions"
+  | "Data"
   | "Application";
+
+/**
+ * A command that needs something typed before it can run.
+ *
+ * The palette does not run it on Enter; it swaps its input for this one, and only the second Enter
+ * runs the command with what was typed. `initial` is what makes the clipboard commands feel like
+ * one keystroke rather than three: the prompt opens with the pasted id already in it, so Enter is
+ * usually the whole interaction.
+ */
+export interface CommandArgument {
+  readonly placeholder: string;
+  /** One line under the input. What a good value looks like. */
+  readonly hint?: string;
+  /** Prefills the input. Async because the only good source of a prefill is the clipboard. */
+  readonly initial?: () => string | Promise<string>;
+  /** An error sentence for a value that cannot work, or null. Runs on every keystroke. */
+  readonly validate?: (value: string) => string | null;
+}
 
 export interface CommandDefinition {
   /** Stable, namespaced, unique: `friends.invite`, `plugin.<id>.<action>`. */
@@ -43,7 +66,10 @@ export interface CommandDefinition {
   readonly enabled?: () => boolean;
   /** Extra words to match on that are not in the title (aliases, VRChat jargon). */
   readonly keywords?: readonly string[];
-  readonly run: () => void | Promise<void>;
+  /** Present when the command needs an argument. Absent for the ordinary act-now command. */
+  readonly argument?: CommandArgument;
+  /** The argument, or `""` for a command that takes none. Most implementations ignore it. */
+  readonly run: (argument: string) => void | Promise<void>;
 }
 
 export interface RegisteredCommand extends CommandDefinition {
@@ -85,19 +111,56 @@ export function getCommand(id: string): RegisteredCommand | undefined {
   return registry.get(id);
 }
 
-export function isCommandEnabled(command: RegisteredCommand): boolean {
+export function isCommandEnabled(command: CommandDefinition): boolean {
   return command.enabled === undefined || command.enabled();
 }
 
-/** Runs a command by id. Unknown or disabled ids are a no-op, never a throw. */
-export async function runCommand(id: string): Promise<void> {
-  const command = registry.get(id);
-  if (command === undefined || !isCommandEnabled(command)) return;
+/**
+ * Runs a command object. Disabled commands are a no-op and a throwing one is logged, never
+ * propagated — a command is a leaf of the UI, and the palette has already closed by the time it
+ * runs, so there is nothing left to catch it.
+ */
+export async function execute(command: CommandDefinition, argument = ""): Promise<void> {
+  if (command.enabled !== undefined && !command.enabled()) return;
   try {
-    await command.run();
+    await command.run(argument);
   } catch (error) {
-    console.error(`[commands] "${id}" failed`, error);
+    console.error(`[commands] "${command.id}" failed`, error);
   }
+}
+
+/** Runs a registered command by id. Unknown ids are a no-op, never a throw. */
+export async function runCommand(id: string, argument = ""): Promise<void> {
+  const command = registry.get(id);
+  if (command === undefined) return;
+  await execute(command, argument);
+}
+
+// ---------------------------------------------------------------------------
+// Command sources
+// ---------------------------------------------------------------------------
+
+/**
+ * Commands that only exist for a particular query.
+ *
+ * The registry holds what the build can always do. A source answers "what can be done with *this
+ * text*" — pasting `wrld_…:12345` into the palette has to offer to open that instance, and there
+ * is no way to have registered a command for an id nobody had seen yet. Sources run on every
+ * keystroke, so they must be pure and cheap: parse the string, return nothing or a command or two.
+ *
+ * Their results are never registered, so ids may repeat between keystrokes and nothing has to be
+ * torn down. They are ranked above everything in the registry, because a reader who just pasted an
+ * id is not looking for a fuzzy title match on it.
+ */
+export type CommandSource = (query: string) => readonly CommandDefinition[];
+
+const sources = new Set<CommandSource>();
+
+export function registerCommandSource(source: CommandSource): () => void {
+  sources.add(source);
+  return () => {
+    sources.delete(source);
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -204,13 +267,33 @@ function fuzzy(haystack: string, needle: string): { hits: number[]; score: numbe
   return { hits, score };
 }
 
+/** Above every fuzzy score, so a recognised paste heads the list whatever else matched. */
+const SOURCE_SCORE = 10_000;
+
+function sourceMatches(query: string): CommandMatch[] {
+  const matches: CommandMatch[] = [];
+  let offset = 0;
+  for (const source of sources) {
+    for (const definition of source(query)) {
+      offset += 1;
+      matches.push({
+        command: { ...definition, seq: -offset },
+        hits: [],
+        score: SOURCE_SCORE - offset,
+      });
+    }
+  }
+  return matches;
+}
+
 export function searchCommands(query: string): CommandMatch[] {
   const commands = listCommands();
+  const dynamic = sourceMatches(query);
   const needle = query.trim().toLowerCase();
   if (needle === "") {
-    return commands.map((command) => ({ command, hits: [], score: 0 }));
+    return [...dynamic, ...commands.map((command) => ({ command, hits: [], score: 0 }))];
   }
-  const matches: CommandMatch[] = [];
+  const matches: CommandMatch[] = [...dynamic];
   for (const command of commands) {
     const direct = fuzzy(command.title, needle);
     if (direct !== null) {

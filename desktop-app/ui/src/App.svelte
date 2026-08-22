@@ -54,6 +54,23 @@ $effect(() =>
       notImplemented: (title, why) => {
         toast.warning(title, { description: why, duration: 6000 });
       },
+      /*
+       * The registry's one channel back to the user, mapped onto the toaster here so nothing under
+       * `lib/commands/` has to import it. Errors linger; a success that confirms a keystroke does
+       * not need to.
+       */
+      notify: (level, title, detail) => {
+        // `exactOptionalPropertyTypes`: a missing description and a description of `undefined` are
+        // different types here, so the key is omitted rather than set to nothing.
+        const options = {
+          ...(detail === undefined ? {} : { description: detail }),
+          duration: level === "error" ? 8000 : 4000,
+        };
+        if (level === "success") toast.success(title, options);
+        else if (level === "warning") toast.warning(title, options);
+        else if (level === "error") toast.error(title, options);
+        else toast.info(title, options);
+      },
     }),
   ),
 );

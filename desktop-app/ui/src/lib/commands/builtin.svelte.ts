@@ -9,12 +9,18 @@
  * stubs. A stub says so out loud when it is run — it never silently does nothing.
  */
 
+import { api, describeError } from "../api.ts";
 import { registerCommands } from "../commands.svelte.ts";
-import { planJoin } from "../format.ts";
+import { parseLocation, planJoin } from "../format.ts";
 import { requestJoin } from "../join.ts";
 import { navigate, ROUTE_IDS, type RouteId } from "../router.ts";
 import { app } from "../state/app.svelte.ts";
+import { prefs } from "../state/prefs.svelte.ts";
 import { theme } from "../state/theme.svelte.ts";
+import { registerDirectCommands } from "./direct.svelte.ts";
+import type { CommandHost } from "./host.ts";
+
+export type { CommandHost };
 
 /**
  * Routes with no meaningful bare form, so no palette entry.
@@ -55,12 +61,6 @@ const NAV_SUBTITLES: Record<RouteId, string> = {
   settings: "Contact address, log directories, ports",
 };
 
-/** How a stub reports itself. Injected so the shell owns the toast library, not this module. */
-export interface CommandHost {
-  readonly notImplemented: (title: string, why: string) => void;
-  readonly openPalette: () => void;
-}
-
 /**
  * The first running client whose instance another client could be sent to.
  *
@@ -76,7 +76,17 @@ function firstJoinable(): { currentLocation: string | null; accountId: string | 
   );
 }
 
+/** The location of the first running client that is somewhere nameable, or null. */
+function firstLocated(): string | null {
+  const session = app.sessions.find(
+    (entry) => entry.currentLocation !== null && !parseLocation(entry.currentLocation).opaque,
+  );
+  return session?.currentLocation ?? null;
+}
+
 export function registerBuiltinCommands(host: CommandHost): () => void {
+  const disposeDirect = registerDirectCommands(host);
+
   const navigation = ROUTE_IDS.filter((id) => !UNLISTED_ROUTES.includes(id)).map((id) => ({
     id: `nav.${id}`,
     title: NAV_TITLES[id],
@@ -87,7 +97,7 @@ export function registerBuiltinCommands(host: CommandHost): () => void {
     },
   }));
 
-  return registerCommands([
+  const disposeBuiltins = registerCommands([
     ...navigation,
 
     {
@@ -117,6 +127,100 @@ export function registerBuiltinCommands(host: CommandHost): () => void {
       keywords: ["refresh", "reload", "retry", "offline"],
       run: (): void => {
         app.retry();
+      },
+    },
+
+    {
+      id: "sessions.copy-location",
+      title: "Copy a running client's instance location",
+      subtitle: "The location string, ready to paste into a chat or back into this palette",
+      group: "Sessions",
+      keywords: ["clipboard", "share", "instance", "where"],
+      enabled: (): boolean => firstLocated() !== null,
+      run: async (): Promise<void> => {
+        const location = firstLocated();
+        if (location === null) return;
+        try {
+          await navigator.clipboard.writeText(location);
+          host.notify("success", "Location copied", location);
+        } catch {
+          host.notify(
+            "error",
+            "Could not write to the clipboard",
+            "The browser refused clipboard access to the page.",
+          );
+        }
+      },
+    },
+
+    {
+      id: "notifications.mark-all-seen",
+      title: "Mark every notification as seen",
+      subtitle: "Clears the unseen count. Nothing is deleted — VRChat's own inbox is untouched.",
+      group: "Notifications",
+      keywords: ["read", "clear", "inbox", "dismiss"],
+      enabled: (): boolean => app.unseenNotifications.length > 0,
+      run: async (): Promise<void> => {
+        const pending = app.unseenNotifications.map((item) => item.id);
+        await Promise.all(pending.map((id) => app.markNotificationSeen(id)));
+        host.notify(
+          "success",
+          pending.length === 1
+            ? "1 notification marked seen"
+            : `${pending.length} notifications marked seen`,
+        );
+      },
+    },
+
+    {
+      id: "apps.revoke-all",
+      title: "Cut off every connected app",
+      subtitle: "Opens Connected apps, where the second click confirms it",
+      group: "App access",
+      keywords: ["revoke", "kill switch", "disconnect", "grants"],
+      // Deliberately not the call itself. Revoking every grant is irreversible, and the screen
+      // arms the button with a first click for exactly that reason; a palette entry that fired it
+      // on one Enter would be the same decision made with less thought, not more convenience.
+      run: (): void => {
+        navigate("apps");
+        host.notify(
+          "info",
+          "Confirm on this screen",
+          "Revoke all is armed by its first click and fired by the second.",
+        );
+      },
+    },
+
+    {
+      id: "data.run-retention",
+      title: "Run the retention pass now",
+      subtitle: "Deletes whatever is already past its window, without waiting for the daily pass",
+      group: "Data",
+      keywords: ["prune", "delete", "cleanup", "database", "vacuum"],
+      run: async (): Promise<void> => {
+        try {
+          const result = await api.retention.run();
+          host.notify(
+            "success",
+            result.totalDeleted === 0
+              ? "Nothing was past its window"
+              : `${result.totalDeleted} rows deleted`,
+            `The pass took ${result.durationMs} ms.`,
+          );
+        } catch (error) {
+          host.notify("error", "The retention pass failed", describeError(error));
+        }
+      },
+    },
+
+    {
+      id: "feed.dense",
+      title: "Toggle dense feed rows",
+      subtitle: "Remembered per browser profile, like the theme",
+      group: "Feed",
+      keywords: ["compact", "spacing", "density"],
+      run: (): void => {
+        prefs.setDenseFeed(!prefs.denseFeed);
       },
     },
 
@@ -191,4 +295,9 @@ export function registerBuiltinCommands(host: CommandHost): () => void {
       },
     },
   ]);
+
+  return () => {
+    disposeDirect();
+    disposeBuiltins();
+  };
 }

@@ -7,13 +7,14 @@
   indistinguishable from one that never existed, and the user has no way to learn why.
 -->
 <script lang="ts">
+import ChevronLeftIcon from "@lucide/svelte/icons/chevron-left";
 import SearchIcon from "@lucide/svelte/icons/search";
 import {
   type CommandMatch,
+  execute,
   formatBinding,
   isCommandEnabled,
   type RegisteredCommand,
-  runCommand,
   searchCommands,
 } from "$lib/commands.svelte.ts";
 import * as Dialog from "$lib/components/ui/dialog/index.js";
@@ -24,6 +25,24 @@ let query = $state("");
 let cursor = $state(0);
 let input = $state<HTMLInputElement | null>(null);
 let listBox = $state<HTMLElement | null>(null);
+
+/*
+ * The second half of the palette: a command that needs an argument does not run on Enter, it
+ * *becomes* the palette. The list is replaced by one input under the command's own title, and the
+ * second Enter runs it with what was typed.
+ *
+ * A separate mode rather than a second dialog, because the two are one gesture — the reader has
+ * not left the palette, they have gone one level into it — and because Escape has to mean "back to
+ * the list" here and "close" everywhere else, which two dialogs cannot agree on.
+ */
+let prompting = $state<RegisteredCommand | null>(null);
+let argument = $state("");
+/** Set while `initial()` is in flight, so the clipboard read cannot land in a later prompt. */
+let promptGeneration = 0;
+
+const argumentError = $derived(
+  prompting?.argument?.validate?.(argument) ?? null,
+);
 
 const matches = $derived<CommandMatch[]>(searchCommands(query));
 
@@ -51,10 +70,49 @@ $effect(() => {
   if (open) {
     query = "";
     cursor = 0;
+    prompting = null;
+    argument = "";
+    promptGeneration += 1;
     // The dialog mounts its content asynchronously; focus on the next frame or it lands nowhere.
     requestAnimationFrame(() => input?.focus());
   }
 });
+
+/**
+ * Enters argument mode.
+ *
+ * `initial()` is usually a clipboard read, which is async and can therefore resolve after the
+ * reader has gone back to the list or moved on to a different prompt — hence the generation check.
+ * Anything already typed wins over a late prefill; the reader's own keystrokes are never overwritten.
+ */
+async function prompt(command: RegisteredCommand): Promise<void> {
+  const generation = (promptGeneration += 1);
+  prompting = command;
+  // A query that already parses is the likeliest argument there is: the reader pasted it here.
+  argument = command.argument?.validate?.(query.trim()) === null ? query.trim() : "";
+  requestAnimationFrame(() => input?.focus());
+  const initial = command.argument?.initial;
+  if (initial === undefined || argument !== "") return;
+  const prefill = await initial();
+  if (generation !== promptGeneration || argument !== "") return;
+  argument = prefill;
+  requestAnimationFrame(() => input?.select());
+}
+
+function leavePrompt(): void {
+  promptGeneration += 1;
+  prompting = null;
+  argument = "";
+  requestAnimationFrame(() => input?.focus());
+}
+
+async function submitArgument(): Promise<void> {
+  const command = prompting;
+  if (command === null || argumentError !== null) return;
+  const value = argument;
+  open = false;
+  await execute(command, value);
+}
 
 function scrollCursorIntoView(): void {
   requestAnimationFrame(() => {
@@ -70,11 +128,28 @@ function move(delta: number): void {
 
 async function activate(command: RegisteredCommand): Promise<void> {
   if (!isCommandEnabled(command)) return;
+  if (command.argument !== undefined) {
+    await prompt(command);
+    return;
+  }
   open = false;
-  await runCommand(command.id);
+  await execute(command);
 }
 
 function onKeydown(event: KeyboardEvent): void {
+  if (prompting !== null) {
+    // Enter runs it; Escape and a Backspace on an empty box are both "back to the list", which is
+    // what makes this feel like one level of a palette rather than a dialog on top of one.
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void submitArgument();
+    } else if (event.key === "Escape" || (event.key === "Backspace" && argument === "")) {
+      event.preventDefault();
+      event.stopPropagation();
+      leavePrompt();
+    }
+    return;
+  }
   switch (event.key) {
     case "ArrowDown":
       event.preventDefault();
@@ -134,6 +209,51 @@ function indexOfCommand(command: RegisteredCommand): number {
       <Dialog.Description>Search every action in vrc.zip and run it.</Dialog.Description>
     </Dialog.Header>
 
+    {#if prompting !== null}
+      <!--
+        Argument mode. The command's title stays on screen as a heading rather than being replaced
+        by its own placeholder: it is the only thing saying what this box is for, and a reader who
+        arrived here from a clipboard prefill has typed nothing at all to remind them.
+      -->
+      <div class="flex items-center gap-2 border-b border-border px-4 py-2">
+        <button
+          type="button"
+          onclick={leavePrompt}
+          class="flex shrink-0 items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+        >
+          <ChevronLeftIcon class="size-4" />
+          Commands
+        </button>
+        <span class="truncate text-xs text-muted-foreground">/ {prompting.title}</span>
+      </div>
+      <div class="flex items-center gap-3 px-4">
+        <!-- svelte-ignore a11y_autofocus -->
+        <input
+          bind:this={input}
+          bind:value={argument}
+          onkeydown={onKeydown}
+          type="text"
+          aria-label={prompting.title}
+          aria-invalid={argumentError !== null}
+          placeholder={prompting.argument?.placeholder ?? ""}
+          autocomplete="off"
+          spellcheck="false"
+          class="h-12 w-full bg-transparent font-mono text-sm outline-none placeholder:font-sans placeholder:text-muted-foreground"
+        />
+        <kbd class="shrink-0 border border-border px-1.5 py-0.5 text-xs text-muted-foreground">
+          Enter
+        </kbd>
+      </div>
+      <div class="border-t border-border px-4 py-3 text-xs">
+        {#if argumentError !== null}
+          <p class="text-destructive">{argumentError}</p>
+        {:else if prompting.argument?.hint}
+          <p class="text-muted-foreground">{prompting.argument.hint}</p>
+        {:else}
+          <p class="text-muted-foreground">Enter runs it. Escape goes back to the list.</p>
+        {/if}
+      </div>
+    {:else}
     <div class="flex items-center gap-3 border-b border-border px-4">
       <SearchIcon class="size-4 shrink-0 text-muted-foreground" />
       <!-- svelte-ignore a11y_autofocus -->
@@ -146,7 +266,7 @@ function indexOfCommand(command: RegisteredCommand): number {
         aria-expanded="true"
         aria-controls="command-palette-list"
         aria-autocomplete="list"
-        placeholder="Run a command…"
+        placeholder="Run a command, or paste an id or a link…"
         autocomplete="off"
         spellcheck="false"
         class="h-12 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
@@ -206,6 +326,9 @@ function indexOfCommand(command: RegisteredCommand): number {
 
               {#if !enabled}
                 <span class="shrink-0 text-xs text-muted-foreground">Unavailable</span>
+              {:else if match.command.argument}
+                <!-- Enter opens a box rather than acting, and the row has to say so before it is pressed. -->
+                <span class="shrink-0 text-xs text-muted-foreground">Needs an id</span>
               {:else if match.command.keybinding}
                 <span class="flex shrink-0 items-center gap-1">
                   {#each formatBinding(match.command.keybinding) as key (key)}
@@ -220,5 +343,6 @@ function indexOfCommand(command: RegisteredCommand): number {
         {/each}
       {/if}
     </div>
+    {/if}
   </Dialog.Content>
 </Dialog.Root>

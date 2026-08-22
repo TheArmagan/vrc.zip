@@ -5,7 +5,7 @@ the architecture and the reasoning. This file tracks only *state*: what exists, 
 was decided along the way.
 
 **Last updated:** 2026-08-22
-**Current phase:** Phase 3 — Plugin system
+**Current phase:** Phase 3 — Plugin system (3.1–3.5 done and wired; next is 3.6, the events bridge)
 **Status: Phases 1 and 2 are both built.** Phase 1 was confirmed by hand on 2026-08-22 (1.10 and the
 profile card). Phase 2 closed on the same day: every numbered step is ticked, including 2.8's last
 two pieces (per-app budget overrides and a rate gauge that reports measured numbers instead of
@@ -30,6 +30,20 @@ PLAN.md §Phase 5 only until the plugin host needs a real runtime to spawn; deci
 **Next: Phase 3 — the plugin system.** Decision 105 put it ahead of Phase 4 because it is the largest
 remaining risk and the thing everything else was shaped around. `PLAN.md` §Phase 3 is the spec;
 decision 106 settles the host process (the same `.exe` re-invoked in a plugin-host mode).
+
+**Phase 3 status as of 2026-08-22: 3.1 through 3.5 are done and wired.** A plugin can be installed
+from a local directory, is compiled and scanned at install, is content-addressed and hash-verified on
+every start, spawns into a memory-capped process with a scrubbed environment, and calls a reads-only
+`ctx.vrchat` through a dispatcher that gates every call against the grant. Five session-token routes
+manage it. Verified against a running daemon, not only by tests. Remaining: 3.6 events bridge, 3.7
+storage, 3.8 consent UI, 3.9 renderer, 3.10 nodes, and the scaffolder half of 3.11.
+
+**Two things to read before building on it.** Decision 177 lists four attacks the hostile suite
+asserts as *gaps*, the largest being that **a plugin which gets past install reaches the whole
+filesystem** — the install-time stages are the entire defence today, and PLAN.md correction 6's rule
+about not calling it a sandbox is a measurement now, not a caution. And decision 173: "verify the
+hash on every load" held only on a cold boot until it was fixed, which is the shape of defect worth
+looking for elsewhere.
 
 **The one thing Phase 2 has left is verification, not construction:** an end-to-end pass with a real
 third-party client against `/app` — grant auth, the scope-filtered stream, and a webhook actually

@@ -1,0 +1,72 @@
+# CI for `desktop-app/` only.
+#
+# This file sits at the repository root, which is shared ground: `backend/` is a separate project
+# with its own lifecycle. Hence the path filter — this workflow exists for one directory and must
+# never fire for changes to the other, and a sibling `backend.yml` can be added beside it without
+# either needing to know about the other.
+name: desktop-app
+
+on:
+  push:
+    branches: [main]
+    paths: ['desktop-app/**', '.github/workflows/desktop-app.yml']
+  pull_request:
+    paths: ['desktop-app/**', '.github/workflows/desktop-app.yml']
+
+# A new push supersedes an in-flight run on the same ref. Nothing here is a deploy, so cancelling
+# is free.
+concurrency:
+  group: desktop-app-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: desktop-app
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # Read from `.bun-version`, which is one of the three places the pin lives
+          # (`packageManager` and `engines.bun` are the others, and they move together). The runtime
+          # is a build input here, not a developer prerequisite: it is bundled, shipped, and is what
+          # executes third-party plugin code. See PLAN.md §Phase 5.
+          bun-version-file: desktop-app/.bun-version
+
+      - run: bun install --frozen-lockfile
+
+      # Four gates, run unconditionally rather than short-circuiting, so one failure does not hide
+      # the others. Biome cannot parse `.svelte`, which is why `svelte-check` is its own step and
+      # not a flag on the lint one.
+      - name: typecheck
+        if: ${{ !cancelled() }}
+        run: bun run typecheck
+
+      - name: lint
+        if: ${{ !cancelled() }}
+        run: bun run lint
+
+      - name: svelte-check
+        if: ${{ !cancelled() }}
+        run: bun run check
+        working-directory: desktop-app/ui
+
+      # Two runners, deliberately. `bun test` owns the daemon and packages; the UI is Vitest,
+      # because its state modules are `.svelte.ts` and runes need the Svelte compiler. The root
+      # `test` script names its three directories so a bare glob does not sweep the Vitest files
+      # into Bun's runner, where `vi` and `$state` do not exist.
+      - name: test (daemon, packages, tools)
+        if: ${{ !cancelled() }}
+        run: bun run test
+
+      - name: test (ui)
+        if: ${{ !cancelled() }}
+        run: bun run test:ui
+
+      # The daemon never reaches the live VRChat API in CI — every integration test runs against the
+      # recorded-fixture server in `daemon/src/testing/`. Nothing here needs credentials, and
+      # nothing here should ever be given any.

@@ -16,7 +16,8 @@
   "scripts": {
     "daemon": "bun --watch daemon/src/index.ts",
     "codegen": "bun run --filter @vrcz/tools codegen",
-    "test": "bun test",
+    "test": "bun test packages daemon tools",
+    "test:ui": "bun run --filter @vrcz/ui test",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "format": "biome check --write ."

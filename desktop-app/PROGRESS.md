@@ -634,6 +634,15 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     since `exactOptionalPropertyTypes` makes "absent" and "present and undefined" different things
     and `listEvents` branches on absence.
 
+67. **CI is one path-filtered workflow at the repo root.** `.github/` is shared ground with
+    `backend/`, a separate project, which is why this sat as an open question rather than being
+    added quietly. The resolution is `.github/workflows/desktop-app.yml` gated on
+    `paths: ['desktop-app/**']`: it lives on shared ground but can only ever fire for this project,
+    and `backend/` can drop a sibling file beside it without either needing to know the other
+    exists. Every gate runs `if: !cancelled()` so one failure does not mask the rest, and the Bun
+    version comes from `.bun-version` rather than being written a fourth time. Both test runners
+    run: `bun test` for daemon/packages/tools, Vitest for `ui/`.
+
 ---
 
 ## Gotchas

@@ -128,6 +128,59 @@ interface Bucket {
   lastRefillAt: number;
 }
 
+/**
+ * One bucket's live state.
+ *
+ * `rate` and `burst` are what is *configured* (already at 80% of the ceiling for `rate`, see
+ * `DEFAULTS`); `available` is what is actually left right now, and `queued` is how many `acquire()`
+ * calls are currently blocked on this bucket.
+ */
+export interface RateBucketSnapshot {
+  /** Sustained refill, tokens per second. */
+  readonly rate: number;
+  /** Capacity — how much may be spent at once after an idle period. */
+  readonly burst: number;
+  /**
+   * Tokens left, refilled to the moment `snapshot()` was called. **Unrounded**: the bucket refills
+   * continuously, so 3.4 is the true answer and rounding it here would throw away the only
+   * information a caller needs to decide whether to show "3" or "3.4". Display code floors it.
+   */
+  readonly available: number;
+  /** `acquire()` calls currently sleeping on this bucket. */
+  readonly queued: number;
+}
+
+/** A per-account bucket, tagged with whose it is. */
+export interface AccountRateBucketSnapshot extends RateBucketSnapshot {
+  readonly accountId: string;
+}
+
+/**
+ * Everything the limiter knows about itself, at one instant.
+ *
+ * Three buckets because there are three ceilings, and a single number cannot describe them: an
+ * account can be starved while the IP budget is untouched, and the file tier is independent of
+ * both. Collapsing them is what made the old gauge unreadable.
+ */
+export interface RateLimiterSnapshot {
+  /** One entry per account the limiter has seen, or that something is currently queued behind. */
+  readonly perAccount: readonly AccountRateBucketSnapshot[];
+  /** The IP-wide API budget every account also draws from. */
+  readonly globalApi: RateBucketSnapshot;
+  /** The IP-wide file budget. Not paired with any per-account bucket — see `#files`. */
+  readonly files: RateBucketSnapshot;
+  /**
+   * Blocked `acquire()` calls in total. Not the sum of the fields above: an `"api"` call is queued
+   * against its account bucket *and* the global one, and would be double-counted.
+   */
+  readonly queuedTotal: number;
+  /** The shared 429 breaker: true while nothing may be sent on any account or either tier. */
+  readonly backingOff: boolean;
+  /** Unix ms the breaker opens at, or `null` when it is closed. */
+  readonly retryAfter: number | null;
+  readonly consecutive429: number;
+}
+
 function refill(bucket: Bucket, now: number, ratePerSecond: number, capacity: number): void {
   const elapsedMs = Math.max(0, now - bucket.lastRefillAt);
   bucket.tokens = Math.min(capacity, bucket.tokens + (elapsedMs / 1000) * ratePerSecond);
@@ -165,6 +218,18 @@ export class RateLimiter {
   #consecutive429 = 0;
   /** Unix ms before which nothing may be sent, on any account. */
   #blockedUntil = 0;
+
+  /**
+   * How many `acquire()` calls are currently sleeping, per account / on the global API bucket / on
+   * the file bucket.
+   *
+   * Counted rather than derived, because there is nothing to derive it from: callers race for
+   * tokens as they refill and the limiter holds no queue (see `RatePriority`). A waiter is only
+   * visible while it is inside `acquire()`, so the count has to be taken there.
+   */
+  readonly #queuedByAccount = new Map<string, number>();
+  #queuedGlobalApi = 0;
+  #queuedFiles = 0;
 
   constructor(options: RateLimiterOptions = {}) {
     this.#rate = options.ratePerSecond ?? DEFAULTS.ratePerSecond;
@@ -234,20 +299,118 @@ export class RateLimiter {
   ): Promise<void> {
     const floor = priority === "low" ? this.#lowPriorityReserve : 0;
 
-    // Loop rather than compute once: while we were waiting out the breaker, another response may
-    // have arrived and extended it.
-    for (;;) {
-      const globalWait = this.backoffRemainingMs;
-      if (globalWait > 0) {
-        await this.#sleep(globalWait);
-        continue;
-      }
+    // Counted once on the first sleep and released in `finally`, not paired around each sleep: a
+    // caller that wakes, finds the bucket still empty and sleeps again never stopped waiting, and
+    // flickering the gauge to zero between iterations would misreport that as a drain. The `finally`
+    // is what makes a throw or an aborted caller unable to leak the count.
+    let counted = false;
+    try {
+      // Loop rather than compute once: while we were waiting out the breaker, another response may
+      // have arrived and extended it.
+      for (;;) {
+        const globalWait = this.backoffRemainingMs;
+        if (globalWait > 0) {
+          if (!counted) {
+            counted = true;
+            this.#enterQueue(accountId, rateClass);
+          }
+          await this.#sleep(globalWait);
+          continue;
+        }
 
-      const wait =
-        rateClass === "file" ? this.#reserveFile(floor) : this.#reserve(accountId, floor);
-      if (wait === 0) return;
-      await this.#sleep(wait);
+        const wait =
+          rateClass === "file" ? this.#reserveFile(floor) : this.#reserve(accountId, floor);
+        if (wait === 0) return;
+        if (!counted) {
+          counted = true;
+          this.#enterQueue(accountId, rateClass);
+        }
+        await this.#sleep(wait);
+      }
+    } finally {
+      if (counted) this.#leaveQueue(accountId, rateClass);
     }
+  }
+
+  /**
+   * Everything the limiter currently knows, for the control API's gauge.
+   *
+   * `available` is **exact at the moment of the call**, not an estimate: each bucket is refilled to
+   * `now()` before it is read, which is the same arithmetic `acquire()` does. That precision is the
+   * whole point — the numbers this replaces were derived from the configured rate and the breaker
+   * flag, so they described the *configuration* rather than the limiter, and were wrong exactly when
+   * someone was looking at them to find out why something was slow.
+   *
+   * Refilling mutates the buckets, which is deliberate and harmless: a refill to now is idempotent
+   * and is what the next `acquire()` would have done anyway.
+   */
+  snapshot(): RateLimiterSnapshot {
+    const now = this.#now();
+    refill(this.#global, now, this.#globalRate, this.#globalBurst);
+    refill(this.#files, now, this.#fileRate, this.#fileBurst);
+
+    // Union of the two maps: a bucket exists from an account's first call, and a queue entry can in
+    // principle outlive nothing — but taking both means the gauge can never show a waiter with no
+    // row to sit in.
+    const accountIds = new Set([...this.#buckets.keys(), ...this.#queuedByAccount.keys()]);
+    const perAccount: AccountRateBucketSnapshot[] = [];
+    for (const accountId of accountIds) {
+      const bucket = this.#buckets.get(accountId);
+      if (bucket) refill(bucket, now, this.#rate, this.#burst);
+      perAccount.push({
+        accountId,
+        rate: this.#rate,
+        burst: this.#burst,
+        available: bucket?.tokens ?? this.#burst,
+        queued: this.#queuedByAccount.get(accountId) ?? 0,
+      });
+    }
+
+    return {
+      perAccount,
+      globalApi: {
+        rate: this.#globalRate,
+        burst: this.#globalBurst,
+        available: this.#global.tokens,
+        queued: this.#queuedGlobalApi,
+      },
+      files: {
+        rate: this.#fileRate,
+        burst: this.#fileBurst,
+        available: this.#files.tokens,
+        queued: this.#queuedFiles,
+      },
+      queuedTotal: this.#queuedGlobalApi + this.#queuedFiles,
+      backingOff: now < this.#blockedUntil,
+      retryAfter: now < this.#blockedUntil ? this.#blockedUntil : null,
+      consecutive429: this.#consecutive429,
+    };
+  }
+
+  /**
+   * An `"api"` call is charged to two buckets and so waits on both; a `"file"` call waits on the
+   * file bucket alone, matching what `#reserveFile` actually consults.
+   */
+  #enterQueue(accountId: string, rateClass: RateClass): void {
+    if (rateClass === "file") {
+      this.#queuedFiles += 1;
+      return;
+    }
+    this.#queuedGlobalApi += 1;
+    this.#queuedByAccount.set(accountId, (this.#queuedByAccount.get(accountId) ?? 0) + 1);
+  }
+
+  #leaveQueue(accountId: string, rateClass: RateClass): void {
+    if (rateClass === "file") {
+      this.#queuedFiles = Math.max(0, this.#queuedFiles - 1);
+      return;
+    }
+    this.#queuedGlobalApi = Math.max(0, this.#queuedGlobalApi - 1);
+    const remaining = (this.#queuedByAccount.get(accountId) ?? 0) - 1;
+    // Drop the key at zero rather than leaving a 0 behind, so an account that was never seen again
+    // doesn't sit in the map — and in the snapshot — forever.
+    if (remaining > 0) this.#queuedByAccount.set(accountId, remaining);
+    else this.#queuedByAccount.delete(accountId);
   }
 
   /**

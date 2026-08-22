@@ -11,6 +11,7 @@ import type {
   EventsDailyRow,
   FriendLogHistoryRow,
   FriendLogRow,
+  GrantBudgetRow,
   GrantRow,
   KindCount,
   NewAuditEntry,
@@ -19,11 +20,15 @@ import type {
   NewGrant,
   NewPairingRequest,
   NewSession,
+  NewWebhook,
+  NewWebhookDelivery,
   NoteRow,
   NotificationRow,
   PairingRequestRow,
   RetentionConfigRow,
   SessionRow,
+  WebhookDeliveryRow,
+  WebhookRow,
 } from "./types.ts";
 
 /** In-memory database path. Tests use this; the daemon passes a real file. */
@@ -587,6 +592,138 @@ export class Store {
     return this.stmts.countGrantScopeUsage.get(grantId, scope, since)?.n ?? 0;
   }
 
+  // -- grant budgets (Phase 2) -----------------------------------------------
+
+  /** Sets one app's hourly allowance for one scope. `0` is a real setting: never. */
+  setGrantBudget(grantId: string, scope: string, hourlyLimit: number, at: number): void {
+    this.stmts.setGrantBudget.run(grantId, scope, hourlyLimit, at);
+  }
+
+  /** Drops an override, returning the scope to whatever this build defaults it to. */
+  deleteGrantBudget(grantId: string, scope: string): void {
+    this.stmts.deleteGrantBudget.run(grantId, scope);
+  }
+
+  /** The override for one (grant, scope), or null when there is none. */
+  grantBudget(grantId: string, scope: string): number | null {
+    return this.stmts.getGrantBudget.get(grantId, scope)?.hourly_limit ?? null;
+  }
+
+  listGrantBudgets(grantId: string): GrantBudgetRow[] {
+    return this.stmts.listGrantBudgets.all(grantId);
+  }
+
+  // -- webhooks (Phase 2) ----------------------------------------------------
+
+  /**
+   * Files a webhook. `secret_hash` is a hash — this method never sees, and must never be handed,
+   * the plaintext `whsec_…` the caller is shown once. See `webhooks/signature.ts`.
+   */
+  insertWebhook(webhook: NewWebhook): void {
+    this.stmts.insertWebhook.run(
+      webhook.id,
+      webhook.grant_id,
+      webhook.url,
+      webhook.secret_hash,
+      webhook.kinds,
+      webhook.account_id,
+      webhook.created_at,
+    );
+  }
+
+  getWebhook(id: string): WebhookRow | null {
+    return this.stmts.getWebhook.get(id) ?? null;
+  }
+
+  listWebhooks(grantId?: string): WebhookRow[] {
+    return grantId === undefined
+      ? this.stmts.listWebhooks.all()
+      : this.stmts.listWebhooksForGrant.all(grantId);
+  }
+
+  /** The dispatch set: everything not disabled. Cached by the manager, not queried per event. */
+  listLiveWebhooks(): WebhookRow[] {
+    return this.stmts.listLiveWebhooks.all();
+  }
+
+  /** Removes a webhook and, by cascade, every delivery still queued for it. */
+  deleteWebhook(id: string): boolean {
+    return this.stmts.deleteWebhook.run(id).changes > 0;
+  }
+
+  /** Idempotent: disabling an already-disabled webhook keeps the original reason and time. */
+  disableWebhook(id: string, at: number, reason: string): boolean {
+    return this.stmts.disableWebhook.run(at, reason, id).changes > 0;
+  }
+
+  /** Health bookkeeping for a delivered send. Clears the auto-disable counter. */
+  recordWebhookDelivered(id: string, at: number, status: number | null): void {
+    this.stmts.recordWebhookDelivered.run(at, status, id);
+  }
+
+  /**
+   * Health bookkeeping for a dead-lettered delivery. Returns the resulting `consecutive_dead`, which
+   * is what the auto-disable threshold is compared against — returned rather than re-read by the
+   * caller so the increment and the decision cannot see different values.
+   */
+  recordWebhookDead(id: string, at: number, status: number | null, error: string | null): number {
+    this.stmts.recordWebhookDead.run(at, status, error, id);
+    return this.getWebhook(id)?.consecutive_dead ?? 0;
+  }
+
+  enqueueWebhookDelivery(delivery: NewWebhookDelivery): void {
+    this.stmts.insertWebhookDelivery.run(
+      delivery.id,
+      delivery.webhook_id,
+      delivery.event_id,
+      delivery.event_kind,
+      delivery.payload,
+      delivery.next_attempt_at,
+      delivery.created_at,
+    );
+  }
+
+  /**
+   * Deliveries ready to send: **at most one per webhook**, and always that webhook's oldest pending
+   * row. The ordering guarantee is in the SQL, not here — see `SQL.listDueWebhookDeliveries`.
+   */
+  dueWebhookDeliveries(now: number, limit: number): WebhookDeliveryRow[] {
+    return this.stmts.listDueWebhookDeliveries.all(now, limit);
+  }
+
+  getWebhookDelivery(id: string): WebhookDeliveryRow | null {
+    return this.stmts.getWebhookDelivery.get(id) ?? null;
+  }
+
+  listWebhookDeliveries(webhookId: string, limit = 100): WebhookDeliveryRow[] {
+    return this.stmts.listWebhookDeliveries.all(webhookId, limit);
+  }
+
+  /** A failed attempt with retries left. Bumps `attempts` and moves the row's due time out. */
+  rescheduleWebhookDelivery(
+    id: string,
+    nextAttemptAt: number,
+    status: number | null,
+    error: string | null,
+  ): boolean {
+    return this.stmts.rescheduleWebhookDelivery.run(nextAttemptAt, status, error, id).changes > 0;
+  }
+
+  /** Terminal, and guarded on the row still being pending so a race cannot count it twice. */
+  markWebhookDelivered(id: string, at: number, status: number | null): boolean {
+    return this.stmts.markWebhookDelivered.run(at, status, id).changes > 0;
+  }
+
+  /** Terminal, same guard. `dead_at` is the dead-letter: the row is kept, never retried again. */
+  markWebhookDeliveryDead(
+    id: string,
+    at: number,
+    status: number | null,
+    error: string | null,
+  ): boolean {
+    return this.stmts.markWebhookDeliveryDead.run(at, status, error, id).changes > 0;
+  }
+
   // -- meta / housekeeping --------------------------------------------------
 
   getMeta(key: string): string | null {
@@ -796,6 +933,39 @@ function prepareAll(db: Database) {
     listAuditForGrant: q<AuditRow, [string, number, number]>(SQL.listAuditForGrant),
     finishAudit: q<void, [number | null, number]>(SQL.finishAudit),
     countGrantScopeUsage: q<{ n: number }, [string, string, number]>(SQL.countGrantScopeUsage),
+
+    setGrantBudget: q<void, [string, string, number, number]>(SQL.setGrantBudget),
+    deleteGrantBudget: q<void, [string, string]>(SQL.deleteGrantBudget),
+    getGrantBudget: q<GrantBudgetRow, [string, string]>(SQL.getGrantBudget),
+    listGrantBudgets: q<GrantBudgetRow, [string]>(SQL.listGrantBudgets),
+
+    insertWebhook: q<void, [string, string | null, string, string, string, string | null, number]>(
+      SQL.insertWebhook,
+    ),
+    getWebhook: q<WebhookRow, [string]>(SQL.getWebhook),
+    listWebhooks: q<WebhookRow, []>(SQL.listWebhooks),
+    listWebhooksForGrant: q<WebhookRow, [string]>(SQL.listWebhooksForGrant),
+    listLiveWebhooks: q<WebhookRow, []>(SQL.listLiveWebhooks),
+    deleteWebhook: q<void, [string]>(SQL.deleteWebhook),
+    disableWebhook: q<void, [number, string, string]>(SQL.disableWebhook),
+    recordWebhookDelivered: q<void, [number, number | null, string]>(SQL.recordWebhookDelivered),
+    recordWebhookDead: q<void, [number, number | null, string | null, string]>(
+      SQL.recordWebhookDead,
+    ),
+
+    insertWebhookDelivery: q<void, [string, string, string, string, string, number, number]>(
+      SQL.insertWebhookDelivery,
+    ),
+    listDueWebhookDeliveries: q<WebhookDeliveryRow, [number, number]>(SQL.listDueWebhookDeliveries),
+    getWebhookDelivery: q<WebhookDeliveryRow, [string]>(SQL.getWebhookDelivery),
+    listWebhookDeliveries: q<WebhookDeliveryRow, [string, number]>(SQL.listWebhookDeliveries),
+    rescheduleWebhookDelivery: q<void, [number, number | null, string | null, string]>(
+      SQL.rescheduleWebhookDelivery,
+    ),
+    markWebhookDelivered: q<void, [number, number | null, string]>(SQL.markWebhookDelivered),
+    markWebhookDeliveryDead: q<void, [number, number | null, string | null, string]>(
+      SQL.markWebhookDeliveryDead,
+    ),
 
     getMeta: q<{ value: string }, [string]>(SQL.getMeta),
     setMeta: q<void, [string, string]>(SQL.setMeta),

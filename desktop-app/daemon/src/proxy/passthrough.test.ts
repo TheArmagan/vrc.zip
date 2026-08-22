@@ -59,7 +59,14 @@ interface Harness {
   close: () => void;
 }
 
-function harness(options: { grant?: GrantRow | null; signedIn?: boolean } = {}): Harness {
+function harness(
+  options: {
+    grant?: GrantRow | null;
+    signedIn?: boolean;
+    /** Per-grant allowance overrides, keyed by scope. Absent means "use the build's default". */
+    budgets?: Record<string, number>;
+  } = {},
+): Harness {
   let seen: Seen | null = null;
   const upstream = Bun.serve({
     hostname: "127.0.0.1",
@@ -125,6 +132,7 @@ function harness(options: { grant?: GrantRow | null; signedIn?: boolean } = {}):
               row.outcome === "allowed" &&
               row.ts >= since,
           ).length,
+        grantBudget: (_grantId, scope) => options.budgets?.[scope] ?? null,
       },
       context: () => (options.signedIn === false ? null : signedIn()),
       anonymousContext: anonymous,
@@ -552,6 +560,61 @@ describe("per-grant budgets", () => {
     }
   });
 
+  test("a per-app override replaces the default allowance", async () => {
+    if (limit === undefined) throw new Error("createGroupInvite should be budgeted");
+    const token = mintProxyToken().token;
+    // Deliberately far below the default, so passing this cannot be an accident of the default.
+    const h = harness({
+      grant: grantWith([budgeted.scope], token),
+      budgets: { [budgeted.scope]: 2 },
+    });
+    try {
+      for (const call of spend(h, token, 2)) expect((await call).status).toBe(203);
+      const refused = await spend(h, token, 1)[0];
+      expect(refused?.status).toBe(429);
+      // The refusal names the number the *user* set, not the one the build ships.
+      expect(await refused?.json()).toMatchObject({
+        error: { vrczip: true, limit: 2, scope: budgeted.scope },
+      });
+    } finally {
+      h.close();
+    }
+  });
+
+  test("an override of 0 means never, which is not the same as no override", async () => {
+    // 0 has to be a real setting rather than a falsy stand-in for "unset": "this app may never send
+    // an invite" is the thing someone wants to say without revoking the grant and re-pairing.
+    const token = mintProxyToken().token;
+    const h = harness({
+      grant: grantWith([budgeted.scope], token),
+      budgets: { [budgeted.scope]: 0 },
+    });
+    try {
+      const refused = await spend(h, token, 1)[0];
+      expect(refused?.status).toBe(429);
+      expect(h.seen()).toBeNull();
+    } finally {
+      h.close();
+    }
+  });
+
+  test("an override on a scope that is not budgeted is ignored, not honoured", async () => {
+    // Otherwise the Connected apps page could invent a budget on `worlds:read`, which is a rate
+    // limit wearing a consent screen's clothes. Only the three risky scopes are budgeted at all.
+    const token = mintProxyToken().token;
+    const h = harness({ grant: grantWith(["worlds:read"], token), budgets: { "worlds:read": 0 } });
+    try {
+      const response = await passthrough(
+        route("getWorld"),
+        request({ path: "/worlds/wrld_x", headers: new Headers({ cookie: `auth=${token}` }) }),
+        h.deps,
+      );
+      expect(response.status).toBe(203);
+    } finally {
+      h.close();
+    }
+  });
+
   test("the window rolls, so an app that waits it out continues", async () => {
     if (limit === undefined) throw new Error("createGroupInvite should be budgeted");
     const token = mintProxyToken().token;
@@ -783,6 +846,7 @@ describe("responses whose body fetch already decoded", () => {
           appendAudit: () => 1,
           finishAudit: () => {},
           countGrantScopeUsage: () => 0,
+          grantBudget: () => null,
         },
         context: () => context("usr_a"),
         anonymousContext: () => context("vrczip:anonymous"),

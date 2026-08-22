@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { ALL_SCOPES, isScope, SCOPES } from "@vrcz/shared";
+import { ALL_SCOPES, isScope, NATIVE_SCOPES, SCOPES } from "@vrcz/shared";
 import spec from "../spec/openapi.json" with { type: "json" };
 import { BASE_URL, ROUTES, routeByOperationId, SPEC_VERSION } from "./generated/routes.ts";
 
@@ -50,10 +50,12 @@ test("routes are unique by (method, pathTemplate) and by operationId", () => {
 });
 
 test("no scope in the registry is dead weight", () => {
-  // A scope nobody can reach is a scope that shouldn't be on a consent screen.
+  // A scope nobody can reach is a scope that shouldn't be on a consent screen. The exceptions are
+  // declared, not inferred: `NATIVE_SCOPES` gate vrc.zip's own control API, which has no upstream
+  // operation behind it, and listing them by name keeps this check meaningful for everything else.
   const used = new Set(ROUTES.map((r) => r.scope));
   const unused = ALL_SCOPES.filter((s) => !used.has(s));
-  expect(unused).toEqual([]);
+  expect(unused.sort()).toEqual([...NATIVE_SCOPES].sort());
 });
 
 test("the operations PLAN.md hard-denies are marked hardDenied", () => {

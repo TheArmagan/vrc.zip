@@ -198,3 +198,79 @@ export type AuditRow = {
 };
 
 export type NewAuditEntry = Omit<AuditRow, "id">;
+
+// ---------------------------------------------------------------------------
+// webhooks (Phase 2)
+// ---------------------------------------------------------------------------
+
+/**
+ * One outbound subscription. `secret_hash` is the HMAC key — `sha256(secret)` — and the plaintext
+ * `whsec_…` is handed out once at registration and never stored. See `005_webhooks.sql`.
+ */
+export type WebhookRow = {
+  id: string;
+  /** The grant that registered it, or null for a webhook the user added in the UI. */
+  grant_id: string | null;
+  /** Already normalised by `URL`, and already past the SSRF checks in `webhooks/url.ts`. */
+  url: string;
+  secret_hash: string;
+  /** JSON array of kind patterns: `friend.online`, `friend.*`, or `*`. */
+  kinds: string;
+  /** Null means every account, including events with no account at all. */
+  account_id: string | null;
+  created_at: number;
+  disabled_at: number | null;
+  disabled_reason: string | null;
+  /** Dead-lettered deliveries in a row. Reset by the first success, not decayed. */
+  consecutive_dead: number;
+  delivered_count: number;
+  dead_count: number;
+  last_delivery_at: number | null;
+  last_status: number | null;
+  last_error: string | null;
+};
+
+export type NewWebhook = Pick<
+  WebhookRow,
+  "id" | "grant_id" | "url" | "secret_hash" | "kinds" | "account_id" | "created_at"
+>;
+
+/**
+ * One event on its way to one webhook. Pending while both `delivered_at` and `dead_at` are null —
+ * including while `next_attempt_at` sits in the future, which is a row mid-backoff that survives a
+ * restart.
+ */
+export type WebhookDeliveryRow = {
+  id: string;
+  webhook_id: string;
+  /** Shared by every delivery of the same event, so a receiver can tell a fan-out from a repeat. */
+  event_id: string;
+  event_kind: string;
+  /** The rendered JSON body. Retries re-send these exact bytes so the signature still covers them. */
+  payload: string;
+  attempts: number;
+  next_attempt_at: number;
+  last_status: number | null;
+  last_error: string | null;
+  created_at: number;
+  delivered_at: number | null;
+  dead_at: number | null;
+};
+
+export type NewWebhookDelivery = Pick<
+  WebhookDeliveryRow,
+  "id" | "webhook_id" | "event_id" | "event_kind" | "payload" | "next_attempt_at" | "created_at"
+>;
+
+/**
+ * One per-grant override of a risky scope's hourly allowance — migration 004.
+ *
+ * The presence of the row is the override. There is no "unset" value: absence means the build's
+ * default, and `hourly_limit = 0` means never, which is a setting somebody may well want.
+ */
+export type GrantBudgetRow = {
+  grant_id: string;
+  scope: string;
+  hourly_limit: number;
+  updated_at: number;
+};

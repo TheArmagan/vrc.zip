@@ -15,6 +15,8 @@ export type {
   SchedulerOptions,
 } from "./retention.ts";
 export {
+  applyRetentionUpdate,
+  describeRetention,
   FALLBACK_RETAIN_DAYS,
   GLOBAL_DEFAULT_KIND,
   LAST_RUN_META_KEY,
@@ -22,6 +24,7 @@ export {
   nextRunDelay,
   planRetention,
   resolveRetainDays,
+  resolveRetention,
   rulesFrom,
   runRetention,
   startRetentionScheduler,

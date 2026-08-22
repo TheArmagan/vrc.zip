@@ -109,11 +109,21 @@
               <span class="tabular text-xs text-muted-foreground"
                 >{rates.current}/{rates.limit}/s</span
               >
+              {#if rates.queued > 0}
+                <!--
+                  Only when something is actually waiting. A permanent "0 queued" would be one more
+                  number to learn to ignore, and the point of this badge is that it is unusual.
+                -->
+                <Badge variant="secondary" class="tabular">{rates.queued} queued</Badge>
+              {/if}
             </Tooltip.Trigger>
             <Tooltip.Content>
               {rates.current} requests in the last second, against the {rates.limit}/s
               the daemon allows itself across every account. Peak in the last minute:
               {rates.peak}/s.
+              {#if rates.queued > 0}
+                {rates.queued} calls are waiting on the limiter right now.
+              {/if}
             </Tooltip.Content>
           </Tooltip.Root>
         {/if}

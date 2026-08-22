@@ -330,6 +330,116 @@ export const SQL = {
     SELECT COUNT(*) AS n FROM audit_log
     WHERE grant_id = ? AND scope = ? AND outcome = 'allowed' AND ts >= ?`,
 
+  /*
+   * Per-grant overrides for the risky-scope allowances — migration 004.
+   *
+   * A row means "this app's allowance for this scope is this number"; no row means the build's
+   * default. The upsert is what makes the Connected apps page idempotent: the screen sends the
+   * number it wants, not a decision about whether it is creating or editing.
+   */
+  setGrantBudget: `
+    INSERT INTO grant_budgets (grant_id, scope, hourly_limit, updated_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(grant_id, scope) DO UPDATE SET
+      hourly_limit = excluded.hourly_limit,
+      updated_at   = excluded.updated_at`,
+  deleteGrantBudget: `DELETE FROM grant_budgets WHERE grant_id = ? AND scope = ?`,
+  getGrantBudget: `SELECT * FROM grant_budgets WHERE grant_id = ? AND scope = ?`,
+  listGrantBudgets: `SELECT * FROM grant_budgets WHERE grant_id = ? ORDER BY scope`,
+
+  // -- webhooks (Phase 2) ----------------------------------------------------
+  insertWebhook: `
+    INSERT INTO webhooks (id, grant_id, url, secret_hash, kinds, account_id, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  getWebhook: `SELECT * FROM webhooks WHERE id = ?`,
+  listWebhooks: `SELECT * FROM webhooks ORDER BY created_at DESC`,
+  listWebhooksForGrant: `SELECT * FROM webhooks WHERE grant_id = ? ORDER BY created_at DESC`,
+  /*
+   * The dispatch set. Read once and cached in memory by the manager rather than queried per event —
+   * the bus bursts forty player-join events on an instance transition, and a table scan per event is
+   * not a cost the spine should pay for a feature most users have zero of.
+   */
+  listLiveWebhooks: `SELECT * FROM webhooks WHERE disabled_at IS NULL ORDER BY created_at ASC`,
+  /*
+   * Deleted, not tombstoned — the opposite call from `grants`, and deliberately so. A revoked grant
+   * is evidence about access that already happened; a removed webhook is a subscription the user
+   * cancelled, and leaving it in the list forever would make "remove" look broken. The cascade takes
+   * its queued deliveries with it, which is the point: nothing should still be trying to reach an
+   * endpoint the user just deleted.
+   */
+  deleteWebhook: `DELETE FROM webhooks WHERE id = ?`,
+  disableWebhook: `
+    UPDATE webhooks SET disabled_at = ?, disabled_reason = ?
+    WHERE id = ? AND disabled_at IS NULL`,
+  /*
+   * A delivered send. `consecutive_dead` is zeroed rather than decremented: the counter answers "is
+   * this endpoint currently broken", and one success is a complete answer to that question.
+   */
+  recordWebhookDelivered: `
+    UPDATE webhooks SET
+      consecutive_dead = 0,
+      delivered_count  = delivered_count + 1,
+      last_delivery_at = ?,
+      last_status      = ?,
+      last_error       = NULL
+    WHERE id = ?`,
+  /* A delivery that ran out of attempts. Failed *attempts* are not counted here — see the schema. */
+  recordWebhookDead: `
+    UPDATE webhooks SET
+      consecutive_dead = consecutive_dead + 1,
+      dead_count       = dead_count + 1,
+      last_delivery_at = ?,
+      last_status      = ?,
+      last_error       = ?
+    WHERE id = ?`,
+
+  insertWebhookDelivery: `
+    INSERT INTO webhook_deliveries
+      (id, webhook_id, event_id, event_kind, payload, next_attempt_at, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  /*
+   * The due scan, and the whole ordering guarantee lives in this one statement.
+   *
+   * The correlated subquery restricts the result to each webhook's *head of line* — its oldest
+   * pending row — so a webhook can never have two deliveries in flight and can never deliver event
+   * two while event one is still backing off. Enforcing that in SQL rather than in the scanner
+   * means a second scanner, or a scan that overlaps the previous one, cannot break it either.
+   *
+   * Different webhooks are untouched by this: each contributes its own head, so one dead endpoint
+   * backing off for five minutes costs the others nothing.
+   */
+  listDueWebhookDeliveries: `
+    SELECT d.* FROM webhook_deliveries d
+    WHERE d.delivered_at IS NULL AND d.dead_at IS NULL AND d.next_attempt_at <= ?
+      AND d.rowid = (
+        SELECT h.rowid FROM webhook_deliveries h
+        WHERE h.webhook_id = d.webhook_id AND h.delivered_at IS NULL AND h.dead_at IS NULL
+        ORDER BY h.rowid ASC LIMIT 1
+      )
+    ORDER BY d.next_attempt_at ASC, d.rowid ASC
+    LIMIT ?`,
+  getWebhookDelivery: `SELECT * FROM webhook_deliveries WHERE id = ?`,
+  listWebhookDeliveries: `
+    SELECT * FROM webhook_deliveries WHERE webhook_id = ? ORDER BY rowid DESC LIMIT ?`,
+  /* A failed attempt that will be tried again. The row stays pending; only its due time moves. */
+  rescheduleWebhookDelivery: `
+    UPDATE webhook_deliveries SET
+      attempts = attempts + 1, next_attempt_at = ?, last_status = ?, last_error = ?
+    WHERE id = ? AND delivered_at IS NULL AND dead_at IS NULL`,
+  /*
+   * Both terminal transitions guard on the row still being pending. Without that, a delivery raced
+   * by two scanners could be counted twice against the webhook's health — and `consecutive_dead`
+   * drives auto-disable, so double-counting is not a cosmetic error.
+   */
+  markWebhookDelivered: `
+    UPDATE webhook_deliveries SET
+      attempts = attempts + 1, delivered_at = ?, last_status = ?, last_error = NULL
+    WHERE id = ? AND delivered_at IS NULL AND dead_at IS NULL`,
+  markWebhookDeliveryDead: `
+    UPDATE webhook_deliveries SET
+      attempts = attempts + 1, dead_at = ?, last_status = ?, last_error = ?
+    WHERE id = ? AND delivered_at IS NULL AND dead_at IS NULL`,
+
   // -- meta / housekeeping --------------------------------------------------
   getMeta: `SELECT value FROM meta WHERE key = ?`,
   setMeta: `

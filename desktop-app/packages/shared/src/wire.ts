@@ -378,6 +378,17 @@ export interface StreamEnvelope {
    * the two hand-copied declarations never agreed.
    */
   readonly sessionId: number | null;
+  /**
+   * The display name of the game client this event came from, when it came from one.
+   *
+   * Null for anything not derived from a log, and null for a session whose identity line has not
+   * been read yet. It is carried rather than left to be looked up because sessions are the unit for
+   * everything log-derived (PLAN.md §"Control API"): a third-party app following two concurrent
+   * clients needs to say *which* one without holding a session table of its own, and re-deriving it
+   * from `accountId` is exactly wrong for the case this exists to serve — a client signed into an
+   * account vrc.zip does not manage has a display name and no account id at all.
+   */
+  readonly displayName: string | null;
   readonly subjectId: string | null;
   readonly location: string | null;
   /** The kind-specific body. Narrow it at the point of use; the wire promises only that it is JSON. */
@@ -436,8 +447,16 @@ export interface RateFrame {
   readonly accounts: Readonly<Record<string, number>>;
   /** Per grant, non-zero only. */
   readonly grants: Readonly<Record<string, number>>;
-  /** The IP-wide ceiling the daemon holds itself to, so the UI can draw load against capacity. */
+  /** The IP-wide API ceiling the daemon holds itself to, so the UI can draw load against capacity. */
   readonly limit: number;
+  /**
+   * Calls blocked on the limiter at this instant.
+   *
+   * On the frame rather than only in `/api/status` because it is the number that explains a stall
+   * while it is happening: a daemon spending 3/s against an 80/s ceiling looks idle, and "and
+   * forty calls are waiting" is the difference between a quiet app and a jammed one.
+   */
+  readonly queued: number;
   /** Unix ms at which a 429 backoff lifts, or null when not backing off. */
   readonly retryAfter: number | null;
 }
@@ -490,29 +509,63 @@ export function isRateFrame(
 // ---------------------------------------------------------------------------
 
 /**
- * The limiter as the settings screen draws it.
+ * One rate ceiling, as it stands right now.
  *
- * `remaining` and `queued` are **approximations** — the limiter does not expose live token counts —
- * and `limit` describes a single ceiling when there are in fact three (20/s per account, 100/s per
- * IP, 300/s per IP for files; see PLAN.md §1.4). Both are open questions in PROGRESS.md rather than
- * settled contract, and this comment is here so nobody builds a precise-looking gauge on top of them
- * without knowing that.
+ * There is no `limit` here and no single number anywhere in {@link RateLimitSnapshot}, because
+ * there was never one ceiling: VRChat enforces 20 req/s per account, 100 req/s per IP, and 300
+ * req/s per IP for files, and vrc.zip runs each at 80% (PLAN.md §1.4). The old snapshot reported
+ * the IP-wide API rate as "the" limit and made up `remaining` and `queued` — a gauge that looked
+ * precise and was not. All four numbers below are read off the limiter's actual buckets.
+ */
+export interface RateCeilingSnapshot {
+  /** Sustained requests per second this bucket refills at. A constant off the configuration. */
+  readonly rate: number;
+  /** Bucket capacity — the size of a burst this ceiling will absorb before it starts pacing. */
+  readonly burst: number;
+  /** Whole tokens available at the moment the snapshot was taken. Measured, not estimated. */
+  readonly available: number;
+  /** Calls blocked on this ceiling right now. Measured by the limiter, not inferred. */
+  readonly queued: number;
+}
+
+/** A per-account ceiling, named. One per account that has spent anything or is waiting. */
+export interface AccountRateCeiling extends RateCeilingSnapshot {
+  readonly accountId: string;
+}
+
+/**
+ * The limiter as the settings screen and the shell draw it.
+ *
+ * Three ceilings, each with its own reading, plus the shared breaker. The breaker is shared and the
+ * ceilings are not: a 429 on either tier stops both, which is why `retryAfter` sits at the top
+ * level rather than on a ceiling.
  */
 export interface RateLimitSnapshot {
-  /** Requests permitted per second across all accounts. */
-  readonly limit: number;
-  /** Tokens currently available. Approximate. */
-  readonly remaining: number;
-  /** Requests waiting on the limiter right now. Approximate. */
+  /** The IP-wide API ceiling. Every account's traffic draws from this one as well as its own. */
+  readonly api: RateCeilingSnapshot;
+  /** The IP-wide file ceiling — images, icons, and everything else on the `/file/` tier. */
+  readonly files: RateCeilingSnapshot;
+  /**
+   * Per-account API ceilings.
+   *
+   * Empty until an account has made its first API call, which is correct rather than a gap: a
+   * bucket that has never been drawn from is at capacity by definition, and {@link perAccountRate}
+   * is enough to render one.
+   */
+  readonly accounts: readonly AccountRateCeiling[];
+  /** The per-account sustained rate every account gets. Shown for accounts not yet in `accounts`. */
+  readonly perAccountRate: number;
+  /** Calls blocked anywhere in the limiter right now. Not the sum of the ceilings' `queued`. */
   readonly queued: number;
   /** Unix milliseconds at which a 429 backoff lifts, or null when not backing off. */
   readonly retryAfter: number | null;
+  /** Consecutive 429s behind the current backoff. Zero once anything succeeds. */
+  readonly consecutive429: number;
   /**
-   * What the daemon is actually spending, against that ceiling.
+   * What the daemon is actually spending, against those ceilings.
    *
-   * The shell used to render `limit` as though it were a live reading, which it never was — it is a
-   * constant read off the configuration. This is the measured half, and it is what makes the number
-   * beside it mean something.
+   * The shell used to render a ceiling as though it were a live reading, which it never was. This
+   * is the measured half, and it is what makes the numbers beside it mean something.
    */
   readonly used: RateSeries;
   /** How many seconds of history `used` carries. */
@@ -588,4 +641,104 @@ export interface AppAuditEntry {
   readonly outcome: AuditOutcome;
   /** The status the caller was given, or null when the call was refused before one was chosen. */
   readonly status: number | null;
+}
+
+// ---------------------------------------------------------------------------
+// Retention
+// ---------------------------------------------------------------------------
+
+/**
+ * The reserved rule key holding the window every unconfigured kind inherits.
+ *
+ * It lives here rather than only in the daemon because the UI has to keep it *out* of the per-kind
+ * list it renders — a `'*'` row shown beside `gamelog.player-join` reads as an event kind called
+ * "everything", which is the one reading that would make someone set it to a day.
+ */
+export const RETENTION_DEFAULT_KEY = "*";
+
+/**
+ * The floor and ceiling on any retention window, in days.
+ *
+ * The floor is 1 rather than 0 because "keep nothing" is not a retention policy, it is turning the
+ * feed off, and a screen that can do that by accident is a screen that eats someone's history on a
+ * mis-drag. The ceiling is ten years: past that the number stops meaning anything and the honest
+ * answer is that nobody has run this daemon that long.
+ */
+export const RETENTION_MIN_DAYS = 1;
+export const RETENTION_MAX_DAYS = 3650;
+
+/** Where the window applied to a kind actually came from. Rendered so a number is never a mystery. */
+export type RetentionSource = "exact" | "prefix" | "default" | "fallback";
+
+/** One stored rule: an exact kind (`gamelog.player-join`) or a family prefix (`gamelog.*`). */
+export interface RetentionRule {
+  readonly kind: string;
+  readonly retainDays: number;
+}
+
+/**
+ * One event kind as the Settings screen draws it: what is stored, what the rules resolve to, and
+ * what the next pass would delete.
+ *
+ * `expiring` is the whole reason this is a dry run rather than a form — a window is an abstraction
+ * until it is "4,182 rows go away", and that is the number someone needs before they commit.
+ */
+export interface RetentionKindStat {
+  readonly kind: string;
+  readonly retainDays: number;
+  readonly source: RetentionSource;
+  /** Rows of this kind stored right now. */
+  readonly rows: number;
+  /** Rows the next pass would roll up and delete. */
+  readonly expiring: number;
+}
+
+/** The body of `GET /api/retention`, and of a `PUT` that applied or previewed one. */
+export interface RetentionSettings {
+  /** The window every kind inherits when no exact or prefix rule matches. */
+  readonly defaultRetainDays: number;
+  /** Stored rules other than the default, kind-ascending. */
+  readonly rules: readonly RetentionRule[];
+  /** Every kind currently in the store, resolved against the rules. Kind-ascending. */
+  readonly kinds: readonly RetentionKindStat[];
+  /** Rows the next pass would delete across every kind. */
+  readonly totalExpiring: number;
+  /** Unix ms of the last completed pass, or null if none has run on this install. */
+  readonly lastRunAt: number | null;
+  /** Unix ms the next scheduled pass is aimed at. */
+  readonly nextRunAt: number | null;
+  /** The database file's size on disk, so a window has a cost attached to it. */
+  readonly dbSizeBytes: number;
+  /**
+   * True when this body describes a proposal rather than what is stored.
+   *
+   * A preview and a saved state are the same shape on purpose: the screen renders one component
+   * either way, and the only difference is which one it is showing.
+   */
+  readonly preview: boolean;
+}
+
+/**
+ * The body of `PUT /api/retention`.
+ *
+ * `rules` is a **patch, not a replacement**: a key mapped to a number sets it, a key mapped to
+ * `null` deletes it, and a key that is absent is left alone. Replacement semantics would mean the
+ * screen has to send every rule it did not touch back, and a screen that has to re-send state it
+ * did not author is a screen that will one day delete a rule it never rendered.
+ */
+export interface RetentionUpdate {
+  readonly defaultRetainDays?: number;
+  readonly rules?: Readonly<Record<string, number | null>>;
+  /** Compute and return the result without writing anything. */
+  readonly dryRun?: boolean;
+}
+
+/** What `POST /api/retention/run` reports about the pass it just made. */
+export interface RetentionRunResult {
+  /** Rows deleted, per kind. Kinds that lost nothing are omitted. */
+  readonly deletedByKind: Readonly<Record<string, number>>;
+  readonly totalDeleted: number;
+  readonly durationMs: number;
+  /** The state after the pass, so the screen never has to re-fetch to redraw. */
+  readonly settings: RetentionSettings;
 }

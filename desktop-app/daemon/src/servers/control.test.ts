@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { DaemonStatus } from "@vrcz/shared";
+import type { DaemonStatus, RetentionSettings, RetentionUpdate } from "@vrcz/shared";
 import { APP_VERSION } from "@vrcz/shared";
 import { emptySeries, WINDOW_SECONDS } from "../net/request-meter.ts";
 import { TOKEN_HEADER } from "../security/guards.ts";
@@ -8,6 +8,7 @@ import type { ControlDeps } from "./control.ts";
 import {
   type AppAuditEntry,
   type AuditQuery,
+  type ConnectedApp,
   type ControlAccount,
   ControlError,
   createControlApp,
@@ -47,6 +48,30 @@ const ICON_URL_FULL = "https://api.vrchat.cloud/api/1/file/file_icon/1/1024";
 
 /** The one grant `fakeDeps` knows about, so an unknown id has something to be unknown against. */
 const GRANT_ID = "grant_00000000";
+
+/** One connected app, as `PUT /api/apps/:id/budgets/:scope` returns it after a write. */
+const CONNECTED_APP: ConnectedApp = {
+  id: GRANT_ID,
+  accountId: "usr_a",
+  accountName: "Tester",
+  app: { name: "MyApp", version: "1.0", contact: "me@example.com" },
+  scopes: [],
+  createdAt: 1_700_000_000_000,
+  lastUsedAt: null,
+  liveSockets: 0,
+  rate: emptySeries(),
+  budgets: [
+    {
+      scope: "invite:send",
+      description: "Send invites and invite requests to other people, as you.",
+      limit: 10,
+      defaultLimit: 60,
+      overridden: true,
+      used: 3,
+      granted: true,
+    },
+  ],
+};
 
 const AUDIT_ENTRY: AppAuditEntry = {
   id: 7,
@@ -341,6 +366,9 @@ interface Recorder {
   selfInvites: { accountId: string; target: InviteTarget }[];
   listeners: ((event: StreamEvent) => void)[];
   unsubscribed: number;
+  retentionUpdates: RetentionUpdate[];
+  retentionRuns: number;
+  budgetWrites: { grantId: string; scope: string; limit: number | null }[];
 }
 
 function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; seen: Recorder } {
@@ -368,8 +396,23 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     selfInvites: [],
     listeners: [],
     unsubscribed: 0,
+    retentionUpdates: [],
+    retentionRuns: 0,
+    budgetWrites: [],
   };
   let settings: Settings = { theme: "dark" };
+  let retention: RetentionSettings = {
+    defaultRetainDays: 90,
+    rules: [{ kind: "gamelog.*", retainDays: 30 }],
+    kinds: [
+      { kind: "gamelog.player-join", retainDays: 30, source: "prefix", rows: 10, expiring: 3 },
+    ],
+    totalExpiring: 3,
+    lastRunAt: null,
+    nextRunAt: 1_700_000_000_000,
+    dbSizeBytes: 4096,
+    preview: false,
+  };
 
   const deps: ControlDeps = {
     status: async () => ({
@@ -377,10 +420,13 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
       backend: "windows-credential-manager",
       accounts: 1,
       rateLimit: {
-        limit: 20,
-        remaining: 20,
+        api: { rate: 80, burst: 100, available: 100, queued: 0 },
+        files: { rate: 240, burst: 300, available: 300, queued: 0 },
+        accounts: [],
+        perAccountRate: 16,
         queued: 0,
         retryAfter: null,
+        consecutive429: 0,
         used: emptySeries(),
         windowSeconds: WINDOW_SECONDS,
       },
@@ -392,6 +438,11 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     },
     denyConsent: async () => {},
     listConnectedApps: async () => [],
+    setAppBudget: async (grantId, scope, limit) => {
+      if (grantId !== GRANT_ID) throw new ControlError(404, "unknown_app", "no such app");
+      seen.budgetWrites.push({ grantId, scope, limit });
+      return CONNECTED_APP;
+    },
     revokeConnectedApp: async () => {},
     revokeAllConnectedApps: async () => 0,
     listAppAudit: async (grantId, query) => {
@@ -563,6 +614,24 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
       if (url.includes("missing")) return null;
       return { bytes: PNG_BYTES, contentType: "image/png" };
     },
+    getRetention: async () => retention,
+    updateRetention: async (update) => {
+      seen.retentionUpdates.push(update);
+      if (update.dryRun === true) {
+        return { ...retention, defaultRetainDays: update.defaultRetainDays ?? 90, preview: true };
+      }
+      retention = { ...retention, defaultRetainDays: update.defaultRetainDays ?? 90 };
+      return retention;
+    },
+    runRetention: async () => {
+      seen.retentionRuns += 1;
+      return {
+        deletedByKind: { "gamelog.player-join": 3 },
+        totalDeleted: 3,
+        durationMs: 1,
+        settings: retention,
+      };
+    },
     getSettings: async () => settings,
     updateSettings: async (patch) => {
       settings = { ...settings, ...patch };
@@ -645,7 +714,17 @@ describe("control API routes", () => {
       backend: "windows-credential-manager",
       accounts: 1,
     });
-    expect(rateLimit).toMatchObject({ limit: 20, remaining: 20, queued: 0, retryAfter: null });
+    // Three ceilings, not one — see `RateLimitSnapshot`. `limit`/`remaining` are gone precisely
+    // because they were a single invented number standing in for buckets that never agreed.
+    expect(rateLimit).toMatchObject({
+      api: { rate: 80, burst: 100, available: 100, queued: 0 },
+      files: { rate: 240, burst: 300, available: 300, queued: 0 },
+      accounts: [],
+      perAccountRate: 16,
+      queued: 0,
+      retryAfter: null,
+      consecutive429: 0,
+    });
     expect(rateLimit.windowSeconds).toBe(WINDOW_SECONDS);
     expect(rateLimit.used.history).toHaveLength(WINDOW_SECONDS);
     expect(rateLimit.used.current).toBe(0);
@@ -1540,6 +1619,7 @@ describe("GET /api/stream", () => {
       payload: {
         accountId: "usr_a",
         sessionId: null,
+        displayName: null,
         subjectId: "usr_friend",
         location: null,
         data: { userId: "usr_friend" },
@@ -1683,6 +1763,161 @@ describe("GET /api/apps/:id/audit", () => {
   test("an unknown grant id is a 404", async () => {
     const { deps } = fakeDeps();
     const res = await call(deps, "/api/apps/grant_nonexistent/audit");
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ error: "unknown_app" });
+  });
+});
+
+describe("retention routes", () => {
+  const json = (body: unknown) => ({
+    method: "PUT",
+    body: JSON.stringify(body),
+    headers: { "content-type": "application/json" },
+  });
+
+  test("GET returns the stored config and the dry run alongside it", async () => {
+    const { deps } = fakeDeps();
+    const res = await call(deps, "/api/retention");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      defaultRetainDays: 90,
+      rules: [{ kind: "gamelog.*", retainDays: 30 }],
+      totalExpiring: 3,
+      preview: false,
+    });
+  });
+
+  test("PUT passes the patch through, and dryRun comes back marked as a preview", async () => {
+    const { deps, seen } = fakeDeps();
+
+    const saved = await call(deps, "/api/retention", json({ defaultRetainDays: 30 }));
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toMatchObject({ defaultRetainDays: 30, preview: false });
+
+    const previewed = await call(
+      deps,
+      "/api/retention",
+      json({ defaultRetainDays: 7, dryRun: true }),
+    );
+    expect(await previewed.json()).toMatchObject({ defaultRetainDays: 7, preview: true });
+
+    expect(seen.retentionUpdates).toEqual([
+      { defaultRetainDays: 30 },
+      { defaultRetainDays: 7, dryRun: true },
+    ]);
+  });
+
+  test("null deletes a rule and a number sets one — both survive the round trip", async () => {
+    const { deps, seen } = fakeDeps();
+    const res = await call(
+      deps,
+      "/api/retention",
+      json({ rules: { "gamelog.*": null, "friend.online": 14 } }),
+    );
+    expect(res.status).toBe(200);
+    expect(seen.retentionUpdates).toEqual([{ rules: { "gamelog.*": null, "friend.online": 14 } }]);
+  });
+
+  /*
+   * Bounds are rejected rather than clamped, and this is the test that says so. A clamp would
+   * store a different number of days than the user typed, and days are how much of their history
+   * they think they are keeping.
+   */
+  test.each([
+    ["zero days", { defaultRetainDays: 0 }],
+    ["negative days", { defaultRetainDays: -1 }],
+    ["past the ceiling", { defaultRetainDays: 4000 }],
+    ["a fraction", { defaultRetainDays: 1.5 }],
+    ["a string", { defaultRetainDays: "90" }],
+    ["a rule out of range", { rules: { "friend.online": 0 } }],
+    ["a rule that is a string", { rules: { "friend.online": "30" } }],
+    ["rules that are an array", { rules: [1, 2] }],
+    ["dryRun that is not a boolean", { dryRun: "yes" }],
+  ])("%s is a 400 and writes nothing", async (_name, body) => {
+    const { deps, seen } = fakeDeps();
+    const res = await call(deps, "/api/retention", json(body));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "invalid_body" });
+    expect(seen.retentionUpdates).toEqual([]);
+  });
+
+  test("a body that is not an object is a 400", async () => {
+    const { deps } = fakeDeps();
+    const res = await call(deps, "/api/retention", {
+      method: "PUT",
+      body: "not json",
+      headers: { "content-type": "application/json" },
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("POST /api/retention/run reports the pass and the state after it", async () => {
+    const { deps, seen } = fakeDeps();
+    const res = await call(deps, "/api/retention/run", { method: "POST" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      totalDeleted: 3,
+      deletedByKind: { "gamelog.player-join": 3 },
+      settings: { defaultRetainDays: 90 },
+    });
+    expect(seen.retentionRuns).toBe(1);
+  });
+
+  test("the routes are behind the same guards as everything else on this port", async () => {
+    const { deps } = fakeDeps();
+    const res = await call(deps, "/api/retention", { headers: { authorization: "Bearer wrong" } });
+    expect(res.status).toBe(401);
+  });
+});
+
+describe("PUT /api/apps/:id/budgets/:scope", () => {
+  const put = (body: unknown) => ({
+    method: "PUT",
+    body: JSON.stringify(body),
+    headers: { "content-type": "application/json" },
+  });
+
+  test("a number sets the allowance and the updated app comes back", async () => {
+    const { deps, seen } = fakeDeps();
+    const res = await call(deps, `/api/apps/${GRANT_ID}/budgets/invite:send`, put({ limit: 10 }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ id: GRANT_ID, budgets: [{ limit: 10 }] });
+    expect(seen.budgetWrites).toEqual([{ grantId: GRANT_ID, scope: "invite:send", limit: 10 }]);
+  });
+
+  /*
+   * `null` clears the override, and clearing means "use the build's default" rather than "zero".
+   * They are different settings and the page offers both, so the wire has to be able to say either.
+   */
+  test("null clears the override rather than meaning zero", async () => {
+    const { deps, seen } = fakeDeps();
+    const res = await call(deps, `/api/apps/${GRANT_ID}/budgets/invite:send`, put({ limit: null }));
+    expect(res.status).toBe(200);
+    expect(seen.budgetWrites).toEqual([{ grantId: GRANT_ID, scope: "invite:send", limit: null }]);
+  });
+
+  test("zero is accepted, because 'never' is a real setting", async () => {
+    const { deps, seen } = fakeDeps();
+    const res = await call(deps, `/api/apps/${GRANT_ID}/budgets/invite:send`, put({ limit: 0 }));
+    expect(res.status).toBe(200);
+    expect(seen.budgetWrites[0]?.limit).toBe(0);
+  });
+
+  test.each([
+    ["a negative number", { limit: -1 }],
+    ["a fraction", { limit: 1.5 }],
+    ["a string", { limit: "10" }],
+    ["a missing limit", {}],
+  ])("%s is a 400 and writes nothing", async (_name, body) => {
+    const { deps, seen } = fakeDeps();
+    const res = await call(deps, `/api/apps/${GRANT_ID}/budgets/invite:send`, put(body));
+    expect(res.status).toBe(400);
+    expect(seen.budgetWrites).toEqual([]);
+  });
+
+  test("an unknown app is a 404", async () => {
+    const { deps } = fakeDeps();
+    const res = await call(deps, "/api/apps/grant_nope/budgets/invite:send", put({ limit: 10 }));
     expect(res.status).toBe(404);
     expect(await res.json()).toMatchObject({ error: "unknown_app" });
   });

@@ -148,6 +148,24 @@ export const SCOPES = {
     dangerous: false,
   },
 
+  /*
+   * vrc.zip's own scopes, for the control API on :7775 rather than the VRChat mirror on :7774.
+   * They have no operation in the route table behind them — they gate data vrc.zip derived itself.
+   */
+  "sessions:read": {
+    description: "See when your VRChat clients start and stop, and where they are.",
+    dangerous: false,
+  },
+  "sessions:unlinked": {
+    description:
+      "See VRChat clients signed into accounts you have not added to vrc.zip, including their display names.",
+    dangerous: true,
+  },
+  "webhooks:write": {
+    description: "Register web addresses that vrc.zip will send your events to as they happen.",
+    dangerous: false,
+  },
+
   "system:read": {
     description: "Read VRChat's public configuration, health, and online-user count.",
     dangerous: false,
@@ -172,6 +190,25 @@ export const SCOPES = {
 export type Scope = keyof typeof SCOPES;
 
 export const ALL_SCOPES = Object.keys(SCOPES) as Scope[];
+
+/**
+ * The scopes that gate **vrc.zip's own** control API rather than a VRChat operation.
+ *
+ * Every other scope in the registry is reachable from the generated route table — an app asking
+ * for `worlds:read` is asking to be allowed to call VRChat's world endpoints through the mirror on
+ * `:7774`. These have no operation behind them because the data they gate does not exist upstream:
+ * sessions are derived from local log files, and a webhook is a thing vrc.zip does, not a thing
+ * VRChat has.
+ *
+ * Written down as a list rather than inferred so that `routes.test.ts` can keep asserting that no
+ * *other* scope is dead weight. A scope nobody can reach is a scope that should not be on a consent
+ * screen, and losing that check to add these would be a bad trade.
+ */
+export const NATIVE_SCOPES: readonly Scope[] = [
+  "sessions:read",
+  "sessions:unlinked",
+  "webhooks:write",
+] as const;
 
 export function isScope(value: string): value is Scope {
   return Object.hasOwn(SCOPES, value);

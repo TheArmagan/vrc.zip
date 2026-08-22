@@ -16,10 +16,13 @@ const deps: ControlDeps = {
     backend: "file",
     accounts: 0,
     rateLimit: {
-      limit: 20,
-      remaining: 20,
+      api: { rate: 80, burst: 100, available: 100, queued: 0 },
+      files: { rate: 240, burst: 300, available: 300, queued: 0 },
+      accounts: [],
+      perAccountRate: 16,
       queued: 0,
       retryAfter: null,
+      consecutive429: 0,
       used: emptySeries(),
       windowSeconds: WINDOW_SECONDS,
     },
@@ -73,6 +76,18 @@ const deps: ControlDeps = {
   listGroupPosts: async () => ({ posts: [], hasMore: false }),
   listGroupInstances: async () => ({ instances: [] }),
   listGroupGalleryImages: async () => ({ images: [], hasMore: false }),
+  setAppBudget: async () => {
+    throw new Error("unused");
+  },
+  getRetention: async () => {
+    throw new Error("unused");
+  },
+  updateRetention: async () => {
+    throw new Error("unused");
+  },
+  runRetention: async () => {
+    throw new Error("unused");
+  },
   getSettings: async () => ({}),
   updateSettings: async () => ({}),
   subscribeEvents: () => () => {},

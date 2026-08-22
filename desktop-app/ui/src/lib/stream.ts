@@ -58,6 +58,7 @@ function asPayload(value: unknown): StreamEnvelope {
     // the boundary with a process that ships separately, and coercing one field is cheaper than a
     // whole screen of sessions failing to group.
     sessionId: asSessionId(record.sessionId),
+    displayName: typeof record.displayName === "string" ? record.displayName : null,
     subjectId: typeof record.subjectId === "string" ? record.subjectId : null,
     location: typeof record.location === "string" ? record.location : null,
     data: (record.data ?? null) as StreamEnvelope["data"],
@@ -86,6 +87,7 @@ function asRateFrame(value: unknown): RateFrame | null {
     accounts: asCounts(record.accounts),
     grants: asCounts(record.grants),
     limit: typeof record.limit === "number" ? record.limit : 0,
+    queued: typeof record.queued === "number" ? record.queued : 0,
     retryAfter: typeof record.retryAfter === "number" ? record.retryAfter : null,
   };
 }

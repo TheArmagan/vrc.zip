@@ -131,7 +131,12 @@ class AppState {
       // Seed the histories the live socket will extend. Re-seeding on every refresh is deliberate:
       // it is also the resync after a reconnect, when the socket missed however many seconds the
       // daemon was away and the client's own tail has drifted from the truth.
-      rates.seedTotal(status.rateLimit.used, status.rateLimit.limit, status.rateLimit.retryAfter);
+      rates.seedTotal(
+        status.rateLimit.used,
+        status.rateLimit.api.rate,
+        status.rateLimit.queued,
+        status.rateLimit.retryAfter,
+      );
       for (const account of accounts) rates.seedAccount(account.id, account.rate);
       this.sessions = sessions;
       this.settings = settings;

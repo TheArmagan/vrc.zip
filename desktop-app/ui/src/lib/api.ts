@@ -42,6 +42,12 @@ import {
   type LoginResult,
   type RateLimitSnapshot,
   type RateSeries,
+  type RetentionKindStat,
+  type RetentionRule,
+  type RetentionRunResult,
+  type RetentionSettings,
+  type RetentionSource,
+  type RetentionUpdate,
   type TwoFactorMethod,
   type VerifyTwoFactorResult,
 } from "@vrcz/shared";
@@ -94,6 +100,12 @@ export {
   type KnownEventKind,
   type LoginResult,
   type RateLimitSnapshot as RateLimitStatus,
+  type RetentionKindStat,
+  type RetentionRule,
+  type RetentionRunResult,
+  type RetentionSettings,
+  type RetentionSource,
+  type RetentionUpdate,
   type TwoFactorMethod,
   type VerifyTwoFactorResult,
 };
@@ -508,6 +520,29 @@ export interface ConnectedApp {
   readonly liveSockets: number;
   /** A minute of one-second request counts, oldest first. Seeds the card's sparkline. */
   readonly rate: RateSeries;
+  /**
+   * The three risky scopes' hourly allowances, and what this app has spent against each.
+   *
+   * All three are always present, including scopes the app does not hold — `granted` says which.
+   * A row that vanished for an app without the scope would hide the control exactly when someone
+   * wants to confirm it is closed.
+   */
+  readonly budgets: readonly AppBudget[];
+}
+
+/** One risky scope's hourly allowance for one app, as the Connected apps card edits it. */
+export interface AppBudget {
+  readonly scope: string;
+  readonly description: string;
+  /** Calls permitted per rolling hour. `0` means never. */
+  readonly limit: number;
+  /** What this build ships, so "Reset" can say what it goes back to. */
+  readonly defaultLimit: number;
+  /** True when `limit` was set here rather than inherited from `defaultLimit`. */
+  readonly overridden: boolean;
+  /** Calls of this scope that reached VRChat inside the current hour. */
+  readonly used: number;
+  readonly granted: boolean;
 }
 
 export interface SettingsPorts {
@@ -1044,6 +1079,19 @@ export const api = {
       request<{ revoked: number }>("/apps/revoke-all", { method: "POST" }),
 
     /**
+     * Sets one app's hourly allowance for one risky scope.
+     *
+     * `null` clears the override and the scope falls back to the build's default — which is not the
+     * same as `0`, and `0` is a real setting: "this app may never send an invite", without revoking
+     * the grant and making the user pair it again.
+     */
+    setBudget: (grantId: string, scope: string, limit: number | null): Promise<ConnectedApp> =>
+      request<ConnectedApp>(
+        `/apps/${encodeURIComponent(grantId)}/budgets/${encodeURIComponent(scope)}`,
+        { method: "PUT", body: { limit } },
+      ),
+
+    /**
      * What one app has actually done, newest first.
      *
      * Only mutating calls are recorded, so an empty list means "this app has changed nothing", not
@@ -1356,5 +1404,20 @@ export const api = {
 
     update: (patch: SettingsPatch): Promise<Settings> =>
       request<Settings>("/settings", { method: "PUT", body: patch }),
+  },
+
+  /*
+   * Retention. `update` is both save and preview — pass `dryRun` and nothing is written, which is
+   * how the screen shows what a window would delete before anyone commits to it.
+   */
+  retention: {
+    get: (signal?: AbortSignal): Promise<RetentionSettings> =>
+      request<RetentionSettings>("/retention", withSignal(signal)),
+
+    update: (update: RetentionUpdate): Promise<RetentionSettings> =>
+      request<RetentionSettings>("/retention", { method: "PUT", body: update }),
+
+    run: (): Promise<RetentionRunResult> =>
+      request<RetentionRunResult>("/retention/run", { method: "POST" }),
   },
 } as const;

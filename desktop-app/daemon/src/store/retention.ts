@@ -1,3 +1,6 @@
+import type { RetentionSettings, RetentionSource } from "@vrcz/shared";
+import { RETENTION_DEFAULT_KEY } from "@vrcz/shared";
+
 import { SQL } from "./queries.ts";
 import type { Store } from "./store.ts";
 import type { RetentionConfigRow } from "./types.ts";
@@ -33,6 +36,8 @@ export type RetentionRules = ReadonlyMap<string, number>;
 export type RetentionPlanEntry = {
   kind: string;
   retainDays: number;
+  /** Which rule produced `retainDays`. Carried through so the API does not re-derive it. */
+  source: RetentionSource;
   /** Rows with `ts < cutoff` expire. */
   cutoff: number;
   /** Rows that would be rolled up and deleted. */
@@ -81,10 +86,17 @@ export function rulesFrom(
  * Resolution order: exact kind, then the longest matching `prefix.*` pattern, then the global
  * `'*'`, then {@link FALLBACK_RETAIN_DAYS}. A kind nobody configured therefore still expires —
  * an event type added in a later release cannot grow unbounded by omission.
+ *
+ * Returns *where* the answer came from as well as the answer, because the Settings screen renders
+ * both. A window someone did not set, shown with no indication that it was inherited, is a number
+ * they will try to edit in the wrong row.
  */
-export function resolveRetainDays(rules: RetentionRules, kind: string): number {
+export function resolveRetention(
+  rules: RetentionRules,
+  kind: string,
+): { retainDays: number; source: RetentionSource } {
   const exact = rules.get(kind);
-  if (exact !== undefined) return exact;
+  if (exact !== undefined) return { retainDays: exact, source: "exact" };
 
   let best: number | undefined;
   let bestLength = -1;
@@ -96,9 +108,17 @@ export function resolveRetainDays(rules: RetentionRules, kind: string): number {
       bestLength = prefix.length;
     }
   }
-  if (best !== undefined) return best;
+  if (best !== undefined) return { retainDays: best, source: "prefix" };
 
-  return rules.get(GLOBAL_DEFAULT_KIND) ?? FALLBACK_RETAIN_DAYS;
+  const fallback = rules.get(GLOBAL_DEFAULT_KIND);
+  return fallback !== undefined
+    ? { retainDays: fallback, source: "default" }
+    : { retainDays: FALLBACK_RETAIN_DAYS, source: "fallback" };
+}
+
+/** {@link resolveRetention} without the provenance, for the callers that only prune. */
+export function resolveRetainDays(rules: RetentionRules, kind: string): number {
+  return resolveRetention(rules, kind).retainDays;
 }
 
 /**
@@ -115,11 +135,11 @@ export function planRetention(store: Store, options: RetentionOptions = {}): Ret
   let totalRows = 0;
 
   for (const kind of [...counts.keys()].sort()) {
-    const retainDays = resolveRetainDays(rules, kind);
+    const { retainDays, source } = resolveRetention(rules, kind);
     const cutoff = now - retainDays * DAY_MS;
     const rows = countExpiring.get(kind, cutoff)?.count ?? 0;
     const total = counts.get(kind) ?? 0;
-    entries.push({ kind, retainDays, cutoff, rows, remaining: total - rows });
+    entries.push({ kind, retainDays, source, cutoff, rows, remaining: total - rows });
     totalRows += rows;
   }
 
@@ -243,4 +263,94 @@ export function startRetentionScheduler(
       timer = null;
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// The API surface — what `GET`/`PUT /api/retention` reads and writes
+// ---------------------------------------------------------------------------
+
+/**
+ * The stored configuration plus a dry run over it, in the shape the wire uses.
+ *
+ * `overrides` is what makes a preview and a saved state the same call: pass a proposed patch and
+ * this reports what that patch *would* do, without writing it. The screen therefore has one code
+ * path for "here is what you have" and "here is what you are about to have", and the second one
+ * cannot drift from the first because it is the first.
+ *
+ * `nextRunAt` is passed in rather than read: the scheduler owns it and lives in the composition
+ * root, and a store module reaching for it would be the store knowing about the daemon's lifecycle.
+ */
+export function describeRetention(
+  store: Store,
+  options: {
+    readonly overrides?: Readonly<Record<string, number>>;
+    readonly nextRunAt?: number | null;
+    readonly preview?: boolean;
+    readonly now?: number;
+  } = {},
+): RetentionSettings {
+  const rows = store.listRetentionConfig();
+  const effective = new Map<string, number>(rows.map((row) => [row.kind, row.retain_days]));
+  if (options.overrides !== undefined) {
+    for (const [kind, days] of Object.entries(options.overrides)) effective.set(kind, days);
+  }
+
+  // Spelled out rather than assembled by mutation: `RetentionOptions` is readonly, and
+  // `exactOptionalPropertyTypes` makes "absent" and "present and undefined" different arguments.
+  const plan = planRetention(store, {
+    ...(options.overrides !== undefined ? { overrides: options.overrides } : {}),
+    ...(options.now !== undefined ? { now: options.now } : {}),
+  });
+
+  const lastRun = store.getMeta(LAST_RUN_META_KEY);
+  const lastRunAt = lastRun === null ? null : Number.parseInt(lastRun, 10);
+
+  return {
+    defaultRetainDays: effective.get(RETENTION_DEFAULT_KEY) ?? FALLBACK_RETAIN_DAYS,
+    rules: [...effective]
+      .filter(([kind]) => kind !== RETENTION_DEFAULT_KEY)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([kind, retainDays]) => ({ kind, retainDays })),
+    kinds: plan.entries.map((entry) => ({
+      kind: entry.kind,
+      retainDays: entry.retainDays,
+      source: entry.source,
+      rows: entry.rows + entry.remaining,
+      expiring: entry.rows,
+    })),
+    totalExpiring: plan.totalRows,
+    lastRunAt: lastRunAt === null || Number.isNaN(lastRunAt) ? null : lastRunAt,
+    nextRunAt: options.nextRunAt ?? null,
+    dbSizeBytes: store.dbSizeBytes(),
+    preview: options.preview ?? false,
+  };
+}
+
+/**
+ * Applies a retention patch.
+ *
+ * Patch semantics, per {@link RetentionUpdate}: a number sets, `null` deletes, absent leaves alone.
+ * The whole patch is one transaction so a half-applied config cannot survive a crash — retention is
+ * a delete policy, and a delete policy that is partly the old one and partly the new one is the
+ * worst of both.
+ *
+ * The `'*'` row is never deletable: `resolveRetention` would fall through to
+ * {@link FALLBACK_RETAIN_DAYS} and the user would find their explicit default silently replaced by
+ * a constant. `defaultRetainDays` is the only way to move it.
+ */
+export function applyRetentionUpdate(
+  store: Store,
+  update: { defaultRetainDays?: number; rules?: Readonly<Record<string, number | null>> },
+  now: number = Date.now(),
+): void {
+  store.transaction(() => {
+    if (update.defaultRetainDays !== undefined) {
+      store.setRetentionConfig(RETENTION_DEFAULT_KEY, update.defaultRetainDays, now);
+    }
+    for (const [kind, days] of Object.entries(update.rules ?? {})) {
+      if (kind === RETENTION_DEFAULT_KEY) continue;
+      if (days === null) store.deleteRetentionConfig(kind);
+      else store.setRetentionConfig(kind, days, now);
+    }
+  });
 }

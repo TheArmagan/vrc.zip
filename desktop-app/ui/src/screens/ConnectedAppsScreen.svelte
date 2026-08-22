@@ -29,8 +29,9 @@ import EmptyState from "$lib/components/EmptyState.svelte";
 import SectionHeader from "$lib/components/SectionHeader.svelte";
 import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
+import { Input } from "$lib/components/ui/input/index.js";
 import { Separator } from "$lib/components/ui/separator/index.js";
-import { api, type AppAuditEntry, type ConnectedApp } from "$lib/api.ts";
+import { api, type AppAuditEntry, type ConnectedApp, describeError } from "$lib/api.ts";
 import Sparkline from "$lib/components/Sparkline.svelte";
 import { fullTimestamp, timeAgo } from "$lib/format.ts";
 import { clock } from "$lib/state/clock.svelte.ts";
@@ -208,6 +209,53 @@ function dangerous(app: ConnectedApp): readonly { scope: string; description: st
 function ordinary(app: ConnectedApp): readonly { scope: string; description: string }[] {
   return app.scopes.filter((scope) => !scope.dangerous);
 }
+
+/*
+ * Hourly allowances.
+ *
+ * Three scopes carry one — invites, friend requests, group invites — because those are the calls
+ * other people see, and an app that mass-sends them gets *the user* reported rather than itself.
+ * The rate sparkline above answers "is this app noisy"; this answers "how much of my reputation can
+ * it spend in an hour", which is a different question and the one a per-app number belongs to.
+ *
+ * Saved on blur rather than per keystroke: typing "5" on the way to "50" would otherwise commit a
+ * number the user never meant, against a window that is already counting.
+ */
+let savingBudget = $state<string | null>(null);
+
+function budgetKey(grantId: string, scope: string): string {
+  return `${grantId}
+${scope}`;
+}
+
+async function saveBudget(app: ConnectedApp, scope: string, raw: string): Promise<void> {
+  const key = budgetKey(app.id, scope);
+  const trimmed = raw.trim();
+  // An emptied field means "go back to the default", which is not the same as zero. Zero is a
+  // setting someone chose: never.
+  const limit = trimmed === "" ? null : Number.parseInt(trimmed, 10);
+  if (limit !== null && (!Number.isSafeInteger(limit) || limit < 0)) return;
+
+  const current = app.budgets.find((budget) => budget.scope === scope);
+  if (current !== undefined && (limit === null ? !current.overridden : current.limit === limit)) {
+    return;
+  }
+
+  savingBudget = key;
+  actionError = null;
+  try {
+    const updated = await api.apps.setBudget(app.id, scope, limit);
+    apps = apps.map((entry) => (entry.id === updated.id ? updated : entry));
+  } catch (cause) {
+    actionError = describeError(cause);
+  } finally {
+    savingBudget = null;
+  }
+}
+
+async function resetBudget(app: ConnectedApp, scope: string): Promise<void> {
+  await saveBudget(app, scope, "");
+}
 </script>
 
 <div class="flex h-full flex-col">
@@ -321,6 +369,59 @@ function ordinary(app: ConnectedApp): readonly { scope: string; description: str
               {:else if danger.length === 0}
                 <p class="text-muted-foreground">No permissions recorded for this app.</p>
               {/if}
+
+              <!--
+                The hourly allowances. Rendered for all three scopes whether or not the app holds
+                them, with the ones it does not hold dimmed: a row that disappeared for an app
+                without `invite:send` would hide the control exactly when someone opens this card to
+                check that it cannot send invites.
+              -->
+              <div class="rounded-md border border-border">
+                <p class="border-b border-border px-3 py-2 text-xs text-muted-foreground">
+                  Hourly limits. These cap how much this app can do in your name per hour, on top of
+                  the permissions above. Empty the box to go back to the default; 0 means never.
+                </p>
+                <ul class="divide-y divide-border">
+                  {#each entry.budgets as budget (budget.scope)}
+                    <li
+                      class="flex flex-wrap items-center gap-3 px-3 py-2 {budget.granted
+                        ? ''
+                        : 'opacity-60'}"
+                    >
+                      <div class="min-w-0 flex-1">
+                        <p class="font-mono text-xs text-foreground">{budget.scope}</p>
+                        <p class="text-xs text-muted-foreground">
+                          {#if budget.granted}
+                            {budget.used} of {budget.limit} used this hour
+                          {:else}
+                            Not granted, so nothing is spending this
+                          {/if}
+                        </p>
+                      </div>
+                      <Input
+                        type="number"
+                        min={0}
+                        class="w-24 tabular"
+                        placeholder={String(budget.defaultLimit)}
+                        value={budget.overridden ? String(budget.limit) : ""}
+                        disabled={savingBudget !== null}
+                        onblur={(event) => saveBudget(entry, budget.scope, event.currentTarget.value)}
+                      />
+                      {#if budget.overridden}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          class="h-7 px-2 text-xs"
+                          disabled={savingBudget !== null}
+                          onclick={() => resetBudget(entry, budget.scope)}
+                        >
+                          Reset to {budget.defaultLimit}
+                        </Button>
+                      {/if}
+                    </li>
+                  {/each}
+                </ul>
+              </div>
 
               <!--
                 What this app is costing, which is the fact that makes the Revoke button beside it

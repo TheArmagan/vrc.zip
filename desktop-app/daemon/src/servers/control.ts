@@ -20,6 +20,12 @@ import {
   type LoginResult,
   type RateLimitSnapshot,
   type RateSeries,
+  RETENTION_DEFAULT_KEY,
+  RETENTION_MAX_DAYS,
+  RETENTION_MIN_DAYS,
+  type RetentionRunResult,
+  type RetentionSettings,
+  type RetentionUpdate,
   type StatusSnapshot,
   type StreamFrame,
   type TwoFactorMethod,
@@ -698,6 +704,31 @@ export interface ConnectedApp {
    * that makes the revoke button beside it an informed decision rather than a guess.
    */
   readonly rate: RateSeries;
+  /**
+   * The three risky scopes' hourly allowances, and what this app has spent against them.
+   *
+   * Only the budgeted scopes appear, and one appears whether or not this app holds it: a card that
+   * hid `invite:send` because the app cannot send invites would make the control invisible exactly
+   * when someone wants to check that it is zero.
+   */
+  readonly budgets: readonly AppBudget[];
+}
+
+/** One risky scope's allowance for one app. */
+export interface AppBudget {
+  readonly scope: string;
+  /** Plain English, from the shared registry. The same sentence the consent sheet showed. */
+  readonly description: string;
+  /** Calls permitted per rolling hour. `0` means never. */
+  readonly limit: number;
+  /** This build's allowance for the scope, so the page can say what "reset" would go back to. */
+  readonly defaultLimit: number;
+  /** True when `limit` is the user's, false when it is `defaultLimit` because nothing was set. */
+  readonly overridden: boolean;
+  /** Calls of this scope that reached VRChat inside the current window. */
+  readonly used: number;
+  /** True when the app holds this scope at all. A budget on a scope it lacks is inert. */
+  readonly granted: boolean;
 }
 
 /** One requested scope, as the consent sheet renders it. */
@@ -794,6 +825,15 @@ export interface ControlDeps {
    * one" must not take the others down with it.
    */
   revokeConnectedApp(grantId: string): Promise<void>;
+
+  /**
+   * Sets or clears one app's hourly allowance for one risky scope.
+   *
+   * `null` clears the override, which returns the scope to this build's default rather than to
+   * zero — decision 95 asks for an editable number, not a second kill switch. Throws
+   * `ControlError(404)` for an unknown app and `ControlError(400)` for a scope that is not budgeted.
+   */
+  setAppBudget(grantId: string, scope: string, limit: number | null): Promise<ConnectedApp>;
 
   /** The global kill switch. Returns how many live grants it closed. */
   revokeAllConnectedApps(): Promise<number>;
@@ -994,6 +1034,16 @@ export interface ControlDeps {
   getSettings(): Promise<Settings>;
   /** Merges the patch and resolves to the settings as they now stand. */
   updateSettings(patch: SettingsPatch): Promise<Settings>;
+
+  /** The retention config, plus a dry run of what the next pass would delete. */
+  getRetention(): Promise<RetentionSettings>;
+  /**
+   * Applies a retention patch, or — when `dryRun` is set — reports what it would do and writes
+   * nothing. Both resolve to the same shape; `preview` on the result says which happened.
+   */
+  updateRetention(update: RetentionUpdate): Promise<RetentionSettings>;
+  /** Runs a retention pass now, rather than waiting for the nightly one. */
+  runRetention(): Promise<RetentionRunResult>;
 
   /**
    * Subscribes to the live event bus for `GET /api/stream`. Returns an unsubscribe function, which
@@ -1712,6 +1762,25 @@ export function createControlApp({ port, deps, token }: ControlAppOptions) {
       ),
     )
 
+    /*
+     * The per-app allowance for one risky scope. `PUT` with `{"limit": n}` sets it and
+     * `{"limit": null}` clears it — clearing returns the scope to the build's default, which is why
+     * this is not a DELETE: DELETE would read as "remove the budget", and there is no such state.
+     */
+    .put("/api/apps/:id/budgets/:scope", async (c) => {
+      const body = await readJsonObject(c.req.raw);
+      if (body === undefined) throw new ControlError(400, "invalid_body", "expected a JSON object");
+      const raw = body.limit;
+      if (raw !== null && (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 0)) {
+        throw new ControlError(
+          400,
+          "invalid_body",
+          "limit must be a non-negative whole number, or null to use the default",
+        );
+      }
+      return c.json(await deps.setAppBudget(c.req.param("id"), c.req.param("scope"), raw));
+    })
+
     .post("/api/apps/:id/revoke", async (c) => {
       await deps.revokeConnectedApp(c.req.param("id"));
       return c.body(null, 204);
@@ -1733,6 +1802,23 @@ export function createControlApp({ port, deps, token }: ControlAppOptions) {
       if (body === undefined) throw new ControlError(400, "invalid_body", "expected a JSON object");
       return c.json(await deps.updateSettings(body));
     })
+
+    /*
+     * Retention — the one setting on this screen that deletes things.
+     *
+     * `PUT` is the same route whether it is saving or previewing, and `dryRun` picks. That is not
+     * a shortcut: a preview computed by a different code path than the save is a preview that can
+     * be wrong about the one thing it exists to be right about.
+     */
+    .get("/api/retention", async (c) => c.json(await deps.getRetention()))
+
+    .put("/api/retention", async (c) => {
+      const body = await readJsonObject(c.req.raw);
+      if (body === undefined) throw new ControlError(400, "invalid_body", "expected a JSON object");
+      return c.json(await deps.updateRetention(parseRetentionUpdate(body)));
+    })
+
+    .post("/api/retention/run", async (c) => c.json(await deps.runRetention()))
 
     /*
      * The live feed. Same guards as every other route on this port — the token arrives as
@@ -1821,6 +1907,67 @@ function parseOffset(raw: string | undefined): number {
     throw new ControlError(400, "invalid_query", "offset must be a non-negative integer");
   }
   return parsed;
+}
+
+/**
+ * Validates a `PUT /api/retention` body.
+ *
+ * Every window is bounds-checked *here*, at the edge, rather than clamped further in. A clamp
+ * would silently store something other than what the user typed, and the number they typed is the
+ * number of days of their history they believe they are keeping.
+ */
+export function parseRetentionUpdate(body: Record<string, JsonValue>): RetentionUpdate {
+  const update: {
+    defaultRetainDays?: number;
+    rules?: Record<string, number | null>;
+    dryRun?: boolean;
+  } = {};
+
+  if (body.defaultRetainDays !== undefined) {
+    update.defaultRetainDays = parseRetainDays(body.defaultRetainDays, RETENTION_DEFAULT_KEY);
+  }
+
+  const rules = body.rules;
+  if (rules !== undefined) {
+    if (typeof rules !== "object" || rules === null || Array.isArray(rules)) {
+      throw new ControlError(400, "invalid_body", "rules must be an object");
+    }
+    const parsed: Record<string, number | null> = {};
+    for (const [kind, value] of Object.entries(rules)) {
+      if (kind === "" || kind.length > 64) {
+        throw new ControlError(400, "invalid_body", "a rule key must be 1-64 characters");
+      }
+      // `null` is the delete verb, and it is the only non-number this accepts. `undefined` cannot
+      // reach here from JSON, so an absent key really does mean "leave it alone".
+      parsed[kind] = value === null ? null : parseRetainDays(value, kind);
+    }
+    update.rules = parsed;
+  }
+
+  if (body.dryRun !== undefined) {
+    if (typeof body.dryRun !== "boolean") {
+      throw new ControlError(400, "invalid_body", "dryRun must be a boolean");
+    }
+    update.dryRun = body.dryRun;
+  }
+
+  return update;
+}
+
+function parseRetainDays(value: JsonValue, kind: string): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < RETENTION_MIN_DAYS ||
+    value > RETENTION_MAX_DAYS
+  ) {
+    throw new ControlError(
+      400,
+      "invalid_body",
+      `"${kind}" must be a whole number of days between ${String(RETENTION_MIN_DAYS)} and ${String(RETENTION_MAX_DAYS)}`,
+    );
+  }
+  return value;
 }
 
 function integerParam(raw: string | undefined): number | undefined {

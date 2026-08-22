@@ -15,21 +15,34 @@ import type {
   User,
   World,
 } from "@vrcz/api/types";
-import { isScope, type JsonValue, type RateFrame, SCOPES, STREAM_RATE } from "@vrcz/shared";
+import {
+  isScope,
+  type JsonValue,
+  type RateCeilingSnapshot,
+  type RateFrame,
+  RETENTION_DEFAULT_KEY,
+  type RetentionRunResult,
+  type RetentionSettings,
+  type RetentionUpdate,
+  SCOPES,
+  STREAM_RATE,
+} from "@vrcz/shared";
 import type { Account, AccountSnapshot } from "../accounts/account.ts";
 import type { AccountManager } from "../accounts/manager.ts";
 import { type PresenceService, trustLevelOf } from "../accounts/presence.ts";
 import type { EventBus } from "../bus/event-bus.ts";
 import { ImageCache } from "../net/image-cache.ts";
-import type { RateLimiter } from "../net/rate-limiter.ts";
+import type { RateBucketSnapshot, RateLimiter } from "../net/rate-limiter.ts";
 import { vrcFetch } from "../net/request.ts";
 import { emptySeries, type RequestMeter, WINDOW_SECONDS } from "../net/request-meter.ts";
 import { pickUserImageUrl, pickUserImageUrlFull } from "../net/user-image.ts";
 import type { ConsentRegistry, PendingConsent } from "../proxy/consent.ts";
+import { BUDGET_WINDOW_MS, DEFAULT_GRANT_BUDGETS } from "../proxy/passthrough.ts";
 import type { PipelineMirror } from "../proxy/pipeline-mirror.ts";
 import type { SecretsStore } from "../security/secrets.ts";
 import {
   type AppAuditEntry,
+  type AppBudget,
   type AuditQuery,
   type ConnectedApp,
   type ControlAccount,
@@ -74,7 +87,12 @@ import {
   type WorldSummary,
 } from "../servers/control.ts";
 import type { Settings } from "../settings.ts";
-import type { Store } from "../store/index.ts";
+import {
+  applyRetentionUpdate,
+  describeRetention,
+  runRetention as runRetentionPass,
+  type Store,
+} from "../store/index.ts";
 import type { GrantRow } from "../store/types.ts";
 
 /**
@@ -109,6 +127,14 @@ export interface ControlDepsOptions {
    * empty series rather than as a missing field, so the UI has nothing to branch on.
    */
   readonly meter?: RequestMeter | undefined;
+  /**
+   * When the nightly retention pass is next due, so `GET /api/retention` can say so.
+   *
+   * A getter rather than a number: the scheduler re-rolls its jitter after every pass, so a value
+   * captured at construction would be wrong from the first night onward. Optional because a test
+   * store has no scheduler, and "no pass scheduled" is an honest answer for one.
+   */
+  readonly nextRetentionRunAt?: (() => number) | undefined;
   readonly settings: Settings;
   readonly env?: NodeJS.ProcessEnv;
   readonly connectPipeline: (accountId: string) => void;
@@ -698,6 +724,7 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
    */
   function rateFrame(): RateFrame {
     const meter = options.meter;
+    const live = limiter.snapshot();
     const accountRates: Record<string, number> = {};
     const grantRates: Record<string, number> = {};
 
@@ -718,9 +745,42 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       accounts: accountRates,
       grants: grantRates,
       limit: limiter.globalRatePerSecond,
-      retryAfter: limiter.isBackingOff ? Date.now() + limiter.backoffRemainingMs : null,
+      queued: live.queuedTotal,
+      retryAfter: live.retryAfter,
     };
   }
+
+  /**
+   * The display name of one game client, memoised across every stream subscriber.
+   *
+   * A `SELECT` per event per socket would be a query per player join per open tab, and a busy
+   * public instance is dozens of joins a second. The cache is keyed by session row id, which never
+   * changes meaning, and is refreshed when a `session.*` event says the identity moved — a session
+   * starts before its log has revealed who is signed in, so the first answer for a new session is
+   * legitimately null and must not be the last one.
+   */
+  const sessionNames = new Map<number, string | null>();
+
+  function sessionDisplayName(sessionId: number | null): string | null {
+    if (sessionId === null) return null;
+    const cached = sessionNames.get(sessionId);
+    if (cached !== undefined) return cached;
+    const name = store.getSession(sessionId)?.display_name ?? null;
+    sessionNames.set(sessionId, name);
+    return name;
+  }
+
+  // The identity line arrives after the session row does, so a cached null is provisional. Every
+  // session event drops the entry rather than trying to patch it — the store is the authority and
+  // re-reading one row is cheaper than getting this subtly wrong.
+  bus.subscribe(
+    (event) => {
+      if (event.sessionId !== null && event.sessionId !== undefined) {
+        sessionNames.delete(event.sessionId);
+      }
+    },
+    { kinds: ["session.*"] },
+  );
 
   // One cache for the whole daemon. Its de-duplication only works if every caller shares it, and a
   // per-request instance would also re-run the eviction sweep on every avatar.
@@ -1141,19 +1201,26 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
 
   return {
     async status(): Promise<StatusSnapshot> {
+      const live = limiter.snapshot();
       return {
         degradedKeychain: secrets.degraded,
         backend: secrets.backend,
         accounts: accounts.list().length,
+        // Read off the limiter's own buckets. Every number here is measured — see
+        // `RateLimitSnapshot`, which used to carry one invented ceiling and two invented readings.
+        // `available` is floored because a bucket at 19.6 tokens has nineteen it can spend.
         rateLimit: {
-          limit: limiter.globalRatePerSecond,
-          // The limiter does not expose live token counts, and inventing a number here would be
-          // worse than admitting we don't have one: the UI would draw a confident wrong gauge.
-          remaining: limiter.isBackingOff ? 0 : limiter.globalRatePerSecond,
-          queued: 0,
-          retryAfter: limiter.isBackingOff ? Date.now() + limiter.backoffRemainingMs : null,
-          // The measured half. `limit` is a constant off the configuration and always was; this is
-          // what the daemon is doing with it, and it is what the shell's reading now comes from.
+          api: ceiling(live.globalApi),
+          files: ceiling(live.files),
+          accounts: live.perAccount.map((bucket) => ({
+            accountId: bucket.accountId,
+            ...ceiling(bucket),
+          })),
+          perAccountRate: limiter.ratePerSecond,
+          queued: live.queuedTotal,
+          retryAfter: live.retryAfter,
+          consecutive429: live.consecutive429,
+          // What the daemon is doing with those ceilings, as opposed to what they permit.
           used: options.meter?.total() ?? emptySeries(),
           windowSeconds: WINDOW_SECONDS,
         },
@@ -1529,6 +1596,34 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
             ),
           )
           .sort((a, b) => b.createdAt - a.createdAt)
+      );
+    },
+
+    async setAppBudget(grantId, scope, limit): Promise<ConnectedApp> {
+      const grant = store.getGrant(grantId);
+      if (grant === null || grant.revoked_at !== null) {
+        throw new ControlError(404, "unknown_app", `no app grant ${grantId}`);
+      }
+      // Only the scopes that *have* a budget can be given one. Accepting any scope string would let
+      // this route invent an hourly cap on `worlds:read`, which the proxy would then ignore — a
+      // control that visibly saves and silently does nothing is worse than no control.
+      if (!isScope(scope) || DEFAULT_GRANT_BUDGETS[scope] === undefined) {
+        throw new ControlError(
+          400,
+          "unbudgeted_scope",
+          `"${scope}" does not carry an hourly allowance`,
+        );
+      }
+
+      if (limit === null) store.deleteGrantBudget(grantId, scope);
+      else store.setGrantBudget(grantId, scope, limit, Date.now());
+
+      return toConnectedApp(
+        grant,
+        accounts,
+        store,
+        options.pipelineMirror ?? null,
+        options.meter ?? null,
       );
     },
 
@@ -2087,6 +2182,44 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       });
     },
 
+    async getRetention(): Promise<RetentionSettings> {
+      return describeRetention(store, { nextRunAt: options.nextRetentionRunAt?.() ?? null });
+    },
+
+    async updateRetention(update: RetentionUpdate): Promise<RetentionSettings> {
+      const nextRunAt = options.nextRetentionRunAt?.() ?? null;
+
+      // A dry run resolves the patch into `overrides` and never touches the table. Note that the
+      // patch's deletions cannot be previewed this way — `overrides` can only add or replace a
+      // rule, not remove one — so a delete is reported against the rule it is replacing rather
+      // than against the inherited window it will fall back to. Deleting a rule can only ever
+      // *lengthen* what is kept (the default is the longest thing it can fall back to in practice),
+      // so the preview under-promises rather than over-deletes, which is the safe direction.
+      if (update.dryRun === true) {
+        const overrides: Record<string, number> = {};
+        if (update.defaultRetainDays !== undefined) {
+          overrides[RETENTION_DEFAULT_KEY] = update.defaultRetainDays;
+        }
+        for (const [kind, days] of Object.entries(update.rules ?? {})) {
+          if (days !== null) overrides[kind] = days;
+        }
+        return describeRetention(store, { overrides, nextRunAt, preview: true });
+      }
+
+      applyRetentionUpdate(store, update);
+      return describeRetention(store, { nextRunAt });
+    },
+
+    async runRetention(): Promise<RetentionRunResult> {
+      const result = runRetentionPass(store);
+      return {
+        deletedByKind: result.deletedByKind,
+        totalDeleted: result.totalDeleted,
+        durationMs: result.durationMs,
+        settings: describeRetention(store, { nextRunAt: options.nextRetentionRunAt?.() ?? null }),
+      };
+    },
+
     async getSettings(): Promise<WireSettings> {
       return settings as unknown as WireSettings;
     },
@@ -2140,6 +2273,7 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
           payload: {
             accountId: event.accountId,
             sessionId: event.sessionId ?? null,
+            displayName: sessionDisplayName(event.sessionId ?? null),
             subjectId: event.subjectId ?? null,
             location: event.location ?? null,
             data: (event.payload ?? null) as JsonValue,
@@ -2218,7 +2352,33 @@ function toConnectedApp(
     lastUsedAt: grant.last_used_at,
     liveSockets: mirror?.socketsForGrant(grant.id) ?? 0,
     rate: meter?.grant(grant.id) ?? emptySeries(),
+    budgets: appBudgets(grant, new Set(scopes), store),
   };
+}
+
+/**
+ * The three risky scopes' allowances for one app, with what it has spent against each.
+ *
+ * All three are always reported, including the ones the app does not hold. A card that hid
+ * `invite:send` because the app cannot send invites would hide the control exactly when someone
+ * wants to check that it is closed — `granted: false` says the same thing without the disappearing
+ * act, and it also means the row does not appear out of nowhere if the app later escalates.
+ */
+function appBudgets(grant: GrantRow, held: ReadonlySet<string>, store: Store): AppBudget[] {
+  const since = Date.now() - BUDGET_WINDOW_MS;
+  const entries = Object.entries(DEFAULT_GRANT_BUDGETS) as [string, number][];
+  return entries.map(([scope, defaultLimit]) => {
+    const override = store.grantBudget(grant.id, scope);
+    return {
+      scope,
+      description: isScope(scope) ? SCOPES[scope].description : scope,
+      limit: override ?? defaultLimit,
+      defaultLimit,
+      overridden: override !== null,
+      used: store.countGrantScopeUsage(grant.id, scope, since),
+      granted: held.has(scope),
+    };
+  });
 }
 
 function toConsentRequest(
@@ -2249,5 +2409,20 @@ function toConsentRequest(
     code: pending.code,
     createdAt: pending.createdAt,
     expiresAt: pending.expiresAt,
+  };
+}
+
+/**
+ * One limiter bucket, in wire shape.
+ *
+ * `available` is floored rather than rounded: a bucket holding 19.6 tokens can pay for nineteen
+ * requests, and rounding it to twenty would show headroom that the next call is about to wait for.
+ */
+function ceiling(bucket: RateBucketSnapshot): RateCeilingSnapshot {
+  return {
+    rate: bucket.rate,
+    burst: bucket.burst,
+    available: Math.floor(bucket.available),
+    queued: bucket.queued,
   };
 }

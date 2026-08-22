@@ -14,6 +14,7 @@ import Trash2Icon from "@lucide/svelte/icons/trash-2";
 import { toast } from "svelte-sonner";
 import { api, describeError, EVENT_FAMILIES } from "$lib/api.ts";
 import ErrorNote from "$lib/components/ErrorNote.svelte";
+import RetentionSection from "$lib/components/RetentionSection.svelte";
 import SectionHeader from "$lib/components/SectionHeader.svelte";
 import * as Alert from "$lib/components/ui/alert/index.js";
 import { Badge } from "$lib/components/ui/badge/index.js";
@@ -268,16 +269,7 @@ async function askForNotifications(): Promise<void> {
     </section>
 
     <!-- History -->
-    <section class="space-y-3">
-      <h2 class="text-base font-semibold">History</h2>
-      <Alert.Root>
-        <Alert.Description>
-          The daemon runs a retention job that trims old events on a schedule it chooses. There is
-          no setting for it on the control API yet, so this screen cannot offer one. Until there
-          is, the Feed and Game log say plainly when they have reached the end of what is kept.
-        </Alert.Description>
-      </Alert.Root>
-    </section>
+    <RetentionSection />
 
     <!-- This browser -->
     <section class="space-y-3">

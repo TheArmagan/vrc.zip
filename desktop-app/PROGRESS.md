@@ -223,10 +223,12 @@ handshake, because the alternative is a login flow that mints credentials with n
       read behind a dangerous scope writes an `audit_log` row attributed to the app, readable at
       `GET /api/apps/:id/audit` and shown per card on the Connected apps page; the three risky scopes
       carry a rolling hourly allowance per grant, refused with a 429 that never reaches VRChat.
-      **Still outstanding in 2.8:** the per-app *override* for those allowances — decision 95 asks for
-      them to be editable on the Connected apps page, and today they are the defaults only. The
-      honest gauge from decision 100 (`rateLimit.remaining`/`queued` made real, one gauge becoming
-      three) is also still outstanding.
+      **2.8 is now complete.** The per-app *override* landed (decision 118): migration 004's
+      `grant_budgets`, `PUT /api/apps/:id/budgets/:scope`, and an editable box per risky scope on
+      each Connected apps card showing "n of m used this hour". So did the honest gauge from
+      decision 100 (decision 117): `RateLimiter.snapshot()` reports real token counts and real
+      waiter counts, `RateLimitSnapshot` became the three ceilings that actually exist, and the
+      shell shows a queued badge only while something is waiting.
 - [x] **2.9 Pipeline mirror** (`proxy/pipeline-mirror.ts`) — `wss://…:7774/` speaking VRChat's
       protocol, filtered per event type by the grant's scopes, fed from the daemon's single real
       socket per account. Frames are re-emitted **verbatim** and scanned before forwarding; a dead
@@ -246,7 +248,7 @@ handshake, because the alternative is a login flow that mints credentials with n
       `EAGER_FILL_LIMIT` (24) and the tail hydrates on hover, and every one of those calls is
       charged at `"low"` priority, which reserves a quarter of each bucket for everything else.
       Decisions 112 and 113.
-- [ ] **2.10 Control API** (`:7775`) — consent status, grant list/revoke, the enriched event stream
+- [~] **2.10 Control API** (`:7775`) — consent status, grant list/revoke, the enriched event stream
       with `sessionId`/`accountId`/`displayName` on every `gamelog.*`, and webhook registration.
       **Scoped by the 2026-08-22 planning pass (decisions 97, 98, 99, 104):** webhooks ship *with*
       the stream rather than after it, which means this step carries a real outbound-HTTP subsystem
@@ -254,6 +256,15 @@ handshake, because the alternative is a login flow that mints credentials with n
       `sessions:unlinked` scope; `GET`/`PUT /api/retention` and a real per-event-type Settings
       control land here, and the retention types move to `@vrcz/shared` with them; and the
       `invite-request` / `boop` palette stubs get their routes.
+      **Landed so far:** retention is done end to end (decision 119) — `GET`/`PUT /api/retention`,
+      `POST /api/retention/run`, the shared wire types, and a real Settings control that previews
+      what a window would delete before anyone saves it, replacing the paragraph that used to
+      apologise for its own absence. `StreamEnvelope` now carries `displayName` on every event
+      (decision 121), and vrc.zip's own scopes exist (decision 120): `sessions:read`,
+      `sessions:unlinked`, `webhooks:write`. **Still outstanding:** the grant-authenticated surface
+      itself (a third-party app reaching `:7775` with its proxy token and being filtered by scope,
+      including `sessions:unlinked`), webhook registration routes and wiring, and the
+      `invite-request` / `boop` palette stubs.
 
 ---
 
@@ -1228,6 +1239,58 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      was never seen, which is a more honest record than no row at all. The general shape is worth
      keeping: **any quota checked before an awaited operation and recorded after it is not a quota**,
      and a test that awaits its calls in sequence will never notice.
+
+117. **The rate gauge stopped guessing, and the shape of the lie is worth naming.** `RateLimitSnapshot`
+     carried one `limit` when there are three ceilings, an invented `remaining` (`isBackingOff ? 0 :
+     globalRatePerSecond` — a constant dressed as a reading) and a hard-coded `queued: 0`. It is
+     replaced by `{api, files, accounts[], perAccountRate, queued, retryAfter, consecutive429}`,
+     every field read off the limiter's own buckets: `RateLimiter.snapshot()` refills each bucket to
+     now and reports its token count, and `acquire()` now counts its waiters, incrementing when a
+     call first sleeps and releasing in a `finally` so a throw cannot leak the count. `queued` also
+     rides the once-a-second `rate` frame, because it is the number that explains a stall *while it
+     is happening*: 3/s against an 80/s ceiling looks identical whether the daemon is idle or has
+     forty calls stacked behind a 429. Note that `queuedTotal` is not the sum of the per-ceiling
+     counts — an API call queues against both its account bucket and the IP bucket.
+
+118. **Per-app budget overrides are a row's presence, not a nullable column.** Migration 004's
+     `grant_budgets` has one row per (grant, scope) and `hourly_limit INTEGER NOT NULL`: absence
+     means "whatever this build defaults to", so raising a default in a later release reaches every
+     app nobody edited, and `0` is a real setting — "this app may never send an invite" without
+     revoking the grant and making the user pair again. A nullable column would have given two
+     spellings of "unset" and code would eventually have disagreed about which it was reading.
+     Only the three scopes in `DEFAULT_GRANT_BUDGETS` can be given one: the route 400s on anything
+     else rather than storing a number the proxy would ignore, because a control that visibly saves
+     and silently does nothing is worse than no control. `PUT /api/apps/:id/budgets/:scope` takes
+     `{"limit": n | null}` — not a DELETE, because clearing returns the scope to the default and
+     there is no "no budget" state to delete into.
+
+119. **Retention's preview and its save are the same call.** `PUT /api/retention` with `dryRun`
+     computes through `describeRetention`'s `overrides` path and writes nothing; without it, the
+     same function reports what was just written. A preview computed by a different code path than
+     the save is a preview that can be wrong about the one thing it exists to be right about. Two
+     consequences worth knowing: a patch's *deletions* cannot be previewed (an override can replace
+     a rule, not remove one), so a delete previews against the rule it replaces — which
+     under-promises rather than over-deletes, the safe direction; and windows are **rejected**
+     rather than clamped at the route, because a clamp stores a different number of days than the
+     user typed and days are how much of their history they think they are keeping. `rules` is a
+     patch: number sets, `null` deletes, absent leaves alone — replacement semantics would make the
+     screen re-send rules it never rendered.
+
+120. **vrc.zip has scopes of its own now, and `routes.test.ts` had to be taught about them.**
+     `sessions:read`, `sessions:unlinked` and `webhooks:write` gate the control API on `:7775`,
+     which has no VRChat operation behind it — sessions are derived from local log files and a
+     webhook is a thing vrc.zip does. That broke "no scope in the registry is dead weight", which is
+     a check worth keeping, so the exceptions are declared by name in `NATIVE_SCOPES` rather than
+     the assertion being softened. `sessions:unlinked` is dangerous: an unlinked session leaks the
+     existence of accounts the user never added to vrc.zip.
+
+121. **`StreamEnvelope` carries `displayName`, resolved once and cached across every socket.** PLAN.md
+     §"Control API" wants every `gamelog.*` to name its game client, and re-deriving it from
+     `accountId` is exactly wrong for the case the field exists to serve — a client signed into an
+     unmanaged account has a display name and no account id at all. A `SELECT` per event per socket
+     would be a query per player join per open tab, so it is memoised by session row id and dropped
+     on any `session.*` event: a session row exists before its log has revealed who is signed in, so
+     the first null is provisional and must not be the last answer.
 
 ---
 

@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
+  applyRetentionUpdate,
+  describeRetention,
   FALLBACK_RETAIN_DAYS,
   GLOBAL_DEFAULT_KIND,
   LAST_RUN_META_KEY,
@@ -328,6 +330,122 @@ describe("startRetentionScheduler", () => {
     expect(scheduler.nextRunAt).toBeGreaterThan(now);
     scheduler.stop();
     expect(count(store, "events")).toBe(1);
+    store.close();
+  });
+});
+
+describe("describeRetention", () => {
+  test("reports the default, the rules, and per-kind provenance", () => {
+    const store = seed();
+    store.setRetentionConfig(GLOBAL_DEFAULT_KIND, 90, NOW);
+    store.setRetentionConfig("gamelog.*", 30, NOW);
+    store.setRetentionConfig("friend.online", 7, NOW);
+
+    addEvent(store, "gamelog.player-join", NOW - 40 * DAY);
+    addEvent(store, "gamelog.player-join", NOW - 10 * DAY);
+    addEvent(store, "friend.online", NOW - 10 * DAY);
+    addEvent(store, "user.avatar", NOW - 10 * DAY);
+
+    const described = describeRetention(store, { now: NOW, nextRunAt: NOW + DAY });
+
+    expect(described.defaultRetainDays).toBe(90);
+    // The `'*'` row is never listed as a rule — it has its own field, and a row reading "*" in a
+    // list of event kinds is a row somebody will set to one day. Everything else 001 seeds is
+    // there too, which is why this checks membership and ordering rather than the whole list.
+    expect(described.rules).toContainEqual({ kind: "friend.online", retainDays: 7 });
+    expect(described.rules).toContainEqual({ kind: "gamelog.*", retainDays: 30 });
+    expect(described.rules.some((rule) => rule.kind === GLOBAL_DEFAULT_KIND)).toBe(false);
+    expect(described.rules.map((rule) => rule.kind)).toEqual(
+      [...described.rules.map((rule) => rule.kind)].sort((a, b) => a.localeCompare(b)),
+    );
+
+    const byKind = new Map(described.kinds.map((entry) => [entry.kind, entry]));
+    expect(byKind.get("gamelog.player-join")).toEqual({
+      kind: "gamelog.player-join",
+      retainDays: 30,
+      source: "prefix",
+      rows: 2,
+      expiring: 1,
+    });
+    expect(byKind.get("friend.online")?.source).toBe("exact");
+    expect(byKind.get("user.avatar")).toMatchObject({ retainDays: 90, source: "default" });
+
+    // The 40-day-old gamelog row against the 30-day family rule, plus the 10-day-old
+    // `friend.online` against the 7-day exact rule.
+    expect(described.totalExpiring).toBe(2);
+    expect(described.nextRunAt).toBe(NOW + DAY);
+    expect(described.preview).toBe(false);
+    expect(described.lastRunAt).toBeNull();
+    store.close();
+  });
+
+  test("falls back rather than keeping forever when the '*' row is gone", () => {
+    const store = seed();
+    store.deleteRetentionConfig(GLOBAL_DEFAULT_KIND);
+    addEvent(store, "user.avatar", NOW - 10 * DAY);
+
+    const described = describeRetention(store, { now: NOW });
+    expect(described.defaultRetainDays).toBe(FALLBACK_RETAIN_DAYS);
+    expect(described.kinds[0]?.source).toBe("fallback");
+    store.close();
+  });
+
+  test("overrides preview a change without writing it", () => {
+    const store = seed();
+    store.setRetentionConfig(GLOBAL_DEFAULT_KIND, 90, NOW);
+    addEvent(store, "user.avatar", NOW - 40 * DAY);
+
+    const before = describeRetention(store, { now: NOW });
+    expect(before.totalExpiring).toBe(0);
+
+    const previewed = describeRetention(store, {
+      now: NOW,
+      overrides: { [GLOBAL_DEFAULT_KIND]: 7 },
+      preview: true,
+    });
+    expect(previewed.totalExpiring).toBe(1);
+    expect(previewed.preview).toBe(true);
+
+    // The row is still there, and the stored config is still 90 — a preview that wrote anything
+    // would be a preview that deleted something.
+    expect(count(store, "events")).toBe(1);
+    expect(describeRetention(store, { now: NOW }).defaultRetainDays).toBe(90);
+    store.close();
+  });
+
+  test("carries the last completed pass's timestamp", () => {
+    const store = seed();
+    addEvent(store, "user.avatar", NOW - 400 * DAY);
+    runRetention(store, { now: NOW });
+    expect(describeRetention(store, { now: NOW }).lastRunAt).toBe(NOW);
+    store.close();
+  });
+});
+
+describe("applyRetentionUpdate", () => {
+  test("a number sets, null deletes, and an absent key is left alone", () => {
+    const store = seed();
+    store.setRetentionConfig("gamelog.*", 30, NOW);
+    store.setRetentionConfig("friend.online", 7, NOW);
+
+    applyRetentionUpdate(store, { rules: { "gamelog.*": null, "user.avatar": 14 } }, NOW);
+
+    const rules = new Map(store.listRetentionConfig().map((row) => [row.kind, row.retain_days]));
+    expect(rules.has("gamelog.*")).toBe(false);
+    expect(rules.get("user.avatar")).toBe(14);
+    expect(rules.get("friend.online")).toBe(7);
+    store.close();
+  });
+
+  test("defaultRetainDays is the only way to move the '*' row", () => {
+    const store = seed();
+    applyRetentionUpdate(store, { defaultRetainDays: 45 }, NOW);
+    expect(describeRetention(store, { now: NOW }).defaultRetainDays).toBe(45);
+
+    // A `'*'` key inside `rules` is ignored rather than honoured: deleting it would silently swap
+    // the user's explicit default for a built-in constant.
+    applyRetentionUpdate(store, { rules: { [GLOBAL_DEFAULT_KIND]: null } }, NOW);
+    expect(describeRetention(store, { now: NOW }).defaultRetainDays).toBe(45);
     store.close();
   });
 });

@@ -48,6 +48,16 @@ export interface PassthroughGrantStore {
    * `audit_log`, so the window can never be silently truncated out from under the count.
    */
   countGrantScopeUsage(grantId: string, scope: string, since: number): number;
+
+  /**
+   * This grant's own hourly allowance for `scope`, or null to use the build's default.
+   *
+   * Separate from {@link countGrantScopeUsage} rather than folded into a single "may I" call
+   * because the two answer different questions: one is a durable count of what happened, the other
+   * is a setting the user edited. Keeping them apart is what lets the Connected apps page render
+   * "42 of 60 used this hour" without the proxy having to hand it a decision.
+   */
+  grantBudget(grantId: string, scope: string): number | null;
 }
 
 /**
@@ -264,10 +274,15 @@ export async function passthrough(
    */
   const grant = authorized.grant;
   if (grant !== null) {
-    // The default, and for now the only, allowance. Decision 95 also asks for a per-app override
-    // edited on the Connected apps page; the seam for it is deliberately absent until the control
-    // that writes it exists, because an override nothing can set is a capability nothing uses.
-    const limit = DEFAULT_GRANT_BUDGETS[route.scope];
+    // The user's override for this app first, then the build's default. Only the three scopes in
+    // `DEFAULT_GRANT_BUDGETS` are budgeted at all, and an override on any other scope is ignored
+    // rather than honoured — otherwise the page could quietly invent a budget on `worlds:read`,
+    // which is a rate limit wearing a consent screen's clothes.
+    const fallback = DEFAULT_GRANT_BUDGETS[route.scope];
+    const limit =
+      fallback === undefined
+        ? undefined
+        : (deps.grants.grantBudget(grant.id, route.scope) ?? fallback);
     if (limit !== undefined) {
       const since = now() - BUDGET_WINDOW_MS;
       if (deps.grants.countGrantScopeUsage(grant.id, route.scope, since) >= limit) {

@@ -43,8 +43,16 @@ function push(into: number[], value: number): number[] {
 class RatesState {
   /** Everything the daemon is spending, across every account. */
   total = $state<number[]>(seed(undefined));
-  /** The IP-wide ceiling. A constant off the daemon's configuration, not a measurement. */
+  /** The IP-wide API ceiling. A constant off the daemon's configuration, not a measurement. */
   limit = $state(0);
+  /**
+   * Calls blocked on the limiter right now.
+   *
+   * The reading the shell was missing: a daemon spending 3/s against an 80/s ceiling looks idle
+   * whether nothing is happening or forty calls are stacked behind a 429, and those are not the
+   * same app to be using.
+   */
+  queued = $state(0);
   /** Unix ms at which a 429 backoff lifts, or null. */
   retryAfter = $state<number | null>(null);
 
@@ -77,9 +85,10 @@ class RatesState {
   }
 
   /** Seeds the total from `/api/status`. */
-  seedTotal(series: RateSeries, limit: number, retryAfter: number | null): void {
+  seedTotal(series: RateSeries, limit: number, queued: number, retryAfter: number | null): void {
     this.total = seed(series);
     this.limit = limit;
+    this.queued = queued;
     this.retryAfter = retryAfter;
   }
 
@@ -100,6 +109,7 @@ class RatesState {
   apply(frame: RateFrame): void {
     this.total = push(this.total, frame.total);
     this.limit = frame.limit;
+    this.queued = frame.queued;
     this.retryAfter = frame.retryAfter;
 
     // Every known series, not only the mentioned ones — see the module comment.

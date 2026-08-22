@@ -38,6 +38,7 @@ describe("migrate", () => {
       "events_daily",
       "friend_log",
       "friend_log_history",
+      "grant_budgets",
       "grants",
       "meta",
       "notes",
@@ -46,6 +47,8 @@ describe("migrate", () => {
       "retention_config",
       "sessions",
       "user_cache",
+      "webhook_deliveries",
+      "webhooks",
       "world_cache",
     ]);
     db.close();

@@ -96,6 +96,19 @@ export const PLUGIN_METER_PREFIX = "plugin:";
  */
 const SHADOWED_SCOPES: readonly Scope[] = Object.keys(DEFAULT_GRANT_BUDGETS).filter(isScope);
 
+/** One budgeted scope for one plugin, as the management page renders it. */
+export interface PluginBudgetView {
+  readonly scope: string;
+  /** False for a budgeted scope this plugin was not granted. The row is shown anyway. */
+  readonly granted: boolean;
+  readonly used: number;
+  /** Null for a scope that carries no budget at all. */
+  readonly limit: number | null;
+  readonly windowMs: number;
+  /** True while calls under this scope would be logged and not performed. */
+  readonly dryRun: boolean;
+}
+
 /** One installed plugin, as the management surface needs it. */
 export interface InstalledPluginView {
   readonly status: PluginStatus;
@@ -171,6 +184,22 @@ export interface PluginHost {
    * they removed — is the worse surprise.
    */
   uninstall(pluginId: string, options?: { readonly keepData?: boolean }): Promise<void>;
+
+  /**
+   * What this plugin has spent this hour, per budgeted scope, and whether each is still shadowed.
+   *
+   * Every budgeted scope is returned, including ones the plugin was not granted — `granted` says
+   * which. A row that vanished for a scope the plugin does not hold would hide the control exactly
+   * when someone wants to confirm it is closed.
+   */
+  budgets(pluginId: string): PluginBudgetView[];
+  /**
+   * Lifts or restores dry-run for one scope of one plugin.
+   *
+   * The explicit per-plugin, per-scope gesture PLAN.md correction 4 and decision 109 require.
+   * Never a timer: "it has behaved for seven days" says nothing about the eighth.
+   */
+  setDryRunLifted(pluginId: string, scope: string, lifted: boolean): void;
 
   /** Plugin installs waiting for someone to answer, and the two ways to answer them. */
   readonly consent: {
@@ -260,6 +289,15 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
   // Consent
   // ---------------------------------------------------------------------------------------------
 
+  /**
+   * Held rather than constructed inline, because the management page reads it.
+   *
+   * PLAN.md correction 3 asks for "a UI naming who is eating it", and a budget nothing can read is
+   * a budget nobody can act on: the point of the number is that a user can see *which* plugin is
+   * spending their account's allowance before VRChat's own limiter tells them.
+   */
+  const budget = new PluginBudget();
+
   const consent = new PluginConsentBroker({
     ...(options.onConsentPending === undefined ? {} : { onPending: options.onConsentPending }),
   });
@@ -321,7 +359,7 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
       }),
     },
     grants: liveGrant,
-    budget: new PluginBudget(),
+    budget,
     onCall: (record) => {
       // The audit hook. A dedicated plugin audit table is 3.8's, alongside the management page that
       // reads it; until then a refusal is worth a line and a success is not worth one per call.
@@ -606,6 +644,28 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
 
     disable(pluginId) {
       registry.disable(pluginId);
+    },
+
+    budgets(pluginId) {
+      const grant = liveGrant(pluginId);
+      const lifted = new Set(store.listPluginDryRunLifted(pluginId));
+      return SHADOWED_SCOPES.map((scope) => {
+        const usage = budget.usage(pluginId, scope);
+        return {
+          scope,
+          granted: grant?.scopes.includes(scope) ?? false,
+          used: usage.used,
+          limit: usage.limit,
+          windowMs: usage.windowMs,
+          // Shadowed unless explicitly lifted. The safe state is the one you get from having no row.
+          dryRun: !lifted.has(scope),
+        };
+      });
+    },
+
+    setDryRunLifted(pluginId, scope, lifted) {
+      if (lifted) store.liftPluginDryRun(pluginId, scope, Date.now());
+      else store.restorePluginDryRun(pluginId, scope);
     },
 
     consent: {

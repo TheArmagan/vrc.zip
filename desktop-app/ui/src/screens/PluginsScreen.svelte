@@ -209,6 +209,26 @@ async function setEnabled(plugin: InstalledPlugin, enabled: boolean): Promise<vo
 /** Which uninstalls are set to keep their data. Absent means delete, which is the default. */
 let keepData = $state<Record<string, boolean>>({});
 
+/**
+ * Lifts or restores dry-run for one scope.
+ *
+ * Lifting is the direction that lets a plugin act on other people, so it is the one that gets the
+ * hold. Restoring is a plain click: making it harder to close a door than to open one is exactly
+ * backwards.
+ */
+async function setDryRun(plugin: InstalledPlugin, scope: string, lifted: boolean): Promise<void> {
+  busy = plugin.id;
+  actionError = null;
+  try {
+    const updated = await api.plugins.setDryRun(plugin.id, scope, lifted);
+    plugins = plugins.map((entry) => (entry.id === plugin.id ? updated : entry));
+  } catch (error) {
+    actionError = describeError(error);
+  } finally {
+    busy = null;
+  }
+}
+
 async function uninstall(plugin: InstalledPlugin): Promise<void> {
   busy = plugin.id;
   actionError = null;
@@ -440,6 +460,51 @@ function secondsLeft(requestedAt: number): number {
               · {plugin.restarts} restart{plugin.restarts === 1 ? "" : "s"}
             {/if}
           </p>
+
+          {#if plugin.budgets.some((entry) => entry.granted)}
+            <!--
+              Correction 3's "a UI naming who is eating it", and correction 4's dry-run gesture, in
+              one block. Only granted scopes are shown expanded: a plugin holding none of the three
+              has nothing to say here, and three permanently-empty rows on every card would train
+              people to skip the section on the cards where it matters.
+            -->
+            <div class="mt-3 flex flex-col gap-2 rounded border border-border p-3">
+              {#each plugin.budgets.filter((entry) => entry.granted) as entry (entry.scope)}
+                <div class="flex flex-wrap items-center gap-2 text-sm">
+                  <span class="font-medium">{entry.description}</span>
+                  <span class="text-muted-foreground text-xs">
+                    {entry.used} of {entry.limit ?? "∞"} used this hour
+                  </span>
+                  {#if entry.dryRun}
+                    <Badge variant="secondary">Dry run</Badge>
+                    <span class="text-muted-foreground text-xs">
+                      logged, not performed
+                    </span>
+                    <div class="ml-auto">
+                      <HoldToConfirm
+                        label="Hold to allow for real"
+                        holdingLabel="Keep holding…"
+                        variant="outline"
+                        disabled={busy === plugin.id}
+                        onconfirm={() => void setDryRun(plugin, entry.scope, true)}
+                      />
+                    </div>
+                  {:else}
+                    <Badge variant="destructive">Live</Badge>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      class="ml-auto"
+                      disabled={busy === plugin.id}
+                      onclick={() => void setDryRun(plugin, entry.scope, false)}
+                    >
+                      Back to dry run
+                    </Button>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          {/if}
 
           <footer class="mt-3 flex flex-wrap items-center gap-2">
             <Button

@@ -217,7 +217,9 @@ describe("the scope filter", () => {
   test("an exact pattern does not match by string prefix", () => {
     const allows = compileAuthority(grantOf(["friends:read"], [ACCOUNT], ["friend.online"]));
     expect(allows(toPluginEvent({ kind: "friend.online", accountId: ACCOUNT, ts: 1 }))).toBe(true);
-    expect(allows(toPluginEvent({ kind: "friend.offline", accountId: ACCOUNT, ts: 1 }))).toBe(false);
+    expect(allows(toPluginEvent({ kind: "friend.offline", accountId: ACCOUNT, ts: 1 }))).toBe(
+      false,
+    );
   });
 });
 

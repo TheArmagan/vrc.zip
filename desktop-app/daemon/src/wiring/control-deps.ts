@@ -113,7 +113,7 @@ import {
 import type { GrantRow } from "../store/types.ts";
 import type { WebhookManager } from "../webhooks/index.ts";
 import { EPHEMERAL } from "./feed-writer.ts";
-import type { InstalledPluginView, PluginHost } from "./plugin-host.ts";
+import type { InstalledPluginView, PluginBudgetView, PluginHost } from "./plugin-host.ts";
 import { webhookSummary } from "./webhook-summary.ts";
 
 /**
@@ -828,7 +828,10 @@ function toControlAccount(
 }
 
 /** `InstalledPluginView` → the wire shape. The one place the supervisor's vocabulary is projected. */
-function toPluginSummary(view: InstalledPluginView): PluginSummary {
+function toPluginSummary(
+  view: InstalledPluginView,
+  budgets: readonly PluginBudgetView[],
+): PluginSummary {
   const { status } = view;
   return {
     id: status.pluginId,
@@ -849,6 +852,15 @@ function toPluginSummary(view: InstalledPluginView): PluginSummary {
     refusal: view.refusal,
     scopes: [...view.scopes],
     accountIds: [...view.accountIds],
+    budgets: budgets.map((entry) => ({
+      scope: entry.scope,
+      description: isScope(entry.scope) ? SCOPES[entry.scope].description : entry.scope,
+      granted: entry.granted,
+      used: entry.used,
+      limit: entry.limit,
+      windowMs: entry.windowMs,
+      dryRun: entry.dryRun,
+    })),
   };
 }
 
@@ -858,7 +870,7 @@ function pluginOrThrow(host: PluginHost, pluginId: string): PluginSummary {
   if (found === undefined) {
     throw new ControlError(404, "unknown_plugin", `${pluginId} is not installed.`);
   }
-  return toPluginSummary(found);
+  return toPluginSummary(found, host.budgets(pluginId));
 }
 
 export function createControlDeps(options: ControlDepsOptions): ControlDeps {
@@ -2364,18 +2376,23 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
     async listPlugins(): Promise<PluginSummary[]> {
       // No host means the daemon cannot run plugins at all, and "none are installed" is exactly
       // true for one that cannot. Same posture as `listWebhooks` above.
-      return await Promise.resolve((options.plugins?.list() ?? []).map(toPluginSummary));
+      const host = options.plugins;
+      if (host === undefined) return await Promise.resolve([]);
+      return await Promise.resolve(
+        host.list().map((view) => toPluginSummary(view, host.budgets(view.status.pluginId))),
+      );
     },
 
     async installPlugin(rootDir, accountIds): Promise<PluginSummary> {
-      const outcome = await pluginHost().install(rootDir, accountIds);
+      const host = pluginHost();
+      const outcome = await host.install(rootDir, accountIds);
       if (!outcome.ok) {
         // The pipeline's sentences are written to be shown unchanged — a manifest issue list, a
         // compile diagnostic with line and column, a deny-scan finding naming the construct. This
         // is the one place they would be worth destroying by summarising, so it does not.
         throw new ControlError(400, "plugin_install_failed", outcome.message);
       }
-      return toPluginSummary(outcome.plugin);
+      return toPluginSummary(outcome.plugin, host.budgets(outcome.plugin.status.pluginId));
     },
 
     async enablePlugin(pluginId): Promise<PluginSummary> {
@@ -2389,6 +2406,18 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       // Synchronous on purpose all the way down: it kills rather than asks, so nothing here can be
       // delayed by the very plugin the user is trying to be rid of.
       host.disable(pluginId);
+      return await Promise.resolve(pluginOrThrow(host, pluginId));
+    },
+
+    async setPluginDryRun(pluginId, scope, lifted): Promise<PluginSummary> {
+      const host = options.plugins;
+      if (host === undefined) {
+        throw new ControlError(404, "unknown_plugin", `${pluginId} is not installed.`);
+      }
+      // Read the plugin back first, so an unknown id is a 404 rather than a write that lands
+      // nowhere and answers 200.
+      pluginOrThrow(host, pluginId);
+      host.setDryRunLifted(pluginId, scope, lifted);
       return await Promise.resolve(pluginOrThrow(host, pluginId));
     },
 

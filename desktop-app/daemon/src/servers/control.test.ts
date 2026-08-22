@@ -91,7 +91,12 @@ const PENDING_CONSENT: PendingPluginConsentSummary = {
   requestedAt: 1_700_000_000_000,
   isUpdate: true,
   scopes: [
-    { scope: "friends:read", description: "Read your friends list.", dangerous: false, isNew: false },
+    {
+      scope: "friends:read",
+      description: "Read your friends list.",
+      dangerous: false,
+      isNew: false,
+    },
     { scope: "invite:send", description: "Send invites.", dangerous: true, isNew: true },
   ],
   capabilities: [
@@ -119,6 +124,17 @@ const PLUGIN: PluginSummary = {
   refusal: null,
   scopes: ["friends:read"],
   accountIds: ["usr_a"],
+  budgets: [
+    {
+      scope: "invite:send",
+      description: "Send invites.",
+      granted: false,
+      used: 0,
+      limit: 60,
+      windowMs: 3_600_000,
+      dryRun: true,
+    },
+  ],
 };
 
 /** One connected app, as `PUT /api/apps/:id/budgets/:scope` returns it after a write. */
@@ -479,6 +495,7 @@ interface Recorder {
   pluginInstalls: { rootDir: string; accountIds: readonly string[] }[];
   pluginToggles: { id: string; enabled: boolean }[];
   pluginsUninstalled: string[];
+  dryRunWrites: { pluginId: string; scope: string; lifted: boolean }[];
   pendingConsents: PendingPluginConsentSummary[];
   consentDecisions: { id: string; decision: PluginConsentDecision }[];
   consentDenials: string[];
@@ -527,6 +544,7 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     pluginInstalls: [],
     pluginToggles: [],
     pluginsUninstalled: [],
+    dryRunWrites: [],
     pendingConsents: [PENDING_CONSENT],
     consentDecisions: [],
     consentDenials: [],
@@ -604,6 +622,16 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     },
     uninstallPlugin: async (pluginId) => {
       seen.pluginsUninstalled.push(pluginId);
+    },
+    setPluginDryRun: async (pluginId, scope, lifted) => {
+      if (pluginId !== PLUGIN.id) throw new ControlError(404, "unknown_plugin");
+      seen.dryRunWrites.push({ pluginId, scope, lifted });
+      return {
+        ...PLUGIN,
+        budgets: PLUGIN.budgets.map((entry) =>
+          entry.scope === scope ? { ...entry, dryRun: !lifted } : entry,
+        ),
+      };
     },
     listPendingPluginConsents: async () => [...seen.pendingConsents],
     approvePluginConsent: async (id, decision) => {
@@ -2519,6 +2547,50 @@ describe("plugin management", () => {
     });
   });
 
+  test("lifting dry-run names the plugin and the scope, and answers with the card", async () => {
+    const { deps, seen } = fakeDeps();
+    const res = await call(deps, "/api/plugins/acme.hello/dry-run/invite:send", {
+      method: "PUT",
+      body: JSON.stringify({ lifted: true }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(res.status).toBe(200);
+    expect(seen.dryRunWrites).toEqual([
+      { pluginId: "acme.hello", scope: "invite:send", lifted: true },
+    ]);
+    const body = (await res.json()) as { budgets: { scope: string; dryRun: boolean }[] };
+    expect(body.budgets[0]).toMatchObject({ scope: "invite:send", dryRun: false });
+  });
+
+  /**
+   * A missing `lifted` must not read as either answer. Defaulting to `false` would silently
+   * re-shadow a scope the user had lifted; defaulting to `true` would lift one on a malformed
+   * request, which is the direction that lets a plugin act on other people.
+   */
+  test("a dry-run write without an explicit boolean is refused", async () => {
+    const { deps, seen } = fakeDeps();
+    expect(
+      (
+        await call(deps, "/api/plugins/acme.hello/dry-run/invite:send", {
+          method: "PUT",
+          body: JSON.stringify({}),
+          headers: { "content-type": "application/json" },
+        })
+      ).status,
+    ).toBe(400);
+    expect(seen.dryRunWrites).toEqual([]);
+  });
+
+  test("an unknown plugin is a 404 rather than a write that lands nowhere", async () => {
+    const { deps } = fakeDeps();
+    const res = await call(deps, "/api/plugins/nope.nope/dry-run/invite:send", {
+      method: "PUT",
+      body: JSON.stringify({ lifted: true }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(res.status).toBe(404);
+  });
+
   test("the pending sheet lists what is waiting, including what an update newly wants", async () => {
     const { deps } = fakeDeps();
     const res = await call(deps, "/api/plugins/pending");
@@ -2537,9 +2609,7 @@ describe("plugin management", () => {
     const { deps, seen } = fakeDeps();
     const res = await post(deps, "/api/plugins/pending/pc1/approve", { accountIds: ["usr_a"] });
     expect(res.status).toBe(204);
-    expect(seen.consentDecisions).toEqual([
-      { id: "pc1", decision: { accountIds: ["usr_a"] } },
-    ]);
+    expect(seen.consentDecisions).toEqual([{ id: "pc1", decision: { accountIds: ["usr_a"] } }]);
 
     // The request existed and the *timing* failed, which is a different sentence from "no such
     // thing" — someone who left the sheet open until it expired needs to be told which.

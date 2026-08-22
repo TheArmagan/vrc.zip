@@ -622,6 +622,26 @@ export interface InstalledPlugin {
   readonly refusal: string | null;
   readonly scopes: readonly string[];
   readonly accountIds: readonly string[];
+  /**
+   * The three risky scopes, always all three.
+   *
+   * Present even for scopes this plugin was not granted — `granted` says which — because a row that
+   * vanished would hide the control exactly when someone wants to confirm it is closed.
+   */
+  readonly budgets: readonly PluginBudget[];
+}
+
+/** One risky scope on a plugin's card: what it has spent this hour, and whether it is shadowed. */
+export interface PluginBudget {
+  readonly scope: string;
+  readonly description: string;
+  readonly granted: boolean;
+  readonly used: number;
+  /** Null for a scope carrying no budget at all. */
+  readonly limit: number | null;
+  readonly windowMs: number;
+  /** True while calls under this scope would be logged and not performed. */
+  readonly dryRun: boolean;
 }
 
 /**
@@ -1338,6 +1358,18 @@ export const api = {
         method: "DELETE",
         query: { keepData: options.keepData === true ? "1" : undefined },
       }),
+
+    /**
+     * Lifts or restores dry-run for one scope of one plugin.
+     *
+     * Per plugin *and* per scope, and never on a timer: "it has behaved for seven days" says
+     * nothing about the eighth, and a timed prompt only teaches people to dismiss prompts.
+     */
+    setDryRun: (pluginId: string, scope: string, lifted: boolean): Promise<InstalledPlugin> =>
+      request<InstalledPlugin>(
+        `/plugins/${encodeURIComponent(pluginId)}/dry-run/${encodeURIComponent(scope)}`,
+        { method: "PUT", body: { lifted } },
+      ),
 
     pending: (signal?: AbortSignal): Promise<PendingPluginConsent[]> =>
       request<PendingPluginConsent[]>("/plugins/pending", withSignal(signal)),

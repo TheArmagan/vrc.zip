@@ -5,8 +5,8 @@ the architecture and the reasoning. This file tracks only *state*: what exists, 
 was decided along the way.
 
 **Last updated:** 2026-08-23
-**Current phase:** Phase 3 — Plugin system (3.0–3.6 done; **3.7 storage and the `ctx` runtime are
-built**, with only its budget readout outstanding; next is 3.8, consent and management UI)
+**Current phase:** Phase 3 — Plugin system (3.0 through 3.8 done; next is 3.9, the declarative UI
+renderer, then 3.10 nodes and 3.11 the scaffolder)
 **Status: Phases 1 and 2 are both built.** Phase 1 was confirmed by hand on 2026-08-22 (1.10 and the
 profile card). Phase 2 closed on the same day: every numbered step is ticked, including 2.8's last
 two pieces (per-app budget overrides and a rate gauge that reports measured numbers instead of
@@ -357,7 +357,7 @@ for the life of the product.
       **Read decision 177 before trusting any of this**: four attacks are asserted as *gaps*,
       including that a plugin which gets past install reaches the whole filesystem. The prelude's
       global scrubbing, by contrast, measured stronger than assumed.
-- [~] **3.4 Dispatcher, scope gate, rate budget** — one dispatcher doing arg parsing and the scope
+- [x] **3.4 Dispatcher, scope gate, rate budget** — one dispatcher doing arg parsing and the scope
       check, never the handlers. Every plugin call goes through the shared limiter tagged with the
       plugin id, with a subordinate per-plugin budget and a UI naming who is eating it.
       **Built** (decision 167): `scope-gate.ts` is the pure decision layer over the existing
@@ -370,8 +370,9 @@ for the life of the product.
       `:7775` install, list, enable, disable and uninstall. Verified against a running daemon — a
       plugin's own `vrchat.accounts.list` was observed going out through `send`, the dispatcher, the
       scope gate and the grant, and coming back.
-      **Not yet done:** the UI naming who is eating the budget. The budget itself is dormant until
-      writes land, since all three budgeted scopes are writes.
+      **Closed by decision 190:** the plugins page names what each plugin has spent this hour, per
+      budgeted scope. The budget itself stays dormant until writes land, since all three budgeted
+      scopes are writes — the readout says `0 of 60` and means it.
 - [~] **3.5 Install pipeline** — `Bun.build` with `target: "browser"` and `external: []`, then an AST
       deny-scan over the *bundled output*, then content-addressing at `plugins/<id>/<sha256>.js` with
       the hash verified on every load.
@@ -428,7 +429,7 @@ for the life of the product.
       before adding any dependency to the published package**: importing the package root made a
       plugin uninstallable, because zod reaches the bundle and the deny-scan refuses it.
       **Not yet done:** 3.4's per-plugin budget readout, which needs a plugin screen to live on.
-- [~] **3.8 Consent and management UI** — the account picker, the dangerous block behind a second
+- [x] **3.8 Consent and management UI** — the account picker, the dangerous block behind a second
       toggle, hold-to-confirm, grants keyed immutably by
       `(pluginId, version, grantHash)`, and the dry-run lift as an explicit per-plugin per-scope
       gesture with the dry-run log beside it as evidence (decision 109).
@@ -442,9 +443,10 @@ for the life of the product.
       parks on a consent broker that narrows and never widens, and `#/plugins` carries both the
       sheet and the management list with a real `HoldToConfirm`. Verified against a running daemon:
       a dangerous scope left unticked is absent from the stored grant, `ctx.storage` round-trips,
-      and uninstall deletes the data directory. **Not yet done:** the dry-run lift gesture, the
-      per-plugin budget readout (3.4's outstanding item), and decision 61's second alert channel for
-      when no UI client is connected — today that is a log line.
+      and uninstall deletes the data directory. **Complete** as of decision 190: the dry-run lift
+      is an explicit per-plugin per-scope hold, the budget readout names what each plugin has spent
+      this hour (3.4's outstanding item, now closed), and an install with no UI client connected
+      raises a toast and opens `#/plugins`.
 - [ ] **3.9 Declarative UI renderer** — forms, tables, dialogs, context menus and
       per-node click handlers. Charts follow rather than ship with it (decision 110).
       **Scoped by decision 182:** the tree rides `/api/stream` as a new frame type carrying a
@@ -2661,6 +2663,36 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 
      Also verified end to end on the same run: `ctx.storage` round-tripped a value through the real
      dispatcher, gate and per-plugin SQLite file; uninstall deleted `plugin-data/<id>/`.
+
+190. **The dry-run lift, the budget readout, and the second alert channel — 3.8 is done.**
+
+     **The lift is per plugin and per scope, and lifting is the only half that is hard.** Lifting
+     lets a plugin act on other people, so it gets the hold; restoring is a plain click, because
+     making it harder to close a door than to open one is exactly backwards. The route refuses a
+     request with no explicit boolean rather than defaulting either way: defaulting to `false`
+     would silently re-shadow a scope the user had lifted, and defaulting to `true` would lift one
+     on a malformed request.
+
+     **The budget readout answers correction 3's "a UI naming who is eating it."** All three
+     budgeted scopes are returned including ones the plugin does not hold — `granted` says which —
+     because a row that vanished would hide the control exactly when someone wants to confirm it is
+     closed. Only granted scopes are drawn expanded on the card, so a plugin holding none of the
+     three does not train people to skip the section on the cards where it matters. No per-plugin
+     budget *override* was built: the app-grant version stores one in `grant_budgets`, and the
+     plugin ledger is in memory until the outbound-action step gives it an audit table to count
+     from. The readout is honest about what it reads.
+
+     **The alert channels are weighted the opposite way to the app flow, deliberately.**
+     `consent-alert.ts` fires an OS notification unconditionally for an app pairing because that
+     flow's premise is that the user is elsewhere. A plugin install's ordinary case is a person who
+     clicked Install one second ago, so toasting them about a sheet already on their screen is
+     noise: with a UI client connected this only logs. The case that still needs reaching is an
+     install started from a script or `curl` with no UI at all, where the request would park for
+     five minutes and expire in silence — there both channels fire, a toast and a browser on
+     `#/plugins`.
+
+     Verified against a running daemon: a plugin granted `invite:send` shows `0 of 60 used this
+     hour` with `dryRun: true`; lifting flips only that scope; restoring flips it back.
 
 ---
 

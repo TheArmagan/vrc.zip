@@ -1198,9 +1198,7 @@ function prepareAll(db: Database) {
     insertPluginGrant: q<
       void,
       [string, string, string, string, string, string, string, string, number]
-    >(
-      SQL.insertPluginGrant,
-    ),
+    >(SQL.insertPluginGrant),
     findPluginGrant: q<PluginGrantRow, [string, string, string]>(SQL.findPluginGrant),
     listPluginGrants: q<PluginGrantRow, [string]>(SQL.listPluginGrants),
     revokePluginGrants: q<void, [number, string]>(SQL.revokePluginGrants),

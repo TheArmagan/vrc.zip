@@ -10,8 +10,11 @@ import { discoverLogDirectories, LogWatcher } from "./game-logs/index.ts";
 import { RateLimiter } from "./net/rate-limiter.ts";
 import { RequestMeter } from "./net/request-meter.ts";
 import { buildUserAgent } from "./net/user-agent.ts";
+import { notifyDesktop } from "./os/desktop-notification.ts";
+import { openUrl } from "./os/open-url.ts";
 import { databasePath, ensureStateDir } from "./paths.ts";
 import { PipelineClient } from "./pipeline/index.ts";
+import type { PendingPluginConsent } from "./plugins/consent.ts";
 import { ConsentRegistry } from "./proxy/consent.ts";
 import { PipelineMirror } from "./proxy/pipeline-mirror.ts";
 import { createProxyLogger, PROXY_LOG_ENV } from "./proxy/request-log.ts";
@@ -296,6 +299,18 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
   // control API is handed this instance to mount its management routes against, so it has to exist
   // before `bindServers`; but a plugin process is a spawn, and nothing the user is waiting for
   // should queue behind N of them. See `wiring/plugin-host.ts` for what it holds together.
+  /*
+   * Assigned once the session URL and the stream-client count exist, both of which are built well
+   * below this point. A holder rather than a forward reference so the ordering is stated rather
+   * than relied on: an install cannot happen before the servers are up, but a closure that would
+   * throw if it did is not something to leave to reading order.
+   */
+  let alertPluginConsent: (pending: PendingPluginConsent) => void = (pending) => {
+    console.warn(
+      `[vrc.zip] ${pending.manifest.name} ${pending.manifest.version} is waiting to be installed, before the daemon finished starting.`,
+    );
+  };
+
   const plugins = createPluginHost({
     store,
     accounts,
@@ -312,12 +327,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
      * when a UI client is connected, an OS notification and a browser when none is. That belongs
      * with 3.8's consent screen, which is what the second channel would open.
      */
-    onConsentPending: (pending) => {
-      console.warn(
-        `[vrc.zip] ${pending.manifest.name} ${pending.manifest.version} is waiting to be installed. ` +
-          `Approve or deny it on the plugins screen — it expires in five minutes and nothing is granted until then.`,
-      );
-    },
+    onConsentPending: (pending) => alertPluginConsent(pending),
   });
 
   // --- servers --------------------------------------------------------------
@@ -517,6 +527,41 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
   // Which channel runs depends on whether anyone is watching; see `wiring/consent-alert.ts`. The
   // token is in the URL because a browser opened cold has no other way to authenticate its first
   // navigation — the same reason the launch URL carries one.
+  /*
+   * The plugin half of the same problem, with the channels weighted differently on purpose.
+   *
+   * `consent-alert.ts` fires an OS notification unconditionally for an *app* pairing, because that
+   * flow's whole premise is that the user is elsewhere — in a headset, in a game window — and a UI
+   * client holding a socket says nothing about anyone looking at it.
+   *
+   * A plugin install is the opposite: the ordinary case is a person who clicked Install on the
+   * plugins screen one second ago, and toasting them about a sheet already on their screen is
+   * noise. So when a UI client is connected this only logs, and the screen's own poll surfaces it.
+   *
+   * The case that still needs reaching is an install started with no UI at all — a script, a
+   * terminal, `curl`. There the request would otherwise park for five minutes and expire in
+   * silence, so both channels fire: a toast, and a browser on the plugins screen.
+   */
+  alertPluginConsent = (pending) => {
+    const what = `${pending.manifest.name} ${pending.manifest.version}`;
+    if (deps.streamClientCount() > 0) {
+      console.warn(
+        `[vrc.zip] ${what} is waiting to be installed. Approve or deny it on the plugins screen.`,
+      );
+      return;
+    }
+    console.warn(
+      `[vrc.zip] ${what} is waiting to be installed and no vrc.zip window is open. Opening one — it expires in five minutes and nothing is granted until then.`,
+    );
+    // Best-effort, both of them. A headless box has no browser and no notification daemon, and the
+    // install still works: the request is on the control API for anything that asks.
+    void notifyDesktop({
+      title: "vrc.zip: a plugin wants to be installed",
+      body: `${what} is waiting for you to approve or deny it.`,
+    });
+    void openUrl(`${launchUrl}#/plugins`);
+  };
+
   const detachConsentAlerts = attachConsentAlerts({
     bus,
     consent,

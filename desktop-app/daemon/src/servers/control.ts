@@ -849,6 +849,19 @@ export interface PluginConsentDecision {
   events?: string[];
 }
 
+/** One budgeted scope on a plugin's card: what it has spent, and whether it is still shadowed. */
+export interface PluginBudgetSummary {
+  scope: string;
+  description: string;
+  /** False for a budgeted scope this plugin was not granted. Shown anyway, so "closed" is visible. */
+  granted: boolean;
+  used: number;
+  limit: number | null;
+  windowMs: number;
+  /** True while calls under this scope are logged and not performed. */
+  dryRun: boolean;
+}
+
 export interface PluginSummary {
   /** The manifest id, `publisher.name`. Stable across versions and the key for every route below. */
   id: string;
@@ -885,6 +898,8 @@ export interface PluginSummary {
   scopes: string[];
   /** The accounts the grant covers. Empty is normal and means the plugin can act as none of them. */
   accountIds: string[];
+  /** The three risky scopes, always all of them. See {@link PluginBudgetSummary}. */
+  budgets: PluginBudgetSummary[];
 }
 
 /** One requested scope, as the consent sheet renders it. */
@@ -1067,6 +1082,14 @@ export interface ControlDeps {
    * that was not running. PLAN.md is explicit that this one must always succeed.
    */
   disablePlugin(pluginId: string): Promise<PluginSummary>;
+
+  /**
+   * Lifts or restores dry-run for one scope of one plugin.
+   *
+   * The explicit gesture of decision 109, and the reason it is per plugin *and* per scope rather
+   * than a setting: it is never lifted by a timer, and never for everything at once.
+   */
+  setPluginDryRun(pluginId: string, scope: string, lifted: boolean): Promise<PluginSummary>;
 
   /**
    * Plugin installs waiting for a person.
@@ -2355,6 +2378,15 @@ export function createControlApp({ port, deps, appApi, token }: ControlAppOption
     .post("/api/plugins/:id/disable", async (c) =>
       c.json(await deps.disablePlugin(c.req.param("id"))),
     )
+
+    .put("/api/plugins/:id/dry-run/:scope", async (c) => {
+      const body = await readJsonObject(c.req.raw);
+      const lifted = body?.lifted;
+      if (typeof lifted !== "boolean") {
+        return c.json({ error: "invalid_body", detail: "lifted must be true or false" }, 400);
+      }
+      return c.json(await deps.setPluginDryRun(c.req.param("id"), c.req.param("scope"), lifted));
+    })
 
     .get("/api/plugins/pending", async (c) => c.json(await deps.listPendingPluginConsents()))
 

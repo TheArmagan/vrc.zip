@@ -571,6 +571,52 @@ describe("PluginSupervisor disable", () => {
   });
 });
 
+describe("PluginSupervisor bundle resolution", () => {
+  /*
+   * "Verify the hash on every load" is only true if something re-asks on every load, and the load
+   * that is easiest to forget is the one nobody triggers: a crash loop respawns every few seconds,
+   * indefinitely, and a path captured at construction would mean the file is never looked at again
+   * after the daemon booted.
+   */
+  test("the bundle is re-resolved on every start, not captured once", async () => {
+    let resolutions = 0;
+    const harness = makeHarness({
+      spawn: () => {
+        resolutions += 1;
+        return SPAWN;
+      },
+    });
+
+    await boot(harness);
+    expect(resolutions).toBe(1);
+
+    await crashAndRestart(harness, 1_000);
+    expect(resolutions).toBe(2);
+  });
+
+  test("a refused bundle halts rather than respawning it", async () => {
+    let allow = true;
+    const harness = makeHarness({
+      spawn: () => (allow ? SPAWN : null),
+    });
+
+    await boot(harness);
+    allow = false;
+
+    // The artifact was swapped out under a running plugin; the restart is where that is caught.
+    harness.latest().crash();
+    harness.clock.advance(1_000);
+    await flush();
+
+    expect(harness.supervisor.state).toBe("disabled");
+    expect(harness.supervisor.disabled?.reason).toBe("spawn-failed");
+    // Not sticky: a locked file is a condition of the moment, and the halt still holds this session.
+    expect(harness.store.load(PLUGIN_ID)).toBeNull();
+    // And nothing was spawned from the file it refused.
+    expect(harness.transports.length).toBe(1);
+  });
+});
+
 describe("PluginSupervisor spawn failure", () => {
   test("halts without a restart loop and without persisting the halt", async () => {
     const harness = makeHarness();
@@ -615,5 +661,31 @@ describe("PluginSupervisor frame routing", () => {
 
     expect(seen.length).toBe(1);
     expect(seen[0]?.t).toBe("credit");
+  });
+
+  /*
+   * The other half of the routing seam. `onPluginFrame` carries frames outward; `send` is what
+   * carries a reply back, and without it a `PluginChannel` — and therefore the whole dispatcher —
+   * cannot be built over a supervisor at all.
+   */
+  test("send reaches the running plugin", async () => {
+    const harness = makeHarness();
+    const transport = await boot(harness);
+
+    expect(harness.supervisor.send({ t: "res", id: "h1", result: null })).toBe(true);
+    expect(transport.sent.at(-1)).toEqual({ t: "res", id: "h1", result: null });
+  });
+
+  test("send answers false rather than throwing when nothing is running", async () => {
+    const harness = makeHarness();
+    // Before a start there is no transport at all.
+    expect(harness.supervisor.send({ t: "res", id: "h1" })).toBe(false);
+
+    await boot(harness);
+    harness.supervisor.disable();
+
+    // And after a disable the supervisor has dropped it, so a channel held across the disable
+    // writes into nothing rather than into a process that is on its way out.
+    expect(harness.supervisor.send({ t: "res", id: "h1" })).toBe(false);
   });
 });

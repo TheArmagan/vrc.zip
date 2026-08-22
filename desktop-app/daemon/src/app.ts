@@ -30,6 +30,7 @@ import { FeedWriter } from "./wiring/feed-writer.ts";
 import { createLogSink } from "./wiring/log-bridge.ts";
 import { NotificationSink } from "./wiring/notification-sink.ts";
 import { publishPipelineEvent } from "./wiring/pipeline-bridge.ts";
+import { createPluginHost } from "./wiring/plugin-host.ts";
 import { UpdateDiffSet } from "./wiring/update-diff.ts";
 import { attachWebhookBridge } from "./wiring/webhook-bridge.ts";
 
@@ -290,6 +291,17 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
   const detachWebhooks = attachWebhookBridge({ bus, manager: webhooks });
   webhooks.start();
 
+  // --- plugins --------------------------------------------------------------
+  // Constructed here and started at the very end, and the gap between the two is deliberate: the
+  // control API is handed this instance to mount its management routes against, so it has to exist
+  // before `bindServers`; but a plugin process is a spawn, and nothing the user is waiting for
+  // should queue behind N of them. See `wiring/plugin-host.ts` for what it holds together.
+  const plugins = createPluginHost({
+    store,
+    accounts,
+    ...(env !== undefined ? { env } : {}),
+  });
+
   // --- servers --------------------------------------------------------------
   // Must read `state.json` before `writeStateFile` below overwrites it. Fresh token by default;
   // the previous run's only under `--watch` / `--hot` / `VRCZIP_STABLE_TOKEN=1`.
@@ -381,6 +393,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     pipelineMirror,
     meter,
     webhooks,
+    plugins,
     connectPipeline,
     ...(env !== undefined ? { env } : {}),
     onSettingsSaved: (next) => saveSettings(next, env),
@@ -494,6 +507,17 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     openBrowser: () => settings.openBrowserOnStart,
   });
 
+  /*
+   * Last, after every listener is up.
+   *
+   * Sequential inside, and a plugin that cannot start is recorded against that plugin rather than
+   * thrown — one bad install must not be able to stop the daemon booting. Awaited rather than left
+   * floating so a caller that resolves `startDaemon` knows the plugins have at least been asked to
+   * start; the promise resolves when each has been *spawned and sent `activate`*, never when it is
+   * healthy, because health is a running judgement about a process we do not trust.
+   */
+  await plugins.start();
+
   return {
     bus,
     store,
@@ -508,6 +532,11 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
       // Order is the reverse of construction, and the first two lines are the ones that matter:
       // stop accepting work, then flush what is already queued, before anything closes.
       detachConsentAlerts();
+      // Early, and before the servers: a plugin is the one subsystem here that is a separate
+      // process, so leaving it running while the daemon tears itself down means it makes calls into
+      // a host that is half gone. Bounded — `stopAll` gives every plugin the same grace and then
+      // stops waiting, because a wedged plugin must not be able to hold the user's quit open.
+      await plugins.stop();
       watcher.stop();
       presence.stop();
       notificationSync.stop();

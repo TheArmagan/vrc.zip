@@ -31,6 +31,7 @@ import {
   MAX_WORLD_IDS,
   type NotificationQuery,
   type PageQuery,
+  type PluginSummary,
   parseAvatarId,
   parseImageFileId,
   parseInviteLocation,
@@ -75,6 +76,24 @@ const WEBHOOK: WebhookSummary = {
   lastStatus: 200,
   lastError: null,
   pending: 0,
+};
+
+const PLUGIN: PluginSummary = {
+  id: "acme.hello",
+  name: "Hello",
+  version: "1.0.0",
+  publisher: "acme",
+  state: "running",
+  trust: "unsigned",
+  installedAt: 1_700_000_000_000,
+  disabledReason: null,
+  disabledBy: null,
+  restarts: 0,
+  rssBytes: 41_943_040,
+  lastFailure: null,
+  refusal: null,
+  scopes: ["friends:read"],
+  accountIds: ["usr_a"],
 };
 
 /** One connected app, as `PUT /api/apps/:id/budgets/:scope` returns it after a write. */
@@ -432,6 +451,9 @@ interface Recorder {
   retentionRuns: number;
   budgetWrites: { grantId: string; scope: string; limit: number | null }[];
   webhooksDeleted: string[];
+  pluginInstalls: { rootDir: string; accountIds: readonly string[] }[];
+  pluginToggles: { id: string; enabled: boolean }[];
+  pluginsUninstalled: string[];
   sentActions: {
     kind: string;
     accountId: string;
@@ -474,6 +496,9 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     retentionRuns: 0,
     budgetWrites: [],
     webhooksDeleted: [],
+    pluginInstalls: [],
+    pluginToggles: [],
+    pluginsUninstalled: [],
     sentActions: [],
   };
   let settings: Settings = { theme: "dark" };
@@ -527,6 +552,27 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     listWebhooks: async () => [WEBHOOK],
     deleteWebhook: async (webhookId) => {
       seen.webhooksDeleted.push(webhookId);
+    },
+    listPlugins: async () => [PLUGIN],
+    installPlugin: async (rootDir, accountIds) => {
+      seen.pluginInstalls.push({ rootDir, accountIds });
+      if (rootDir === "/bad") {
+        throw new ControlError(400, "plugin_install_failed", "there is no vrcz-plugin.json there");
+      }
+      return PLUGIN;
+    },
+    enablePlugin: async (pluginId) => {
+      if (pluginId !== PLUGIN.id) throw new ControlError(404, "unknown_plugin");
+      seen.pluginToggles.push({ id: pluginId, enabled: true });
+      return PLUGIN;
+    },
+    disablePlugin: async (pluginId) => {
+      if (pluginId !== PLUGIN.id) throw new ControlError(404, "unknown_plugin");
+      seen.pluginToggles.push({ id: pluginId, enabled: false });
+      return { ...PLUGIN, state: "disabled", disabledReason: "Disabled by the user" };
+    },
+    uninstallPlugin: async (pluginId) => {
+      seen.pluginsUninstalled.push(pluginId);
     },
     setAppBudget: async (grantId, scope, limit) => {
       if (grantId !== GRANT_ID) throw new ControlError(404, "unknown_app", "no such app");
@@ -2353,6 +2399,117 @@ describe("the two authentication models on one port", () => {
     // bit more than an unauthenticated client should be able to learn about this surface.
     const { deps } = fakeDeps();
     expect((await call(deps, "/app/nope")).status).toBe(401);
+  });
+});
+
+describe("plugin management", () => {
+  function post(deps: ControlDeps, path: string, body?: unknown): Promise<Response> {
+    return call(deps, path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  }
+
+  test("GET lists every installed plugin", async () => {
+    const { deps } = fakeDeps();
+    const res = await call(deps, "/api/plugins");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([PLUGIN]);
+  });
+
+  test("install takes a directory and answers 201 with the plugin", async () => {
+    const { deps, seen } = fakeDeps();
+    const res = await post(deps, "/api/plugins", { path: "C:/src/hello" });
+    expect(res.status).toBe(201);
+    expect(await res.json()).toMatchObject({ id: "acme.hello", state: "running" });
+    expect(seen.pluginInstalls).toEqual([{ rootDir: "C:/src/hello", accountIds: [] }]);
+  });
+
+  /*
+   * The half of the install body that is a permission decision. An absent `accountIds` must grant
+   * *nothing* — a plugin handed every account because a field was missing is the exact over-grant
+   * the account picker exists to prevent, and a missing field is not consent.
+   */
+  test("accountIds defaults to none and never to all", async () => {
+    const { deps, seen } = fakeDeps();
+    await post(deps, "/api/plugins", { path: "/plug" });
+    expect(seen.pluginInstalls[0]?.accountIds).toEqual([]);
+  });
+
+  test("accountIds is deduplicated and capped", async () => {
+    const { deps, seen } = fakeDeps();
+    await post(deps, "/api/plugins", { path: "/plug", accountIds: ["usr_a", "usr_a", "usr_b"] });
+    expect(seen.pluginInstalls[0]?.accountIds).toEqual(["usr_a", "usr_b"]);
+
+    const tooMany = await post(deps, "/api/plugins", {
+      path: "/plug",
+      accountIds: Array.from({ length: 17 }, (_, index) => `usr_${String(index)}`),
+    });
+    expect(tooMany.status).toBe(400);
+  });
+
+  test("a non-string in accountIds is refused rather than filtered", async () => {
+    // Filtering would install with fewer accounts than the caller asked for and say nothing.
+    const { deps } = fakeDeps();
+    const res = await post(deps, "/api/plugins", { path: "/plug", accountIds: ["usr_a", 7] });
+    expect(res.status).toBe(400);
+  });
+
+  test("a missing path is a 400, not a filesystem call", async () => {
+    const { deps, seen } = fakeDeps();
+    expect((await post(deps, "/api/plugins", {})).status).toBe(400);
+    expect((await post(deps, "/api/plugins", { path: "" })).status).toBe(400);
+    expect(seen.pluginInstalls).toEqual([]);
+  });
+
+  test("an install failure comes back with the pipeline's own sentence", async () => {
+    const { deps } = fakeDeps();
+    const res = await post(deps, "/api/plugins", { path: "/bad" });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({
+      error: "plugin_install_failed",
+      message: "there is no vrcz-plugin.json there",
+    });
+  });
+
+  test("enable and disable each answer with the plugin as it now stands", async () => {
+    const { deps, seen } = fakeDeps();
+    expect((await post(deps, "/api/plugins/acme.hello/enable")).status).toBe(200);
+
+    const disabled = await post(deps, "/api/plugins/acme.hello/disable");
+    expect(await disabled.json()).toMatchObject({ state: "disabled" });
+    expect(seen.pluginToggles).toEqual([
+      { id: "acme.hello", enabled: true },
+      { id: "acme.hello", enabled: false },
+    ]);
+  });
+
+  test("toggling a plugin that is not installed is a 404", async () => {
+    const { deps } = fakeDeps();
+    expect((await post(deps, "/api/plugins/nope.nope/enable")).status).toBe(404);
+    expect((await post(deps, "/api/plugins/nope.nope/disable")).status).toBe(404);
+  });
+
+  test("DELETE uninstalls and is idempotent", async () => {
+    const { deps, seen } = fakeDeps();
+    expect((await call(deps, "/api/plugins/acme.hello", { method: "DELETE" })).status).toBe(204);
+    expect((await call(deps, "/api/plugins/gone.gone", { method: "DELETE" })).status).toBe(204);
+    expect(seen.pluginsUninstalled).toEqual(["acme.hello", "gone.gone"]);
+  });
+
+  test("every plugin route is behind the session token", async () => {
+    const { deps } = fakeDeps();
+    for (const [method, path] of [
+      ["GET", "/api/plugins"],
+      ["POST", "/api/plugins"],
+      ["POST", "/api/plugins/acme.hello/enable"],
+      ["POST", "/api/plugins/acme.hello/disable"],
+      ["DELETE", "/api/plugins/acme.hello"],
+    ] as const) {
+      const res = await call(deps, path, { method, headers: { authorization: "" } });
+      expect(res.status).toBe(401);
+    }
   });
 });
 

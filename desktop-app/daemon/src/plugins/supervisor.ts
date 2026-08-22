@@ -283,10 +283,26 @@ const DEFAULTS = {
 // Options and status
 // ---------------------------------------------------------------------------------------------
 
+/** What a supervisor hands the factory, minus the two fields it fills in itself. */
+export type SupervisorSpawn = Omit<TransportSpawnOptions, "pluginId" | "helloTimeoutMs">;
+
 export interface SupervisorOptions {
   readonly pluginId: string;
-  /** Passed to the factory on every start. `pluginId` is taken from the option above. */
-  readonly spawn: Omit<TransportSpawnOptions, "pluginId" | "helloTimeoutMs">;
+  /**
+   * What to run, resolved on **every** start.
+   *
+   * A function rather than a fixed value, because "verify the hash on every load" is only true if
+   * something re-asks. The bundle path is content-addressed — `plugins/<id>/<sha256>.js` — and the
+   * resolver behind this (`createSpawnResolver`) re-reads the file and re-hashes it before handing
+   * back a path. Captured once, a supervisor would keep respawning a file that had been swapped out
+   * underneath it since the daemon booted, and the restart path is exactly where that matters: a
+   * crash loop is a spawn every few seconds, indefinitely, with nobody re-checking.
+   *
+   * `null` means the resolver refused — missing, unreadable, or no longer matching its hash — and
+   * the supervisor halts rather than running it. A plain object is still accepted, for tests and for
+   * a caller with nothing to resolve.
+   */
+  readonly spawn: SupervisorSpawn | (() => SupervisorSpawn | null);
   readonly factory: TransportFactory;
 
   /** Protocol major this host speaks. Defaults to `PLUGIN_API_PROTOCOL_MAJOR`. */
@@ -479,11 +495,24 @@ export class PluginSupervisor {
     this.#transition("starting");
 
     const epoch = ++this.#epoch;
+
+    // Re-resolved here, on every start, and that placement is the whole point — see
+    // `SupervisorOptions.spawn`. A refusal is a halt, not a retry: nothing about spawning the same
+    // bundle again changes the fact that the file on disk is not the file that was installed.
+    const spawn =
+      typeof this.#options.spawn === "function" ? this.#options.spawn() : this.#options.spawn;
+    if (spawn === null) {
+      const detail = "This plugin's installed files could not be verified, so it was not started.";
+      this.#fail("spawn-failed", detail);
+      this.#disable("spawn-failed", detail, false);
+      return;
+    }
+
     let transport: PluginTransport;
     try {
       transport = await this.#options.factory(
         {
-          ...this.#options.spawn,
+          ...spawn,
           pluginId: this.pluginId,
           helloTimeoutMs: this.#helloTimeoutMs,
         },
@@ -575,6 +604,24 @@ export class PluginSupervisor {
    */
   disable(reason: DisableReason = "user", detail = "Disabled by the user"): void {
     this.#disable(reason, detail, reason !== "spawn-failed");
+  }
+
+  /**
+   * Hands one frame to the running plugin. **The only way out through this object.**
+   *
+   * The supervisor keeps its transport private on purpose — the transport is the thing whose
+   * lifetime it owns, and a caller holding one across a restart would be writing into a process
+   * that no longer exists. This is the seam that makes `PluginDispatcher.attach` wirable without
+   * giving that away: a `PluginChannel` built over it is valid for the whole life of the
+   * supervisor, and it simply answers `false` while nothing is running.
+   *
+   * `false` rather than a throw, matching `PluginTransport.send`: every caller is already in the
+   * middle of a decision and none of them wants an exception on a send. The dispatcher turns it
+   * into `E_UNAVAILABLE` for the host-to-plugin direction and drops it for a reply nobody is
+   * waiting for any more.
+   */
+  send(frame: Envelope): boolean {
+    return this.#transport?.send(frame) ?? false;
   }
 
   /** Clears a disable, sticky or not, and returns the supervisor to `idle`. Does not start it. */

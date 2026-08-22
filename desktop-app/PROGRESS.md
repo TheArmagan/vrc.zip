@@ -334,9 +334,13 @@ say "plugins run with your account's privileges; only install plugins you trust.
       `dispatcher.ts` owns arg parsing, deadlines, in-flight caps and an `onCall` audit hook, and
       `plugin-vrchat.ts` is the reads-only semantic surface — accounts, friends, users, worlds,
       instances, groups — at `"low"` priority with a `(accountId, path)` cache.
-      **Not yet done:** wiring into `app.ts`, which needs a `send` seam the supervisor does not
-      expose (see Gotchas), and the UI naming who is eating the budget. The budget itself is dormant
-      until writes land, since all three budgeted scopes are writes.
+      **Wired** as of decisions 172–175: `wiring/plugin-host.ts` assembles the subsystem, `app.ts`
+      owns its lifecycle, the supervisor has a public `send`, and five session-token routes on
+      `:7775` install, list, enable, disable and uninstall. Verified against a running daemon — a
+      plugin's own `vrchat.accounts.list` was observed going out through `send`, the dispatcher, the
+      scope gate and the grant, and coming back.
+      **Not yet done:** the UI naming who is eating the budget. The budget itself is dormant until
+      writes land, since all three budgeted scopes are writes.
 - [~] **3.5 Install pipeline** — `Bun.build` with `target: "browser"` and `external: []`, then an AST
       deny-scan over the *bundled output*, then content-addressing at `plugins/<id>/<sha256>.js` with
       the hash verified on every load.
@@ -347,9 +351,13 @@ say "plugins run with your account's privileges; only install plugins you trust.
       "verify the hash on every load" actually runs, since it is what `PluginRegistry` is
       constructed with. `runtime-fetch.ts` carries decision 111's hash-pinned fetch, its own zip
       reader, and the manual "use this bun instead" escape.
-      **Not yet done:** the pinned-git-URL source (a fetch step in front of an identical pipeline),
-      the real SHA-256 pins, and wiring into `app.ts`. Read the deny-scan Gotcha before describing
-      this as a boundary — it catches syntax, and computed access walks past it.
+      **Wired** with 3.4 (decisions 172–175), and the verify-on-load claim was found to hold only
+      on a cold boot until decision 173 fixed it — read that one, it is the sharpest defect of the
+      round. A tampered artifact is now refused on enable, on restart and on a cold boot, verified
+      by hand against a running daemon.
+      **Not yet done:** the pinned-git-URL source (a fetch step in front of an identical pipeline)
+      and the real SHA-256 pins. Read the deny-scan Gotcha before describing this as a boundary —
+      it catches syntax, and computed access walks past it.
 - [ ] **3.6 Events bridge** — declarative filters compiled to closures at subscribe time, credit
       windows with a per-subscription overflow policy, per-tick batching, and a `dropped` frame when
       the host sheds load. `EventBus.emit()` must never await anything plugin-related.
@@ -2074,6 +2082,51 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      with its type chip" — `evaluateNodeBody` returns a string and has no way to express a chip, so
      the source comment was wrong and the docs page describing it was right.
 
+172. **The plugin subsystem is wired through one `wiring/plugin-host.ts`, and the supervisor gets a
+     public `send`.** `PluginSupervisor` kept its transport private, which is right — a caller
+     holding one across a restart writes into a dead process — but it left no way to build a
+     `PluginChannel`. The seam is one method returning `false` rather than throwing, matching
+     `PluginTransport.send`.
+
+     The dispatcher is attached from the supervisor's **state**, not at construction: attached at
+     `starting`, because a plugin may call the host from inside its own `activate`, and detached at
+     `backoff`/`idle`/`disabled` so a dying plugin's in-flight host calls are aborted at the moment
+     it dies. Attachment is tracked in a `Set` because `attach()` detaches first, and re-attaching
+     on every status emit would cancel a plugin's own calls on every heartbeat. `handleFrame`'s
+     `false` return is preserved and forwarded to an `onUnownedFrame` hook, which is 3.6's seam.
+
+173. **"Verify the hash on every load" was true only on a cold boot, and is now true on every
+     start.** This is the sharpest thing found this round, and it is a defect in decision 168's
+     central claim rather than in its implementation. `PluginSupervisor` captured its `spawn`
+     options at construction, so the resolver — and with it `loadArtifact`'s hash check — never ran
+     again for the life of that supervisor. **Both paths that matter bypassed it:** a crash-loop
+     restart respawns every few seconds indefinitely, and `PluginRegistry.enable()` called
+     `supervisor.start()` directly, skipping `spawnFor` entirely. So a plugin whose artifact was
+     modified after the daemon booted would keep running the modified file until the next cold boot.
+
+     `SupervisorOptions.spawn` is now a resolver re-invoked on every start, a `null` resolution is a
+     halt rather than a retry, and `enable` routes through `start`. **A content-addressed path does
+     not verify itself; something has to re-ask.** Writing the verify and never calling it again is
+     the failure mode a content-addressed store invites, precisely because the path *looks* like a
+     guarantee.
+
+174. **The install route writes the grant, and grants no accounts by default.** 3.8 replaces the
+     whole block and it is marked as such in the source. Two properties survive the placeholder,
+     because losing them would be a regression rather than an unfinished feature: the grant is a
+     real immutable `(pluginId, version, grantHash)` row, so the gate still reads what was
+     *approved* and never the manifest; and `accountIds` defaults to **nothing**, because a missing
+     field is not consent and defaulting to every account is exactly the over-grant the account
+     picker exists to prevent. Under-permitting is the direction a placeholder is allowed to be
+     wrong in.
+
+175. **Plugin management is five session-token routes, not a scoped surface.** `scopeGuard`,
+     `rateBudget` and `auditLog` belong to `/app`, which is mounted *before* `sessionAuth` and
+     answers to a different authentication model entirely. Install, list, enable, disable and
+     uninstall answer to the person at the keyboard holding the session token; a *plugin's* own
+     authority is its grant row, checked on every call the plugin makes rather than on these routes.
+     Reaching for the third-party middleware here would have conflated two authentication models
+     that PLAN.md deliberately keeps apart.
+
 ---
 
 ## Gotchas
@@ -2082,6 +2135,28 @@ Empirical notes. Add to this as you hit things — especially where the plan tur
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
 
+- **A content-addressed path does not verify itself, and "on every load" quietly meant "on every
+  cold boot".** `PluginSupervisor` captured its spawn options once, so the hash check ran the first
+  time and never again — through a crash-loop restart respawning every few seconds, and through
+  `PluginRegistry.enable()`, which skipped the resolver altogether. The install-time test passed,
+  the load-time test passed, and the property still did not hold at run time. Fixed by making the
+  bundle a resolver re-invoked on every start (decision 173). Worth generalising: whenever a
+  guarantee is "checked on every X", find the code path that repeats X and confirm the check is
+  inside it rather than beside it.
+- **The polite control cannot activate under the real prelude.** `hostile/polite.js` exports
+  `activate`/`deactivate`, and the prelude's only seam is `globalThis.__vrczHost.onFrame` — it does
+  not read a module's exports, which `docs/lifecycle.md` states outright. A real install of it
+  therefore reaches `activating`, misses the 15s deadline and restart-loops. The plugin-side runtime
+  that would bridge exports to the seam is 3.11. It means the "control" fixture would fail an
+  end-to-end suite **for a reason that is not a defence firing**, which is the worst kind of red.
+- **The install pipeline and migration 006 disagree on the source word.** `InstallSuccess.sourceKind`
+  is `"local"`; the `plugins.source_kind` column documents `'path' | 'git'`. `plugin-host.ts` maps
+  between them, which is the sort of mapping that should not need to exist.
+- **A refused bundle reads as `idle` carrying the registry's wrong sentence.** `PluginRegistry`'s
+  `#unstartable` says the files could not be found and reinstalling should fix it, which is right
+  for a missing file and wrong for a *modified* one — the second is a tamper report and reads as a
+  filing error. That is why `onRefused` is captured separately and surfaced as
+  `PluginSummary.refusal`.
 - **`Bun.build` with `target: "browser"` and `external: []` does NOT make node builtins hard build
   errors.** PLAN.md §"Install-time compilation" states it parenthetically and it is the load-bearing
   half of that section's argument. Measured on Bun 1.4.0, it *stubs* them:

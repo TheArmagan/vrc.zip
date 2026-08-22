@@ -150,7 +150,12 @@ export class PluginRegistry {
     const supervisor = new PluginSupervisor({
       ...this.#options.supervisor,
       pluginId,
-      spawn,
+      // The resolver, not the value `spawn` above. The check on this line is what produces the
+      // friendly first-time sentence; handing the supervisor the resolver is what makes the *hash*
+      // re-verified on every restart too, rather than once when this object was constructed. A
+      // crash-looping plugin respawns every few seconds forever, and a captured path would mean
+      // nobody ever looked at the file again.
+      spawn: () => this.#options.spawnFor(pluginId),
       factory: this.#options.factory,
       disableStore: createPluginDisableStore(this.#store),
       onPluginFrame: (frame) => this.#options.onPluginFrame?.(pluginId, frame),
@@ -185,15 +190,18 @@ export class PluginRegistry {
     }
   }
 
-  /** Clears a disable and starts the plugin again. */
+  /**
+   * Clears a disable and starts the plugin again.
+   *
+   * Both branches end in {@link start} rather than in `supervisor.start()`, so re-enabling goes
+   * through the same resolution — and therefore the same hash check and the same "could not find
+   * this plugin's files" reporting — as a cold boot. `supervisor.enable()` has already cleared the
+   * durable record by the time `start` reads the row.
+   */
   async enable(pluginId: string): Promise<void> {
     const supervisor = this.#supervisors.get(pluginId);
-    if (supervisor !== undefined) {
-      supervisor.enable();
-      await supervisor.start();
-      return;
-    }
-    this.#store.enablePlugin(pluginId);
+    if (supervisor !== undefined) supervisor.enable();
+    else this.#store.enablePlugin(pluginId);
     await this.start(pluginId);
   }
 

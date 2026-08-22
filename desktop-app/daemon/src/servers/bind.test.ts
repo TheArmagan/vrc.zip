@@ -37,6 +37,17 @@ const deps: ControlDeps = {
   revokeConnectedApp: async () => {},
   revokeAllConnectedApps: async () => 0,
   listAppAudit: async () => [],
+  listPlugins: async () => [],
+  installPlugin: async () => {
+    throw new Error("unused");
+  },
+  enablePlugin: async () => {
+    throw new Error("unused");
+  },
+  disablePlugin: async () => {
+    throw new Error("unused");
+  },
+  uninstallPlugin: async () => {},
   streamClientCount: () => 0,
   login: async () => ({ status: "requires-2fa", accountId: "usr_1", methods: ["totp"] }),
   verifyTwoFactor: async () => {

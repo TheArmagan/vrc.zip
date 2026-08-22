@@ -792,6 +792,58 @@ export interface AppBudget {
   readonly granted: boolean;
 }
 
+/**
+ * One installed plugin, as the management surface renders it.
+ *
+ * Flat, and every field a sentence or a number the page can put on screen without knowing anything
+ * about supervisors. The daemon-side shape (`PluginStatus`, which carries a failure kind, a restart
+ * ladder and a disable record) stays inside `daemon/src/plugins/`; this is the projection of it, and
+ * `wiring/control-deps.ts` is the one place the two meet.
+ *
+ * **No bundle path and no bundle hash.** Neither tells the person reading the page anything they can
+ * act on, and the second reads as a checksum a user might be tempted to compare by hand against a
+ * file the daemon has already refused to load.
+ */
+export interface PluginSummary {
+  /** The manifest id, `publisher.name`. Stable across versions and the key for every route below. */
+  id: string;
+  name: string;
+  version: string;
+  publisher: string;
+  /**
+   * `idle`, `starting`, `activating`, `running`, `stopping`, `backoff`, `disabled` — the
+   * supervisor's own word, passed through rather than collapsed into a boolean. "Backing off after
+   * a crash" and "the user turned it off" are the two states someone opens this page to tell apart.
+   */
+  state: string;
+  /** `unsigned` or `signed`, derived at install and never self-declared. */
+  trust: string;
+  /** Unix milliseconds, integer. */
+  installedAt: number;
+  /** Plain English, or null while it is allowed to run. */
+  disabledReason: string | null;
+  /** `user` or `crash-loop` — whether a person or the daemon turned it off. Null when neither has. */
+  disabledBy: string | null;
+  /** Restarts since its last stable period. A number climbing here is a plugin that cannot stay up. */
+  restarts: number;
+  /** Most recent RSS reading in bytes, or null before the first. */
+  rssBytes: number | null;
+  /** The last thing that went wrong, already in words. Null when nothing has. */
+  lastFailure: string | null;
+  /**
+   * Why the daemon will not load this plugin's files, when it will not.
+   *
+   * Separate from `disabledReason` because a **tampered artifact** is not a disable: the row is
+   * enabled and the file on disk no longer matches the hash it was installed under, which is the
+   * one thing on this page a user has to act on rather than merely read.
+   */
+  refusal: string | null;
+  /** The scopes the live grant carries. What the plugin *asked* for is not this. */
+  scopes: string[];
+  /** The accounts the grant covers. Empty is normal and means the plugin can act as none of them. */
+  accountIds: string[];
+}
+
 /** One requested scope, as the consent sheet renders it. */
 export interface ConsentScope {
   scope: string;
@@ -940,6 +992,41 @@ export interface ControlDeps {
    * `ControlError(404)` for an unknown app and `ControlError(400)` for a scope that is not budgeted.
    */
   setAppBudget(grantId: string, scope: string, limit: number | null): Promise<ConnectedApp>;
+
+  /*
+   * Plugins. Five routes, and the split between them is the one PLAN.md §Phase 3 asks for:
+   * installing is a build, disabling is instant and always succeeds, and uninstalling removes the
+   * files. Nothing here is scoped — the control port is guarded by the session token, so the caller
+   * is the person at the keyboard, and a plugin's *own* authority is the grant, which lives in
+   * `plugin_grants` and is checked on every call the plugin makes rather than on these routes.
+   */
+
+  /** Every installed plugin and what it is doing, whether or not it is running. */
+  listPlugins(): Promise<PluginSummary[]>;
+
+  /**
+   * Compiles a local plugin directory, files it, and starts it.
+   *
+   * `accountIds` is what the plugin may act as, and **only what is named here is granted** — see the
+   * 3.8 seam in `wiring/plugin-host.ts`. Throws `ControlError(400, "plugin_install_failed")` with
+   * the pipeline's own sentence, which is written to be shown unchanged: a manifest error, a
+   * compile diagnostic with line and column, or a deny-scan finding naming the construct.
+   */
+  installPlugin(rootDir: string, accountIds: readonly string[]): Promise<PluginSummary>;
+
+  /** Clears a disable, sticky or not, and starts the plugin. Throws `ControlError(404)` if unknown. */
+  enablePlugin(pluginId: string): Promise<PluginSummary>;
+
+  /**
+   * Turns a plugin off now.
+   *
+   * The kill path: it does not wait for the process to go away, and it is not an error on a plugin
+   * that was not running. PLAN.md is explicit that this one must always succeed.
+   */
+  disablePlugin(pluginId: string): Promise<PluginSummary>;
+
+  /** Removes the row, the grant and the artifacts. Idempotent; an unknown id is not an error. */
+  uninstallPlugin(pluginId: string): Promise<void>;
 
   /**
    * Every webhook registered on this daemon, newest first.
@@ -2175,6 +2262,45 @@ export function createControlApp({ port, deps, appApi, token }: ControlAppOption
       c.json({ revoked: await deps.revokeAllConnectedApps() }),
     )
 
+    /*
+     * Plugins.
+     *
+     * Same guards as every other `/api` route and no per-route checks of its own: `hostGuard`,
+     * `originGuard` and `sessionAuth` are already mounted above, which is the whole reason
+     * cross-cutting concerns are middleware here. What these handlers do is validate their inputs
+     * and translate — the decisions are the plugin host's.
+     */
+    .get("/api/plugins", async (c) => c.json(await deps.listPlugins()))
+
+    .post("/api/plugins", async (c) => {
+      const body = await readJsonObject(c.req.raw);
+      if (body === undefined) throw new ControlError(400, "invalid_body", "expected a JSON object");
+
+      const path = stringField(body, "path");
+      if (path === undefined || path.length > MAX_PLUGIN_PATH_LENGTH) {
+        throw new ControlError(
+          400,
+          "invalid_body",
+          `path must be a plugin directory of 1 to ${String(MAX_PLUGIN_PATH_LENGTH)} characters`,
+        );
+      }
+
+      return c.json(await deps.installPlugin(path, parseAccountIds(body.accountIds)), 201);
+    })
+
+    .post("/api/plugins/:id/enable", async (c) =>
+      c.json(await deps.enablePlugin(c.req.param("id"))),
+    )
+
+    .post("/api/plugins/:id/disable", async (c) =>
+      c.json(await deps.disablePlugin(c.req.param("id"))),
+    )
+
+    .delete("/api/plugins/:id", async (c) => {
+      await deps.uninstallPlugin(c.req.param("id"));
+      return c.body(null, 204);
+    })
+
     .get("/api/settings", async (c) => c.json(await deps.getSettings()))
 
     .put("/api/settings", async (c) => {
@@ -2245,6 +2371,37 @@ async function readJsonObject(request: Request): Promise<Record<string, JsonValu
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
   return parsed as Record<string, JsonValue>;
+}
+
+/**
+ * How long a plugin directory path may be. Generous — a deep checkout under a long home directory
+ * is normal — and present only so an unbounded string never reaches the filesystem.
+ */
+const MAX_PLUGIN_PATH_LENGTH = 4096;
+
+/** The most accounts one plugin may be pointed at. Six is a lot of VRChat accounts; sixteen is absurd. */
+const MAX_PLUGIN_ACCOUNTS = 16;
+
+/**
+ * The accounts an install grants the plugin.
+ *
+ * Absent means **none**, never "all". A plugin granted every account by default is precisely the
+ * over-grant the account picker exists to prevent, and a missing field is not consent.
+ */
+function parseAccountIds(raw: JsonValue | undefined): readonly string[] {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw) || raw.length > MAX_PLUGIN_ACCOUNTS) {
+    throw new ControlError(
+      400,
+      "invalid_body",
+      `accountIds must be an array of at most ${String(MAX_PLUGIN_ACCOUNTS)} account ids`,
+    );
+  }
+  const ids = raw.filter((value): value is string => typeof value === "string" && value !== "");
+  if (ids.length !== raw.length) {
+    throw new ControlError(400, "invalid_body", "accountIds must contain only account ids");
+  }
+  return [...new Set(ids)];
 }
 
 function stringField(body: Record<string, JsonValue> | undefined, key: string): string | undefined {

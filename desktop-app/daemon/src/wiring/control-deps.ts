@@ -86,6 +86,7 @@ import {
   type MutualFriendSummary,
   type NotificationItem,
   type PendingConsentRequest,
+  type PluginSummary,
   type SettingsPatch,
   type StatusSnapshot,
   type StreamEvent,
@@ -110,6 +111,7 @@ import {
 import type { GrantRow } from "../store/types.ts";
 import type { WebhookManager } from "../webhooks/index.ts";
 import { EPHEMERAL } from "./feed-writer.ts";
+import type { InstalledPluginView, PluginHost } from "./plugin-host.ts";
 import { webhookSummary } from "./webhook-summary.ts";
 
 /**
@@ -167,6 +169,14 @@ export interface ControlDepsOptions {
    * test injects one to stub the third-party host without a network.
    */
   readonly avatarIds?: AvatarIdResolver | undefined;
+  /**
+   * The plugin subsystem, for the management routes.
+   *
+   * Optional for the same reason `consent` is: every existing test constructing these deps has no
+   * plugin host, and "no plugins are installed" is exactly true for a daemon that cannot run one.
+   * The mutating routes refuse with a 503 rather than pretending they worked.
+   */
+  readonly plugins?: PluginHost | undefined;
   readonly settings: Settings;
   readonly env?: NodeJS.ProcessEnv;
   readonly connectPipeline: (accountId: string) => void;
@@ -815,9 +825,58 @@ function toControlAccount(
   };
 }
 
+/** `InstalledPluginView` → the wire shape. The one place the supervisor's vocabulary is projected. */
+function toPluginSummary(view: InstalledPluginView): PluginSummary {
+  const { status } = view;
+  return {
+    id: status.pluginId,
+    name: view.name,
+    version: status.version,
+    publisher: view.publisher,
+    state: status.state,
+    trust: status.trust,
+    installedAt: view.installedAt,
+    // The supervisor's live record first, then the stored row: an auto-disable that happened this
+    // session is the more specific of the two, and both say the same thing after a restart.
+    disabledReason: status.disabled?.detail ?? status.disabledReason,
+    disabledBy: status.disabled?.reason ?? status.disabledBy,
+    restarts: status.restarts,
+    rssBytes: status.rssBytes,
+    // Only the sentence. `SupervisorFailureKind` is a vocabulary the daemon branches on and the UI
+    // never should, and the detail already reads as prose because it was written to.
+    lastFailure: status.lastFailure?.detail ?? null,
+    refusal: view.refusal,
+    scopes: [...view.scopes],
+    accountIds: [...view.accountIds],
+  };
+}
+
+/** Reads one plugin back after a state change, so the caller sees what actually happened. */
+function pluginOrThrow(host: PluginHost, pluginId: string): PluginSummary {
+  const found = host.list().find((entry) => entry.status.pluginId === pluginId);
+  if (found === undefined) {
+    throw new ControlError(404, "unknown_plugin", `${pluginId} is not installed.`);
+  }
+  return toPluginSummary(found);
+}
+
 export function createControlDeps(options: ControlDepsOptions): ControlDeps {
   const { accounts, store, bus, limiter, secrets, presence, connectPipeline } = options;
   let settings = options.settings;
+
+  /**
+   * The plugin host, or a refusal.
+   *
+   * A daemon built without one cannot install, enable or disable anything, and saying so is better
+   * than a 500 from a `?.` that quietly did nothing. Reading is different — see `listPlugins`.
+   */
+  function pluginHost(): PluginHost {
+    const host = options.plugins;
+    if (host === undefined) {
+      throw new ControlError(503, "plugins_unavailable", "This daemon cannot run plugins.");
+    }
+    return host;
+  }
 
   /**
    * Live event-stream sockets. The consent alerts read it to decide whether anyone is watching:
@@ -2294,6 +2353,48 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         options.pipelineMirror ?? null,
         options.meter ?? null,
       );
+    },
+
+    /*
+     * Plugins. The one place `PluginStatus` — a supervisor state, a restart ladder, a failure kind
+     * — becomes something a page can render, which is what this file is for.
+     */
+
+    async listPlugins(): Promise<PluginSummary[]> {
+      // No host means the daemon cannot run plugins at all, and "none are installed" is exactly
+      // true for one that cannot. Same posture as `listWebhooks` above.
+      return await Promise.resolve((options.plugins?.list() ?? []).map(toPluginSummary));
+    },
+
+    async installPlugin(rootDir, accountIds): Promise<PluginSummary> {
+      const outcome = await pluginHost().install(rootDir, accountIds);
+      if (!outcome.ok) {
+        // The pipeline's sentences are written to be shown unchanged — a manifest issue list, a
+        // compile diagnostic with line and column, a deny-scan finding naming the construct. This
+        // is the one place they would be worth destroying by summarising, so it does not.
+        throw new ControlError(400, "plugin_install_failed", outcome.message);
+      }
+      return toPluginSummary(outcome.plugin);
+    },
+
+    async enablePlugin(pluginId): Promise<PluginSummary> {
+      const host = pluginHost();
+      await host.enable(pluginId);
+      return pluginOrThrow(host, pluginId);
+    },
+
+    async disablePlugin(pluginId): Promise<PluginSummary> {
+      const host = pluginHost();
+      // Synchronous on purpose all the way down: it kills rather than asks, so nothing here can be
+      // delayed by the very plugin the user is trying to be rid of.
+      host.disable(pluginId);
+      return await Promise.resolve(pluginOrThrow(host, pluginId));
+    },
+
+    async uninstallPlugin(pluginId): Promise<void> {
+      // Idempotent, like every other removal here: an id that is already gone is the outcome asked
+      // for, and the host's own uninstall is safe on a plugin with no supervisor.
+      await options.plugins?.uninstall(pluginId);
     },
 
     async listWebhooks(): Promise<WebhookSummary[]> {

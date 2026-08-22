@@ -287,6 +287,54 @@ handshake, because the alternative is a login flow that mints credentials with n
 
 ---
 
+## Phase 3 checklist
+
+`PLAN.md` §Phase 3 for the detail, and its §"Plugin build order" for *why this order*. The one item
+worth restating here: **the deliberately hostile plugin comes third, immediately after the
+supervisor.** Written later it would only validate a design already committed to; written there,
+every claim after it — the deny-scan, the RSS watchdog, event-flood backpressure — is tested against
+a live adversary as it is made. Decision 108.
+
+The standing posture for the whole phase, from PLAN.md correction 6: **do not call it a security
+sandbox until it is one.** Until process plus OS-level sandboxing lands, the docs and the consent UI
+say "plugins run with your account's privileges; only install plugins you trust."
+
+- [ ] **3.1 `@vrcz/plugin-api` types** — the published surface, versioned on the protocol major, with
+      the daemon importing the same declarations so there is no drift. Four pieces: the manifest
+      (a **Zod schema as the single source of truth**, with the JSON Schema, the consent UI and the
+      docs reference generated from it), the RPC envelope protocol, the `UINode` vocabulary, and
+      `NodeDefinition` plus the port-type lattice.
+- [ ] **3.2 `ProcessTransport` + supervisor** — `Bun.spawn` per plugin with `env: {}` behind a
+      `PluginTransport` interface, spawned `--smol` unless the manifest opts out. Host-driven
+      heartbeat whose echo lives in the injected prelude rather than in plugin code, RSS watchdog,
+      activation and call deadlines, exponential restart backoff, crash-loop auto-disable.
+- [ ] **3.3 The hostile plugin** — spin loop, memory bomb, `import("node:"+"fs")`, event flood, and a
+      lifecycle hook that never returns. The regression suite for everything above it.
+- [ ] **3.4 Dispatcher, scope gate, rate budget** — one dispatcher doing arg parsing and the scope
+      check, never the handlers. Every plugin call goes through the shared limiter tagged with the
+      plugin id, with a subordinate per-plugin budget and a UI naming who is eating it.
+- [ ] **3.5 Install pipeline** — `Bun.build` with `target: "browser"` and `external: []`, then an AST
+      deny-scan over the *bundled output*, then content-addressing at `plugins/<id>/<sha256>.js` with
+      the hash verified on every load.
+- [ ] **3.6 Events bridge** — declarative filters compiled to closures at subscribe time, credit
+      windows with a per-subscription overflow policy, per-tick batching, and a `dropped` frame when
+      the host sheds load. `EventBus.emit()` must never await anything plugin-related.
+- [ ] **3.7 Storage** — one SQLite file per plugin in its own data dir. Uninstall is `rm -rf`, quota
+      is a `stat`, and a plugin cannot lock or corrupt the daemon's WAL.
+- [ ] **3.8 Consent and management UI** — the account picker, the dangerous block behind a second
+      toggle, hold-to-confirm on the unsigned tier, grants keyed immutably by
+      `(pluginId, version, grantHash)`, and the dry-run lift as an explicit per-plugin per-scope
+      gesture with the dry-run log beside it as evidence (decision 109).
+- [ ] **3.9 Declarative UI renderer** — forms, virtualized tables, dialogs, context menus and
+      per-node click handlers. Charts follow rather than ship with it (decision 110).
+- [ ] **3.10 Nodes** — plugin-contributed node types, registered from the same `NodeDefinition` the
+      editor, the runtime and the type checker all read.
+- [ ] **3.11 Scaffolder and docs** — `create-vrcz-plugin` with `bun run dev` wired to `vrcz dev`,
+      plus the generated reference (scope table, manifest reference, event catalog, port matrix) and
+      the hand-written mental model, guides, and security-model page.
+
+---
+
 ## Decision log
 
 Decisions made in conversation that aren't obvious from `PLAN.md` alone.

@@ -379,3 +379,158 @@ export async function nodeDefinitionHash(def: NodeDefinition): Promise<string> {
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 }
+
+/* -------------------------------------------------------------------------------------------- */
+/* Validation                                                                                     */
+/* -------------------------------------------------------------------------------------------- */
+
+/** Caps, for the same reason the UI vocabulary has them: this arrives from another process. */
+export const MAX_NODE_PORTS = 16;
+export const MAX_NODE_CONFIG_FIELDS = 24;
+export const MAX_NODE_STRING = 200;
+
+export interface NodeIssue {
+  readonly path: string;
+  readonly message: string;
+}
+
+export type NodeValidation =
+  | { readonly ok: true; readonly definition: NodeDefinition }
+  | { readonly ok: false; readonly issues: readonly NodeIssue[] };
+
+const CONFIG_KINDS = ["text", "number", "boolean", "select", "duration", "user", "world"] as const;
+
+/** `publisher.name`-ish: an identifier a graph can store and a person can read in an error. */
+const NODE_ID_PATTERN = /^[a-z][a-z0-9]*(?:[-.][a-z0-9]+)*$/;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function checkString(
+  issues: NodeIssue[],
+  path: string,
+  value: unknown,
+  { required }: { required: boolean },
+): void {
+  if (value === undefined) {
+    if (required) issues.push({ path, message: "is required" });
+    return;
+  }
+  if (typeof value !== "string" || value === "") {
+    issues.push({ path, message: "must be a non-empty string" });
+    return;
+  }
+  if (value.length > MAX_NODE_STRING) {
+    issues.push({ path, message: `must be at most ${MAX_NODE_STRING} characters` });
+  }
+}
+
+function checkPorts(issues: NodeIssue[], path: string, value: unknown): void {
+  if (!Array.isArray(value)) {
+    issues.push({ path, message: "must be an array of ports" });
+    return;
+  }
+  if (value.length > MAX_NODE_PORTS) {
+    issues.push({ path, message: `must have at most ${MAX_NODE_PORTS} ports` });
+    return;
+  }
+  const seen = new Set<string>();
+  value.forEach((port, index) => {
+    const at = `${path}[${String(index)}]`;
+    if (!isRecord(port)) {
+      issues.push({ path: at, message: "must be an object" });
+      return;
+    }
+    checkString(issues, `${at}.id`, port.id, { required: true });
+    checkString(issues, `${at}.label`, port.label, { required: true });
+    if (typeof port.id === "string") {
+      // Duplicate port ids are the failure that silently loses an edge: a saved graph references a
+      // port by id, and two ports answering to one id means the wrong one may resolve.
+      if (seen.has(port.id)) issues.push({ path: at, message: `duplicates port id "${port.id}"` });
+      seen.add(port.id);
+    }
+    if (!isPortType(port.type)) {
+      issues.push({
+        path: `${at}.type`,
+        message: `must be one of: ${PORT_TYPES.join(", ")}`,
+      });
+    }
+  });
+}
+
+/**
+ * Validates a node definition that arrived from a plugin.
+ *
+ * The same contract as `validateUINode`: a result rather than a throw, and the caller decides what
+ * a rejection means. Every message names a path, because the author is the only person who can fix
+ * it and "invalid node definition" tells them nothing.
+ *
+ * Note what is *not* checked here: whether the id appears in the plugin's `contributes.nodes`. This
+ * module may not read a manifest — the one-way dependency that keeps the call path away from what
+ * an author *requested* — so the host checks that where it has both.
+ */
+export function validateNodeDefinition(value: unknown): NodeValidation {
+  const issues: NodeIssue[] = [];
+  if (!isRecord(value)) {
+    return { ok: false, issues: [{ path: "$", message: "must be an object" }] };
+  }
+
+  checkString(issues, "id", value.id, { required: true });
+  if (typeof value.id === "string" && !NODE_ID_PATTERN.test(value.id)) {
+    issues.push({
+      path: "id",
+      message: 'must look like "friend-online" or "notes.added": lowercase, starting with a letter',
+    });
+  }
+  checkString(issues, "title", value.title, { required: true });
+  checkString(issues, "description", value.description, { required: false });
+  checkString(issues, "category", value.category, { required: false });
+  checkString(issues, "icon", value.icon, { required: false });
+
+  const kind = value.kind;
+  if (kind !== "trigger" && kind !== "action" && kind !== "condition") {
+    issues.push({ path: "kind", message: 'must be "trigger", "action" or "condition"' });
+  }
+
+  checkPorts(issues, "outputs", value.outputs);
+  if (kind === "trigger") {
+    // A trigger with inputs is the shape the whole inversion exists to prevent: nothing upstream
+    // can hand a value to the thing a graph *starts* with.
+    if (value.inputs !== undefined) {
+      issues.push({ path: "inputs", message: "a trigger has no inputs — it arms, it does not run" });
+    }
+  } else if (kind === "action" || kind === "condition") {
+    checkPorts(issues, "inputs", value.inputs);
+  }
+
+  if (value.config !== undefined) {
+    if (!Array.isArray(value.config)) {
+      issues.push({ path: "config", message: "must be an array of fields" });
+    } else if (value.config.length > MAX_NODE_CONFIG_FIELDS) {
+      issues.push({
+        path: "config",
+        message: `must have at most ${MAX_NODE_CONFIG_FIELDS} fields`,
+      });
+    } else {
+      value.config.forEach((field, index) => {
+        const at = `config[${String(index)}]`;
+        if (!isRecord(field)) {
+          issues.push({ path: at, message: "must be an object" });
+          return;
+        }
+        if (!(CONFIG_KINDS as readonly unknown[]).includes(field.kind)) {
+          issues.push({ path: `${at}.kind`, message: `must be one of: ${CONFIG_KINDS.join(", ")}` });
+        }
+        checkString(issues, `${at}.id`, field.id, { required: true });
+        checkString(issues, `${at}.label`, field.label, { required: true });
+        if (field.kind === "select" && !Array.isArray(field.options)) {
+          issues.push({ path: `${at}.options`, message: "a select needs options" });
+        }
+      });
+    }
+  }
+
+  if (issues.length > 0) return { ok: false, issues };
+  return { ok: true, definition: value as unknown as NodeDefinition };
+}

@@ -1,0 +1,20 @@
+{
+  "id": "example.hello-panel",
+  "name": "Hello Panel",
+  "version": "1.0.0",
+  "publisher": "vrc.zip examples",
+  "description": "The smallest plugin that draws something you can click.",
+  "main": "src/index.ts",
+  "engines": { "pluginApi": 0 },
+  "permissions": {
+    "scopes": [],
+    "accounts": { "mode": "one", "optional": true, "reason": "It does not act as any account." },
+    "capabilities": [],
+    "events": [],
+    "fetch": { "domains": [], "reason": "It makes no requests." }
+  },
+  "contributes": {
+    "panels": [{ "id": "hello", "title": "Hello", "placement": "sidebar" }],
+    "commands": [{ "id": "wave", "title": "Wave hello", "description": "Shows a toast" }]
+  }
+}

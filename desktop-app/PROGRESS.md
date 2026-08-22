@@ -447,7 +447,7 @@ for the life of the product.
       is an explicit per-plugin per-scope hold, the budget readout names what each plugin has spent
       this hour (3.4's outstanding item, now closed), and an install with no UI client connected
       raises a toast and opens `#/plugins`.
-- [~] **3.9 Declarative UI renderer** — forms, tables, dialogs, context menus and
+- [x] **3.9 Declarative UI renderer** — forms, tables, dialogs, context menus and
       per-node click handlers. Charts follow rather than ship with it (decision 110).
       **Scoped by decision 182:** the tree rides `/api/stream` as a new frame type carrying a
       **keyed patch**, not a whole-tree replace; `table` **pages** through `PagedSection` /
@@ -460,10 +460,14 @@ for the life of the product.
       browsers, and `POST /api/plugins/:id/panels/:panelId/intent` sends a user action back through
       `ui.intent`. **Not yet done:** the Svelte renderer that draws a `UINode` tree, which is what
       makes any of it visible.
-- [ ] **3.10 Nodes** — plugin-contributed node types, registered from the same `NodeDefinition` the
+- [x] **3.10 Nodes** — plugin-contributed node types, registered from the same `NodeDefinition` the
       editor, the runtime and the type checker all read. **Scoped by decision 182: no editor here.**
       Registration, the runtime that arms triggers and executes actions, and `assignable()` enforced
       on save. `@xyflow/svelte` is not installed and the canvas is Phase 4's.
+      **Done** (decision 194): `plugins/node-registry.ts` holds registrations, `validateNodeDefinition`
+      rejects a malformed one (including a trigger with inputs), `nodes.register` / `nodes.fire` are
+      the plugin's half, `onNodeArm` / `onNodeDisarm` / `onNodeExecute` are the host's, and
+      `checkEdge` is the type checker Phase 4 calls on save.
 - [~] **3.11 Scaffolder and docs** — `create-vrcz-plugin` with `bun run dev` wired to `vrcz dev`,
       plus the generated reference (scope table, manifest reference, event catalog, port matrix) and
       the hand-written mental model, guides, and security-model page.
@@ -2808,6 +2812,49 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      Verified in a browser: the sidebar group and filter, the panel page behind a sidebar entry, a
      plugin's modal opening and closing, a toast titled with the plugin's name, and the palette
      running a contributed command that answers with a toast.
+
+194. **3.10: node types register, arm and execute — with no editor, per decision 182.** A plugin
+     declares node *ids* in `contributes.nodes` and registers the real definition when it activates.
+     Both halves are load-bearing and they answer different questions: the manifest is what the host
+     knows **while the plugin is stopped**, which is what lets a saved graph say "this node is
+     paused" instead of showing a hole, and the registration carries ports, config and the body
+     template, none of which can live in a manifest without duplicating the source of truth.
+
+     **A registration whose id is not declared is refused, and this is where that check finally
+     lives.** `manifest.md` says checking the two lists agree is the install pipeline's job and that
+     the pipeline does not do it — the pipeline *cannot*, because definitions only exist once the
+     plugin runs. Here both halves are in hand.
+
+     `validateNodeDefinition` is new in `@vrcz/plugin-api`, the same contract as `validateUINode`: a
+     result rather than a throw, every message carrying a path, because the author is the only person
+     who can fix it. It makes the trigger inversion structural rather than documented — **a trigger
+     with `inputs` is rejected outright**, so the thing a graph starts with cannot be handed a value.
+
+     Definitions die with the process; declarations do not. That split is exactly what PLAN.md's
+     "paused and marked unavailable, never deleted" needs to be expressible.
+
+     `checkEdge` is the type checker's daemon-side face, and it answers with a *sentence* rather than
+     a boolean: every refusal here is one a user reads while wiring a graph, and "incompatible"
+     without naming both types is a dead end. Phase 4 calls it on save and at each execution
+     boundary — twice on purpose, because the editor is a client and clients lie.
+
+     **`nodes.*` carries no scope and no capability**, for the same reason `ui.*` does not:
+     registering a node type is a plugin describing what it can do. Authority is checked when the
+     node *runs*, because whatever its handler calls goes through the same gate as any other call.
+
+195. **Five example plugins, and a test that installs every one of them.** `examples/plugins/`
+     holds `hello-panel`, `friend-watch`, `note-keeper`, `instance-table` and `graph-nodes` — one
+     idea each, in an order where each assumes the one before it. They are written as documentation
+     that runs: the comments explain *why* the API has the shape it does (why a trigger arms, why
+     `coalesce` needs a `keyPath`, why the records query is deliberately narrow, why omitting
+     `accountId` with several accounts is an error rather than a guess).
+
+     **The test is the point.** `install/examples.test.ts` runs each one through the real pipeline —
+     manifest parse, `Bun.build`, deny-scan, content-addressing, verify-on-load. An example that does
+     not compile is worse than no example, because it is the first thing an author copies and it
+     fails in *their* project where they cannot tell whose bug it is. It is also the standing guard
+     on decision 186: if anyone "simplifies" an example's import from `@vrcz/plugin-api/runtime` to
+     the package root, zod reaches the bundle, the deny-scan refuses it, and this test says so.
 
 ---
 

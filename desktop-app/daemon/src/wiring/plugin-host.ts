@@ -70,6 +70,11 @@ import {
 } from "../plugins/install/index.ts";
 import { createVrchatMethods, type PluginAccountInfo } from "../plugins/plugin-vrchat.ts";
 import { makeProcessTransportFactory } from "../plugins/process-transport.ts";
+import {
+  createNodeMethods,
+  NodeRegistry,
+  type RegisteredNode,
+} from "../plugins/node-registry.ts";
 import { PluginRegistry, type PluginStatus } from "../plugins/registry.ts";
 import { ensurePluginRuntime } from "../plugins/runtime-fetch.ts";
 import { PluginStorage } from "../plugins/storage/database.ts";
@@ -186,6 +191,16 @@ export interface PluginHostOptions {
   readonly onPanelChange?: ((change: PanelChange) => void) | undefined;
   /** Raised when a plugin asks for a toast. */
   readonly onToast?: ((toast: PluginToast) => void) | undefined;
+  /**
+   * Raised when a plugin's armed trigger fires.
+   *
+   * Phase 4's graph runtime is what will listen. Wired as a seam now so a plugin written against
+   * `fire()` today behaves identically the day that runtime lands, rather than silently doing
+   * nothing and then changing behaviour under the author.
+   */
+  readonly onNodeFire?:
+    | ((event: { pluginId: string; instanceId: string; outputs: JsonValue }) => void)
+    | undefined;
 }
 
 export interface PluginHost {
@@ -224,6 +239,9 @@ export interface PluginHost {
    * Never a timer: "it has behaved for seven days" says nothing about the eighth.
    */
   setDryRunLifted(pluginId: string, scope: string, lifted: boolean): void;
+
+  /** Every node type registered right now, across every running plugin. */
+  nodeTypes(): RegisteredNode[];
 
   /** Every panel one plugin is currently drawing. Empty for a plugin that draws none. */
   panels(pluginId: string): PanelState[];
@@ -353,6 +371,18 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
     ...(options.onToast === undefined ? {} : { onToast: options.onToast }),
   });
 
+  /**
+   * Node types plugins have registered.
+   *
+   * `declaredNodes` reads the stored manifest rather than the grant, because `contributes` is
+   * surface and not authority — and it is what makes "this node type comes from a plugin that is
+   * stopped" a thing the host can say at all.
+   */
+  const nodes = new NodeRegistry({
+    declaredNodes: (pluginId) =>
+      manifestOf(pluginId)?.contributes.nodes.map((node) => node.id) ?? [],
+  });
+
   const consent = new PluginConsentBroker({
     ...(options.onConsentPending === undefined ? {} : { onPending: options.onConsentPending }),
   });
@@ -391,6 +421,10 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
     table: {
       ...createStorageMethods({ storageFor }),
       ...createUiMethods({ panels }),
+      ...createNodeMethods({
+        nodes,
+        ...(options.onNodeFire === undefined ? {} : { onFire: options.onNodeFire }),
+      }),
       ...createVrchatMethods({
         /*
          * The account's own request context, tagged with the plugin id so the meter can name who is
@@ -469,6 +503,9 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
       closeStorage(status.pluginId);
       // And draws nothing. Every button on a panel is an intent that would reach a dead process.
       panels.closeAll(status.pluginId);
+      // Its node *definitions* go; its manifest *declarations* stay, which is what lets a saved
+      // graph say "paused, this plugin is not running" rather than "unknown node type".
+      nodes.clear(status.pluginId);
       return;
     }
 
@@ -751,6 +788,8 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
     },
 
     panels: (pluginId) => panels.list(pluginId),
+
+    nodeTypes: () => nodes.list(),
 
     async runCommand(pluginId, commandId) {
       await dispatcher.call(pluginId, "ui.command", { commandId } as unknown as JsonValue);

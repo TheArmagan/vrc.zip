@@ -44,6 +44,7 @@ import {
   type PluginEvent,
 } from "./protocol.ts";
 import type { StorageRecord, StorageUsage } from "./storage.ts";
+import type { NodeConfigValues, PortValues } from "./nodes.ts";
 import type { UiIntentDispatch } from "./ui.ts";
 
 /** What the prelude installs. Declared structurally so this file imports nothing from the host. */
@@ -122,6 +123,20 @@ export interface PluginContext {
   readonly storage: StorageApi;
   readonly events: EventsApi;
   readonly ui: UiApi;
+  readonly nodes: NodesApi;
+}
+
+export interface NodesApi {
+  /**
+   * Registers one node type. The id must be one your manifest declares in `contributes.nodes`.
+   *
+   * Registered at activation rather than declared whole in the manifest, because ports, config and
+   * the body template are code — but the *id* has to be in the manifest, which is what lets a saved
+   * graph name your node while your plugin is stopped instead of showing a hole.
+   */
+  register(definition: unknown): Promise<void>;
+  /** Fires an armed trigger instance. `outputs` are keyed by output port id. */
+  fire(instanceId: string, outputs?: Record<string, unknown>): Promise<void>;
 }
 
 export interface UiApi {
@@ -197,6 +212,29 @@ export interface PluginHooks {
    * an intent: a command belongs to the plugin, not to a surface.
    */
   onCommand?(commandId: string, ctx: PluginContext): unknown | Promise<unknown>;
+  /**
+   * A graph armed one of your trigger node types.
+   *
+   * A trigger **arms, it does not execute**: hold whatever subscription you need and call
+   * `ctx.nodes.fire(instanceId, outputs)` when the world does something. Returning from this hook
+   * means "armed", not "fired".
+   */
+  onNodeArm?(
+    instance: { instanceId: string; nodeId: string; config: NodeConfigValues },
+    ctx: PluginContext,
+  ): unknown | Promise<unknown>;
+  /** A graph disarmed a trigger instance. Drop whatever `onNodeArm` set up. */
+  onNodeDisarm?(instance: { instanceId: string }, ctx: PluginContext): unknown | Promise<unknown>;
+  /**
+   * A graph reached one of your action or condition nodes.
+   *
+   * Return the node's outputs, keyed by output port id. A condition returns its verdict the same
+   * way — there is no separate shape for one, because the graph reads an output either way.
+   */
+  onNodeExecute?(
+    call: { nodeId: string; inputs: PortValues; config: NodeConfigValues },
+    ctx: PluginContext,
+  ): unknown | Promise<unknown>;
 }
 
 /** The one `onFrame` slot means one runtime. Tracked so a second `definePlugin` can say so. */
@@ -350,6 +388,24 @@ class Runtime {
       );
       return;
     }
+    if (frame.method === "nodes.arm") {
+      await this.#answer(id, this.#hooks.onNodeArm, (hook) =>
+        hook.call(this.#hooks, frame.params as never, this.ctx),
+      );
+      return;
+    }
+    if (frame.method === "nodes.disarm") {
+      await this.#answer(id, this.#hooks.onNodeDisarm, (hook) =>
+        hook.call(this.#hooks, frame.params as never, this.ctx),
+      );
+      return;
+    }
+    if (frame.method === "nodes.execute") {
+      await this.#answer(id, this.#hooks.onNodeExecute, (hook) =>
+        hook.call(this.#hooks, frame.params as never, this.ctx),
+      );
+      return;
+    }
     if (frame.method !== "ui.intent") {
       this.#host.send({
         t: "err",
@@ -452,6 +508,15 @@ class Runtime {
           ...(options.description === undefined ? {} : { description: options.description }),
           tone: options.tone ?? "neutral",
         });
+      },
+    };
+
+    const nodes: NodesApi = {
+      register: async (definition) => {
+        await call("nodes.register", { definition });
+      },
+      fire: async (instanceId, outputs = {}) => {
+        await call("nodes.fire", { instanceId, outputs });
       },
     };
 
@@ -559,6 +624,7 @@ class Runtime {
       storage,
       events,
       ui,
+      nodes,
     };
   }
 }

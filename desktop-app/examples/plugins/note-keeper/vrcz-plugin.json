@@ -1,0 +1,20 @@
+{
+  "id": "example.note-keeper",
+  "name": "Note Keeper",
+  "version": "1.0.0",
+  "publisher": "vrc.zip examples",
+  "description": "Keeps notes in its own database. Shows KV, the append-only log, and the quota.",
+  "main": "src/index.ts",
+  "engines": { "pluginApi": 0 },
+  "permissions": {
+    "scopes": [],
+    "accounts": { "mode": "one", "optional": true, "reason": "Notes are local; no account is used." },
+    "capabilities": ["storage"],
+    "events": [],
+    "fetch": { "domains": [], "reason": "It makes no requests." }
+  },
+  "contributes": {
+    "panels": [{ "id": "notes", "title": "Notes", "placement": "sidebar" }],
+    "commands": [{ "id": "clear", "title": "Clear all notes", "description": "Deletes every note" }]
+  }
+}

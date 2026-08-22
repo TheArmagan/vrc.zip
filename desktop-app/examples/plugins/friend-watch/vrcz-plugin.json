@@ -1,0 +1,22 @@
+{
+  "id": "example.friend-watch",
+  "name": "Friend Watch",
+  "version": "1.0.0",
+  "publisher": "vrc.zip examples",
+  "description": "Shows who came online, and how to survive a noisy event.",
+  "main": "src/index.ts",
+  "engines": { "pluginApi": 0 },
+  "permissions": {
+    "scopes": ["friends:read"],
+    "accounts": {
+      "mode": "many",
+      "reason": "To watch friends on each account you pick."
+    },
+    "capabilities": [],
+    "events": ["friend.online", "friend.offline", "friend.location"],
+    "fetch": { "domains": [], "reason": "It makes no requests." }
+  },
+  "contributes": {
+    "panels": [{ "id": "watch", "title": "Friend Watch", "placement": "sidebar" }]
+  }
+}

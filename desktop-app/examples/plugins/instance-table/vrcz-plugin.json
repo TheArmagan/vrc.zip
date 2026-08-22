@@ -1,0 +1,23 @@
+{
+  "id": "example.instance-table",
+  "name": "Instance Table",
+  "version": "1.0.0",
+  "publisher": "vrc.zip examples",
+  "description": "Reads your friends through ctx.vrchat and draws them as a sortable table.",
+  "main": "src/index.ts",
+  "engines": { "pluginApi": 0 },
+  "permissions": {
+    "scopes": ["friends:read", "users:read"],
+    "accounts": {
+      "mode": "one",
+      "reason": "To read the friends list of the account you pick."
+    },
+    "capabilities": [],
+    "events": [],
+    "fetch": { "domains": [], "reason": "vrc.zip makes the VRChat requests, not the plugin." }
+  },
+  "contributes": {
+    "panels": [{ "id": "friends", "title": "Friends Table", "placement": "sidebar" }],
+    "commands": [{ "id": "refresh", "title": "Refresh the friends table" }]
+  }
+}

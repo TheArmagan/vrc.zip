@@ -90,6 +90,7 @@ export {
   type StorageApi,
   type SubscribeOptions,
   type Subscription,
+  type NodesApi,
   type UiApi,
   type VrchatApi,
 } from "./runtime.ts";
@@ -233,6 +234,11 @@ export {
 // ---------------------------------------------------------------------------
 
 export {
+  MAX_NODE_CONFIG_FIELDS,
+  MAX_NODE_PORTS,
+  type NodeIssue,
+  type NodeValidation,
+  validateNodeDefinition,
   assignable,
   canonicalNodeDefinition,
   type ExecutableNodeDefinition,

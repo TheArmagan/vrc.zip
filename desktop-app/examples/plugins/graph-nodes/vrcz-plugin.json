@@ -1,0 +1,22 @@
+{
+  "id": "example.graph-nodes",
+  "name": "Graph Nodes",
+  "version": "1.0.0",
+  "publisher": "vrc.zip examples",
+  "description": "Contributes a trigger and an action to the node graph.",
+  "main": "src/index.ts",
+  "engines": { "pluginApi": 0 },
+  "permissions": {
+    "scopes": ["friends:read"],
+    "accounts": { "mode": "one", "reason": "The trigger watches one account's friends." },
+    "capabilities": ["storage"],
+    "events": ["friend.online"],
+    "fetch": { "domains": [], "reason": "It makes no requests." }
+  },
+  "contributes": {
+    "nodes": [
+      { "id": "friend-came-online", "title": "A friend came online", "category": "Friends" },
+      { "id": "remember-friend", "title": "Remember this friend", "category": "Friends" }
+    ]
+  }
+}

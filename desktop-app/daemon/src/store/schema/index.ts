@@ -3,6 +3,7 @@ import userCache002 from "./002_user_cache_per_account.sql" with { type: "text" 
 import grants003 from "./003_proxy_grants.sql" with { type: "text" };
 import grantBudgets004 from "./004_grant_budgets.sql" with { type: "text" };
 import webhooks005 from "./005_webhooks.sql" with { type: "text" };
+import plugins006 from "./006_plugins.sql" with { type: "text" };
 
 /** One numbered migration. `version` must be unique, contiguous from 1, and ascending. */
 export type Migration = {
@@ -21,4 +22,5 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 3, name: "003_proxy_grants", sql: grants003 },
   { version: 4, name: "004_grant_budgets", sql: grantBudgets004 },
   { version: 5, name: "005_webhooks", sql: webhooks005 },
+  { version: 6, name: "006_plugins", sql: plugins006 },
 ];

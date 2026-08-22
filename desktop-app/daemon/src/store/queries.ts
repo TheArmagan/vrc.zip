@@ -474,4 +474,65 @@ export const SQL = {
   setMeta: `
     INSERT INTO meta (key, value) VALUES (?, ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+
+  // -- plugins (Phase 3) ------------------------------------------------------
+  insertPlugin: `
+    INSERT INTO plugins
+      (id, version, manifest, bundle_hash, source_kind, source_ref, trust, publisher_key,
+       installed_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      version       = excluded.version,
+      manifest      = excluded.manifest,
+      bundle_hash   = excluded.bundle_hash,
+      source_kind   = excluded.source_kind,
+      source_ref    = excluded.source_ref,
+      trust         = excluded.trust,
+      publisher_key = excluded.publisher_key,
+      updated_at    = excluded.updated_at`,
+  getPlugin: `SELECT * FROM plugins WHERE id = ?`,
+  listPlugins: `SELECT * FROM plugins ORDER BY installed_at DESC`,
+  deletePlugin: `DELETE FROM plugins WHERE id = ?`,
+  /*
+   * Disable and enable are separate statements rather than one with a nullable parameter, because
+   * they are the two halves of the promise that disable always succeeds: the disable path touches
+   * one row with no reads and no joins, which is as close to "cannot fail" as SQL gets.
+   */
+  disablePlugin: `
+    UPDATE plugins SET disabled_at = ?, disabled_by = ?, disabled_reason = ? WHERE id = ?`,
+  enablePlugin: `
+    UPDATE plugins SET disabled_at = NULL, disabled_by = NULL, disabled_reason = NULL WHERE id = ?`,
+
+  insertPluginGrant: `
+    INSERT INTO plugin_grants
+      (plugin_id, version, grant_hash, scopes, account_ids, capabilities, domains, granted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(plugin_id, version, grant_hash) DO NOTHING`,
+  /*
+   * The consent lookup, and the whole point of the composite key. A version bump or a widened
+   * permission set produces a hash that has never been approved, so this finds nothing and the
+   * sheet is unavoidable. `revoked_at IS NULL` is in the WHERE rather than checked in code, so
+   * something that forgets to check cannot honour a revoked grant.
+   */
+  findPluginGrant: `
+    SELECT * FROM plugin_grants
+    WHERE plugin_id = ? AND version = ? AND grant_hash = ? AND revoked_at IS NULL`,
+  listPluginGrants: `SELECT * FROM plugin_grants WHERE plugin_id = ? ORDER BY granted_at DESC`,
+  revokePluginGrants: `
+    UPDATE plugin_grants SET revoked_at = ? WHERE plugin_id = ? AND revoked_at IS NULL`,
+
+  liftPluginDryRun: `
+    INSERT INTO plugin_dry_run_lifted (plugin_id, scope, lifted_at) VALUES (?, ?, ?)
+    ON CONFLICT(plugin_id, scope) DO NOTHING`,
+  restorePluginDryRun: `DELETE FROM plugin_dry_run_lifted WHERE plugin_id = ? AND scope = ?`,
+  listPluginDryRunLifted: `SELECT scope FROM plugin_dry_run_lifted WHERE plugin_id = ?`,
+
+  insertPluginCrash: `
+    INSERT INTO plugin_crashes (plugin_id, ts, reason, detail, code, signal)
+    VALUES (?, ?, ?, ?, ?, ?)`,
+  /* The breaker's window. Counted rather than listed: the decision needs a number, not the rows. */
+  countPluginCrashesSince: `
+    SELECT COUNT(*) AS n FROM plugin_crashes WHERE plugin_id = ? AND ts >= ?`,
+  listPluginCrashes: `
+    SELECT * FROM plugin_crashes WHERE plugin_id = ? ORDER BY ts DESC LIMIT ?`,
 } as const;

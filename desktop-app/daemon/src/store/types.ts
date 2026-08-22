@@ -274,3 +274,57 @@ export type GrantBudgetRow = {
   hourly_limit: number;
   updated_at: number;
 };
+
+// -- plugins (Phase 3) --------------------------------------------------------
+
+/** One installed plugin. `manifest` is the JSON accepted at install, kept verbatim. */
+export type PluginRow = {
+  id: string;
+  version: string;
+  manifest: string;
+  bundle_hash: string;
+  source_kind: string;
+  source_ref: string;
+  trust: string;
+  publisher_key: string | null;
+  installed_at: number;
+  updated_at: number;
+  disabled_at: number | null;
+  disabled_by: string | null;
+  disabled_reason: string | null;
+};
+
+export type NewPlugin = Omit<PluginRow, "disabled_at" | "disabled_by" | "disabled_reason">;
+
+/**
+ * One approved grant, immutable and keyed by (plugin, version, grant hash).
+ *
+ * A change is a new row, never an UPDATE — that is what makes "an update that adds a scope provably
+ * re-prompts" hold by construction rather than by a check somebody has to remember to write.
+ */
+export type PluginGrantRow = {
+  plugin_id: string;
+  version: string;
+  grant_hash: string;
+  scopes: string;
+  account_ids: string;
+  capabilities: string;
+  domains: string;
+  granted_at: number;
+  revoked_at: number | null;
+};
+
+export type NewPluginGrant = Omit<PluginGrantRow, "revoked_at">;
+
+/** One crash, for the breaker's rolling window and for the bug report. */
+export type PluginCrashRow = {
+  id: number;
+  plugin_id: string;
+  ts: number;
+  reason: string;
+  detail: string;
+  code: number | null;
+  signal: string | null;
+};
+
+export type NewPluginCrash = Omit<PluginCrashRow, "id">;

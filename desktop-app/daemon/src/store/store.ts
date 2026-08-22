@@ -19,12 +19,18 @@ import type {
   NewFriendLogHistory,
   NewGrant,
   NewPairingRequest,
+  NewPlugin,
+  NewPluginCrash,
+  NewPluginGrant,
   NewSession,
   NewWebhook,
   NewWebhookDelivery,
   NoteRow,
   NotificationRow,
   PairingRequestRow,
+  PluginCrashRow,
+  PluginGrantRow,
+  PluginRow,
   RetentionConfigRow,
   SessionRow,
   WebhookDeliveryRow,
@@ -764,6 +770,124 @@ export class Store {
     return row?.size ?? 0;
   }
 
+  // -- plugins (Phase 3) -----------------------------------------------------
+
+  /** Files an install, or replaces the row for an upgrade. Grants are keyed separately, by version. */
+  upsertPlugin(plugin: NewPlugin): void {
+    this.stmts.insertPlugin.run(
+      plugin.id,
+      plugin.version,
+      plugin.manifest,
+      plugin.bundle_hash,
+      plugin.source_kind,
+      plugin.source_ref,
+      plugin.trust,
+      plugin.publisher_key,
+      plugin.installed_at,
+      plugin.updated_at,
+    );
+  }
+
+  getPlugin(id: string): PluginRow | null {
+    return this.stmts.getPlugin.get(id);
+  }
+
+  listPlugins(): PluginRow[] {
+    return this.stmts.listPlugins.all();
+  }
+
+  /** Removes the row. The bundle and the plugin's data directory are the caller's to delete. */
+  deletePlugin(id: string): void {
+    this.stmts.deletePlugin.run(id);
+  }
+
+  /**
+   * Turns a plugin off, durably.
+   *
+   * The one write in this file that may not be allowed to fail: PLAN.md promises disable is instant
+   * and always succeeds, and an auto-disable that did not survive a daemon restart would be a crash
+   * loop with extra steps. One row, no reads, no joins.
+   */
+  disablePlugin(id: string, at: number, by: string, reason: string): void {
+    this.stmts.disablePlugin.run(at, by, reason, id);
+  }
+
+  enablePlugin(id: string): void {
+    this.stmts.enablePlugin.run(id);
+  }
+
+  /** Records an approved grant. Idempotent: re-approving the same hash is not a new grant. */
+  insertPluginGrant(grant: NewPluginGrant): void {
+    this.stmts.insertPluginGrant.run(
+      grant.plugin_id,
+      grant.version,
+      grant.grant_hash,
+      grant.scopes,
+      grant.account_ids,
+      grant.capabilities,
+      grant.domains,
+      grant.granted_at,
+    );
+  }
+
+  /**
+   * The live grant for exactly this (plugin, version, grant hash), or null.
+   *
+   * Null is the signal to raise the consent sheet, and it is what a version bump or a widened
+   * permission set produces by construction — there is no separate "did this change?" check to
+   * forget to write.
+   */
+  findPluginGrant(pluginId: string, version: string, grantHash: string): PluginGrantRow | null {
+    return this.stmts.findPluginGrant.get(pluginId, version, grantHash);
+  }
+
+  listPluginGrants(pluginId: string): PluginGrantRow[] {
+    return this.stmts.listPluginGrants.all(pluginId);
+  }
+
+  /** Revokes every live grant a plugin holds. Rows are kept — the history is the point. */
+  revokePluginGrants(pluginId: string, at: number): number {
+    return this.stmts.revokePluginGrants.run(at, pluginId).changes;
+  }
+
+  /**
+   * Lifts dry-run for one scope, by the explicit gesture PLAN.md correction 4 requires.
+   *
+   * An allowlist rather than a flag: absence means shadowed, so a bug that fails to write a row
+   * under-permits rather than over-permits.
+   */
+  liftPluginDryRun(pluginId: string, scope: string, at: number): void {
+    this.stmts.liftPluginDryRun.run(pluginId, scope, at);
+  }
+
+  restorePluginDryRun(pluginId: string, scope: string): void {
+    this.stmts.restorePluginDryRun.run(pluginId, scope);
+  }
+
+  listPluginDryRunLifted(pluginId: string): string[] {
+    return this.stmts.listPluginDryRunLifted.all(pluginId).map((row) => row.scope);
+  }
+
+  insertPluginCrash(crash: NewPluginCrash): void {
+    this.stmts.insertPluginCrash.run(
+      crash.plugin_id,
+      crash.ts,
+      crash.reason,
+      crash.detail,
+      crash.code,
+      crash.signal,
+    );
+  }
+
+  /** How many times this plugin has died since `since`. The crash-loop breaker's rolling window. */
+  countPluginCrashesSince(pluginId: string, since: number): number {
+    return this.stmts.countPluginCrashesSince.get(pluginId, since)?.n ?? 0;
+  }
+
+  listPluginCrashes(pluginId: string, limit = 50): PluginCrashRow[] {
+    return this.stmts.listPluginCrashes.all(pluginId, limit);
+  }
+
   /**
    * Reclaims up to `pages` freelist pages. Only does anything with
    * `auto_vacuum = INCREMENTAL`, which {@link applyPragmas} sets before the first table exists.
@@ -986,6 +1110,32 @@ function prepareAll(db: Database) {
     markWebhookDeliveryDead: q<void, [number, number | null, string | null, string]>(
       SQL.markWebhookDeliveryDead,
     ),
+    insertPlugin: q<
+      void,
+      [string, string, string, string, string, string, string, string | null, number, number]
+    >(SQL.insertPlugin),
+    getPlugin: q<PluginRow, [string]>(SQL.getPlugin),
+    listPlugins: q<PluginRow, []>(SQL.listPlugins),
+    deletePlugin: q<void, [string]>(SQL.deletePlugin),
+    disablePlugin: q<void, [number, string, string, string]>(SQL.disablePlugin),
+    enablePlugin: q<void, [string]>(SQL.enablePlugin),
+
+    insertPluginGrant: q<void, [string, string, string, string, string, string, string, number]>(
+      SQL.insertPluginGrant,
+    ),
+    findPluginGrant: q<PluginGrantRow, [string, string, string]>(SQL.findPluginGrant),
+    listPluginGrants: q<PluginGrantRow, [string]>(SQL.listPluginGrants),
+    revokePluginGrants: q<void, [number, string]>(SQL.revokePluginGrants),
+
+    liftPluginDryRun: q<void, [string, string, number]>(SQL.liftPluginDryRun),
+    restorePluginDryRun: q<void, [string, string]>(SQL.restorePluginDryRun),
+    listPluginDryRunLifted: q<{ scope: string }, [string]>(SQL.listPluginDryRunLifted),
+
+    insertPluginCrash: q<void, [string, number, string, string, number | null, string | null]>(
+      SQL.insertPluginCrash,
+    ),
+    countPluginCrashesSince: q<{ n: number }, [string, number]>(SQL.countPluginCrashesSince),
+    listPluginCrashes: q<PluginCrashRow, [string, number]>(SQL.listPluginCrashes),
     countPendingWebhookDeliveries: q<{ n: number }, [string]>(SQL.countPendingWebhookDeliveries),
     countSettledWebhookDeliveries: q<{ count: number }, [number]>(
       SQL.countSettledWebhookDeliveries,

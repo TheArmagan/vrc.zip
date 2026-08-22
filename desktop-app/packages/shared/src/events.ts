@@ -61,13 +61,77 @@ export const EVENT_FAMILIES: readonly EventFamily[] = [
   "other",
 ];
 
+/**
+ * The part of a profile a `*.updated` event is about.
+ *
+ * VRChat's `friend-update` and `user-update` frames carry a whole user object and say nothing about
+ * what moved in it, so "Ada updated their profile" was the most any subscriber could report. These
+ * are the aspects the daemon diffs a frame against its previous copy to recover, which turns one
+ * unreadable kind into a sentence: not `friend.updated` but `friend.updated.avatar`.
+ *
+ * Deliberately coarse. `currentAvatarImageUrl` and `currentAvatarThumbnailImageUrl` move together
+ * and mean one thing to a reader, so they are one aspect; the several fields VRChat can express a
+ * rank through collapse into `trust` for the same reason.
+ */
+export const PROFILE_CHANGE_ASPECTS = [
+  "name",
+  /** The avatar they are wearing. */
+  "avatar",
+  /** The picture shown for them, which VRChat lets a user override independently of the avatar. */
+  "icon",
+  "bio",
+  /** Online, join me, ask me, busy. The chosen one, not whether they are connected. */
+  "status",
+  /** The free-text line under the status. */
+  "status_message",
+  "trust",
+  "platform",
+] as const;
+
+export type ProfileChangeAspect = (typeof PROFILE_CHANGE_ASPECTS)[number];
+
+/**
+ * The same treatment for `economy-update`, which has the same defect in a smaller space.
+ *
+ * VRChat sends it whenever anything about the account's entitlements moves, and in practice almost
+ * every one of them is the credit balance ticking. `economy.update` therefore meant "your wallet
+ * changed" nine times out of ten while being unable to say so.
+ */
+export const ECONOMY_CHANGE_ASPECTS = ["wallet_balance", "vrchat_plus"] as const;
+
+export type EconomyChangeAspect = (typeof ECONOMY_CHANGE_ASPECTS)[number];
+
+/**
+ * One field's before and after, as the payload of a refined `*.update(d)` event carries it.
+ *
+ * Both sides are strings or null because this is what gets rendered, not what gets recomputed: a
+ * trust rank arrives as a tag list and leaves as `"trusted"`, a balance as a number and leaves as
+ * its digits. Null on `from` means the daemon had no previous value rather than that the field was
+ * empty, which is a distinction the UI leans on.
+ *
+ * `aspect` is a plain string rather than a union of the two vocabularies above: this crosses the
+ * wire into a feed row, and a build that meets an aspect a newer daemon invented must render it
+ * rather than reject it. Producers narrow it; consumers do not.
+ */
+export interface FieldChange {
+  readonly aspect: string;
+  readonly from: string | null;
+  readonly to: string | null;
+}
+
 /** Friend-list and friend-presence changes, from the pipeline and from REST poll diffs. */
 export type FriendEventKind =
   | "friend.online"
   | "friend.offline"
   | "friend.active"
   | "friend.location"
+  /**
+   * Something on the profile moved and the daemon could not say what — the first frame seen for a
+   * friend, where there is no previous copy to compare against. A frame that changed nothing the
+   * daemon tracks is dropped rather than emitted as this.
+   */
   | "friend.updated"
+  | `friend.updated.${ProfileChangeAspect}`
   | "friend.added"
   | "friend.removed"
   /** A whole-list presence snapshot for one account, not a per-friend delta. */
@@ -78,6 +142,7 @@ export type FriendEventKind =
 /** Changes to a user record, including this account's own. */
 export type UserEventKind =
   | "user.updated"
+  | `user.updated.${ProfileChangeAspect}`
   | "user.location"
   | "user.badge_assigned"
   | "user.badge_unassigned";
@@ -134,7 +199,7 @@ export type GroupEventKind =
 
 export type InstanceEventKind = "instance.queue_joined" | "instance.queue_ready";
 
-export type EconomyEventKind = "economy.update";
+export type EconomyEventKind = "economy.update" | `economy.update.${EconomyChangeAspect}`;
 
 export type ContentEventKind = "content.refresh" | "content.image_updated";
 
@@ -187,11 +252,30 @@ export const BUS_EVENT_KINDS = [
   "friend.active",
   "friend.location",
   "friend.updated",
+  // Spelled out rather than built from `PROFILE_CHANGE_ASPECTS` with a `flatMap`: the array has to
+  // stay a tuple of literals for `MissingFromArray` to check it against the union, and a mapped
+  // array widens to `string[]`. The compile error below is what catches a forgotten line.
+  "friend.updated.name",
+  "friend.updated.avatar",
+  "friend.updated.icon",
+  "friend.updated.bio",
+  "friend.updated.status",
+  "friend.updated.status_message",
+  "friend.updated.trust",
+  "friend.updated.platform",
   "friend.added",
   "friend.removed",
   "friend.presence",
   "friend.list_refreshed",
   "user.updated",
+  "user.updated.name",
+  "user.updated.avatar",
+  "user.updated.icon",
+  "user.updated.bio",
+  "user.updated.status",
+  "user.updated.status_message",
+  "user.updated.trust",
+  "user.updated.platform",
   "user.location",
   "user.badge_assigned",
   "user.badge_unassigned",
@@ -230,6 +314,8 @@ export const BUS_EVENT_KINDS = [
   "instance.queue_joined",
   "instance.queue_ready",
   "economy.update",
+  "economy.update.wallet_balance",
+  "economy.update.vrchat_plus",
   "content.refresh",
   "content.image_updated",
   "consent.pending",

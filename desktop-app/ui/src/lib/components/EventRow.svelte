@@ -71,8 +71,15 @@ const subject = $derived(
 /** True when the row is showing an identifier rather than a name, which reads differently. */
 const subjectIsId = $derived(details.subject === null && subject !== null);
 
-/** A row with a user to name always renders one, even when the payload carried only the id. */
-const showsUser = $derived(subject !== null || subjectUserId !== null);
+/**
+ * A row with a user to name always renders one, even when the payload carried only the id — unless
+ * the description says the row has no subject at all. See `EventDetails.subjectless`: an economy
+ * frame carries the reader's own account id, and naming it turns "Credit balance changed" into a
+ * sentence about somebody else.
+ */
+const showsUser = $derived(
+  details.subjectless !== true && (subject !== null || subjectUserId !== null),
+);
 
 const repeatTitle = $derived(
   oldestTs === null || repeats < 2
@@ -206,6 +213,7 @@ const expandable = $derived(raw !== null || details.facts.length > 0 || details.
         worldName={details.worldName}
         accountId={event.accountId}
         showJump={false}
+        observedAt={event.ts}
       />
     {:else if details.worldName !== null}
       <!--

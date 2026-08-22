@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { BusEvent } from "../bus/event-bus.ts";
 import { EventBus } from "../bus/event-bus.ts";
 import type { SessionEvent, SessionSnapshot } from "../game-logs/index.ts";
 import type { DecodedPipelineEvent } from "../pipeline/index.ts";
@@ -6,6 +7,7 @@ import { MEMORY, Store } from "../store/index.ts";
 import { FeedWriter } from "./feed-writer.ts";
 import { createLogSink } from "./log-bridge.ts";
 import { busKindFor, toBusEvent } from "./pipeline-bridge.ts";
+import { UpdateDiffSet } from "./update-diff.ts";
 
 const NOW = 1_750_000_000_000;
 
@@ -39,6 +41,17 @@ function decoded(type: string, data: unknown): DecodedPipelineEvent {
   } as DecodedPipelineEvent;
 }
 
+/**
+ * `toBusEvent` returns null only for a profile update that changed nothing, which needs a
+ * `UpdateDiffSet` to detect. Every call without one is non-null by construction, and this narrows it
+ * without a non-null assertion, which Biome bans.
+ */
+function mapped(accountId: string, event: DecodedPipelineEvent, diffs?: UpdateDiffSet): BusEvent {
+  const mappedEvent = toBusEvent(accountId, event, diffs);
+  if (mappedEvent === null) throw new Error(`${event.type} was dropped, expected an event`);
+  return mappedEvent;
+}
+
 describe("pipeline bridge", () => {
   test("maps wire names onto the dotted bus taxonomy", () => {
     expect(busKindFor("friend-online")).toBe("friend.online");
@@ -50,7 +63,7 @@ describe("pipeline bridge", () => {
   });
 
   test("extracts the subject from a normal payload", () => {
-    const event = toBusEvent("usr_a", decoded("friend-online", { userId: "usr_friend" }));
+    const event = mapped("usr_a", decoded("friend-online", { userId: "usr_friend" }));
     expect(event.kind).toBe("friend.online");
     expect(event.subjectId).toBe("usr_friend");
     expect(event.accountId).toBe("usr_a");
@@ -59,21 +72,146 @@ describe("pipeline bridge", () => {
   test("reads friend-active's lowercase `userid`", () => {
     // A real upstream typo. Reading only the correct spelling drops the subject on every
     // friend-active event, which is the sort of thing nobody notices for months.
-    const event = toBusEvent("usr_a", decoded("friend-active", { userid: "usr_friend" }));
+    const event = mapped("usr_a", decoded("friend-active", { userid: "usr_friend" }));
     expect(event.subjectId).toBe("usr_friend");
   });
 
   test("carries VRChat's odd location values through untouched", () => {
     for (const location of ["", "offline", "traveling", "traveling:traveling", "private"]) {
-      const event = toBusEvent("usr_a", decoded("friend-location", { userId: "u", location }));
+      const event = mapped("usr_a", decoded("friend-location", { userId: "u", location }));
       expect(event.location).toBe(location);
     }
   });
 
   test("survives a payload with no subject at all", () => {
-    const event = toBusEvent("usr_a", decoded("clear-notification", undefined));
+    const event = mapped("usr_a", decoded("clear-notification", undefined));
     expect(event.subjectId).toBeNull();
     expect(event.location).toBeNull();
+  });
+});
+
+describe("profile updates", () => {
+  function update(user: Record<string, unknown>): DecodedPipelineEvent {
+    return decoded("friend-update", { userId: "usr_friend", user: { id: "usr_friend", ...user } });
+  }
+
+  test("the first frame for a user cannot name what changed", () => {
+    const diffs = new UpdateDiffSet();
+    const event = mapped("usr_a", update({ displayName: "Ada", bio: "hello" }), diffs);
+    expect(event.kind).toBe("friend.updated");
+  });
+
+  test("names the one field that moved", () => {
+    const diffs = new UpdateDiffSet();
+    mapped("usr_a", update({ displayName: "Ada", bio: "hello" }), diffs);
+
+    const event = mapped("usr_a", update({ displayName: "Ada", bio: "goodbye" }), diffs);
+    expect(event.kind).toBe("friend.updated.bio");
+    expect(event.payload).toMatchObject({
+      changes: [{ aspect: "bio", from: "hello", to: "goodbye" }],
+    });
+  });
+
+  test("keeps the generic kind when several fields moved at once", () => {
+    const diffs = new UpdateDiffSet();
+    mapped("usr_a", update({ displayName: "Ada", status: "active" }), diffs);
+
+    const event = mapped("usr_a", update({ displayName: "Ada L", status: "busy" }), diffs);
+    expect(event.kind).toBe("friend.updated");
+    const payload = event.payload as { changes: { aspect: string }[] };
+    expect(payload.changes.map((change) => change.aspect).toSorted()).toEqual(["name", "status"]);
+  });
+
+  test("drops a frame that changed nothing this build tracks", () => {
+    const diffs = new UpdateDiffSet();
+    mapped("usr_a", update({ displayName: "Ada", bio: "hello" }), diffs);
+
+    // Same values, plus a field the daemon does not model. VRChat re-sends these constantly, and
+    // every one of them used to be a feed row reading "Ada changed their profile".
+    const again = toBusEvent(
+      "usr_a",
+      update({ displayName: "Ada", bio: "hello", friendKey: "changed" }),
+      diffs,
+    );
+    expect(again).toBeNull();
+  });
+
+  test("a field the frame omits is not a field that was cleared", () => {
+    const diffs = new UpdateDiffSet();
+    mapped("usr_a", update({ displayName: "Ada", bio: "hello" }), diffs);
+
+    // No `bio` at all. Treating absence as "" is the bug this guards: it would report a cleared
+    // bio on every partial frame, which is most of them.
+    expect(toBusEvent("usr_a", update({ displayName: "Ada" }), diffs)).toBeNull();
+
+    // And the remembered value survives, so a later real change still diffs against "hello".
+    const event = mapped("usr_a", update({ bio: "goodbye" }), diffs);
+    expect(event.payload).toMatchObject({ changes: [{ aspect: "bio", from: "hello" }] });
+  });
+
+  test("an emptied field is a change, unlike an absent one", () => {
+    const diffs = new UpdateDiffSet();
+    mapped("usr_a", update({ bio: "hello" }), diffs);
+
+    const event = mapped("usr_a", update({ bio: "" }), diffs);
+    expect(event.kind).toBe("friend.updated.bio");
+    expect(event.payload).toMatchObject({ changes: [{ aspect: "bio", from: "hello", to: "" }] });
+  });
+
+  test("the same user under two accounts is two histories", () => {
+    const diffs = new UpdateDiffSet();
+    mapped("usr_a", update({ bio: "hello" }), diffs);
+
+    // Account b has never seen this user, so its first frame is "unknown" rather than a diff
+    // against what account a happened to observe.
+    expect(mapped("usr_b", update({ bio: "hello" }), diffs).kind).toBe("friend.updated");
+  });
+
+  test("without a differ the mapping is unchanged", () => {
+    // The bridge stays a pure function that anything can call, which is what the mapping tests
+    // above rely on.
+    expect(mapped("usr_a", update({ bio: "hello" })).kind).toBe("friend.updated");
+  });
+});
+
+describe("economy updates", () => {
+  function economy(data: Record<string, unknown>): DecodedPipelineEvent {
+    return decoded("economy-update", data);
+  }
+
+  test("names a wallet balance that moved", () => {
+    const diffs = new UpdateDiffSet();
+    mapped("usr_a", economy({ walletBalance: 100, isVRChatPlus: true }), diffs);
+
+    const event = mapped("usr_a", economy({ walletBalance: 90, isVRChatPlus: true }), diffs);
+    expect(event.kind).toBe("economy.update.wallet_balance");
+    expect(event.payload).toMatchObject({
+      changes: [{ aspect: "wallet_balance", from: "100", to: "90" }],
+    });
+  });
+
+  test("reads the spelling that actually arrives, not only the modelled one", () => {
+    // The type models `balance`; the frames carry `walletBalance`. Reading only the modelled name
+    // would leave the one kind this event almost always is permanently unnameable.
+    const diffs = new UpdateDiffSet();
+    mapped("usr_a", economy({ balance: 100 }), diffs);
+    expect(mapped("usr_a", economy({ walletBalance: 140 }), diffs).kind).toBe(
+      "economy.update.wallet_balance",
+    );
+  });
+
+  test("drops a repeat of the same balance", () => {
+    const diffs = new UpdateDiffSet();
+    mapped("usr_a", economy({ walletBalance: 100 }), diffs);
+    expect(toBusEvent("usr_a", economy({ walletBalance: 100 }), diffs)).toBeNull();
+  });
+
+  test("a plus subscription starting is its own kind", () => {
+    const diffs = new UpdateDiffSet();
+    mapped("usr_a", economy({ walletBalance: 100, isVRChatPlus: false }), diffs);
+
+    const event = mapped("usr_a", economy({ walletBalance: 100, isVRChatPlus: true }), diffs);
+    expect(event.kind).toBe("economy.update.vrchat_plus");
   });
 });
 

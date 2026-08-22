@@ -30,6 +30,7 @@ import { FeedWriter } from "./wiring/feed-writer.ts";
 import { createLogSink } from "./wiring/log-bridge.ts";
 import { NotificationSink } from "./wiring/notification-sink.ts";
 import { publishPipelineEvent } from "./wiring/pipeline-bridge.ts";
+import { UpdateDiffSet } from "./wiring/update-diff.ts";
 import { attachWebhookBridge } from "./wiring/webhook-bridge.ts";
 
 /**
@@ -160,6 +161,14 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
 
   const pipelines = new Map<string, PipelineClient>();
 
+  /*
+   * The previous copy of everything the pipeline announces changes to without saying what changed
+   * — profiles and the wallet — so a frame can be resolved into the field it moved. Owned here
+   * rather than by the bridge because the bridge is a pure mapping and this is state, and because
+   * account removal has to be able to drop it.
+   */
+  const updateDiffs = new UpdateDiffSet();
+
   function connectPipeline(accountId: string): void {
     if (pipelines.has(accountId) || !userAgent) return;
 
@@ -170,7 +179,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
       // the new token, and the old one is exactly what a stale closure would hand it.
       getAuthToken: async () => accounts.get(accountId)?.authToken() ?? "",
       onEvent: (decoded) => {
-        publishPipelineEvent(bus, accountId, decoded);
+        publishPipelineEvent(bus, accountId, decoded, updateDiffs);
         // The mirror gets the frame as it arrived, not the normalised bus event: its contract is
         // VRChat's wire format, and the bus event is deliberately a different shape.
         pipelineMirror.publish(accountId, decoded);
@@ -204,6 +213,16 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
       if (event.accountId) connectPipeline(event.accountId);
     },
     { kinds: ["account.ready"] },
+  );
+
+  // Removing an account drops the profiles remembered through it. Not for the memory, which is
+  // trivial, but so that re-adding the account starts from "no previous copy" rather than diffing
+  // today's frames against snapshots taken before it was removed.
+  bus.subscribe(
+    (event) => {
+      if (event.accountId) updateDiffs.forget(event.accountId);
+    },
+    { kinds: ["account.removed"] },
   );
 
   // --- friend presence ------------------------------------------------------

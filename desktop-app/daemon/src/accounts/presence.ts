@@ -145,7 +145,11 @@ export class PresenceService {
     this.#subscription = this.options.bus.subscribe(
       (event) => this.#onBusEvent(event.kind, event),
       {
-        kinds: ["friend.*", "user.updated", "account.ready"],
+        // `user.updated*` and not `user.updated`: the bridge refines a profile update into
+        // `user.updated.avatar` and friends once it can name the field, and an exact-kind
+        // subscription would have silently stopped seeing every one of them. `friend.*` already
+        // matches at any depth.
+        kinds: ["friend.*", "user.updated", "user.updated.*", "account.ready"],
       },
     );
 

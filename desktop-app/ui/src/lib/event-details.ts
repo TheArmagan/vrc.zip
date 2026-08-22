@@ -36,6 +36,7 @@ import LogInIcon from "@lucide/svelte/icons/log-in";
 import LogOutIcon from "@lucide/svelte/icons/log-out";
 import MonitorIcon from "@lucide/svelte/icons/monitor";
 import PackageIcon from "@lucide/svelte/icons/package";
+import PencilIcon from "@lucide/svelte/icons/pencil";
 import PowerIcon from "@lucide/svelte/icons/power";
 import RadioIcon from "@lucide/svelte/icons/radio";
 import ShieldCheckIcon from "@lucide/svelte/icons/shield-check";
@@ -82,6 +83,16 @@ export interface EventDetails {
   readonly action: string;
   /** Who or what this is about, when the payload names one. */
   readonly subject: string | null;
+  /**
+   * True for a row that must not name a subject *even though the payload carries an id*.
+   *
+   * Distinct from `subject: null`, which means "I have no name, look the id up" — the row then
+   * renders the id or resolves it. `economy.update.*` is the case this exists for: it carries the
+   * signed-in account's own `userId`, and "Ada Lovelace changed their credit balance" reads as
+   * though somebody else's wallet moved. Nothing about *whose* account it is belongs in the
+   * sentence, because it is always the reader's own.
+   */
+  readonly subjectless?: boolean;
   readonly facts: readonly EventFact[];
   /** The VRChat location string this row should draw, or null for a row with no place in it. */
   readonly location: string | null;
@@ -153,9 +164,159 @@ function familyFallback(kind: EventKind): Pick<EventDetails, "icon" | "tone"> {
   return { icon: CircleDotIcon, tone: "neutral" };
 }
 
+// ---------------------------------------------------------------------------
+// Refined update events
+// ---------------------------------------------------------------------------
+
+/**
+ * `friend.updated.avatar`, `economy.update.wallet_balance` and their siblings.
+ *
+ * These are handled before the switch rather than as eighteen more cases, because the kind and the
+ * payload say the same thing twice: the daemon put the aspect in the kind so a *filter* can select
+ * it, and the change list in the payload so a *row* can show what it moved to. One table serves
+ * both, and a sub-kind this build has never heard of still lands here and renders — which matters,
+ * because the daemon can learn to name an aspect before the UI has an opinion about it.
+ */
+const ASPECT_PHRASE: Readonly<Record<string, string>> = {
+  name: "changed their display name",
+  avatar: "switched avatar",
+  icon: "changed their profile picture",
+  bio: "rewrote their bio",
+  status: "changed their status",
+  status_message: "changed their status message",
+  trust: "changed trust rank",
+  platform: "switched platform",
+  // Economy. Subjectless, so these are written to read as a whole sentence on their own — see the
+  // `action` field's contract on `EventDetails`.
+  wallet_balance: "Credit balance changed",
+  vrchat_plus: "VRChat Plus changed",
+};
+
+const ASPECT_LABEL: Readonly<Record<string, string>> = {
+  name: "Display name",
+  avatar: "Avatar",
+  icon: "Profile picture",
+  bio: "Bio",
+  status: "Status",
+  status_message: "Status message",
+  trust: "Trust rank",
+  platform: "Platform",
+  wallet_balance: "Credits",
+  vrchat_plus: "VRChat Plus",
+};
+
+const ASPECT_ICON: Readonly<Record<string, LucideIcon>> = {
+  name: PencilIcon,
+  avatar: SparklesIcon,
+  icon: ImageIcon,
+  bio: PencilIcon,
+  status: CircleDotIcon,
+  status_message: PencilIcon,
+  trust: ShieldCheckIcon,
+  platform: MonitorIcon,
+  wallet_balance: SparklesIcon,
+  vrchat_plus: SparklesIcon,
+};
+
+/**
+ * Aspects whose value is an image URL.
+ *
+ * Worth being told about, not worth printing: a row that said `Avatar https://api.vrchat.cloud/…`
+ * would spend its whole width on a string nobody reads. The kind carries the news; the URL is in
+ * the expander with the rest of the raw payload for anyone who wants it.
+ */
+const OPAQUE_ASPECTS: ReadonlySet<string> = new Set(["avatar", "icon"]);
+
+interface ParsedChange {
+  readonly aspect: string;
+  readonly from: string | null;
+  readonly to: string | null;
+}
+
+/** Unlike `str`, this keeps `""` — for a diff, "cleared" and "not mentioned" are different news. */
+function exactStr(record: Readonly<Record<string, unknown>> | null, key: string): string | null {
+  if (record === null) return null;
+  const value = record[key];
+  return typeof value === "string" ? value : null;
+}
+
+function changesOf(payload: Readonly<Record<string, unknown>> | null): ParsedChange[] {
+  const raw = payload?.changes;
+  if (!Array.isArray(raw)) return [];
+  const out: ParsedChange[] = [];
+  for (const item of raw) {
+    const record = asRecord(item);
+    const aspect = str(record, "aspect");
+    if (aspect === null) continue;
+    out.push({ aspect, from: exactStr(record, "from"), to: exactStr(record, "to") });
+  }
+  return out;
+}
+
+/** An empty string is a real answer here, so it gets words rather than being dropped. */
+function shown(value: string | null): string | null {
+  if (value === null) return null;
+  return value === "" ? "not set" : value;
+}
+
+function changeFacts(changes: readonly ParsedChange[]): EventFact[] {
+  const out: EventFact[] = [];
+  for (const change of changes) {
+    if (OPAQUE_ASPECTS.has(change.aspect)) continue;
+    const label = ASPECT_LABEL[change.aspect] ?? change.aspect;
+    const to = shown(change.to);
+    const from = shown(change.from);
+    // The old value earns its place only when there was one. "Bio: not set to Hello" is worse
+    // than "Bio: Hello", and the first update for a friend has no old value at all.
+    out.push(...fact(label, from === null || to === null ? to : `${from} → ${to}`));
+  }
+  return out;
+}
+
+/** The kinds the daemon refines, each with the prefix that separates the base from the aspect. */
+const REFINED_PREFIXES = ["friend.updated", "user.updated", "economy.update"] as const;
+
+function describeFieldChange(
+  kind: string,
+  payload: Readonly<Record<string, unknown>> | null,
+  who: string | null,
+): EventDetails | null {
+  const base = REFINED_PREFIXES.find((prefix) => kind === prefix || kind.startsWith(`${prefix}.`));
+  if (base === undefined) return null;
+
+  const changes = changesOf(payload);
+  const aspect = kind === base ? null : kind.slice(base.length + 1);
+  const isEconomy = base === "economy.update";
+
+  // A generic profile kind with nothing in the payload is the "first frame, nothing to compare"
+  // case, and the switch below already words that one correctly. Economy has no case down there,
+  // and it has to come through here regardless so the row does not name the reader's own account.
+  if (aspect === null && changes.length === 0 && !isEconomy) return null;
+
+  const phrase =
+    aspect !== null
+      ? (ASPECT_PHRASE[aspect] ?? `changed their ${aspect.replace(/_/g, " ")}`)
+      : changes.length === 0
+        ? "Subscription updated"
+        : `changed ${String(changes.length)} things about ${isEconomy ? "the subscription" : "their profile"}`;
+
+  return {
+    ...BLANK,
+    icon: (aspect === null ? undefined : ASPECT_ICON[aspect]) ?? UsersIcon,
+    tone: isEconomy ? "system" : "social",
+    subject: isEconomy ? null : who,
+    ...(isEconomy ? { subjectless: true } : {}),
+    action: phrase,
+    facts: changeFacts(changes),
+  };
+}
+
 export function describeEvent(event: LiveEvent): EventDetails {
   const payload = asRecord(event.payload);
   const who = subjectName(event.payload);
+
+  const fieldChange = describeFieldChange(event.kind, payload, who);
+  if (fieldChange !== null) return fieldChange;
 
   switch (event.kind) {
     // -- the game log -------------------------------------------------------

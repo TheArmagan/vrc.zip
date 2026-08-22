@@ -121,3 +121,99 @@ describe("describeEvent", () => {
     expect(describeEvent(event("session.end", { exitKind: "crash" })).tone).toBe("alert");
   });
 });
+
+describe("refined update events", () => {
+  function change(aspect: string, from: string | null, to: string | null) {
+    return { aspect, from, to };
+  }
+
+  it("says which part of a profile moved", () => {
+    const details = describeEvent(
+      event("friend.updated.bio", {
+        user: { id: "usr_a", displayName: "Ada" },
+        changes: [change("bio", "hello", "goodbye")],
+      }),
+    );
+    expect(details.subject).toBe("Ada");
+    expect(details.action).toBe("rewrote their bio");
+    expect(details.facts).toEqual([{ label: "Bio", value: "hello → goodbye" }]);
+  });
+
+  it("does not print an image URL nobody would read", () => {
+    const details = describeEvent(
+      event("friend.updated.avatar", {
+        user: { id: "usr_a", displayName: "Ada" },
+        changes: [change("avatar", "https://old", "https://new")],
+      }),
+    );
+    expect(details.action).toBe("switched avatar");
+    expect(details.facts).toEqual([]);
+  });
+
+  it("gives the old value only when there was one", () => {
+    const details = describeEvent(
+      event("friend.updated.status_message", {
+        changes: [change("status_message", null, "afk")],
+      }),
+    );
+    expect(details.facts).toEqual([{ label: "Status message", value: "afk" }]);
+  });
+
+  it("puts a cleared field into words rather than dropping it", () => {
+    const details = describeEvent(
+      event("friend.updated.bio", { changes: [change("bio", "hello", "")] }),
+    );
+    expect(details.facts).toEqual([{ label: "Bio", value: "hello → not set" }]);
+  });
+
+  it("counts the changes when several moved at once", () => {
+    const details = describeEvent(
+      event("friend.updated", {
+        changes: [change("name", "Ada", "Ada L"), change("status", "active", "busy")],
+      }),
+    );
+    expect(details.action).toBe("changed 2 things about their profile");
+    expect(details.facts).toHaveLength(2);
+  });
+
+  it("leaves the un-refined kind to its own case", () => {
+    // No change list: this is the first frame seen for that friend, where the daemon has nothing
+    // to compare against and the generic wording is the honest one.
+    const details = describeEvent(event("friend.updated", { statusDescription: "afk" }));
+    expect(details.action).toBe("changed their profile");
+  });
+
+  it("renders an economy change without a subject", () => {
+    // "Ada's credit balance changed" would read as somebody else's wallet. It is always the
+    // signed-in account's own.
+    const details = describeEvent(
+      event("economy.update.wallet_balance", {
+        userId: "usr_a",
+        changes: [change("wallet_balance", "100", "90")],
+      }),
+    );
+    expect(details.subject).toBeNull();
+    // Not merely nameless: the row must not fall back to the account id it carries either.
+    expect(details.subjectless).toBe(true);
+    expect(details.action).toBe("Credit balance changed");
+    expect(details.facts).toEqual([{ label: "Credits", value: "100 → 90" }]);
+  });
+
+  it("keeps an un-refined economy row subjectless too", () => {
+    // The first economy frame has nothing to diff against, so it stays generic. It still carries
+    // the account's own `userId`, and naming it is the bug this guards.
+    const details = describeEvent(event("economy.update", { userId: "usr_a", balance: 100 }));
+    expect(details.subjectless).toBe(true);
+    expect(details.action).toBe("Subscription updated");
+  });
+
+  it("renders an aspect this build has never heard of", () => {
+    // A newer daemon can name an aspect before the UI has an opinion about it. Falling back is
+    // what keeps that a readable row rather than a dropped one.
+    const details = describeEvent(
+      event("friend.updated.pronouns", { changes: [change("pronouns", null, "they/them")] }),
+    );
+    expect(details.action).toBe("changed their pronouns");
+    expect(details.facts).toEqual([{ label: "pronouns", value: "they/them" }]);
+  });
+});

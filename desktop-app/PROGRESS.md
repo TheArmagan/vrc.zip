@@ -1623,6 +1623,25 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      game log rather than from VRChat: `sessions.current_location` is the only source that knows
      what *this machine* is doing, and it is a set because several clients can be up at once.
 
+149. **An update event names the field it changed.** VRChat's `friend-update`, `user-update` and
+     `economy-update` frames announce that something moved and carry a whole object rather than the
+     part that moved, so `friend.updated` could mean an avatar, a bio, a rank or a status message
+     and the feed could only render it as the same sentence every time. The daemon now holds the
+     previous copy (`wiring/update-diff.ts`) and emits `friend.updated.avatar`,
+     `economy.update.wallet_balance` and the rest, with the before/after list in the payload. One
+     aspect names the kind; several stay generic with the list in the payload, because a frame that
+     moved three things is not three events and promoting one of them would be arbitrary.
+
+     Three consequences worth stating. **A frame that changed nothing tracked is dropped entirely**
+     — VRChat re-sends these constantly on fields nobody models, and each one used to be a feed row
+     describing a change that was invisible even in principle. That is only safe because the tracked
+     aspects are a superset of what `sameRecord` compares, so a dropped frame cannot be one that
+     would have moved the presence cache. **The generic kind now means one specific thing**: the
+     first frame seen for that subject, where there was no previous copy and naming the field would
+     be a guess. And **absent is not empty**: a snapshot value is null for unknown and `""` for
+     known-to-be-empty, because treating an omitted `bio` as `""` reports a cleared bio on every
+     partial frame, which is most of them.
+
 ---
 
 ## Gotchas
@@ -1630,6 +1649,22 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **`economy-update` is documented as `balance` and arrives as `walletBalance`.** `PipelineEconomyUpdate`
+  models `balance`, and the frames that actually land spell it `walletBalance` — the type's own
+  comment warns the shape is unstable, and this is what that meant. Reading only the modelled name
+  would leave the kind this event almost always *is* (the credit balance ticking) permanently
+  unnameable, so `economySnapshot` reads both, newest spelling first. Worth remembering as the
+  general shape of the risk: a field name in `pipeline/events.ts` is a guess until a real frame has
+  been seen, and a differ keyed on the wrong name silently reports "nothing changed" forever rather
+  than failing.
+
+- **A subscription on an exact kind stops matching the moment that kind grows sub-kinds.**
+  `PresenceService` subscribed to `["friend.*", "user.updated", …]`. The wildcard matches at any
+  depth, so `friend.updated.avatar` kept reaching it; the exact `user.updated` did not, and
+  `user.updated.avatar` would have silently stopped updating the presence cache with no error
+  anywhere. Refining a kind is therefore never a local change: every exact-kind subscriber to that
+  kind has to be found and widened. Grepping for the literal string is the check.
 
 - **Reading source through the shell collapsed doubled backslashes, and produced a confident,
   wrong bug report.** `queries.ts` briefly did contain a real escaping bug (`` `\${char}` `` emits

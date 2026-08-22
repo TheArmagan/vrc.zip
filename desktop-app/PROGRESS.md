@@ -1841,8 +1841,11 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      accounts signed in, "wear this" means nothing until it says who, and picking the first online
      account would silently dress the wrong person.
 
-     **The control is an icon, and the account is chosen in a popover rather than named on the
-     button.** An action this small should not spend header width on a display name, and an action
+     **The control is an icon, and the account is chosen in a menu rather than named on the
+     button.** A `DropdownMenu` rather than a `Popover` full of buttons: it is a menu of actions, so
+     it should carry a menu's roles and arrow-key navigation, and it inherits the app's own menu
+     padding instead of the popover's card padding, which is sized for prose and reads as loose
+     around a list of names. An action this small should not spend header width on a display name, and an action
      that changes your account should not decide whose on your behalf. The list is sorted with the
      likely account first — the one the modal was opened through, or the one that could see the
      avatar — because putting the probable answer at the top is as far as a guess should go when the

@@ -36,9 +36,9 @@ import {
 } from "$lib/components/ui/avatar/index.js";
 import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
-import * as Popover from "$lib/components/ui/popover/index.js";
 import { Separator } from "$lib/components/ui/separator/index.js";
 import { Skeleton } from "$lib/components/ui/skeleton/index.js";
+import * as DropdownMenu from "$lib/components/ui/dropdown-menu/index.js";
 import * as Tabs from "$lib/components/ui/tabs/index.js";
 import { calendarDay, initials } from "$lib/format.ts";
 import {
@@ -69,7 +69,7 @@ const seenBy = $derived.by(() => {
  * Wearing it.
  *
  * The only control in any of the entity modals that changes something on VRChat's side about *you*,
- * and the account it dresses is the whole question. The button is an icon and the *popover* is
+ * and the account it dresses is the whole question. The button is an icon and the *menu* is
  * where the account is chosen, rather than the button naming one it picked: an action this small
  * should not spend header width on a name, and an action that changes your account should not
  * decide whose account on your behalf.
@@ -194,8 +194,13 @@ const FAILURE_BODIES: Record<string, string> = {
 >
   {#snippet actions()}
     {#if avatar !== null && app.accounts.length > 0}
-      <Popover.Root bind:open={wearOpen}>
-        <Popover.Trigger>
+      <!--
+        A `DropdownMenu` rather than a `Popover` with buttons in it: this is a menu of actions, so
+        it should come with the roles and the arrow-key navigation a menu has, and it inherits the
+        app's own menu padding instead of the popover's card padding, which is sized for prose.
+      -->
+      <DropdownMenu.Root bind:open={wearOpen}>
+        <DropdownMenu.Trigger>
           {#snippet child({ props })}
             <Button
               {...props}
@@ -209,18 +214,16 @@ const FAILURE_BODIES: Record<string, string> = {
               <ShirtIcon />
             </Button>
           {/snippet}
-        </Popover.Trigger>
+        </DropdownMenu.Trigger>
 
-        <Popover.Content class="w-64 p-1" align="end">
-          <p class="px-2 py-1.5 text-xs text-muted-foreground">Wear this avatar as</p>
+        <DropdownMenu.Content align="end" class="w-56">
+          <DropdownMenu.Label>Wear this avatar as</DropdownMenu.Label>
           <!-- Keyed by account id, which is unique by construction. -->
           {#each wearChoices as account (account.id)}
             {@const offline = account.connection !== "connected"}
-            <button
-              type="button"
-              class="flex w-full cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+            <DropdownMenu.Item
               disabled={offline || wearingId !== null}
-              onclick={() => void wearAs(account.id, account.displayName)}
+              onSelect={() => void wearAs(account.id, account.displayName)}
             >
               <!-- alt="" deliberately: the name is the next element in the same control. -->
               <Avatar class="size-5 shrink-0">
@@ -231,10 +234,10 @@ const FAILURE_BODIES: Record<string, string> = {
               {#if offline}
                 <span class="shrink-0 text-xs text-muted-foreground">Not signed in</span>
               {/if}
-            </button>
+            </DropdownMenu.Item>
           {/each}
-        </Popover.Content>
-      </Popover.Root>
+        </DropdownMenu.Content>
+      </DropdownMenu.Root>
     {/if}
   {/snippet}
 

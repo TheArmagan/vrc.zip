@@ -52,6 +52,12 @@ import type { AccountManager } from "../accounts/manager.ts";
 import type { EventBus } from "../bus/event-bus.ts";
 import { pluginDataDir } from "../paths.ts";
 import { PluginBudget } from "../plugins/budget.ts";
+import {
+  type ConsentApproval,
+  narrowToRequest,
+  type PendingPluginConsent,
+  PluginConsentBroker,
+} from "../plugins/consent.ts";
 import { PluginDispatcher } from "../plugins/dispatcher.ts";
 import { PluginEventsBridge } from "../plugins/events-bridge.ts";
 import {
@@ -135,6 +141,14 @@ export interface PluginHostOptions {
    * reaches here today is a `hello` or a `pong` the supervisor has already acted on.
    */
   readonly onUnownedFrame?: ((pluginId: string, frame: Envelope) => void) | undefined;
+  /**
+   * Raised when an install is waiting to be approved.
+   *
+   * The same two-channel problem the app consent sheet solves (decision 61): a UI client that is
+   * connected raises its own sheet, and nothing connected means the daemon has to reach the user
+   * some other way. This is the seam for both.
+   */
+  readonly onConsentPending?: ((pending: PendingPluginConsent) => void) | undefined;
 }
 
 export interface PluginHost {
@@ -157,6 +171,13 @@ export interface PluginHost {
    * they removed — is the worse surprise.
    */
   uninstall(pluginId: string, options?: { readonly keepData?: boolean }): Promise<void>;
+
+  /** Plugin installs waiting for someone to answer, and the two ways to answer them. */
+  readonly consent: {
+    pending(): PendingPluginConsent[];
+    approve(id: string, approval: ConsentApproval): boolean;
+    deny(id: string): boolean;
+  };
 }
 
 export function createPluginHost(options: PluginHostOptions): PluginHost {
@@ -234,6 +255,14 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
       ...(dryRunScopes.length === 0 ? {} : { dryRunScopes }),
     };
   }
+
+  // ---------------------------------------------------------------------------------------------
+  // Consent
+  // ---------------------------------------------------------------------------------------------
+
+  const consent = new PluginConsentBroker({
+    ...(options.onConsentPending === undefined ? {} : { onPending: options.onConsentPending }),
+  });
 
   // ---------------------------------------------------------------------------------------------
   // Storage
@@ -437,6 +466,8 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
       // queueing events for a process that is on its way out.
       events.detachAll();
       attached.clear();
+      // An unanswered question is not a yes. Every waiting install fails rather than proceeding.
+      consent.shutdown();
       await registry.stopAll();
     },
 
@@ -477,32 +508,54 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
       });
 
       /*
-       * ================== 3.8 REPLACES EVERYTHING BETWEEN THESE LINES ==================
-       *
-       * The grant is written here, from the manifest, without asking anyone. That is a placeholder
-       * and nothing more: PLAN.md's consent flow — the account picker, the dangerous block behind a
-       * second toggle, hold-to-confirm on the unsigned tier — is step 3.8, and it is what turns
-       * "the author requested this" into "the user approved this".
-       *
-       * Two properties are kept even so, because losing them would be a security regression rather
-       * than an unfinished feature:
-       *
-       *  - The grant is a **row**, keyed by `(plugin, version, grantHash)` exactly as it will be
-       *    after 3.8, so the gate reads what was approved and never the manifest.
-       *  - `accountIds` defaults to **nothing**, and only what the caller explicitly names is
-       *    granted. Defaulting to every account the daemon holds would be the exact over-grant the
-       *    account picker exists to prevent, and under-permitting is the direction a placeholder is
-       *    allowed to be wrong in.
+       * Consent. The install parks here until a person answers, and **nothing above this point is
+       * authority** — the row records that a bundle was compiled and stored, which is a fact about
+       * disk, while the grant below records that somebody agreed to it. Keeping the two separate is
+       * what lets a denial leave an installed-but-ungranted plugin that starts nothing.
        */
+      const previous = liveGrant(manifest.id);
+      const decision = await consent.ask({
+        manifest,
+        isUpdate: previous !== null,
+        // What this version asks for that the last approved one did not. The sheet sorts these
+        // first, because "this update wants more" is the question a re-prompt exists to answer.
+        newScopes:
+          previous === null
+            ? []
+            : manifest.permissions.scopes.filter((scope) => !previous.scopes.includes(scope)),
+        source: built.sourceRef,
+      });
+
+      if (!decision.ok) {
+        // The plugin stays installed and ungranted rather than being rolled back. It cannot start
+        // without a grant, and leaving the artifact means a user who denied by accident, or walked
+        // away and let it time out, does not have to rebuild it to be asked again.
+        return {
+          ok: false,
+          stage: "consent",
+          message:
+            decision.reason === "denied"
+              ? "You declined to install this plugin. Nothing was granted, and it will not run."
+              : decision.reason === "timeout"
+                ? "The consent request expired before it was answered. Nothing was granted."
+                : "vrc.zip shut down before the consent request was answered. Nothing was granted.",
+        };
+      }
+
+      const approved = narrowToRequest(manifest, decision.approval);
+
       store.insertPluginGrant({
         plugin_id: manifest.id,
         version: manifest.version,
+        // Hashed over what the *manifest* asked, not over what was approved: the hash is the
+        // identity of the question, and a narrower answer to the same question must not read as a
+        // different question the next time it is asked.
         grant_hash: grantHash(manifest),
-        scopes: JSON.stringify(manifest.permissions.scopes),
-        account_ids: JSON.stringify([...accountIds]),
-        capabilities: JSON.stringify(manifest.permissions.capabilities),
+        scopes: JSON.stringify(approved.scopes),
+        account_ids: JSON.stringify(approved.accountIds),
+        capabilities: JSON.stringify(approved.capabilities),
         domains: JSON.stringify(manifest.permissions.fetch.domains),
-        events: JSON.stringify(manifest.permissions.events),
+        events: JSON.stringify(approved.events),
         granted_at: now,
       });
       /* ================================================================================= */
@@ -553,6 +606,12 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
 
     disable(pluginId) {
       registry.disable(pluginId);
+    },
+
+    consent: {
+      pending: () => consent.pending(),
+      approve: (id, approval) => consent.approve(id, approval),
+      deny: (id) => consent.deny(id),
     },
 
     uninstall(pluginId, uninstallOptions) {

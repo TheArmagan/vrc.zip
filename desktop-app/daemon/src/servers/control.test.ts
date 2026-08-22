@@ -31,6 +31,8 @@ import {
   MAX_WORLD_IDS,
   type NotificationQuery,
   type PageQuery,
+  type PendingPluginConsentSummary,
+  type PluginConsentDecision,
   type PluginSummary,
   parseAvatarId,
   parseImageFileId,
@@ -76,6 +78,26 @@ const WEBHOOK: WebhookSummary = {
   lastStatus: 200,
   lastError: null,
   pending: 0,
+};
+
+const PENDING_CONSENT: PendingPluginConsentSummary = {
+  id: "pc1",
+  pluginId: "acme.notes",
+  name: "Notes",
+  version: "2.0.0",
+  publisher: "acme",
+  description: "Keeps notes about people you meet.",
+  source: "/tmp/notes",
+  requestedAt: 1_700_000_000_000,
+  isUpdate: true,
+  scopes: ["friends:read", "invite:send"],
+  newScopes: ["invite:send"],
+  capabilities: ["storage"],
+  events: ["friend.*"],
+  fetchDomains: [],
+  accountMode: "many",
+  accountsOptional: false,
+  performance: "smol",
 };
 
 const PLUGIN: PluginSummary = {
@@ -453,6 +475,9 @@ interface Recorder {
   pluginInstalls: { rootDir: string; accountIds: readonly string[] }[];
   pluginToggles: { id: string; enabled: boolean }[];
   pluginsUninstalled: string[];
+  pendingConsents: PendingPluginConsentSummary[];
+  consentDecisions: { id: string; decision: PluginConsentDecision }[];
+  consentDenials: string[];
   sentActions: {
     kind: string;
     accountId: string;
@@ -498,6 +523,9 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     pluginInstalls: [],
     pluginToggles: [],
     pluginsUninstalled: [],
+    pendingConsents: [PENDING_CONSENT],
+    consentDecisions: [],
+    consentDenials: [],
     sentActions: [],
   };
   let settings: Settings = { theme: "dark" };
@@ -572,6 +600,21 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     },
     uninstallPlugin: async (pluginId) => {
       seen.pluginsUninstalled.push(pluginId);
+    },
+    listPendingPluginConsents: async () => [...seen.pendingConsents],
+    approvePluginConsent: async (id, decision) => {
+      const index = seen.pendingConsents.findIndex((entry) => entry.id === id);
+      if (index === -1) return false;
+      seen.pendingConsents.splice(index, 1);
+      seen.consentDecisions.push({ id, decision });
+      return true;
+    },
+    denyPluginConsent: async (id) => {
+      const index = seen.pendingConsents.findIndex((entry) => entry.id === id);
+      if (index === -1) return false;
+      seen.pendingConsents.splice(index, 1);
+      seen.consentDenials.push(id);
+      return true;
     },
     setAppBudget: async (grantId, scope, limit) => {
       if (grantId !== GRANT_ID) throw new ControlError(404, "unknown_app", "no such app");
@@ -2470,6 +2513,68 @@ describe("plugin management", () => {
       error: "plugin_install_failed",
       message: "there is no vrcz-plugin.json there",
     });
+  });
+
+  test("the pending sheet lists what is waiting, including what an update newly wants", async () => {
+    const { deps } = fakeDeps();
+    const res = await call(deps, "/api/plugins/pending");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([
+      expect.objectContaining({
+        id: "pc1",
+        pluginId: "acme.notes",
+        isUpdate: true,
+        newScopes: ["invite:send"],
+        accountMode: "many",
+      }),
+    ]);
+  });
+
+  test("approving forwards the accounts, and answering twice is a 409", async () => {
+    const { deps, seen } = fakeDeps();
+    const res = await post(deps, "/api/plugins/pending/pc1/approve", { accountIds: ["usr_a"] });
+    expect(res.status).toBe(204);
+    expect(seen.consentDecisions).toEqual([
+      { id: "pc1", decision: { accountIds: ["usr_a"] } },
+    ]);
+
+    // The request existed and the *timing* failed, which is a different sentence from "no such
+    // thing" — someone who left the sheet open until it expired needs to be told which.
+    const again = await post(deps, "/api/plugins/pending/pc1/approve", { accountIds: ["usr_a"] });
+    expect(again.status).toBe(409);
+    expect(await again.json()).toMatchObject({ error: "consent_not_pending" });
+  });
+
+  /**
+   * Absent and empty mean different things, and collapsing them is the bug that grants everything:
+   * a UI that forgot to send `scopes` must not be read as "approve none", and one that sends `[]`
+   * must not be read as "approve all".
+   */
+  test("an omitted narrowing list is not the same as an empty one", async () => {
+    const { deps, seen } = fakeDeps();
+    await post(deps, "/api/plugins/pending/pc1/approve", { accountIds: [] });
+    expect(seen.consentDecisions[0]?.decision).toEqual({ accountIds: [] });
+
+    seen.pendingConsents.push({ ...PENDING_CONSENT, id: "pc2" });
+    await post(deps, "/api/plugins/pending/pc2/approve", { accountIds: [], scopes: [] });
+    expect(seen.consentDecisions[1]?.decision).toEqual({ accountIds: [], scopes: [] });
+  });
+
+  test("a narrowing list that is not an array of strings is refused", async () => {
+    const { deps, seen } = fakeDeps();
+    const res = await post(deps, "/api/plugins/pending/pc1/approve", {
+      accountIds: [],
+      scopes: ["friends:read", 7],
+    });
+    expect(res.status).toBe(400);
+    expect(seen.consentDecisions).toEqual([]);
+  });
+
+  test("denying resolves it, and the id stops being pending", async () => {
+    const { deps, seen } = fakeDeps();
+    expect((await post(deps, "/api/plugins/pending/pc1/deny")).status).toBe(204);
+    expect(seen.consentDenials).toEqual(["pc1"]);
+    expect((await post(deps, "/api/plugins/pending/pc1/deny")).status).toBe(409);
   });
 
   test("enable and disable each answer with the plugin as it now stands", async () => {

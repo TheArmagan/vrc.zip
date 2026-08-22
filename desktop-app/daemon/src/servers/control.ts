@@ -804,6 +804,46 @@ export interface AppBudget {
  * act on, and the second reads as a checksum a user might be tempted to compare by hand against a
  * file the daemon has already refused to load.
  */
+/**
+ * One plugin install waiting to be approved.
+ *
+ * Everything the sheet needs to ask the question and nothing it does not: the manifest's own
+ * presentation fields, the lists being requested, and whether this is an update asking for more
+ * than the last approved version had.
+ */
+export interface PendingPluginConsentSummary {
+  id: string;
+  pluginId: string;
+  name: string;
+  version: string;
+  publisher: string;
+  description: string | null;
+  /** Where it is being installed from, so "which copy is this" has an answer. */
+  source: string;
+  requestedAt: number;
+  isUpdate: boolean;
+  scopes: string[];
+  /** Scopes this version asks for that the last approved one did not. Rendered first. */
+  newScopes: string[];
+  capabilities: string[];
+  events: string[];
+  fetchDomains: string[];
+  /** `one` or `many` — how many accounts the picker may let the user choose. */
+  accountMode: string;
+  /** Whether the plugin says it works with no account at all. */
+  accountsOptional: boolean;
+  /** `smol` or `throughput`. Spends the user's memory, so it is shown. */
+  performance: string;
+}
+
+/** What the user chose on the sheet. Every list narrows the request; none may exceed it. */
+export interface PluginConsentDecision {
+  accountIds: string[];
+  scopes?: string[];
+  capabilities?: string[];
+  events?: string[];
+}
+
 export interface PluginSummary {
   /** The manifest id, `publisher.name`. Stable across versions and the key for every route below. */
   id: string;
@@ -1022,6 +1062,17 @@ export interface ControlDeps {
    * that was not running. PLAN.md is explicit that this one must always succeed.
    */
   disablePlugin(pluginId: string): Promise<PluginSummary>;
+
+  /**
+   * Plugin installs waiting for a person.
+   *
+   * `POST /api/plugins` parks until one of these is answered, so this list is what the sheet
+   * renders and the two calls below are the only way that request ever returns.
+   */
+  listPendingPluginConsents(): Promise<PendingPluginConsentSummary[]>;
+  /** False when the id is no longer waiting: already answered, or timed out. */
+  approvePluginConsent(id: string, decision: PluginConsentDecision): Promise<boolean>;
+  denyPluginConsent(id: string): Promise<boolean>;
 
   /**
    * Removes the row, the grant, the artifacts and — unless `keepData` — the plugin's own database.
@@ -2300,6 +2351,31 @@ export function createControlApp({ port, deps, appApi, token }: ControlAppOption
       c.json(await deps.disablePlugin(c.req.param("id"))),
     )
 
+    .get("/api/plugins/pending", async (c) => c.json(await deps.listPendingPluginConsents()))
+
+    .post("/api/plugins/pending/:id/approve", async (c) => {
+      const body = await readJsonObject(c.req.raw);
+      const decision: PluginConsentDecision = {
+        // The same parser the install route uses, so "absent means none, never all" is one rule
+        // rather than two implementations of it.
+        accountIds: [...parseAccountIds(body?.accountIds)],
+        ...narrowingList(body, "scopes"),
+        ...narrowingList(body, "capabilities"),
+        ...narrowingList(body, "events"),
+      };
+      // 409 rather than 404: the request existed, and it is the *timing* that failed. Someone who
+      // left the sheet open until it expired needs to be told that, not that nothing was there.
+      return (await deps.approvePluginConsent(c.req.param("id"), decision))
+        ? c.body(null, 204)
+        : c.json({ error: "consent_not_pending" }, 409);
+    })
+
+    .post("/api/plugins/pending/:id/deny", async (c) =>
+      (await deps.denyPluginConsent(c.req.param("id")))
+        ? c.body(null, 204)
+        : c.json({ error: "consent_not_pending" }, 409),
+    )
+
     .delete("/api/plugins/:id", async (c) => {
       // `?keepData=1` keeps the plugin's database. Absent means delete it, which is what uninstall
       // means to the person clicking it; 3.8's checkbox is what sets this.
@@ -2409,6 +2485,29 @@ function parseAccountIds(raw: JsonValue | undefined): readonly string[] {
     throw new ControlError(400, "invalid_body", "accountIds must contain only account ids");
   }
   return [...new Set(ids)];
+}
+
+/**
+ * One optional narrowing list from a consent decision.
+ *
+ * Absent is **not** the same as empty, and the difference is the whole reason this returns a spread
+ * rather than an array: an omitted `scopes` means "everything that was asked for", while `[]` means
+ * "none of it". Collapsing the two would make a UI that forgot to send the field grant everything.
+ */
+function narrowingList(
+  body: Record<string, JsonValue> | undefined,
+  key: "scopes" | "capabilities" | "events",
+): Record<string, string[]> {
+  const raw = body?.[key];
+  if (raw === undefined) return {};
+  if (!Array.isArray(raw)) {
+    throw new ControlError(400, "invalid_body", `${key} must be an array of strings`);
+  }
+  const values = raw.filter((value): value is string => typeof value === "string");
+  if (values.length !== raw.length) {
+    throw new ControlError(400, "invalid_body", `${key} must contain only strings`);
+  }
+  return { [key]: values };
 }
 
 function stringField(body: Record<string, JsonValue> | undefined, key: string): string | undefined {

@@ -2590,6 +2590,38 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      `authoritySignature` now includes the patterns, or a re-consent that narrowed only the events
      would have been invisible to the per-tick "has this grant changed" check.
 
+188. **Consent is a blocking rendezvous, and nothing above it is authority.** `POST /api/plugins`
+     now parks between "the bundle is compiled and stored" and "a grant exists", which is the seam
+     that makes a denial coherent: the plugin row records a fact about disk, the grant records that
+     somebody agreed, and a denied install leaves an installed-but-ungranted plugin that starts
+     nothing. It is not rolled back, because a user who denied by accident or let it expire should
+     not have to rebuild it to be asked again.
+
+     **In memory, and it dies with the daemon.** The third-party app flow persists a pending row
+     because *VRChat's login* drives it — the app is a separate process holding a half-authenticated
+     session and nobody may be at the keyboard. A plugin install has a human on the other end of the
+     same session, one they started deliberately. A half-answered consent question surviving a
+     restart, answered later by someone who has forgotten what they were installing, is worse than
+     asking again. Shutdown therefore **denies** every waiting request: an unanswered question is
+     not a yes.
+
+     **An approval narrows and can never widen**, enforced in one function (`narrowToRequest`) so
+     the installer cannot express a widening grant even by mistake. A UI bug that sent a scope the
+     plugin never asked for would otherwise mint authority nobody requested, and it would look
+     exactly like consent in the grant row. The same rule at the HTTP edge has a subtler half:
+     **absent and empty mean different things** — an omitted `scopes` is "everything asked for", `[]`
+     is "none of it" — so the parser returns a spread rather than an array, and both readings are
+     asserted.
+
+     The grant hash still covers what the *manifest* asked, not what was approved. The hash is the
+     identity of the question; a narrower answer to the same question must not read as a different
+     question the next time it is asked.
+
+     **Not yet done:** the consent *screen*. `app.ts` logs a line naming the plugin and saying it
+     expires in five minutes, which is the minimum honest thing while the sheet does not exist —
+     decision 61's two-channel treatment (a Web Notification when a UI client is connected, an OS
+     notification and a browser when none is) belongs with the screen it would open.
+
 ---
 
 ## Gotchas

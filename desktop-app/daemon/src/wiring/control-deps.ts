@@ -86,6 +86,7 @@ import {
   type MutualFriendSummary,
   type NotificationItem,
   type PendingConsentRequest,
+  type PendingPluginConsentSummary,
   type PluginSummary,
   type SettingsPatch,
   type StatusSnapshot,
@@ -2388,6 +2389,53 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       // delayed by the very plugin the user is trying to be rid of.
       host.disable(pluginId);
       return await Promise.resolve(pluginOrThrow(host, pluginId));
+    },
+
+    async listPendingPluginConsents(): Promise<PendingPluginConsentSummary[]> {
+      const pending = options.plugins?.consent.pending() ?? [];
+      return await Promise.resolve(
+        pending.map((entry) => {
+          const { permissions } = entry.manifest;
+          return {
+            id: entry.id,
+            pluginId: entry.manifest.id,
+            name: entry.manifest.name,
+            version: entry.manifest.version,
+            publisher: entry.manifest.publisher,
+            description: entry.manifest.description ?? null,
+            source: entry.source,
+            requestedAt: entry.requestedAt,
+            isUpdate: entry.isUpdate,
+            scopes: [...permissions.scopes],
+            newScopes: [...entry.newScopes],
+            capabilities: [...permissions.capabilities],
+            events: [...permissions.events],
+            fetchDomains: [...permissions.fetch.domains],
+            accountMode: permissions.accounts.mode,
+            accountsOptional: permissions.accounts.optional,
+            performance: entry.manifest.performance,
+          };
+        }),
+      );
+    },
+
+    async approvePluginConsent(id, decision): Promise<boolean> {
+      const host = options.plugins;
+      if (host === undefined) return await Promise.resolve(false);
+      return await Promise.resolve(
+        host.consent.approve(id, {
+          accountIds: decision.accountIds,
+          // Spread rather than assigned, because absent and empty mean different things here:
+          // omitted is "everything asked for", `[]` is "none of it".
+          ...(decision.scopes === undefined ? {} : { scopes: decision.scopes }),
+          ...(decision.capabilities === undefined ? {} : { capabilities: decision.capabilities }),
+          ...(decision.events === undefined ? {} : { events: decision.events }),
+        }),
+      );
+    },
+
+    async denyPluginConsent(id): Promise<boolean> {
+      return await Promise.resolve(options.plugins?.consent.deny(id) ?? false);
     },
 
     async uninstallPlugin(pluginId, uninstallOptions): Promise<void> {

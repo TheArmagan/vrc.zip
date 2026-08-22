@@ -48,6 +48,9 @@ const deps: ControlDeps = {
     throw new Error("unused");
   },
   uninstallPlugin: async () => {},
+  listPendingPluginConsents: async () => [],
+  approvePluginConsent: async () => false,
+  denyPluginConsent: async () => false,
   streamClientCount: () => 0,
   login: async () => ({ status: "requires-2fa", accountId: "usr_1", methods: ["totp"] }),
   verifyTwoFactor: async () => {

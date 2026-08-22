@@ -303,6 +303,21 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     // turns a subscription frame into a filtered, credited, batched view of this stream.
     bus,
     ...(env !== undefined ? { env } : {}),
+    /*
+     * An install now parks until somebody answers, so a request nobody can see is a request that
+     * times out five minutes later with no explanation. This is the minimum honest thing: say in
+     * the log that something is waiting and where to answer it.
+     *
+     * It is deliberately not the whole of decision 61's two-channel treatment — a Web Notification
+     * when a UI client is connected, an OS notification and a browser when none is. That belongs
+     * with 3.8's consent screen, which is what the second channel would open.
+     */
+    onConsentPending: (pending) => {
+      console.warn(
+        `[vrc.zip] ${pending.manifest.name} ${pending.manifest.version} is waiting to be installed. ` +
+          `Approve or deny it on the plugins screen — it expires in five minutes and nothing is granted until then.`,
+      );
+    },
   });
 
   // --- servers --------------------------------------------------------------

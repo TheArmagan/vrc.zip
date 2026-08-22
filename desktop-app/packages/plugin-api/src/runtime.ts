@@ -121,6 +121,26 @@ export interface PluginContext {
   readonly vrchat: VrchatApi;
   readonly storage: StorageApi;
   readonly events: EventsApi;
+  readonly ui: UiApi;
+}
+
+export interface UiApi {
+  /** Draws (or replaces) a panel. The id must be one your manifest declares. */
+  setPanel(panelId: string, tree: unknown): Promise<void>;
+  /**
+   * Replaces one keyed subtree.
+   *
+   * Cheaper than a whole tree, and it is what keeps focus, scroll position and an open dialog
+   * alive across an update — the host only re-creates what actually changed. Give the node you
+   * intend to replace a `key` first; a patch naming a key that is not drawn is refused.
+   */
+  patchPanel(panelId: string, key: string, tree: unknown): Promise<void>;
+  closePanel(panelId: string): Promise<void>;
+  /** Shows a toast. The host owns how it looks and how long it lasts. */
+  toast(
+    message: string,
+    options?: { description?: string; tone?: "neutral" | "success" | "warn" | "danger" },
+  ): Promise<void>;
 }
 
 export interface VrchatApi {
@@ -170,6 +190,13 @@ export interface PluginHooks {
    * make every slow update look like a plugin that stopped responding.
    */
   onIntent?(dispatch: UiIntentDispatch, ctx: PluginContext): unknown | Promise<unknown>;
+  /**
+   * One of your contributed commands was run from the command palette.
+   *
+   * Reachable whether or not you are drawing a panel, which is why it is its own hook rather than
+   * an intent: a command belongs to the plugin, not to a surface.
+   */
+  onCommand?(commandId: string, ctx: PluginContext): unknown | Promise<unknown>;
 }
 
 /** The one `onFrame` slot means one runtime. Tracked so a second `definePlugin` can say so. */
@@ -316,6 +343,13 @@ class Runtime {
    */
   async #hostCall(frame: Record<string, unknown>): Promise<void> {
     const id = String(frame.id);
+    if (frame.method === "ui.command") {
+      const commandId = String((frame.params as { commandId?: unknown })?.commandId ?? "");
+      await this.#answer(id, this.#hooks.onCommand, (hook) =>
+        hook.call(this.#hooks, commandId, this.ctx),
+      );
+      return;
+    }
     if (frame.method !== "ui.intent") {
       this.#host.send({
         t: "err",
@@ -324,26 +358,36 @@ class Runtime {
       });
       return;
     }
-    const hook = this.#hooks.onIntent;
+    await this.#answer(id, this.#hooks.onIntent, (hook) =>
+      hook.call(this.#hooks, frame.params as unknown as UiIntentDispatch, this.ctx),
+    );
+  }
+
+  /**
+   * Runs one hook and answers the frame, whatever happens.
+   *
+   * Shared between the two host-called hooks because the *answering* is the part that matters: a
+   * missing hook and a throwing hook are both answered as errors, since silence and refusal are the
+   * same observation to a caller with a deadline and only one of them is diagnosable.
+   */
+  async #answer<Hook>(
+    id: string,
+    hook: Hook | undefined,
+    run: (hook: Hook) => unknown,
+  ): Promise<void> {
     if (hook === undefined) {
-      // A panel with handlers but no `onIntent` is a plugin that drew a button it cannot answer.
-      // Answered as an error, so the host can show it rather than leaving the button spinning.
       this.#host.send({
         t: "err",
         id,
         error: {
           code: "E_UNKNOWN_METHOD",
-          message: "This plugin drew a handler but defines no onIntent hook.",
+          message: "This plugin does not define a hook for that.",
         },
       });
       return;
     }
     try {
-      const result = await hook.call(
-        this.#hooks,
-        frame.params as unknown as UiIntentDispatch,
-        this.ctx,
-      );
+      const result = await run(hook);
       this.#host.send({ t: "res", id, result: result === undefined ? null : result });
     } catch (error) {
       this.#host.send({
@@ -390,6 +434,26 @@ class Runtime {
   #buildContext(): PluginContext {
     const call = (method: string, params?: unknown, timeoutMs?: number): Promise<unknown> =>
       this.#call(method, params, timeoutMs);
+
+    /** Convenience over `ui.*`, so a plugin never hand-writes a frame for its own surface. */
+    const ui: UiApi = {
+      setPanel: async (panelId, tree) => {
+        await call("ui.setPanel", { panelId, tree });
+      },
+      patchPanel: async (panelId, key, tree) => {
+        await call("ui.patchPanel", { panelId, key, tree });
+      },
+      closePanel: async (panelId) => {
+        await call("ui.closePanel", { panelId });
+      },
+      toast: async (message, options = {}) => {
+        await call("ui.toast", {
+          message,
+          ...(options.description === undefined ? {} : { description: options.description }),
+          tone: options.tone ?? "neutral",
+        });
+      },
+    };
 
     const storage: StorageApi = {
       kv: {
@@ -494,6 +558,7 @@ class Runtime {
       vrchat,
       storage,
       events,
+      ui,
     };
   }
 }

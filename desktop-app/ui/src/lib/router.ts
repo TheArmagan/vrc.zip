@@ -25,6 +25,9 @@ export const ROUTE_IDS = [
   // `#/plugins` — installs waiting to be approved, and what is installed. Both on one screen,
   // unlike apps: a plugin install is something the user started here, seconds ago.
   "plugins",
+  // `#/plugin/<pluginId>/<panelId>` — one plugin's panel, as a page of its own. The only route
+  // with two parameters, which is why `subParam` exists.
+  "plugin",
   "settings",
 ] as const;
 
@@ -36,6 +39,14 @@ export interface Route {
   readonly id: RouteId;
   /** The trailing path segment, if the URL had one: `#/gamelog/sess_1` -> `"sess_1"`. */
   readonly param: string | null;
+  /**
+   * The segment after that: `#/plugin/acme.notes/settings` -> `"settings"`.
+   *
+   * One route needs it — a plugin panel is identified by a plugin *and* a panel, and neither is
+   * meaningful without the other. Encoding both into one segment was the alternative and it makes
+   * every reader learn a separator that exists nowhere else in the app.
+   */
+  readonly subParam: string | null;
   /** Parsed query string from `#/feed?kind=invite`. */
   readonly query: URLSearchParams;
 }
@@ -51,15 +62,25 @@ export function parseHash(hash: string): Route {
   const head = segments[0] ?? "";
   const id: RouteId = isRouteId(head) ? head : DEFAULT_ROUTE;
   const raw = segments[1];
+  const rawSub = segments[2];
   return {
     id,
     param: raw === undefined ? null : decodeURIComponent(raw),
+    subParam: rawSub === undefined ? null : decodeURIComponent(rawSub),
     query: new URLSearchParams(queryPart),
   };
 }
 
-export function hrefFor(id: RouteId, param?: string, query?: Record<string, string>): string {
-  const tail = param === undefined ? "" : `/${encodeURIComponent(param)}`;
+export function hrefFor(
+  id: RouteId,
+  param?: string,
+  query?: Record<string, string>,
+  subParam?: string,
+): string {
+  const tail =
+    param === undefined
+      ? ""
+      : `/${encodeURIComponent(param)}${subParam === undefined ? "" : `/${encodeURIComponent(subParam)}`}`;
   const qs = query === undefined ? "" : new URLSearchParams(query).toString();
   return `#/${id}${tail}${qs === "" ? "" : `?${qs}`}`;
 }

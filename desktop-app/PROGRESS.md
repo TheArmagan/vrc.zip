@@ -2763,6 +2763,52 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      a fixed daemon. A cache-busting query is the difference between testing the build and testing
      what the browser happened to still have.
 
+193. **Plugins reach the shell: sidebar, palette, modals and toasts.** Four surfaces the user asked
+     for, and each one is a place where "a plugin is not vrc.zip" has to stay visible.
+
+     **The sidebar groups per plugin, under a `Plugins` label.** One flat list would be a list where
+     nobody can tell whose entry is whose once two plugins are installed; the label above them all is
+     what stops a panel called "Notes" from reading as a feature of the app. **A stopped plugin keeps
+     its entries, greyed and marked** — an entry that vanished would hide the one fact that explains
+     why the thing they installed stopped working. The sidebar also scrolls and filters now, because
+     this list has no bound: the filter matches a plugin's *name* as well as its panels' titles, so
+     typing a plugin shows everything it contributes, and **↑/↓ walk the visible entries with Enter
+     to go**. Nothing is pre-selected — Enter on a freshly focused box must not navigate.
+
+     **The palette gives each plugin its own group, named `<Plugin name> (Plugin)`.** `CommandGroup`
+     became a template-literal type to allow it, which keeps a typo in *built-in* code a compile
+     error while letting a plugin's name be anything. Commands are their own host→plugin call
+     (`ui.command`, `onCommand`) rather than an intent, because a command belongs to the plugin and
+     not to a surface — it is reachable whether the plugin is drawing anything or not. The daemon
+     checks the id against what the manifest *declared*, so the palette cannot be talked into
+     invoking a command a plugin never offered.
+
+     **Toasts are their own frame kind**, not an op on the panel frame: a plugin with no panel open
+     can still have something to say, and a toast arriving as a panel operation would have to name a
+     panel that need not exist. The toast is titled with the **plugin's name** and carries its words
+     as the description, so an interruption says who is interrupting in one glance rather than
+     speaking in the host's voice.
+
+     Three defects found by clicking, all invisible to the suite:
+
+     - **`#ingest` routed panel frames but not toast frames.** `isEventFrame` excludes both, so a
+       frame the plugin branch does not name falls off the end of the function entirely. The daemon
+       was emitting toasts correctly for a whole build while nothing showed. **Both members have to
+       be named in that branch**, and that is now written where the branch is.
+     - **Registering plugin commands in a plain `$effect` looped forever.** `registerCommands` reads
+       the registry state it writes, so the effect depended on its own write:
+       `effect_update_depth_exceeded`, a blank screen, one exception. The dependency that should
+       re-run it is the contribution list, so that is the only read outside `untrack`.
+     - **A one-way `open` prop on `Dialog.Root` made the modal flicker.** bits-ui emits
+       `onOpenChange(false)` while it settles, before the dialog has ever been shown; forwarding that
+       fired the plugin's close intent, the plugin re-drew it closed, and the modal opened and shut
+       with nothing in the console. It is `bind:open` now, plus a non-reactive `shown` flag that
+       tells a real dismissal from that settling.
+
+     Verified in a browser: the sidebar group and filter, the panel page behind a sidebar entry, a
+     plugin's modal opening and closing, a toast titled with the plugin's name, and the palette
+     running a contributed command that answers with a toast.
+
 ---
 
 ## Gotchas

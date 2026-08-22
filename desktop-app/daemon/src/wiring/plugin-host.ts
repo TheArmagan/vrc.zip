@@ -80,6 +80,7 @@ import {
   type PanelChange,
   PanelRegistry,
   type PanelState,
+  type PluginToast,
 } from "../plugins/ui-panels.ts";
 import { DEFAULT_GRANT_BUDGETS } from "../proxy/passthrough.ts";
 import type { Store } from "../store/index.ts";
@@ -133,6 +134,18 @@ export interface InstalledPluginView {
    * run a file that no longer matches its hash, and the two want different sentences.
    */
   readonly refusal: string | null;
+  /** Declared panels, from the manifest. Surface rather than authority — see `view()`. */
+  readonly panels: readonly {
+    readonly id: string;
+    readonly title: string;
+    readonly placement: string;
+  }[];
+  /** Declared commands, for the palette. */
+  readonly commands: readonly {
+    readonly id: string;
+    readonly title: string;
+    readonly description: string | null;
+  }[];
 }
 
 export type PluginInstallOutcome =
@@ -171,6 +184,8 @@ export interface PluginHostOptions {
   readonly onConsentPending?: ((pending: PendingPluginConsent) => void) | undefined;
   /** Raised when a plugin draws, patches or closes a panel, for the control stream to forward. */
   readonly onPanelChange?: ((change: PanelChange) => void) | undefined;
+  /** Raised when a plugin asks for a toast. */
+  readonly onToast?: ((toast: PluginToast) => void) | undefined;
 }
 
 export interface PluginHost {
@@ -220,6 +235,13 @@ export interface PluginHost {
    * host mark one node busy without waiting on a redraw that may never come.
    */
   dispatchIntent(pluginId: string, dispatch: UiIntentDispatch): Promise<void>;
+  /**
+   * Runs one of a plugin's contributed commands.
+   *
+   * A command is not tied to a panel — it is reachable from the palette whether the plugin is
+   * drawing anything or not — so it is its own call rather than an intent with a made-up panel id.
+   */
+  runCommand(pluginId: string, commandId: string): Promise<void>;
 
   /** Plugin installs waiting for someone to answer, and the two ways to answer them. */
   readonly consent: {
@@ -328,6 +350,7 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
    */
   const panels = new PanelRegistry({
     ...(options.onPanelChange === undefined ? {} : { onChange: options.onPanelChange }),
+    ...(options.onToast === undefined ? {} : { onToast: options.onToast }),
   });
 
   const consent = new PluginConsentBroker({
@@ -523,6 +546,20 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
       scopes: grant?.scopes ?? [],
       accountIds: grant?.accountIds ?? [],
       refusal: refusals.get(status.pluginId) ?? null,
+      // What the plugin *declared* it contributes, from the manifest as accepted at install. Not
+      // authority — `contributes` is deliberately outside the grant — so it is read from the row
+      // rather than the grant, and it is what the sidebar and the command palette list. A plugin
+      // that is not running still has these: the sidebar entry is how you notice it stopped.
+      panels: (manifest?.contributes.panels ?? []).map((panel) => ({
+        id: panel.id,
+        title: panel.title,
+        placement: panel.placement,
+      })),
+      commands: (manifest?.contributes.commands ?? []).map((command) => ({
+        id: command.id,
+        title: command.title,
+        description: command.description ?? null,
+      })),
     };
   }
 
@@ -667,6 +704,16 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
                 scopes: manifest.permissions.scopes,
                 accountIds: [...accountIds],
                 refusal: null,
+                panels: manifest.contributes.panels.map((panel) => ({
+                  id: panel.id,
+                  title: panel.title,
+                  placement: panel.placement,
+                })),
+                commands: manifest.contributes.commands.map((command) => ({
+                  id: command.id,
+                  title: command.title,
+                  description: command.description ?? null,
+                })),
               }
             : view(status),
       };
@@ -704,6 +751,10 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
     },
 
     panels: (pluginId) => panels.list(pluginId),
+
+    async runCommand(pluginId, commandId) {
+      await dispatcher.call(pluginId, "ui.command", { commandId } as unknown as JsonValue);
+    },
 
     async dispatchIntent(pluginId, dispatch) {
       // `ui.intent` is the one method the *host* calls on the plugin. The dispatcher already owns

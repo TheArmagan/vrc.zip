@@ -23,6 +23,7 @@ import {
   type LoginInput,
   type LoginResult,
   type PluginPanelFrame,
+  type PluginToastFrame,
   type RateLimitSnapshot,
   type RateSeries,
   RETENTION_DEFAULT_KEY,
@@ -916,6 +917,15 @@ export interface PluginSummary {
   accountIds: string[];
   /** The three risky scopes, always all of them. See {@link PluginBudgetSummary}. */
   budgets: PluginBudgetSummary[];
+  /**
+   * What the plugin declared it contributes: panels for the sidebar, commands for the palette.
+   *
+   * From the manifest rather than the grant, because `contributes` is surface and not authority —
+   * a new panel reaches nothing a granted scope did not already reach. Present even when the plugin
+   * is stopped, which is what makes a sidebar entry the place you notice that it stopped.
+   */
+  panels: { id: string; title: string; placement: string }[];
+  commands: { id: string; title: string; description: string | null }[];
 }
 
 /** One requested scope, as the consent sheet renders it. */
@@ -1106,6 +1116,10 @@ export interface ControlDeps {
    * nothing outside the daemon may put a tree on this socket.
    */
   publishPluginPanel(frame: PluginPanelFrame): void;
+  /** Pushes a plugin's toast to every attached browser. */
+  publishPluginToast(frame: PluginToastFrame): void;
+  /** Runs one of a plugin's contributed commands. 404 when the plugin or the command is unknown. */
+  runPluginCommand(pluginId: string, commandId: string): Promise<void>;
 
   /** Every panel one plugin is drawing right now. Empty for a plugin that draws none. */
   listPluginPanels(pluginId: string): Promise<PluginPanelSummary[]>;
@@ -2422,6 +2436,11 @@ export function createControlApp({ port, deps, appApi, token }: ControlAppOption
     .get("/api/plugins/:id/panels", async (c) =>
       c.json(await deps.listPluginPanels(c.req.param("id"))),
     )
+
+    .post("/api/plugins/:id/commands/:commandId", async (c) => {
+      await deps.runPluginCommand(c.req.param("id"), c.req.param("commandId"));
+      return c.body(null, 204);
+    })
 
     .post("/api/plugins/:id/panels/:panelId/intent", async (c) => {
       const body = await readJsonObject(c.req.raw);

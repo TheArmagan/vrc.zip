@@ -36,7 +36,7 @@ export type { CommandHost };
  * affordance already lives. It stays in `ROUTE_IDS` because it is a real route; it is just not a
  * destination you can pick out of a list.
  */
-const UNLISTED_ROUTES: readonly RouteId[] = ["login"];
+const UNLISTED_ROUTES: readonly RouteId[] = ["login", "plugin"];
 
 const NAV_TITLES: Record<RouteId, string> = {
   sessions: "Go to Live sessions",
@@ -49,6 +49,9 @@ const NAV_TITLES: Record<RouteId, string> = {
   consent: "Go to App access",
   apps: "Go to Connected apps",
   plugins: "Go to Plugins",
+  // Never listed: a plugin panel is reached from its own sidebar entry, and the palette lists the
+  // plugin's *commands* instead. A "Go to plugin" with no plugin named would mean nothing.
+  plugin: "Go to a plugin panel",
   settings: "Go to Settings",
 };
 
@@ -63,6 +66,7 @@ const NAV_SUBTITLES: Record<RouteId, string> = {
   consent: "Apps asking to use your VRChat accounts through vrc.zip",
   apps: "Standing app access, and the switch that cuts it off",
   plugins: "Installs waiting to be approved, and what is installed",
+  plugin: "One plugin's panel",
   settings: "Contact address, log directories, ports",
 };
 

@@ -20,7 +20,9 @@ import {
   type EventKind,
   type RateFrame,
   type PluginPanelFrame,
+  type PluginToastFrame,
   STREAM_PLUGIN_PANEL,
+  STREAM_PLUGIN_TOAST,
   STREAM_RATE,
   STREAM_READY,
   type StreamEnvelope,
@@ -124,6 +126,21 @@ function asPanelFrame(value: unknown): PluginPanelFrame | null {
   };
 }
 
+/** A plugin toast's payload, or null if it is not one. */
+function asToastFrame(value: unknown): PluginToastFrame | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.pluginId !== "string" || typeof record.message !== "string") return null;
+  const tone = record.tone;
+  return {
+    pluginId: record.pluginId,
+    pluginName: typeof record.pluginName === "string" ? record.pluginName : record.pluginId,
+    message: record.message,
+    ...(typeof record.description === "string" ? { description: record.description } : {}),
+    tone: tone === "success" || tone === "warn" || tone === "danger" ? tone : "neutral",
+  };
+}
+
 /** Narrows an arbitrary parsed frame, dropping anything without a usable `type`. */
 export function parseFrame(raw: string): StreamFrame | null {
   let parsed: unknown;
@@ -146,6 +163,13 @@ export function parseFrame(raw: string): StreamFrame | null {
     // sample leaves the last value on screen for a second, and inventing a zero would draw a dip
     // that never happened.
     return payload === null ? null : { type: STREAM_RATE, ts, payload };
+  }
+
+  if (record.type === STREAM_PLUGIN_TOAST) {
+    // Passed through for the same reason the panel frame is: `asPayload` would shape it into an
+    // envelope and the toast would arrive as a frame carrying nothing.
+    const payload = asToastFrame(record.payload);
+    return payload === null ? null : { type: STREAM_PLUGIN_TOAST, ts, payload };
   }
 
   if (record.type === STREAM_PLUGIN_PANEL) {

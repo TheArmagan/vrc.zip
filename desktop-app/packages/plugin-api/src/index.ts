@@ -90,6 +90,7 @@ export {
   type StorageApi,
   type SubscribeOptions,
   type Subscription,
+  type UiApi,
   type VrchatApi,
 } from "./runtime.ts";
 

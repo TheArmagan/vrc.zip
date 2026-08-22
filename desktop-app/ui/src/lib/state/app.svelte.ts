@@ -1,4 +1,9 @@
-import { isEventFrame, isPluginPanelFrame, isRateFrame } from "@vrcz/shared";
+import {
+  isEventFrame,
+  isPluginPanelFrame,
+  isPluginToastFrame,
+  isRateFrame,
+} from "@vrcz/shared";
 /**
  * The shell's shared state: daemon status, accounts, live sessions, settings, and the live event
  * tail. Screens own their own queries; anything the sidebar, the palette, or two screens all need
@@ -252,8 +257,13 @@ class AppState {
       rates.apply(frame.payload);
       return;
     }
-    // Nor is a plugin redrawing its own panel. Same reasoning, one union member later.
-    if (isPluginPanelFrame(frame)) {
+    /*
+     * Nor is a plugin redrawing its own panel, or asking for a toast. Same reasoning, two union
+     * members later — and **both** have to be named here: `isEventFrame` excludes them, so a frame
+     * this branch misses is a frame that falls off the end of `#ingest` entirely. That is exactly
+     * how the toast went missing for one build while the daemon was emitting it correctly.
+     */
+    if (isPluginPanelFrame(frame) || isPluginToastFrame(frame)) {
       pluginPanels.apply(frame);
       return;
     }

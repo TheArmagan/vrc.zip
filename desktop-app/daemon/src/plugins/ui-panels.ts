@@ -58,6 +58,14 @@ export interface PanelState {
   readonly updatedAt: number;
 }
 
+/** One toast a plugin asked for. Not a panel operation — see `STREAM_PLUGIN_TOAST`. */
+export interface PluginToast {
+  readonly pluginId: string;
+  readonly message: string;
+  readonly description?: string;
+  readonly tone: "neutral" | "success" | "warn" | "danger";
+}
+
 export type PanelChange =
   | {
       readonly op: "set";
@@ -77,6 +85,8 @@ export type PanelChange =
 export interface PanelRegistryOptions {
   /** Raised after every accepted change, for the control stream to forward. */
   readonly onChange?: (change: PanelChange) => void;
+  /** Raised for `ui.toast`. */
+  readonly onToast?: (toast: PluginToast) => void;
   readonly now?: () => number;
 }
 
@@ -90,10 +100,12 @@ export interface PanelRegistryOptions {
 export class PanelRegistry {
   readonly #panels = new Map<string, Map<string, PanelState>>();
   readonly #onChange: ((change: PanelChange) => void) | undefined;
+  readonly #onToast: ((toast: PluginToast) => void) | undefined;
   readonly #now: () => number;
 
   constructor(options: PanelRegistryOptions = {}) {
     this.#onChange = options.onChange;
+    this.#onToast = options.onToast;
     this.#now = options.now ?? (() => Date.now());
   }
 
@@ -157,6 +169,21 @@ export class PanelRegistry {
     if (owned.size === 0) this.#panels.delete(pluginId);
     this.#emit({ op: "close", pluginId, panelId });
     return true;
+  }
+
+  /**
+   * Asks the host to show a toast.
+   *
+   * Rate-limited by nothing here on purpose: the frame budget in the transport already bounds how
+   * fast a plugin can send anything at all, and a second limiter over one message type would be a
+   * number to explain rather than a property to rely on.
+   */
+  toast(toast: PluginToast): void {
+    try {
+      this.#onToast?.(toast);
+    } catch {
+      // Same reasoning as `#emit`: a subscriber that throws must not fail the plugin's call.
+    }
   }
 
   /** Drops every panel a plugin holds. Called when it stops, however it stopped. */
@@ -281,6 +308,40 @@ export function createUiMethods(deps: UiMethodDeps): GatedMethodTable {
         },
         handle: async ({ panelId, key, tree }, ctx) => {
           deps.panels.patch(ctx.grant.pluginId, panelId, key, tree);
+          return null;
+        },
+      }),
+    },
+
+    "ui.toast": {
+      account: "none",
+      method: uiMethod<
+        { message: string; description?: string; tone: PluginToast["tone"] },
+        null
+      >({
+        parse: (raw) => {
+          if (!isJsonObject(raw)) throw new DispatchError("E_BAD_REQUEST", "Expected an object.");
+          const message = raw.message;
+          if (typeof message !== "string" || message === "" || message.length > 200) {
+            throw new DispatchError(
+              "E_BAD_REQUEST",
+              "message must be a short line of text, at most 200 characters.",
+            );
+          }
+          const description = typeof raw.description === "string" ? raw.description : undefined;
+          const tone = raw.tone;
+          return {
+            ok: true,
+            value: {
+              message,
+              ...(description === undefined ? {} : { description: description.slice(0, 400) }),
+              tone:
+                tone === "success" || tone === "warn" || tone === "danger" ? tone : "neutral",
+            },
+          };
+        },
+        handle: async (toast, ctx) => {
+          deps.panels.toast({ pluginId: ctx.grant.pluginId, ...toast });
           return null;
         },
       }),

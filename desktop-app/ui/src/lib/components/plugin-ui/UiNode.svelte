@@ -34,6 +34,7 @@ import { Alert, AlertDescription, AlertTitle } from "$lib/components/ui/alert/in
 import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
 import * as Card from "$lib/components/ui/card/index.js";
+import * as Dialog from "$lib/components/ui/dialog/index.js";
 import { Input } from "$lib/components/ui/input/index.js";
 import { Label } from "$lib/components/ui/label/index.js";
 import { ScrollArea } from "$lib/components/ui/scroll-area/index.js";
@@ -91,6 +92,31 @@ function setValue(name: string | undefined, value: string | number | boolean): v
   if (name === undefined || form === null) return;
   form[name] = value;
 }
+
+/**
+ * Whether this node's dialog is showing.
+ *
+ * Bound rather than passed one-way, because bits-ui owns the open state while the dialog is up —
+ * Escape and the scrim close it locally, and the plugin learns from the intent rather than being
+ * asked for permission. `node.open` is the plugin's word and seeds this on every tree it sends.
+ */
+let dialogOpen = $state(false);
+/** Non-reactive: has this dialog ever actually been shown? See `onOpenChange`. */
+let shown = false;
+
+$effect(() => {
+  if (node.type !== "dialog") return;
+  dialogOpen = node.open;
+  if (node.open) shown = true;
+});
+
+/**
+ * Which tab is showing, when this node is a `tabs`.
+ *
+ * Host-owned and local: a tab switch must feel instant and an intent round-trips to another
+ * process. `null` means "whatever the plugin said", so a plugin can move the tab by patching.
+ */
+let activeTab = $state<string | null>(null);
 
 const gapClass: Record<string, string> = {
   none: "gap-0",
@@ -296,6 +322,86 @@ const toneClass: Record<string, string> = {
       <p class="text-destructive text-xs">{error}</p>
     {/if}
   </div>
+{:else if node.type === "dialog"}
+  <!--
+    A plugin's modal.
+
+    `open` is the plugin's, not the host's: the tree says whether it is showing, so a plugin that
+    wants it closed patches the node. The close gesture still works locally — Escape, the scrim, the
+    X — and fires `onClose` so the plugin can update its own tree. Leaving it open on screen after a
+    user dismissed it, waiting for a round trip, would be a modal that ignores Escape.
+  -->
+  <Dialog.Root
+    bind:open={dialogOpen}
+    onOpenChange={(next) => {
+      /*
+       * Only a *user* close fires the plugin's `onClose`.
+       *
+       * Measured, not guessed: bits-ui emits `onOpenChange(false)` while it settles, before the
+       * dialog has ever been shown. Forwarding that fired the plugin's close intent immediately,
+       * the plugin dutifully re-drew the dialog closed, and the modal flickered open and shut with
+       * nothing in the console to say why. `shown` is what tells a real dismissal from that.
+       */
+      if (next) {
+        shown = true;
+        return;
+      }
+      if (!shown) return;
+      shown = false;
+      fire(node.onClose);
+    }}
+  >
+    <Dialog.Content>
+      <Dialog.Header>
+        <Dialog.Title>{node.title}</Dialog.Title>
+        {#if node.description !== undefined}
+          <Dialog.Description>{node.description}</Dialog.Description>
+        {/if}
+      </Dialog.Header>
+      <div class="flex flex-col gap-2">
+        {#each childrenOf(node) as child, i (child.key ?? i)}
+          <UiNode node={child} {pluginId} {panelId} path={`${path}.${i}`} {form} />
+        {/each}
+      </div>
+      {#if node.actions !== undefined && node.actions.length > 0}
+        <Dialog.Footer>
+          {#each node.actions as action, i (action.key ?? i)}
+            <UiNode node={action} {pluginId} {panelId} path={`${path}.action.${i}`} {form} />
+          {/each}
+        </Dialog.Footer>
+      {/if}
+    </Dialog.Content>
+  </Dialog.Root>
+{:else if node.type === "tabs"}
+  <!--
+    Which tab is showing is the *host's* business while the panel is open: switching has to feel
+    instant, and an intent round-trips to another process. The plugin's `value` seeds it.
+  -->
+  {@const items = node.items}
+  {#if items.length > 0}
+    <div class="flex flex-col gap-2">
+      <div class="flex flex-wrap gap-1 border-border border-b">
+        {#each items as item (item.id)}
+          <button
+            type="button"
+            class="border-b-2 px-3 py-1.5 text-sm {(activeTab ?? items[0]?.id) === item.id
+              ? 'border-primary text-foreground'
+              : 'border-transparent text-muted-foreground hover:text-foreground'}"
+            onclick={() => {
+              activeTab = item.id;
+            }}
+          >
+            {item.label}
+          </button>
+        {/each}
+      </div>
+      {#each items as item, i (item.id)}
+        {#if (activeTab ?? items[0]?.id) === item.id}
+          <UiNode node={item.content} {pluginId} {panelId} path={`${path}.tab.${i}`} {form} />
+        {/if}
+      {/each}
+    </div>
+  {/if}
 {:else if node.type === "table"}
   <PluginTable {node} {pluginId} {panelId} path={`${path}.table`} />
 {:else if node.type === "list"}

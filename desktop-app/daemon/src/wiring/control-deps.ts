@@ -21,6 +21,7 @@ import {
   isScope,
   type JsonValue,
   type PluginPanelFrame,
+  type PluginToastFrame,
   type RateCeilingSnapshot,
   type RateFrame,
   RETENTION_DEFAULT_KEY,
@@ -29,6 +30,7 @@ import {
   type RetentionUpdate,
   SCOPES,
   STREAM_PLUGIN_PANEL,
+  STREAM_PLUGIN_TOAST,
   STREAM_RATE,
   type WebhookSummary,
   type WorldInstanceList,
@@ -855,6 +857,8 @@ function toPluginSummary(
     refusal: view.refusal,
     scopes: [...view.scopes],
     accountIds: [...view.accountIds],
+    panels: view.panels.map((panel) => ({ ...panel })),
+    commands: view.commands.map((command) => ({ ...command })),
     budgets: budgets.map((entry) => ({
       scope: entry.scope,
       description: isScope(entry.scope) ? SCOPES[entry.scope].description : entry.scope,
@@ -3178,6 +3182,39 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
      * on the bus would give it a retention window, a feed row and a webhook delivery, three things
      * that would then each need to learn to ignore it. See `STREAM_PLUGIN_PANEL`.
      */
+    publishPluginToast(frame: PluginToastFrame): void {
+      const event: StreamEvent = { type: STREAM_PLUGIN_TOAST, ts: Date.now(), payload: frame };
+      for (const listener of streamListeners) {
+        try {
+          listener(event);
+        } catch {
+          // One wedged socket must not stop the others being told.
+        }
+      }
+    },
+
+    async runPluginCommand(pluginId, commandId): Promise<void> {
+      const host = options.plugins;
+      if (host === undefined) {
+        throw new ControlError(404, "unknown_plugin", `${pluginId} is not installed.`);
+      }
+      const view = host.list().find((entry) => entry.status.pluginId === pluginId);
+      if (view === undefined) {
+        throw new ControlError(404, "unknown_plugin", `${pluginId} is not installed.`);
+      }
+      // Checked against what the plugin *declared*, so the palette cannot be talked into invoking a
+      // command id a plugin never offered — which would reach `onCommand` as a string of someone
+      // else's choosing.
+      if (!view.commands.some((command) => command.id === commandId)) {
+        throw new ControlError(
+          404,
+          "unknown_command",
+          `${pluginId} does not contribute a "${commandId}" command.`,
+        );
+      }
+      await host.runCommand(pluginId, commandId);
+    },
+
     publishPluginPanel(frame: PluginPanelFrame): void {
       const event: StreamEvent = {
         type: STREAM_PLUGIN_PANEL,

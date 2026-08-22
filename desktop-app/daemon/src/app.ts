@@ -15,7 +15,7 @@ import { openUrl } from "./os/open-url.ts";
 import { databasePath, ensureStateDir } from "./paths.ts";
 import { PipelineClient } from "./pipeline/index.ts";
 import type { PendingPluginConsent } from "./plugins/consent.ts";
-import type { PanelChange } from "./plugins/ui-panels.ts";
+import type { PanelChange, PluginToast } from "./plugins/ui-panels.ts";
 import { ConsentRegistry } from "./proxy/consent.ts";
 import { PipelineMirror } from "./proxy/pipeline-mirror.ts";
 import { createProxyLogger, PROXY_LOG_ENV } from "./proxy/request-log.ts";
@@ -306,6 +306,11 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
    * than relied on: an install cannot happen before the servers are up, but a closure that would
    * throw if it did is not something to leave to reading order.
    */
+  let publishToast: (toast: PluginToast) => void = () => {
+    // Nothing is attached yet, and a toast is by nature about *now* — queuing one for whoever
+    // connects later would show a stale message to someone who was not there.
+  };
+
   let publishPanelChange: (change: PanelChange) => void = () => {
     // Before the servers exist there is no browser to tell, and the panel is already stored — a
     // reader that connects later gets it from `GET /api/plugins/:id/panels`.
@@ -337,6 +342,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     // Forwarded to every attached browser. The holder is assigned once `deps` exists, for the same
     // ordering reason as the consent alert above.
     onPanelChange: (change) => publishPanelChange(change),
+    onToast: (toast) => publishToast(toast),
   });
 
   // --- servers --------------------------------------------------------------
@@ -551,6 +557,19 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
    * terminal, `curl`. There the request would otherwise park for five minutes and expire in
    * silence, so both channels fire: a toast, and a browser on the plugins screen.
    */
+  publishToast = (toast) => {
+    const plugin = plugins.list().find((entry) => entry.status.pluginId === toast.pluginId);
+    deps.publishPluginToast({
+      pluginId: toast.pluginId,
+      // Named rather than id'd: a toast says "Notes" and not "acme.notes", because the person
+      // reading it is being interrupted and has to place it in one glance.
+      pluginName: plugin?.name ?? toast.pluginId,
+      message: toast.message,
+      ...(toast.description === undefined ? {} : { description: toast.description }),
+      tone: toast.tone,
+    });
+  };
+
   publishPanelChange = (change) => {
     deps.publishPluginPanel({
       pluginId: change.pluginId,

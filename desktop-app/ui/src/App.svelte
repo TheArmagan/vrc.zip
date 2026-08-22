@@ -18,6 +18,9 @@ import GroupModal from "$lib/components/GroupModal.svelte";
 import UserModal from "$lib/components/UserModal.svelte";
 import WorldModal from "$lib/components/WorldModal.svelte";
 import { Toaster } from "$lib/components/ui/sonner/index.js";
+import { registerPluginCommands } from "$lib/commands/plugins.svelte.ts";
+import { pluginContributions } from "$lib/state/plugin-contributions.svelte.ts";
+import { pluginPanels } from "$lib/state/plugin-panels.svelte.ts";
 import { registerBuiltinCommands } from "$lib/commands/builtin.svelte.ts";
 import { isTypingTarget, matchKeybinding, runCommand } from "$lib/commands.svelte.ts";
 import { currentRoute, onRouteChange, type Route } from "$lib/router.ts";
@@ -45,6 +48,64 @@ $effect(() =>
  * running eagerly would be enough to re-register every command on the next session change.
  */
 $effect(() => untrack(() => app.start()));
+
+$effect(() =>
+  untrack(() => {
+    /*
+     * A plugin's toast, shown as the plugin rather than as the app.
+     *
+     * The name is the toast's title and the plugin's words are the description, so an interruption
+     * says who is interrupting in one glance — a message that reads as vrc.zip's own would be a
+     * third party speaking in the host's voice.
+     */
+    void pluginContributions.refresh();
+
+    pluginPanels.onToast = ({ pluginName, message, description, tone }) => {
+      const options = {
+        description: description === undefined ? message : `${message} — ${description}`,
+        duration: tone === "danger" ? 8000 : 4000,
+      };
+      if (tone === "success") toast.success(pluginName, options);
+      else if (tone === "warn") toast.warning(pluginName, options);
+      else if (tone === "danger") toast.error(pluginName, options);
+      else toast.info(pluginName, options);
+    };
+  }),
+);
+
+/**
+ * Plugin commands, re-registered whenever the contribution list changes.
+ *
+ * A plain `$effect` rather than `untrack`, unlike the builtins below: builtins are fixed at
+ * startup, while a plugin installed or removed *now* has to appear in or leave the palette without
+ * a reload. The teardown is what keeps a removed plugin's commands from lingering.
+ */
+$effect(() => {
+  /*
+   * Read tracked, register untracked.
+   *
+   * `registerCommands` writes to the registry's own `$state`, and it reads that same state to
+   * append — so registering inside a plain effect makes the effect depend on what it just wrote and
+   * re-run forever. Svelte says so as `effect_update_depth_exceeded`, which is what this looked
+   * like from the outside: a blank screen and one exception.
+   *
+   * The dependency that *should* re-run this is the contribution list, so that is the one read
+   * outside `untrack`.
+   */
+  const contributions = pluginContributions.commands;
+  return untrack(() =>
+    registerPluginCommands(contributions, {
+      notify: (level, title, detail) => {
+        const options = {
+          ...(detail === undefined ? {} : { description: detail }),
+          duration: level === "error" ? 8000 : 4000,
+        };
+        if (level === "error") toast.error(title, options);
+        else toast.info(title, options);
+      },
+    }),
+  );
+});
 
 $effect(() =>
   untrack(() =>
@@ -112,7 +173,10 @@ const screenProps = $derived<Record<string, unknown>>(
       : // `#/consent/<pairingId>` — where the daemon's browser-open lands.
         route.id === "consent"
         ? { pairingId: route.param }
-        : {},
+        : // The one two-parameter route: a panel is a plugin *and* a panel id.
+          route.id === "plugin"
+          ? { pluginId: route.param ?? "", panelId: route.subParam ?? "" }
+          : {},
 );
 </script>
 

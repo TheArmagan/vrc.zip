@@ -49,6 +49,8 @@ const deps: ControlDeps = {
   },
   uninstallPlugin: async () => {},
   publishPluginPanel: () => {},
+  publishPluginToast: () => {},
+  runPluginCommand: async () => {},
   listPluginPanels: async () => [],
   dispatchPluginIntent: async () => {},
   setPluginDryRun: async () => {

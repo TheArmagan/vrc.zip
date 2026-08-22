@@ -47,6 +47,7 @@ const loaders = {
   consent: () => import("./ConsentScreen.svelte"),
   apps: () => import("./ConnectedAppsScreen.svelte"),
   plugins: () => import("./PluginsScreen.svelte"),
+  plugin: () => import("./PluginPanelScreen.svelte"),
   settings: () => import("./SettingsScreen.svelte"),
 } satisfies Record<RouteId, () => Promise<{ default: unknown }>>;
 

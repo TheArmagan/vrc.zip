@@ -126,6 +126,8 @@ const PLUGIN: PluginSummary = {
   refusal: null,
   scopes: ["friends:read"],
   accountIds: ["usr_a"],
+  panels: [{ id: "notes", title: "Notes", placement: "sidebar" }],
+  commands: [{ id: "export", title: "Export notes", description: null }],
   budgets: [
     {
       scope: "invite:send",
@@ -498,6 +500,7 @@ interface Recorder {
   pluginToggles: { id: string; enabled: boolean }[];
   pluginsUninstalled: string[];
   dryRunWrites: { pluginId: string; scope: string; lifted: boolean }[];
+  commandsRun: { pluginId: string; commandId: string }[];
   panels: PluginPanelSummary[];
   intents: { pluginId: string; panelId: string; intent: JsonValue; formState: JsonValue }[];
   pendingConsents: PendingPluginConsentSummary[];
@@ -549,6 +552,7 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     pluginToggles: [],
     pluginsUninstalled: [],
     dryRunWrites: [],
+    commandsRun: [],
     panels: [
       {
         pluginId: "acme.hello",
@@ -637,6 +641,13 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
       seen.pluginsUninstalled.push(pluginId);
     },
     publishPluginPanel: () => {},
+    publishPluginToast: () => {},
+    runPluginCommand: async (pluginId, commandId) => {
+      if (pluginId !== PLUGIN.id || !PLUGIN.commands.some((entry) => entry.id === commandId)) {
+        throw new ControlError(404, "unknown_command");
+      }
+      seen.commandsRun.push({ pluginId, commandId });
+    },
     listPluginPanels: async (pluginId) => (pluginId === PLUGIN.id ? [...seen.panels] : []),
     dispatchPluginIntent: async (pluginId, panelId, intent, formState) => {
       if (!seen.panels.some((panel) => panel.panelId === panelId)) {

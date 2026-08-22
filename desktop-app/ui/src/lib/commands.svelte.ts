@@ -25,7 +25,20 @@ export type CommandGroup =
   | "App access"
   | "Instant actions"
   | "Data"
-  | "Application";
+  | "Application"
+  /**
+   * One group **per plugin**, named `"<plugin name> (Plugin)"`.
+   *
+   * Not one shared "Plugins" group, and the difference matters once more than one is installed: a
+   * user hunting for something they added is remembering *which plugin it came with*, and a single
+   * bucket makes them read every plugin's commands to find one plugin's. The `(Plugin)` suffix is
+   * what keeps the group from being mistaken for a built-in section — everything else in this
+   * palette is vrc.zip, and these are somebody else's code.
+   *
+   * A template literal type rather than `string`, so a typo'd group in *built-in* code is still a
+   * compile error while a plugin's name can be anything.
+   */
+  | `${string} (Plugin)`;
 
 /**
  * A command that needs something typed before it can run.

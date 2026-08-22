@@ -629,6 +629,14 @@ export interface InstalledPlugin {
    * vanished would hide the control exactly when someone wants to confirm it is closed.
    */
   readonly budgets: readonly PluginBudget[];
+  /**
+   * What the plugin declared it contributes.
+   *
+   * Present whether or not it is running — a sidebar entry for a stopped plugin is how someone
+   * notices that it stopped, rather than the entry silently vanishing.
+   */
+  readonly panels: readonly { id: string; title: string; placement: string }[];
+  readonly commands: readonly { id: string; title: string; description: string | null }[];
 }
 
 /**
@@ -1407,6 +1415,13 @@ export const api = {
       request<void>(
         `/plugins/${encodeURIComponent(pluginId)}/panels/${encodeURIComponent(panelId)}/intent`,
         { method: "POST", body: { intent, formState } },
+      ),
+
+    /** Runs one of a plugin's contributed commands. The plugin decides what that means. */
+    runCommand: (pluginId: string, commandId: string): Promise<void> =>
+      request<void>(
+        `/plugins/${encodeURIComponent(pluginId)}/commands/${encodeURIComponent(commandId)}`,
+        { method: "POST" },
       ),
 
     pending: (signal?: AbortSignal): Promise<PendingPluginConsent[]> =>

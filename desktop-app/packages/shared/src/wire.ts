@@ -609,6 +609,15 @@ export const STREAM_RATE = "rate";
 export const STREAM_PLUGIN_PANEL = "plugin.panel";
 
 /**
+ * A plugin asking for a toast.
+ *
+ * Separate from the panel frame rather than an `op` on it, because a toast is not part of any
+ * panel's tree: a plugin with no panel open can still have something to say, and a toast arriving
+ * as a panel operation would have to name a panel that need not exist.
+ */
+export const STREAM_PLUGIN_TOAST = "plugin.toast";
+
+/**
  * How many one-second buckets a rate history carries. One minute.
  *
  * Here rather than in the daemon's meter because both sides have to agree on it: the daemon fills
@@ -692,6 +701,11 @@ export type StreamFrame =
       readonly type: typeof STREAM_PLUGIN_PANEL;
       readonly ts: number;
       readonly payload: PluginPanelFrame;
+    }
+  | {
+      readonly type: typeof STREAM_PLUGIN_TOAST;
+      readonly ts: number;
+      readonly payload: PluginToastFrame;
     };
 
 /**
@@ -719,6 +733,21 @@ export interface PluginPanelFrame {
   readonly tree: JsonValue | null;
 }
 
+/**
+ * One toast a plugin asked the host to show.
+ *
+ * The host decides how it looks and how long it lasts. A plugin supplies words and a tone, which is
+ * the same posture as the rest of the UI vocabulary: the plugin describes, the host draws.
+ */
+export interface PluginToastFrame {
+  readonly pluginId: string;
+  /** Shown as the toast's own name, so a user can tell which plugin is talking. */
+  readonly pluginName: string;
+  readonly message: string;
+  readonly description?: string;
+  readonly tone: "neutral" | "success" | "warn" | "danger";
+}
+
 /** A frame carrying a bus event, as opposed to the `ready` handshake or a `rate` sample. */
 export type StreamEventFrame = Extract<StreamFrame, { payload: StreamEnvelope }>;
 
@@ -732,8 +761,18 @@ export type StreamEventFrame = Extract<StreamFrame, { payload: StreamEnvelope }>
  */
 export function isEventFrame(frame: StreamFrame): frame is StreamEventFrame {
   return (
-    frame.type !== STREAM_READY && frame.type !== STREAM_RATE && frame.type !== STREAM_PLUGIN_PANEL
+    frame.type !== STREAM_READY &&
+    frame.type !== STREAM_RATE &&
+    frame.type !== STREAM_PLUGIN_PANEL &&
+    frame.type !== STREAM_PLUGIN_TOAST
   );
+}
+
+/** Narrows a frame to a plugin toast. */
+export function isPluginToastFrame(
+  frame: StreamFrame,
+): frame is Extract<StreamFrame, { payload: PluginToastFrame }> {
+  return frame.type === STREAM_PLUGIN_TOAST;
 }
 
 /** Narrows a frame to a plugin panel update. */

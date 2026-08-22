@@ -1338,36 +1338,55 @@ describe("control deps: groups and mutual friends", () => {
     offline.stop();
   });
 
+  /*
+   * Asserts on the *paths*, not on counts of them, and that is deliberate.
+   *
+   * This test failed exactly once in a full run and has never been reproduced since — not in seven
+   * consecutive full runs, nor in eighteen targeted ones. Reading the path rules out what usually
+   * causes that: every request `getUser` and `listUsers` make is awaited (no fire-and-forget
+   * supplement can land late and inflate a count), the fixture, the store and the limiter are all
+   * per-harness, `control-deps.ts` holds no module-level state and starts no timer, and
+   * `USER_CACHE_TTL_MS` is ten minutes, so the warm cannot expire between the two calls no matter
+   * how loaded the machine is.
+   *
+   * So the mechanism is still unknown, and a count-based assertion is the wrong thing to be holding
+   * when it next fires: "expected 2, received 3" does not say *which* request was extra, which is
+   * the only fact that would identify the cause. Comparing whole arrays costs nothing and makes the
+   * next failure self-describing. See PROGRESS.md decision 103.
+   */
   test("the user batch is cache-first, sequential, and leaves the unreadable out", async () => {
     const h = harness();
     await resumeAll(h);
 
     // Warms `user_cache` for SUBJECT through the modal's own path.
     await h.deps.getUser(SUBJECT, VIEWER);
-    const afterWarm = h.requests.filter((path) => path.includes("/users/")).length;
-    const groupsAfterWarm = h.requests.filter((path) =>
-      path.endsWith("/groups/represented"),
-    ).length;
-    const profilesAfterWarm = h.requests.filter((path) => path.includes("/profile/")).length;
+    const afterWarm = h.requests.filter((path) => path.includes("/users/"));
+    const groupsAfterWarm = h.requests.filter((path) => path.endsWith("/groups/represented"));
+    const profilesAfterWarm = h.requests.filter((path) => path.includes("/profile/"));
 
     const batch = await h.deps.listUsers([SUBJECT, "usr_other_one"], VIEWER);
 
     expect(batch.users.map((user) => user.id)).toEqual([SUBJECT, "usr_other_one"]);
     // The cached one cost nothing; only the second was fetched. One call, not two.
-    expect(h.requests.filter((path) => path.endsWith(`/users/${SUBJECT}`)).length).toBe(1);
-    expect(h.requests.filter((path) => path.includes("/users/")).length).toBe(afterWarm + 1);
+    expect(h.requests.filter((path) => path.endsWith(`/users/${SUBJECT}`))).toEqual([
+      `/api/1/users/${SUBJECT}`,
+    ]);
+    expect(h.requests.filter((path) => path.includes("/users/"))).toEqual([
+      ...afterWarm,
+      "/api/1/users/usr_other_one",
+    ]);
     // And neither supplement is fetched per head: either would multiply the most expensive path in
     // the app for decoration no roster row draws.
-    expect(h.requests.filter((path) => path.endsWith("/groups/represented")).length).toBe(
+    expect(h.requests.filter((path) => path.endsWith("/groups/represented"))).toEqual(
       groupsAfterWarm,
     );
-    expect(h.requests.filter((path) => path.includes("/profile/")).length).toBe(profilesAfterWarm);
+    expect(h.requests.filter((path) => path.includes("/profile/"))).toEqual(profilesAfterWarm);
 
     // The second call is served entirely from what the first wrote.
-    const before = h.requests.length;
+    const before = [...h.requests];
     const again = await h.deps.listUsers([SUBJECT, "usr_other_one"], VIEWER);
     expect(again.users).toHaveLength(2);
-    expect(h.requests.length).toBe(before);
+    expect(h.requests).toEqual(before);
     h.stop();
   });
 

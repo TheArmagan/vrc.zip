@@ -229,9 +229,12 @@ handshake, because the alternative is a login flow that mints credentials with n
       `ALLOWED_HOSTNAMES` is now `127.0.0.1` and `localhost`, and the hostname is asserted *rejected*
       by `hostGuard`, `originGuard` and `isLoopbackHttpUrl` rather than merely unused, since the
       launch URL carries the session token. The `useLocalDomain` setting, its wire fields and its
-      Settings toggle go with it; see §Gotchas for what that removal turned up. Still outstanding:
-      **fix the flaky control-deps test** (decision 103) and **cap + budget the roster fallback**
-      (decision 102).
+      Settings toggle go with it; see §Gotchas for what that removal turned up. The **flaky
+      control-deps test** (decision 103) did not reproduce — seven consecutive full runs and
+      eighteen targeted ones — and reading the path ruled out the usual mechanisms, so what landed
+      is a hardening rather than a fix: it asserts on request *paths* instead of counts, so the next
+      failure names the extra request instead of printing "expected 2, received 3". Still
+      outstanding: **cap + budget the roster fallback** (decision 102).
 - [ ] **2.10 Control API** (`:7775`) — consent status, grant list/revoke, the enriched event stream
       with `sessionId`/`accountId`/`displayName` on every `gamelog.*`, and webhook registration.
       **Scoped by the 2026-08-22 planning pass (decisions 97, 98, 99, 104):** webhooks ship *with*
@@ -1618,6 +1621,16 @@ below in one line, because a question closed without a trace is a question that 
   release asset's SHA-256 by hand when the pin is bumped**, since it is now a build input and the pin
   lives in four places rather than three (`packageManager`, `engines.bun`, `.bun-version`, the runtime
   hash). CLAUDE.md still says three and will need updating when the fetcher lands.
+- **The control-deps flake was not reproduced, and its mechanism is still unknown.** `the user
+  batch is cache-first, sequential, and leaves the unreadable out` failed once in a full run and has
+  now survived seven consecutive full runs plus eighteen targeted ones. Reading the path rules out
+  what usually explains that shape: every request both calls make is awaited, so no late supplement
+  can inflate a count; the fixture, store and limiter are per-harness; `control-deps.ts` holds no
+  module-level state and starts no timer; and `USER_CACHE_TTL_MS` is ten minutes, so load cannot
+  expire the warm between the two calls. Decision 103 asked for a fix and there is nothing yet to
+  fix — the assertions now compare whole path arrays instead of counts, so **the next occurrence
+  identifies itself**. A test timeout under a loaded full run remains the leading hypothesis and is
+  the first thing to check if it fires again.
 - **The per-user roster fallback still wants a real measurement**, even though its design is now
   decided (decision 102: cap the eager batch, hover-hydrate the rest, low-priority budget under the
   account bucket). The number worth having is what a busy public instance actually costs against the

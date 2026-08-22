@@ -57,6 +57,10 @@ const deps: ControlDeps = {
     throw new Error("unused");
   },
   listMutualFriends: async () => ({ users: [], hasMore: false }),
+  listGroupMembers: async () => ({ members: [], hasMore: false }),
+  listGroupPosts: async () => ({ posts: [], hasMore: false }),
+  listGroupInstances: async () => ({ instances: [] }),
+  listGroupGalleryImages: async () => ({ images: [], hasMore: false }),
   getSettings: async () => ({}),
   updateSettings: async () => ({}),
   subscribeEvents: () => () => {},

@@ -40,7 +40,14 @@
  * a singleton cannot hold two subjects at once.
  */
 
-import { describeError, isAbort, isNoAccountOnline, isNotFound, isOffline } from "../api.ts";
+import {
+  describeError,
+  isAbort,
+  isForbidden,
+  isNoAccountOnline,
+  isNotFound,
+  isOffline,
+} from "../api.ts";
 
 /**
  * Where a load is. `idle` is load-bearing rather than a starting value: a lazily-loaded section
@@ -53,17 +60,20 @@ export type LoadPhase = "idle" | "loading" | "ready" | "error";
 /**
  * Why something could not be read.
  *
- * Only `other` is a genuine fault. `no-account` and `not-found` are ordinary outcomes and `offline`
- * is the shell's story, already told at the top of the app — each modal maps these to its own
- * sentences rather than to a shared generic one, because what they mean depends on what was being
- * looked up.
+ * Only `other` is a genuine fault. `no-account` and `not-found` are ordinary outcomes, `offline` is
+ * the shell's story already told at the top of the app, and `forbidden` is a rule about who may
+ * look rather than anything going wrong — most VRChat groups will not show their member list to a
+ * non-member, and answering that with an error invites a retry that cannot ever succeed. Each
+ * caller maps these to its own sentences rather than to a shared generic one, because what they
+ * mean depends on what was being looked up.
  */
-export type LoadFailure = "no-account" | "not-found" | "offline" | "other";
+export type LoadFailure = "no-account" | "not-found" | "offline" | "forbidden" | "other";
 
 /** The one definition of which HTTP outcome is which failure. */
 export function classifyFailure(error: unknown): LoadFailure {
   if (isNoAccountOnline(error)) return "no-account";
   if (isNotFound(error)) return "not-found";
+  if (isForbidden(error)) return "forbidden";
   if (isOffline(error)) return "offline";
   return "other";
 }

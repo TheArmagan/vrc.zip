@@ -120,6 +120,157 @@ export interface FriendPresence {
 }
 
 // ---------------------------------------------------------------------------
+// Groups — the sub-resources a group screen is built out of
+// ---------------------------------------------------------------------------
+
+/*
+ * `GroupSummary` and `GroupDetail` still live in `daemon/src/servers/control.ts`; only the
+ * sub-resources are declared here, because they are what the group screen was added for and there
+ * was no reason to write them down twice on the way in. The one exception is
+ * {@link GroupGallerySummary}, which `GroupDetail` carries — the *list* of galleries comes off the
+ * group object itself, and only the images inside one need a request.
+ *
+ * Every list below is a projection, not a passthrough. VRChat's `GroupMember`, `GroupPost`,
+ * `GroupInstance` and `GroupGalleryImage` carry moderation fields (manager notes, ban timestamps,
+ * approval state, role-permission lists) that no reader of a group screen has any business seeing,
+ * and forwarding them because they happened to be in the body is how a control API grows a surface
+ * nobody decided on.
+ */
+
+/**
+ * One gallery on a group's page.
+ *
+ * Comes free with `GET /groups/{groupId}` — `Group.galleries` is part of the group body — so the
+ * gallery list costs no request and only the images inside one do.
+ */
+export interface GroupGallerySummary {
+  readonly id: string;
+  /** Falls back to the id, so a tab always has a label. */
+  readonly name: string;
+  readonly description: string | null;
+  /** VRChat's own flag. A non-member fetching this gallery's images gets a 403. */
+  readonly membersOnly: boolean;
+}
+
+/**
+ * One row of a group's member list.
+ *
+ * `id` and `userId` are **different identifiers and both are needed**: `id` is the membership row,
+ * which is what a moderation action names, and `userId` is the person, which is what the user modal
+ * opens on. VRChat gives the membership row the shorter name, so mixing them up is easy and silent.
+ */
+export interface GroupMemberSummary {
+  /** The **membership** id, not the user's. Unique per (group, user); safe to key a list on. */
+  readonly id: string;
+  readonly userId: string;
+  /** Falls back to `userId` when VRChat sent no embedded user, so a row always has a label. */
+  readonly displayName: string;
+  /** See {@link VrchatImageUrl} — not loadable directly by a browser. */
+  readonly iconUrl: VrchatImageUrl;
+  /** Unix milliseconds, integer, or null. VRChat sends an ISO string; the wire stays integer ms. */
+  readonly joinedAt: number | null;
+  /** The group roles this member holds, as ids. Names live on the group's own `roles`. */
+  readonly roleIds: readonly string[];
+  /** They are wearing this group above their name tag in-game. VRChat's flag, passed through. */
+  readonly isRepresenting: boolean;
+}
+
+/**
+ * One page of `GET /api/groups/:id/members`.
+ *
+ * `hasMore` is "the page came back full", the same contract as `MutualFriendPage` and for the same
+ * reason: VRChat sends no total on any of these endpoints, so a full page is the only evidence
+ * another exists. It can be true for the last exactly-full page — an infinite scroll asking once
+ * more and getting nothing is the right cost, where claiming the list ended early is not.
+ */
+export interface GroupMemberPage {
+  readonly members: readonly GroupMemberSummary[];
+  readonly hasMore: boolean;
+}
+
+/** One announcement on a group's board. */
+export interface GroupPostSummary {
+  readonly id: string;
+  readonly title: string | null;
+  /** The post body, author-written, newlines and all. */
+  readonly text: string | null;
+  readonly authorId: string | null;
+  /**
+   * The author's name, or null — **best-effort, and null is the common case.**
+   *
+   * VRChat's `GroupPost` carries `authorId` and no name at all, so this is filled from what the
+   * daemon already holds locally (presence, then the friend log) and costs no request. Group staff
+   * are usually strangers to the reader, so the UI must have an id fallback rather than treating a
+   * null here as a broken post.
+   */
+  readonly authorDisplayName: string | null;
+  /** Unix milliseconds, integer, or null. */
+  readonly createdAt: number | null;
+  /** See {@link VrchatImageUrl} — not loadable directly by a browser. */
+  readonly imageUrl: VrchatImageUrl;
+}
+
+/** One page of `GET /api/groups/:id/posts`. `hasMore` as in {@link GroupMemberPage}. */
+export interface GroupPostPage {
+  readonly posts: readonly GroupPostSummary[];
+  readonly hasMore: boolean;
+}
+
+/**
+ * One instance a group currently has open.
+ *
+ * The world is **flattened onto this row** rather than nested as a world summary. VRChat embeds a
+ * whole `World` here, so the fields are free, but the shape that would hold them (`WorldSummary`)
+ * lives in the daemon's control module and `@vrcz/shared` is a leaf — and declaring a second
+ * structurally-identical world type in here to avoid that is precisely the duplication the header
+ * of this file exists to argue against. Four named fields are not a type.
+ */
+export interface GroupInstanceSummary {
+  /** The instance id *with* its tags, as VRChat quotes it. */
+  readonly instanceId: string;
+  /** `wrld_…:12345~group(grp_…)` — the full location, ready for a join or an instance lookup. */
+  readonly location: string;
+  /** How many group members are in it. Null when VRChat did not say. */
+  readonly memberCount: number | null;
+  readonly worldId: string | null;
+  /** Falls back to `worldId`, then null — never an empty label. */
+  readonly worldName: string | null;
+  /** See {@link VrchatImageUrl} — not loadable directly by a browser. */
+  readonly worldThumbnailImageUrl: VrchatImageUrl;
+  readonly worldCapacity: number | null;
+}
+
+/**
+ * The answer to `GET /api/groups/:id/instances`.
+ *
+ * **Not paged, because VRChat does not page it** — `GET /groups/{groupId}/instances` takes no `n`
+ * or `offset` at all. An `n` invented here would be a local slice wearing the clothes of a request,
+ * and a `hasMore` on top of it would be a claim nothing upstream can support.
+ */
+export interface GroupInstanceList {
+  readonly instances: readonly GroupInstanceSummary[];
+}
+
+/** One image in a group gallery. */
+export interface GroupGalleryImageSummary {
+  readonly id: string;
+  /** See {@link VrchatImageUrl} — not loadable directly by a browser. */
+  readonly imageUrl: VrchatImageUrl;
+  readonly submittedByUserId: string | null;
+  /** Unix milliseconds, integer, or null. */
+  readonly createdAt: number | null;
+}
+
+/**
+ * One page of `GET /api/groups/:id/galleries/:galleryId/images`. `hasMore` as in
+ * {@link GroupMemberPage}.
+ */
+export interface GroupGalleryImagePage {
+  readonly images: readonly GroupGalleryImageSummary[];
+  readonly hasMore: boolean;
+}
+
+// ---------------------------------------------------------------------------
 // Sessions
 // ---------------------------------------------------------------------------
 

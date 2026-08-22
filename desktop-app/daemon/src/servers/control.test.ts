@@ -9,6 +9,11 @@ import {
   createControlApp,
   type EventQuery,
   type GroupDetail,
+  type GroupGalleryImageSummary,
+  type GroupGallerySummary,
+  type GroupInstanceSummary,
+  type GroupMemberSummary,
+  type GroupPostSummary,
   type InstanceInfo,
   type InviteTarget,
   MAX_USER_IDS,
@@ -85,6 +90,7 @@ const USER_DETAIL: UserDetail = {
     privacy: "default",
     ownerId: "usr_owner",
     description: null,
+    mutualGroup: false,
     isRepresenting: true,
   },
   profileCard: {
@@ -132,6 +138,76 @@ const GROUP = USER_DETAIL.representedGroup as NonNullable<UserDetail["represente
 const GROUP_ID = "grp_2c8e5f1a-4a3d-4b6e-8f0c-1d2e3f4a5b6c";
 /** A group VRChat will not hand over — deleted, or private to this account. */
 const MISSING_GROUP_ID = "grp_00000000-0000-0000-0000-000000000000";
+/** A group this account can see but is not in: it 403s every sub-resource. */
+const CLOSED_GROUP_ID = "grp_11111111-1111-1111-1111-111111111111";
+
+const GALLERY_ID = "ggal_3f0d1c2b-5a6e-4d7c-8b9a-0e1f2a3b4c5d";
+
+const GROUP_GALLERY: GroupGallerySummary = {
+  id: GALLERY_ID,
+  name: "Events",
+  description: "Photos from our meetups.",
+  membersOnly: false,
+};
+
+const GROUP_MEMBER: GroupMemberSummary = {
+  // The membership row and the person are different identifiers, and both are on the wire.
+  id: "gmem_9a8b7c6d-5e4f-4a3b-2c1d-0e9f8a7b6c5d",
+  userId: "usr_member",
+  displayName: "A Member",
+  iconUrl: ICON_URL,
+  joinedAt: 1_650_000_000_000,
+  roleIds: ["grol_moderator"],
+  isRepresenting: true,
+};
+
+const GROUP_POST: GroupPostSummary = {
+  id: "not_7f6e5d4c-3b2a-4190-8877-665544332211",
+  title: "Meetup on Friday",
+  text: "Doors at eight.",
+  authorId: "usr_staff",
+  // Null is the ordinary answer: `GroupPost` carries no name, and staff are usually strangers.
+  authorDisplayName: null,
+  createdAt: 1_690_000_000_000,
+  imageUrl: ICON_URL,
+};
+
+/** Spelled out rather than reusing `WORLD_ID` below: this block is evaluated before that one. */
+const GROUP_INSTANCE_WORLD_ID = "wrld_ba913a96-fac4-4048-a062-9aa5db092812";
+
+const GROUP_INSTANCE: GroupInstanceSummary = {
+  instanceId: `12345~group(${GROUP_ID})`,
+  location: `${GROUP_INSTANCE_WORLD_ID}:12345~group(${GROUP_ID})`,
+  memberCount: 9,
+  worldId: GROUP_INSTANCE_WORLD_ID,
+  worldName: "The Great Pug",
+  worldThumbnailImageUrl: ICON_URL,
+  worldCapacity: 40,
+};
+
+/**
+ * The two refusals every group sub-resource shares, in the deps layer where they belong.
+ *
+ * 403 is not a variant of 404 here: "this group is gone or invisible" and "you are not in it" send
+ * the UI down different branches, and the whole reason `group_forbidden` exists is that a non-member
+ * must not be shown an empty list as though the group had nobody in it.
+ */
+function groupGate(groupId: string): void {
+  if (groupId === MISSING_GROUP_ID) throw new ControlError(404, "unknown_group");
+  if (groupId === CLOSED_GROUP_ID) throw new ControlError(403, "group_forbidden");
+}
+
+/** `n` rows with distinct ids, so a full page is checkable without a fixture per row. */
+function rows<T extends { id: string }>(row: T, n: number): T[] {
+  return Array.from({ length: n }, (_, i) => ({ ...row, id: `${row.id}-${String(i)}` }));
+}
+
+const GALLERY_IMAGE: GroupGalleryImageSummary = {
+  id: "ggim_1a2b3c4d-5e6f-4071-8293-a4b5c6d7e8f9",
+  imageUrl: ICON_URL,
+  submittedByUserId: "usr_member",
+  createdAt: 1_680_000_000_000,
+};
 
 const GROUP_DETAIL: GroupDetail = {
   ...GROUP,
@@ -148,6 +224,8 @@ const GROUP_DETAIL: GroupDetail = {
   isVerified: true,
   joinState: "open",
   membershipStatus: "member",
+  // Rides in on the group body, which is why the gallery tabs cost no request of their own.
+  galleries: [GROUP_GALLERY],
 };
 
 const MUTUAL = {
@@ -224,6 +302,15 @@ interface Recorder {
   userLookups: { userId: string; accountId: string | null }[];
   groupLookups: { userId: string; accountId: string | null }[];
   groupFetches: { groupId: string; accountId: string | null }[];
+  groupMemberPages: { groupId: string; accountId: string | null; page: PageQuery }[];
+  groupPostPages: { groupId: string; accountId: string | null; page: PageQuery }[];
+  groupInstanceFetches: { groupId: string; accountId: string | null }[];
+  galleryPages: {
+    groupId: string;
+    galleryId: string;
+    accountId: string | null;
+    page: PageQuery;
+  }[];
   userBatches: { userIds: string[]; accountId: string | null }[];
   mutualLookups: { userId: string; accountId: string | null; page: PageQuery }[];
   noteWrites: { userId: string; accountId: string | null; note: string }[];
@@ -246,6 +333,10 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     userLookups: [],
     groupLookups: [],
     groupFetches: [],
+    groupMemberPages: [],
+    groupPostPages: [],
+    groupInstanceFetches: [],
+    galleryPages: [],
     userBatches: [],
     mutualLookups: [],
     noteWrites: [],
@@ -379,6 +470,40 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
       }
       return GROUP_DETAIL;
     },
+
+    /*
+     * The four sub-resources share one fake shape: the missing group 404s, the closed group 403s,
+     * and everything else serves one full page then one short one. The 403 is the interesting case
+     * — it is what a non-member gets from most groups, and the route must not flatten it into an
+     * empty list.
+     */
+    listGroupMembers: async (groupId, accountId, page) => {
+      seen.groupMemberPages.push({ groupId, accountId, page });
+      groupGate(groupId);
+      return page.offset === 0
+        ? { members: rows(GROUP_MEMBER, page.n), hasMore: true }
+        : { members: [], hasMore: false };
+    },
+    listGroupPosts: async (groupId, accountId, page) => {
+      seen.groupPostPages.push({ groupId, accountId, page });
+      groupGate(groupId);
+      return page.offset === 0
+        ? { posts: rows(GROUP_POST, page.n), hasMore: true }
+        : { posts: [], hasMore: false };
+    },
+    listGroupInstances: async (groupId, accountId) => {
+      seen.groupInstanceFetches.push({ groupId, accountId });
+      groupGate(groupId);
+      return { instances: [GROUP_INSTANCE] };
+    },
+    listGroupGalleryImages: async (groupId, galleryId, accountId, page) => {
+      seen.galleryPages.push({ groupId, galleryId, accountId, page });
+      groupGate(groupId);
+      return page.offset === 0
+        ? { images: rows(GALLERY_IMAGE, page.n), hasMore: true }
+        : { images: [], hasMore: false };
+    },
+
     listMutualFriends: async (userId, accountId, page) => {
       seen.mutualLookups.push({ userId, accountId, page });
       if (userId === "usr_missing") throw new ControlError(404, "unknown_user");
@@ -694,6 +819,129 @@ describe("control API routes", () => {
     const missing = await call(deps, `/api/groups/${MISSING_GROUP_ID}`);
     expect(missing.status).toBe(404);
     expect(await missing.json()).toMatchObject({ error: "unknown_group" });
+  });
+
+  test("the group sub-resources serve their pages and thread the account", async () => {
+    const { deps, seen } = fakeDeps();
+
+    const members = await call(deps, `/api/groups/${GROUP_ID}/members?accountId=${ACCOUNT.id}`);
+    expect(members.status).toBe(200);
+    expect(await members.json()).toEqual({
+      members: rows(GROUP_MEMBER, 25),
+      // A full page is the only evidence another exists — VRChat sends no total.
+      hasMore: true,
+    });
+
+    const posts = await call(deps, `/api/groups/${GROUP_ID}/posts?n=2`);
+    expect(await posts.json()).toEqual({ posts: rows(GROUP_POST, 2), hasMore: true });
+
+    const instances = await call(deps, `/api/groups/${GROUP_ID}/instances?accountId=${ACCOUNT.id}`);
+    expect(await instances.json()).toEqual({ instances: [GROUP_INSTANCE] });
+
+    const images = await call(
+      deps,
+      `/api/groups/${GROUP_ID}/galleries/${GALLERY_ID}/images?n=3&accountId=${ACCOUNT.id}`,
+    );
+    expect(await images.json()).toEqual({ images: rows(GALLERY_IMAGE, 3), hasMore: true });
+
+    // Which account is asking reaches every one of them: a non-member is refused outright, so the
+    // eyes are part of the question rather than a detail of how it was answered.
+    expect(seen.groupMemberPages[0]?.accountId).toBe(ACCOUNT.id);
+    expect(seen.groupPostPages[0]?.accountId).toBe(null);
+    expect(seen.groupInstanceFetches).toEqual([{ groupId: GROUP_ID, accountId: ACCOUNT.id }]);
+    expect(seen.galleryPages).toEqual([
+      {
+        groupId: GROUP_ID,
+        galleryId: GALLERY_ID,
+        accountId: ACCOUNT.id,
+        page: { n: 3, offset: 0 },
+      },
+    ]);
+  });
+
+  /*
+   * `hasMore` is derived from `returned === n` and nothing else, so the interesting assertion is
+   * the *short* page — that is the only one anything upstream lets us be certain about.
+   */
+  test("the paged group sub-resources report hasMore false on a short page", async () => {
+    const { deps } = fakeDeps();
+
+    const members = await call(deps, `/api/groups/${GROUP_ID}/members?n=5&offset=5`);
+    expect(await members.json()).toEqual({ members: [], hasMore: false });
+
+    const posts = await call(deps, `/api/groups/${GROUP_ID}/posts?n=5&offset=5`);
+    expect(await posts.json()).toEqual({ posts: [], hasMore: false });
+
+    const images = await call(
+      deps,
+      `/api/groups/${GROUP_ID}/galleries/${GALLERY_ID}/images?n=5&offset=5`,
+    );
+    expect(await images.json()).toEqual({ images: [], hasMore: false });
+  });
+
+  /*
+   * The whole reason `group_forbidden` exists. An empty list and "you may not look" are different
+   * facts about a group, and the UI draws them differently — "membership required" against "nobody
+   * has joined yet". A route that flattened the 403 would make the second sentence appear in front
+   * of a group with four hundred members.
+   */
+  test("a 403 from a group sub-resource is group_forbidden, never an empty list", async () => {
+    const { deps } = fakeDeps();
+    for (const path of [
+      `/api/groups/${CLOSED_GROUP_ID}/members`,
+      `/api/groups/${CLOSED_GROUP_ID}/posts`,
+      `/api/groups/${CLOSED_GROUP_ID}/instances`,
+      `/api/groups/${CLOSED_GROUP_ID}/galleries/${GALLERY_ID}/images`,
+    ]) {
+      const res = await call(deps, path);
+      expect(res.status, path).toBe(403);
+      expect(await res.json(), path).toMatchObject({ error: "group_forbidden" });
+    }
+  });
+
+  test("a 404 from a group sub-resource stays unknown_group", async () => {
+    const { deps } = fakeDeps();
+    for (const path of [
+      `/api/groups/${MISSING_GROUP_ID}/members`,
+      `/api/groups/${MISSING_GROUP_ID}/posts`,
+      `/api/groups/${MISSING_GROUP_ID}/instances`,
+      `/api/groups/${MISSING_GROUP_ID}/galleries/${GALLERY_ID}/images`,
+    ]) {
+      const res = await call(deps, path);
+      expect(res.status, path).toBe(404);
+      expect(await res.json(), path).toMatchObject({ error: "unknown_group" });
+    }
+  });
+
+  test("the group sub-resources clamp n, reject a bad offset, and validate both ids", async () => {
+    const { deps, seen } = fakeDeps();
+
+    await call(deps, `/api/groups/${GROUP_ID}/members?n=99999`);
+    await call(deps, `/api/groups/${GROUP_ID}/members?n=nonsense`);
+    expect(seen.groupMemberPages.map((p) => p.page)).toEqual([
+      // VRChat's own ceiling for `n` on these endpoints. Asking for more could only be answered
+      // with 100 anyway, and pretending otherwise would make `hasMore` permanently false.
+      { n: 100, offset: 0 },
+      { n: 25, offset: 0 },
+    ]);
+
+    for (const query of ["?offset=nonsense", "?offset=-1", "?offset=1.5"]) {
+      const res = await call(deps, `/api/groups/${GROUP_ID}/posts${query}`);
+      expect(res.status, query).toBe(400);
+      expect(await res.json()).toMatchObject({ error: "invalid_query" });
+    }
+    expect(seen.groupPostPages).toEqual([]);
+
+    // A `/` in either id would turn one path segment into several on the way upstream.
+    for (const path of [
+      "/api/groups/usr_notagroup/members",
+      `/api/groups/${GROUP_ID}/galleries/ggal_1%2fmembers/images`,
+      `/api/groups/${GROUP_ID}/galleries//images`,
+    ]) {
+      expect((await call(deps, path)).status, path).not.toBe(200);
+    }
+    expect(seen.galleryPages).toEqual([]);
+    expect(seen.groupInstanceFetches).toEqual([]);
   });
 
   test("GET /api/users/:id/mutual-friends pages, defaults, and clamps", async () => {

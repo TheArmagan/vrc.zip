@@ -21,6 +21,7 @@
 -->
 <script lang="ts">
 import CalendarIcon from "@lucide/svelte/icons/calendar";
+import ChevronRightIcon from "@lucide/svelte/icons/chevron-right";
 import ExternalLinkIcon from "@lucide/svelte/icons/external-link";
 import ShieldCheckIcon from "@lucide/svelte/icons/shield-check";
 import UsersIcon from "@lucide/svelte/icons/users";
@@ -33,9 +34,11 @@ import RelativeTime from "$lib/components/RelativeTime.svelte";
 import UserName from "$lib/components/UserName.svelte";
 import { Avatar, AvatarFallback, AvatarImage } from "$lib/components/ui/avatar/index.js";
 import { Badge } from "$lib/components/ui/badge/index.js";
+import { Button } from "$lib/components/ui/button/index.js";
 import { Separator } from "$lib/components/ui/separator/index.js";
 import { Skeleton } from "$lib/components/ui/skeleton/index.js";
 import { calendarDay, groupLink, groupTag, initials } from "$lib/format.ts";
+import { navigate } from "$lib/router.ts";
 import { modalBack } from "$lib/state/entity-modal.svelte.ts";
 import { groupModal } from "$lib/state/group-modal.svelte.ts";
 
@@ -288,8 +291,36 @@ const FAILURE_BODIES: Record<string, string> = {
   {/if}
 
   <!--
-    The members, the posts and the galleries are on vrchat.com and not in the daemon, so the footer
-    says where they are rather than letting this card pass for the whole group.
+    Into the full group screen: members, posts, galleries and instances, each paged.
+    
+    `dismiss()` rather than `close()`, and this is that method's first real caller. Close pops one
+    level of the shared back stack, which is right when a dialog opened another dialog; a route
+    change invalidates every level, because the screen the reader would be returning *to* is no
+    longer behind anything. Leaving the stack populated here would mean the next modal opened from
+    the group screen has a back button pointing at a profile from before the navigation.
+  -->
+  {#if groupModal.groupId !== null}
+    {@const id = groupModal.groupId}
+    <Separator />
+    <Button
+      variant="secondary"
+      class="w-full justify-between"
+      onclick={() => {
+        groupModal.dismiss();
+        navigate("groups", id);
+      }}
+    >
+      <span class="inline-flex items-center gap-2">
+        <UsersIcon class="size-4" />
+        Members, posts, galleries and instances
+      </span>
+      <ChevronRightIcon class="size-4" />
+    </Button>
+  {/if}
+
+  <!--
+    vrchat.com stays in the footer as the way out to everything vrc.zip does not mirror - the
+    calendar, moderation, anything that needs a real session in a browser.
   -->
   <EntityFooter
     id={groupModal.groupId}

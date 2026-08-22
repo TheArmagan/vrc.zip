@@ -652,6 +652,22 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     version comes from `.bun-version` rather than being written a fourth time. Both test runners
     run: `bun test` for daemon/packages/tools, Vitest for `ui/`.
 
+68. **The group screen is a route; the group modal stays a card. Both, on purpose.** The modal is
+    what a represented badge or a profile row opens — one glance, no navigation, and it now hands
+    off rather than sending people to vrchat.com for members and posts. The screen (`#/groups/<id>`)
+    is where the four paged lists live, because infinite scroll inside a dialog that shares a back
+    stack with two other dialogs is a fight with the shell rather than a use of it. Navigating out of
+    the modal calls `dismiss()` rather than `close()` — its first real caller — since a route change
+    invalidates every level of that stack, not one.
+
+69. **A 403 is a first-class UI state (`forbidden`), not an error.** Most VRChat groups show their
+    member list and posts only to members, so a 403 is the *ordinary* answer for a group you have not
+    joined. It renders as a sentence saying membership is required, **with no retry button**: no
+    number of retries acquires membership, and a button that cannot work invites the reader to
+    conclude the app is broken. The tab still renders either way — hiding it would read as a vrc.zip
+    bug to anyone who can see that same list on vrchat.com. `classifyFailure` gained the case and
+    `isForbidden` the predicate.
+
 ---
 
 ## Gotchas
@@ -1092,24 +1108,10 @@ Unresolved; flag to the user rather than guessing.
   a room you sit in settles quickly — but a user hopping public instances is a genuinely heavier
   traffic pattern than before, and it is worth measuring against the 20/s per-account ceiling before
   deciding whether it needs its own budget.
-- **The group modal is a card, not a group screen.** `GET /api/groups/:id` and `GroupModal` landed:
-  a represented badge and a row in a user's Groups tab both open it, and it shows the description,
-  the rules, the links, both member counts with the age of the live one, the owner, the join state
-  and this account's membership status. What it still does not have is **members, posts, galleries
-  and instances** — each needs its own endpoint and its own paging, and the footer links to
-  vrchat.com in the meantime rather than letting the card pass for the whole group.
-- **`mutualGroup` is on the wire and unused.** `LimitedUserGroups` carries it, so the "Mutual" badge
-  dropped from the Groups tab as uncomputable can be restored for free.
-- **The profile image/banner context-menu action is not built.** `UserDetail.iconUrlFull` now exists
-  on the daemon (the non-thumbnail original, null rather than falling back to a thumbnail), but
-  `ui/src/lib/api.ts` does not carry it yet and no menu item opens it.
-- **The JS bundle is ~550 kB**, past Vite's 500 kB warning. It builds fine; worth splitting.
 - **No endpoints for invite-request / boop.** Both are registered in the command palette as stubs
   that name the missing route when run. *Self-invite is now real* — `POST
   /api/accounts/:id/invite-self` — because `vrchat://launch` starts a *second* game client instead
   of moving the running one.
-- **`favicon.ico` 404s** on every page load. Cosmetic, but it is a console error on first
-  impression.
 - **`rateLimit.remaining` and `queued` are approximations, and the snapshot is now also
   incomplete.** The limiter does not expose live token counts, and `StatusSnapshot.rateLimit` still
   describes a single ceiling when there are three (per-account 20/s, per-IP 100/s, files 300/s).

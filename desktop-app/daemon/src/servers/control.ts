@@ -5,6 +5,15 @@ import {
   type FeedEvent,
   type FriendPresence,
   type GameSession,
+  type GroupGalleryImagePage,
+  type GroupGalleryImageSummary,
+  type GroupGallerySummary,
+  type GroupInstanceList,
+  type GroupInstanceSummary,
+  type GroupMemberPage,
+  type GroupMemberSummary,
+  type GroupPostPage,
+  type GroupPostSummary,
   type JsonValue,
   type LoginInput,
   type LoginResult,
@@ -43,6 +52,15 @@ export type {
   FeedEvent,
   FriendPresence,
   GameSession,
+  GroupGalleryImagePage,
+  GroupGalleryImageSummary,
+  GroupGallerySummary,
+  GroupInstanceList,
+  GroupInstanceSummary,
+  GroupMemberPage,
+  GroupMemberSummary,
+  GroupPostPage,
+  GroupPostSummary,
   LoginInput,
   LoginResult,
   RateLimitSnapshot,
@@ -119,6 +137,15 @@ export interface GroupSummary {
   description: string | null;
   /** VRChat's own flag, passed through — never inferred from which endpoint answered. */
   isRepresenting: boolean;
+  /**
+   * VRChat's `mutualGroup`: the *asking* account is in this group too.
+   *
+   * Only `LimitedUserGroups` carries it, which is `GET /users/{id}/groups` and nothing else, so it
+   * is false everywhere else rather than computed — a group fetched by id is not "not mutual", it
+   * is a group nobody asked that question about. The Groups tab is the one place it is rendered,
+   * and that is the one place it arrives.
+   */
+  mutualGroup: boolean;
 }
 
 /**
@@ -165,6 +192,14 @@ export interface GroupDetail extends GroupSummary {
    * A statement about the viewer, not about the group, which is why it moves when `accountId` does.
    */
   membershipStatus: string | null;
+  /**
+   * The group's galleries, which arrive **on the group body itself** — `Group.galleries` — so the
+   * tab strip costs no request and only opening one does.
+   *
+   * A gallery with no id is dropped rather than passed on: there would be nothing to fetch its
+   * images with, and nothing to key the tab on. Empty is the common case for a small group.
+   */
+  galleries: GroupGallerySummary[];
 }
 
 /** The answer to `GET /api/users/:id/groups`. */
@@ -766,6 +801,56 @@ export interface ControlDeps {
    */
   getGroup(groupId: string, accountId: string | null): Promise<GroupDetail>;
 
+  /*
+   * The four group sub-resources. They share an error contract, and the part of it worth stating
+   * once is the **403**.
+   *
+   * Most groups will not show their member list, their board, or a members-only gallery to somebody
+   * who is not in them, and VRChat says so with a 403 rather than an empty list. Collapsing that
+   * into `[]` would put "this group has no members" on screen in front of a group with four hundred
+   * — so it surfaces as `ControlError(403, "group_forbidden")` and the UI renders "membership
+   * required" instead. An empty list and "you may not look" are different facts.
+   *
+   * A 404 stays `unknown_group`, exactly as on {@link getGroup}: gone, or invisible to this account.
+   * `ControlError(404, "unknown_account")` and `ControlError(503, "no_account")` behave as
+   * everywhere else.
+   */
+
+  /** One page of a group's member list. `page` has already been validated and clamped by the route. */
+  listGroupMembers(
+    groupId: string,
+    accountId: string | null,
+    page: PageQuery,
+  ): Promise<GroupMemberPage>;
+
+  /** One page of a group's announcements. `page` has already been validated and clamped. */
+  listGroupPosts(
+    groupId: string,
+    accountId: string | null,
+    page: PageQuery,
+  ): Promise<GroupPostPage>;
+
+  /**
+   * Every instance the group currently has open.
+   *
+   * Takes no paging because **upstream takes none** — `GET /groups/{groupId}/instances` has no `n`
+   * or `offset`. See {@link GroupInstanceList}.
+   */
+  listGroupInstances(groupId: string, accountId: string | null): Promise<GroupInstanceList>;
+
+  /**
+   * One page of images from one of the group's galleries.
+   *
+   * The gallery *list* is not fetched: it rides on the group body as {@link GroupDetail.galleries}.
+   * A `membersOnly` gallery is the most likely source of a `group_forbidden` on this whole family.
+   */
+  listGroupGalleryImages(
+    groupId: string,
+    galleryId: string,
+    accountId: string | null,
+    page: PageQuery,
+  ): Promise<GroupGalleryImagePage>;
+
   /**
    * One world, cached.
    *
@@ -870,11 +955,12 @@ const DEFAULT_EVENT_LIMIT = 100;
 const MAX_EVENT_LIMIT = 500;
 
 /**
- * Paging for the mutual-friends list.
+ * Paging for the mutual-friends list and the three paged group sub-resources.
  *
  * The default is a modal's worth of rows rather than a screenful of data; the maximum is VRChat's
- * own ceiling for `n` on this endpoint, so asking for more than 100 could only ever be answered
- * with 100 and pretending otherwise would break the `hasMore` arithmetic.
+ * own ceiling for `n` on every one of these endpoints, so asking for more than 100 could only ever
+ * be answered with 100 and pretending otherwise would break the `hasMore` arithmetic — which reads
+ * "the page came back full" and would therefore be permanently false at any larger `n`.
  */
 const DEFAULT_PAGE_SIZE = 25;
 const MAX_PAGE_SIZE = 100;
@@ -1133,6 +1219,28 @@ export function parseGroupId(raw: string | undefined): string {
 const GROUP_ID_PATTERN = /^grp_[0-9A-Za-z_-]{1,64}$/;
 
 /**
+ * Validates the `:galleryId` path parameter, which is interpolated into
+ * `GET /groups/{groupId}/galleries/{groupGalleryId}`.
+ *
+ * Deliberately looser than {@link parseGroupId}: the spec types `GroupGalleryId` as a bare string
+ * and the ids VRChat issues today are `ggal_`-prefixed, but nothing documents that prefix, and a
+ * validator asserting an undocumented shape breaks the day it changes. What actually has to hold is
+ * the same thing that holds for a group id — `/`, `?`, `#` and `%` cannot appear and turn one path
+ * segment into several.
+ */
+export function parseGalleryId(raw: string | undefined): string {
+  if (raw === undefined || raw === "") {
+    throw new ControlError(400, "invalid_gallery_id", "a gallery id is required");
+  }
+  if (!GALLERY_ID_PATTERN.test(raw)) {
+    throw new ControlError(400, "invalid_gallery_id", "that is not a VRChat gallery id");
+  }
+  return raw;
+}
+
+const GALLERY_ID_PATTERN = /^[0-9A-Za-z_-]{1,64}$/;
+
+/**
  * The longest note accepted. VRChat's own `/userNotes` caps at 256 characters, and a local note
  * that cannot be synced later would be a note the user has to retype — so the local store adopts
  * the upstream limit now rather than growing data the sync cannot carry.
@@ -1318,6 +1426,64 @@ export function createControlApp({ port, deps, token }: ControlAppOptions) {
       const groupId = parseGroupId(c.req.param("id"));
       const accountId = nonEmpty(c.req.query("accountId")) ?? null;
       return c.json(await deps.getGroup(groupId, accountId));
+    })
+
+    /*
+     * The four sub-resources a group *screen* — as against the group card — is built out of.
+     *
+     * All of them take `?accountId=` for the same reason `GET /api/groups/:id` does: which account
+     * is asking changes what VRChat will hand over, up to and including refusing outright. Paging
+     * follows the mutual-friends route exactly — `n` clamped, `offset` rejected when malformed —
+     * because an ignored offset serves page one forever while the scroll counts up.
+     */
+    .get("/api/groups/:id/members", async (c) => {
+      const groupId = parseGroupId(c.req.param("id"));
+      const accountId = nonEmpty(c.req.query("accountId")) ?? null;
+      return c.json(
+        await deps.listGroupMembers(groupId, accountId, {
+          n: clampPageSize(c.req.query("n")),
+          offset: parseOffset(c.req.query("offset")),
+        }),
+      );
+    })
+
+    .get("/api/groups/:id/posts", async (c) => {
+      const groupId = parseGroupId(c.req.param("id"));
+      const accountId = nonEmpty(c.req.query("accountId")) ?? null;
+      return c.json(
+        await deps.listGroupPosts(groupId, accountId, {
+          n: clampPageSize(c.req.query("n")),
+          offset: parseOffset(c.req.query("offset")),
+        }),
+      );
+    })
+
+    /*
+     * No `n` and no `offset`, because VRChat's own endpoint has neither — see `GroupInstanceList`.
+     * Accepting them here would be a paging contract the daemon would have to fake by slicing.
+     */
+    .get("/api/groups/:id/instances", async (c) => {
+      const groupId = parseGroupId(c.req.param("id"));
+      const accountId = nonEmpty(c.req.query("accountId")) ?? null;
+      return c.json(await deps.listGroupInstances(groupId, accountId));
+    })
+
+    /*
+     * `/images` is a trailing segment vrc.zip adds; upstream the images *are* the gallery
+     * (`GET /groups/{groupId}/galleries/{groupGalleryId}`). It is here because `…/galleries/:id`
+     * with no suffix would read as "the gallery record", which is not a thing this API serves — the
+     * gallery record already rode in on `GET /api/groups/:id`.
+     */
+    .get("/api/groups/:id/galleries/:galleryId/images", async (c) => {
+      const groupId = parseGroupId(c.req.param("id"));
+      const galleryId = parseGalleryId(c.req.param("galleryId"));
+      const accountId = nonEmpty(c.req.query("accountId")) ?? null;
+      return c.json(
+        await deps.listGroupGalleryImages(groupId, galleryId, accountId, {
+          n: clampPageSize(c.req.query("n")),
+          offset: parseOffset(c.req.query("offset")),
+        }),
+      );
     })
 
     /*

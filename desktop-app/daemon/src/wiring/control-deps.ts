@@ -1,6 +1,11 @@
 import type {
   Badge,
   Group,
+  GroupGallery,
+  GroupGalleryImage,
+  GroupInstance,
+  GroupMember,
+  GroupPost,
   Instance,
   LimitedUserGroups,
   LimitedUserInstance,
@@ -30,6 +35,15 @@ import {
   type FriendPresence,
   type GameSession,
   type GroupDetail,
+  type GroupGalleryImagePage,
+  type GroupGalleryImageSummary,
+  type GroupGallerySummary,
+  type GroupInstanceList,
+  type GroupInstanceSummary,
+  type GroupMemberPage,
+  type GroupMemberSummary,
+  type GroupPostPage,
+  type GroupPostSummary,
   type GroupSummary,
   type InstanceDetail,
   type InstanceInfo,
@@ -262,6 +276,7 @@ interface GroupFields {
   readonly ownerId?: string | undefined;
   readonly description?: string | undefined;
   readonly isRepresenting?: boolean | undefined;
+  readonly mutualGroup?: boolean | undefined;
 }
 
 function toGroupSummary(raw: GroupFields): GroupSummary | null {
@@ -285,6 +300,135 @@ function toGroupSummary(raw: GroupFields): GroupSummary | null {
     // a group is not itself proof of representation — VRChat owns that flag, and a UI that draws a
     // "representing" badge should be drawing VRChat's answer rather than ours.
     isRepresenting: raw.isRepresenting === true,
+    // Passed through on the same terms. `LimitedUserGroups` is the only payload that carries it,
+    // so every other caller of this mapper gets `false` — see `GroupSummary.mutualGroup`.
+    mutualGroup: raw.mutualGroup === true,
+  };
+}
+
+/**
+ * One gallery off `Group.galleries`, or `null` when it has no id.
+ *
+ * Dropped rather than defaulted, for the reason every mapper in this file drops: without an id there
+ * is nothing to fetch its images with and nothing to key the tab on, and a duplicate key in an
+ * `{#each}` is a hard runtime error in Svelte 5 rather than a warning.
+ */
+function toGroupGallery(raw: GroupGallery): GroupGallerySummary | null {
+  const id = emptyToNull(raw.id);
+  if (id === null) return null;
+
+  return {
+    id,
+    name: emptyToNull(raw.name) ?? id,
+    description: emptyToNull(raw.description),
+    membersOnly: raw.membersOnly === true,
+  };
+}
+
+/**
+ * One row of a group's member list, or `null` when it cannot be identified.
+ *
+ * **`GroupMember` is `| null` upstream** — the spec says so, for "a user who is not part of the
+ * group" — so an entry can legally be a bare `null` inside the array, and a `.map` that assumed an
+ * object would throw on the whole page rather than lose one row.
+ *
+ * Both ids are kept and neither substitutes for the other: `id` is the *membership* row, which is
+ * what a moderation action names, and `userId` is the person, which is what the user modal opens on.
+ * VRChat gives the membership row the shorter name, which is exactly how they get swapped.
+ */
+function toGroupMember(raw: GroupMember): GroupMemberSummary | null {
+  if (raw === null || typeof raw !== "object") return null;
+
+  const id = emptyToNull(raw.id);
+  const userId = emptyToNull(raw.userId);
+  if (id === null || userId === null) return null;
+
+  const user = raw.user ?? null;
+
+  return {
+    id,
+    userId,
+    displayName: emptyToNull(user?.displayName) ?? userId,
+    /*
+     * `GroupMemberLimitedUser` carries the same images under different names — `iconUrl` is what
+     * every other shape calls `userIcon`, and `thumbnailUrl` is its thumbnail — so the fields are
+     * renamed onto `UserImageFields` rather than picked here by hand. One preference order for the
+     * whole app is the point of that helper; a second one written out inline is how the group
+     * screen ends up preferring a different image from the friends list for the same person.
+     */
+    iconUrl: pickUserImageUrl({
+      userIcon: user?.iconUrl,
+      profilePicOverrideThumbnail: user?.thumbnailUrl,
+      profilePicOverride: user?.profilePicOverride,
+      currentAvatarThumbnailImageUrl: user?.currentAvatarThumbnailImageUrl,
+    }),
+    joinedAt: unixMsFromDate(raw.joinedAt),
+    roleIds: stringArray(raw.roleIds),
+    isRepresenting: raw.isRepresenting === true,
+  };
+}
+
+/**
+ * One announcement, or `null` when it has no id.
+ *
+ * `authorDisplayName` is handed in rather than read off the body: **`GroupPost` carries an
+ * `authorId` and no name at all.** The caller resolves it from local state — the same trick, and the
+ * same zero-request cost, as `trustLevel` on a mutual friend — and null is the ordinary answer,
+ * because group staff are usually strangers to whoever is reading the board.
+ */
+function toGroupPost(raw: GroupPost, authorDisplayName: string | null): GroupPostSummary | null {
+  const id = emptyToNull(raw.id);
+  if (id === null) return null;
+
+  return {
+    id,
+    title: emptyToNull(raw.title),
+    text: emptyToNull(raw.text),
+    authorId: emptyToNull(raw.authorId),
+    authorDisplayName,
+    createdAt: unixMsFromDate(raw.createdAt),
+    imageUrl: emptyToNull(raw.imageUrl),
+  };
+}
+
+/**
+ * One open group instance, or `null` when it has no location.
+ *
+ * The world is flattened onto the row — see {@link GroupInstanceSummary} for why it is four fields
+ * rather than a nested summary. They cost nothing either way: VRChat embeds the entire `World`
+ * record in this response, so fetching the world separately would be paying twice for bytes already
+ * on the wire.
+ *
+ * `location` is what is required rather than `instanceId`, because the location is the only one of
+ * the two a join or an instance lookup can be built from.
+ */
+function toGroupInstance(raw: Partial<GroupInstance>): GroupInstanceSummary | null {
+  const location = emptyToNull(raw.location);
+  if (location === null) return null;
+
+  const world = toWorldSummary(raw.world);
+
+  return {
+    instanceId: emptyToNull(raw.instanceId) ?? location,
+    location,
+    memberCount: numberOrNull(raw.memberCount),
+    worldId: world?.id ?? null,
+    worldName: world?.name ?? null,
+    worldThumbnailImageUrl: world?.thumbnailImageUrl ?? null,
+    worldCapacity: world?.capacity ?? null,
+  };
+}
+
+/** One gallery image, or `null` when it has no id. */
+function toGroupGalleryImage(raw: GroupGalleryImage): GroupGalleryImageSummary | null {
+  const id = emptyToNull(raw.id);
+  if (id === null) return null;
+
+  return {
+    id,
+    imageUrl: emptyToNull(raw.imageUrl),
+    submittedByUserId: emptyToNull(raw.submittedByUserId),
+    createdAt: unixMsFromDate(raw.createdAt),
   };
 }
 
@@ -610,12 +754,25 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       code: "unknown_user",
       message: "VRChat has no such user.",
     },
+    /**
+     * What a 403 means on this path, when it means anything in particular.
+     *
+     * Left undefined by default so a 403 falls through to the generic 502 below, which is right for
+     * every route that had one before the group sub-resources: an account that is signed in should
+     * not be forbidden its own friends list, so a 403 there is genuinely an upstream surprise. The
+     * group routes are the opposite case — a non-member being refused a member list is the *normal*
+     * answer, and it needs a code the UI can branch on.
+     */
+    forbidden?: { code: string; message: string },
   ): Promise<unknown> {
     const response = await vrcFetch(account.context(), path);
     const body = await response.text();
 
     if (response.status === 404) {
       throw new ControlError(404, missing.code, missing.message);
+    }
+    if (response.status === 403 && forbidden !== undefined) {
+      throw new ControlError(403, forbidden.code, forbidden.message);
     }
     if (!response.ok) {
       throw new ControlError(502, code, `VRChat returned ${String(response.status)}`);
@@ -626,6 +783,34 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
     } catch {
       throw new ControlError(502, code, "VRChat returned a non-JSON body");
     }
+  }
+
+  /**
+   * A GET against one of the group sub-resources, with the error contract all four share.
+   *
+   * The **403 is the whole reason this exists**. Membership is required to read the member list, the
+   * board, or a members-only gallery on most groups, and VRChat refuses a non-member with a 403
+   * rather than an empty body. Letting that fall through to the generic 502 — or worse, swallowing
+   * it into `[]` — would put "this group has no members" on screen in front of a group with four
+   * hundred of them. `group_forbidden` is what lets the UI say "membership required" instead.
+   *
+   * The 404 stays `unknown_group` and keeps `getGroup`'s wording, because the two causes VRChat
+   * cannot distinguish there are the same two here.
+   */
+  function groupSubresource(account: Account, path: string, code: string): Promise<unknown> {
+    return vrcJson(
+      account,
+      path,
+      code,
+      {
+        code: "unknown_group",
+        message: "VRChat has no such group, or this account cannot see it.",
+      },
+      {
+        code: "group_forbidden",
+        message: "This group only shows that to its members.",
+      },
+    );
   }
 
   /**
@@ -1540,7 +1725,115 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         isVerified: raw.isVerified === true,
         joinState: emptyToNull(raw.joinState),
         membershipStatus: emptyToNull(raw.membershipStatus),
+        // Free: the galleries are part of the group body, so the tab strip costs no request and
+        // only opening a gallery does.
+        galleries: (Array.isArray(raw.galleries) ? raw.galleries : [])
+          .map((entry: GroupGallery) => toGroupGallery(entry))
+          .filter((gallery): gallery is GroupGallerySummary => gallery !== null),
       };
+    },
+
+    async listGroupMembers(groupId, accountId, page): Promise<GroupMemberPage> {
+      const account = onlineAccount(accountId);
+      const raw = await groupSubresource(
+        account,
+        `/groups/${groupId}/members?n=${String(page.n)}&offset=${String(page.offset)}`,
+        "group_members_fetch_failed",
+      );
+
+      if (!Array.isArray(raw)) return { members: [], hasMore: false };
+
+      const members = raw
+        .map((entry: GroupMember) => toGroupMember(entry))
+        .filter((member): member is GroupMemberSummary => member !== null);
+
+      // `hasMore` is derived from `returned === n`, because VRChat sends no total on this endpoint
+      // — a full page is the only evidence another exists. Measured on the **raw** array rather
+      // than on `members`: a dropped `null` entry shortens the mapped list without meaning the page
+      // was short, and reading it off the mapped one would end the scroll early.
+      return { members, hasMore: raw.length >= page.n };
+    },
+
+    async listGroupPosts(groupId, accountId, page): Promise<GroupPostPage> {
+      const account = onlineAccount(accountId);
+      // The one sub-resource that answers with an **object**, not an array: `{ posts: [...] }`.
+      // The other three return a bare array, which is exactly why this is worth a line of its own.
+      const raw = (await groupSubresource(
+        account,
+        `/groups/${groupId}/posts?n=${String(page.n)}&offset=${String(page.offset)}`,
+        "group_posts_fetch_failed",
+      )) as { posts?: GroupPost[] } | null;
+
+      const entries = Array.isArray(raw?.posts) ? raw.posts : [];
+
+      /*
+       * `GroupPost` has an `authorId` and no display name, so the name comes from what this account
+       * already holds — presence first, since the socket keeps it current, then `friend_log`, which
+       * covers the window before the first friends poll of a cold start lands. Same trick as
+       * `trustLevel` on a mutual friend, and it costs no request.
+       *
+       * Unlike a mutual friend, though, a post author is usually *not* one of the reader's friends,
+       * so null is the ordinary answer here rather than the edge case. Resolving it properly would
+       * be one `GET /users/{id}` per distinct author on every page of the board — real spend, for
+       * decoration the UI can render an id fallback for.
+       */
+      const known = new Map(presence.list(account.id).map((record) => [record.id, record]));
+      const posts = entries
+        .map((post: GroupPost) => {
+          const authorId = emptyToNull(post.authorId);
+          const name =
+            authorId === null
+              ? null
+              : (known.get(authorId)?.displayName ??
+                store.getFriend(account.id, authorId)?.display_name ??
+                null);
+          return toGroupPost(post, emptyToNull(name));
+        })
+        .filter((post): post is GroupPostSummary => post !== null);
+
+      return { posts, hasMore: entries.length >= page.n };
+    },
+
+    async listGroupInstances(groupId, accountId): Promise<GroupInstanceList> {
+      const account = onlineAccount(accountId);
+      const raw = await groupSubresource(
+        account,
+        `/groups/${groupId}/instances`,
+        "group_instances_fetch_failed",
+      );
+
+      // No paging: upstream takes no `n` and no `offset`, so there is no `hasMore` that could mean
+      // anything. See `GroupInstanceList`.
+      if (!Array.isArray(raw)) return { instances: [] };
+
+      const instances = raw
+        .map((entry: Partial<GroupInstance>) => toGroupInstance(entry))
+        .filter((instance): instance is GroupInstanceSummary => instance !== null);
+
+      return { instances };
+    },
+
+    async listGroupGalleryImages(
+      groupId,
+      galleryId,
+      accountId,
+      page,
+    ): Promise<GroupGalleryImagePage> {
+      const account = onlineAccount(accountId);
+      // Upstream the images *are* the gallery — there is no `/images` segment on VRChat's path.
+      const raw = await groupSubresource(
+        account,
+        `/groups/${groupId}/galleries/${galleryId}?n=${String(page.n)}&offset=${String(page.offset)}`,
+        "group_gallery_fetch_failed",
+      );
+
+      if (!Array.isArray(raw)) return { images: [], hasMore: false };
+
+      const images = raw
+        .map((entry: GroupGalleryImage) => toGroupGalleryImage(entry))
+        .filter((image): image is GroupGalleryImageSummary => image !== null);
+
+      return { images, hasMore: raw.length >= page.n };
     },
 
     async listMutualFriends(userId, accountId, page): Promise<MutualFriendPage> {

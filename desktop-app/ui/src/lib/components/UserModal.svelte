@@ -99,6 +99,10 @@ const actionTarget = $derived({
   name: userModal.title,
   accountId: userModal.accountId,
   meta: () => userModal.snapshot,
+  // The modal is the one caller that has the images, so it is the one place the two image items
+  // appear. Both are null until the profile lands, and the menu simply grows when it does.
+  iconUrlFull: profile?.iconUrlFull ?? null,
+  bannerUrl: profile?.bannerUrl ?? null,
 });
 
 /**
@@ -492,6 +496,19 @@ const TAB_FAILURE_BODIES: Record<string, string> = {
                 </button>
                 {#if group.isRepresenting}
                   <Badge variant="secondary" class="shrink-0">Represents</Badge>
+                {/if}
+                {#if group.mutualGroup}
+                  <!--
+                    VRChat's own `mutualGroup`, not a computed intersection: this tab is read
+                    through one account, and that account is the "you" the badge means.
+                  -->
+                  <Badge
+                    variant="outline"
+                    class="shrink-0"
+                    title="The account this profile was read through is in this group too"
+                  >
+                    Mutual
+                  </Badge>
                 {/if}
                 {#if group.privacy === "private"}
                   <Badge variant="outline" class="shrink-0" title="VRChat group privacy">

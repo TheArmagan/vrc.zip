@@ -183,6 +183,14 @@ function harness(
     groups?: () => Response;
     /** What `GET /groups/{id}` answers with — the group modal's own route. */
     group?: () => Response;
+    /**
+     * What the four group sub-resources answer with, given the paging they were asked for.
+     *
+     * One option rather than four, because what these tests are about is the contract all four
+     * share — the paging arithmetic and the 403/404 mapping — and a test that wants to vary one
+     * branches on the path it is handed.
+     */
+    groupSub?: (path: string, n: number, offset: number) => Response;
     /** What `GET /users/{id}/mutuals/friends` answers with, given the paging it was asked for. */
     mutuals?: (n: number, offset: number) => Response;
     /** What `GET /worlds/{id}` answers with. */
@@ -229,6 +237,16 @@ function harness(
     // `GET /groups/{id}` is not under `/users/` at all, and it is matched on the id rather than
     // on the segment so that it cannot be confused with `/users/{id}/groups` below.
     if (path.includes("/groups/grp_")) {
+      // Ordered first: every sub-resource path also contains `/groups/grp_`, so the group body
+      // would otherwise be served for the member list, the board, and the galleries alike.
+      const sub = /\/groups\/grp_[^/]+\/(members|posts|instances|galleries)/.exec(path);
+      if (sub !== null) {
+        const query = new URL(input).searchParams;
+        return (
+          options.groupSub?.(path, Number(query.get("n")), Number(query.get("offset"))) ??
+          Response.json([])
+        );
+      }
       return options.group?.() ?? Response.json({});
     }
     // Ordered before the profile branch below: these are all `/users/…` paths too, and a
@@ -296,7 +314,12 @@ function harness(
       // The friend list this account is already holding in memory. `isFriend` is a set membership
       // test against it and `trustLevel` is a lookup in it, which is why neither costs a request.
       list: () =>
-        (options.friends ?? []).map((id) => ({ id, trustLevel: "trusted", status: "join me" })),
+        (options.friends ?? []).map((id) => ({
+          id,
+          displayName: id.toUpperCase(),
+          trustLevel: "trusted",
+          status: "join me",
+        })),
       listAll: () => [],
       // A live profile read writes back into presence; here there is nothing to write into, so it
       // reports no news and no event is emitted. The behaviour itself is tested in presence.test.ts,
@@ -533,6 +556,8 @@ describe("control deps: groups and mutual friends", () => {
       privacy: "default",
       ownerId: "usr_owner",
       description: null,
+      // `/groups/represented` does not carry the flag, so it is false rather than unknown.
+      mutualGroup: false,
       isRepresenting: true,
     });
     h.stop();
@@ -744,6 +769,24 @@ describe("control deps: groups and mutual friends", () => {
     h.stop();
   });
 
+  test("mutualGroup is passed through, and absent means false", async () => {
+    const h = harness({
+      groups: () =>
+        Response.json([
+          groupBody({ mutualGroup: true }),
+          groupBody({ groupId: "grp_other", mutualGroup: false }),
+          // Optional upstream, like every other field on `LimitedUserGroups`.
+          groupBody({ groupId: "grp_silent" }),
+        ]),
+    });
+    await resumeAll(h);
+
+    const { groups } = await h.deps.listUserGroups(SUBJECT, VIEWER);
+
+    expect(groups.map((group) => group.mutualGroup)).toEqual([true, false, false]);
+    h.stop();
+  });
+
   test("an empty group list is a normal answer", async () => {
     // VRChat filters by what the viewer may see; nothing visible is not the same as no groups.
     const h = harness({ groups: () => Response.json([]) });
@@ -937,6 +980,358 @@ describe("control deps: groups and mutual friends", () => {
 
     const offline = harness();
     await expect(offline.deps.getGroup(GROUP_ID, VIEWER)).rejects.toMatchObject({
+      status: 503,
+      code: "no_account",
+    });
+    offline.stop();
+  });
+
+  test("the galleries ride in on the group body rather than costing a request", async () => {
+    const h = harness({
+      group: () =>
+        Response.json({
+          id: GROUP_ID,
+          name: "A Group",
+          galleries: [
+            { id: "ggal_1", name: "Events", description: "Meetups.", membersOnly: true },
+            // The name falls back to the id rather than rendering as an empty tab.
+            { id: "ggal_2", name: "" },
+            // Every field of `GroupGallery` is optional upstream, so this is legal — and there is
+            // nothing to fetch its images with, so it is dropped rather than shown as a dead tab.
+            { name: "A gallery with no id" },
+          ],
+        }),
+    });
+    await resumeAll(h);
+
+    const group = await h.deps.getGroup(GROUP_ID, VIEWER);
+
+    expect(group.galleries).toEqual([
+      { id: "ggal_1", name: "Events", description: "Meetups.", membersOnly: true },
+      { id: "ggal_2", name: "ggal_2", description: null, membersOnly: false },
+    ]);
+    // Not one request beyond the group itself: `Group.galleries` is part of the body.
+    expect(h.requests.filter((path) => path.includes("/galleries"))).toEqual([]);
+    h.stop();
+  });
+
+  test("a group with no galleries at all is an empty array, not a missing field", async () => {
+    const h = harness({ group: () => Response.json({ id: GROUP_ID, name: "A Group" }) });
+    await resumeAll(h);
+    expect((await h.deps.getGroup(GROUP_ID, VIEWER)).galleries).toEqual([]);
+    h.stop();
+  });
+
+  test("the member list is normalised, paged, and keeps both ids", async () => {
+    const pages: { n: number; offset: number }[] = [];
+    const h = harness({
+      groupSub: (_path, n, offset) => {
+        pages.push({ n, offset });
+        // Three members in total, asked for two at a time.
+        const all = ["usr_m0", "usr_m1", "usr_m2"];
+        return Response.json(
+          all.slice(offset, offset + n).map((userId, index) => ({
+            // The membership row's id, which is *not* the user's — mixing the two up is the easy
+            // mistake here, because VRChat gives the membership row the shorter name.
+            id: `gmem_${userId}`,
+            groupId: GROUP_ID,
+            userId,
+            joinedAt: "2022-03-04T05:06:07.000Z",
+            roleIds: ["grol_member", ""],
+            isRepresenting: index === 0,
+            user: {
+              id: userId,
+              displayName: userId.toUpperCase(),
+              iconUrl: `https://api.vrchat.cloud/api/1/image/${userId}/1/256`,
+              currentAvatarThumbnailImageUrl: "",
+            },
+          })),
+        );
+      },
+    });
+    await resumeAll(h);
+
+    const first = await h.deps.listGroupMembers(GROUP_ID, VIEWER, { n: 2, offset: 0 });
+
+    expect(first.members[0]).toEqual({
+      id: "gmem_usr_m0",
+      userId: "usr_m0",
+      displayName: "USR_M0",
+      iconUrl: "https://api.vrchat.cloud/api/1/image/usr_m0/1/256",
+      // Integer unix ms, never the ISO string VRChat sent.
+      joinedAt: Date.parse("2022-03-04T05:06:07.000Z"),
+      // The empty role id is dropped rather than carried as a role nobody holds.
+      roleIds: ["grol_member"],
+      isRepresenting: true,
+    });
+    // A full page is the only evidence another exists — VRChat sends no total on this endpoint.
+    expect(first.hasMore).toBe(true);
+
+    const second = await h.deps.listGroupMembers(GROUP_ID, VIEWER, { n: 2, offset: 2 });
+    expect(second.members.map((m) => m.userId)).toEqual(["usr_m2"]);
+    expect(second.hasMore).toBe(false);
+
+    // Paging is asked for, not sliced locally: the whole list is never pulled down.
+    expect(pages).toEqual([
+      { n: 2, offset: 0 },
+      { n: 2, offset: 2 },
+    ]);
+    h.stop();
+  });
+
+  /*
+   * `GroupMember` is `| null` in the spec — for "a user who is not part of the group" — so a null
+   * inside the array is legal, and a mapper that assumed an object would lose the whole page to one
+   * row. `hasMore` still reads off the raw array: a dropped entry shortens the mapped list without
+   * meaning the page was short, and reading it off the mapped one would end the scroll early.
+   */
+  test("a null member entry costs that row, not the page or the hasMore", async () => {
+    const h = harness({
+      groupSub: () =>
+        Response.json([
+          null,
+          { id: "gmem_1", groupId: GROUP_ID, userId: "usr_m1", roleIds: [], isRepresenting: false },
+          // No userId: there is nobody to open a modal on, so it is unrenderable.
+          { id: "gmem_2", groupId: GROUP_ID, roleIds: [] },
+        ]),
+    });
+    await resumeAll(h);
+
+    const { members, hasMore } = await h.deps.listGroupMembers(GROUP_ID, VIEWER, {
+      n: 3,
+      offset: 0,
+    });
+
+    expect(members.map((m) => m.userId)).toEqual(["usr_m1"]);
+    // The name falls back to the user id: a row with an empty label is worse than the id.
+    expect(members[0]?.displayName).toBe("usr_m1");
+    expect(members[0]?.iconUrl).toBe(null);
+    expect(hasMore).toBe(true);
+    h.stop();
+  });
+
+  /*
+   * The one sub-resource that answers with an object rather than an array. The other three return
+   * a bare array, so getting this one wrong would quietly serve an empty board forever.
+   */
+  test("the board comes back wrapped in an object, and hasMore follows the page", async () => {
+    const h = harness({
+      groupSub: (_path, n, offset) =>
+        Response.json({
+          posts: ["not_p0", "not_p1", "not_p2"].slice(offset, offset + n).map((id) => ({
+            id,
+            title: "Meetup",
+            text: "Doors at eight.",
+            authorId: "usr_known",
+            createdAt: "2023-05-06T07:08:09.000Z",
+            imageUrl: "",
+          })),
+        }),
+      // `usr_known` is in this account's presence map; the post author usually is not.
+      friends: ["usr_known"],
+    });
+    await resumeAll(h);
+
+    const first = await h.deps.listGroupPosts(GROUP_ID, VIEWER, { n: 2, offset: 0 });
+
+    expect(first.posts[0]).toEqual({
+      id: "not_p0",
+      title: "Meetup",
+      text: "Doors at eight.",
+      authorId: "usr_known",
+      // `GroupPost` carries no name, so this came from local state and cost no request.
+      authorDisplayName: "USR_KNOWN",
+      createdAt: Date.parse("2023-05-06T07:08:09.000Z"),
+      // `""` is how VRChat spells "no image"; `??` would have let it through as a blank `src`.
+      imageUrl: null,
+    });
+    expect(first.hasMore).toBe(true);
+    expect(h.requests.filter((path) => path.endsWith("/users/usr_known"))).toEqual([]);
+
+    const second = await h.deps.listGroupPosts(GROUP_ID, VIEWER, { n: 2, offset: 2 });
+    expect(second.posts.map((p) => p.id)).toEqual(["not_p2"]);
+    expect(second.hasMore).toBe(false);
+    h.stop();
+  });
+
+  test("a post author falls back to friend_log, then to no name at all", async () => {
+    const h = harness({
+      groupSub: () =>
+        Response.json({
+          posts: [
+            { id: "not_p0", authorId: "usr_stranger" },
+            { id: "not_p1", authorId: "usr_seen" },
+          ],
+        }),
+    });
+    await resumeAll(h);
+
+    h.store.upsertFriend({
+      account_id: VIEWER,
+      user_id: "usr_seen",
+      display_name: "Seen Before",
+      trust_level: "veteran",
+      friended_at: T0,
+      unfriended_at: null,
+    });
+
+    const { posts } = await h.deps.listGroupPosts(GROUP_ID, VIEWER, { n: 10, offset: 0 });
+
+    // Null rather than a fetched name: resolving it would be one `GET /users/{id}` per distinct
+    // author on every page of the board, for decoration the UI can render an id fallback for.
+    expect(posts[0]).toMatchObject({ authorId: "usr_stranger", authorDisplayName: null });
+    // `friend_log` covers the window before the first friends poll of a cold start lands.
+    expect(posts[1]).toMatchObject({ authorId: "usr_seen", authorDisplayName: "Seen Before" });
+    expect(h.requests.filter((path) => path.includes("usr_stranger"))).toEqual([]);
+    h.stop();
+  });
+
+  /*
+   * Not paged, because VRChat's own endpoint takes no `n` and no `offset`. An `n` invented here
+   * would be a local slice wearing the clothes of a request.
+   */
+  test("group instances are not paged, and the world rides along free", async () => {
+    const h = harness({
+      groupSub: (path) => {
+        expect(path).not.toContain("n=");
+        return Response.json([
+          {
+            instanceId: `12345~group(${GROUP_ID})`,
+            location: `wrld_1:12345~group(${GROUP_ID})`,
+            memberCount: 9,
+            world: {
+              id: "wrld_1",
+              name: "The Great Pug",
+              thumbnailImageUrl: "https://api.vrchat.cloud/api/1/image/wrld_1/1/256",
+              authorName: "Author",
+              capacity: 40,
+            },
+          },
+          // No location: nothing here could be joined or looked up, so it is dropped.
+          { instanceId: "67890", memberCount: 2 },
+        ]);
+      },
+    });
+    await resumeAll(h);
+
+    const { instances } = await h.deps.listGroupInstances(GROUP_ID, VIEWER);
+
+    expect(instances).toEqual([
+      {
+        instanceId: `12345~group(${GROUP_ID})`,
+        location: `wrld_1:12345~group(${GROUP_ID})`,
+        memberCount: 9,
+        worldId: "wrld_1",
+        worldName: "The Great Pug",
+        worldThumbnailImageUrl: "https://api.vrchat.cloud/api/1/image/wrld_1/1/256",
+        worldCapacity: 40,
+      },
+    ]);
+    // The world was embedded in this response; fetching it would be paying twice for the bytes.
+    expect(h.requests.filter((path) => path.includes("/worlds/"))).toEqual([]);
+    h.stop();
+  });
+
+  test("gallery images page off the gallery itself, with no /images segment upstream", async () => {
+    const paths: string[] = [];
+    const h = harness({
+      groupSub: (path, n, offset) => {
+        paths.push(path);
+        return Response.json(
+          ["ggim_0", "ggim_1"].slice(offset, offset + n).map((id) => ({
+            id,
+            imageUrl: `https://api.vrchat.cloud/api/1/file/${id}/1/256`,
+            submittedByUserId: "usr_m0",
+            createdAt: "2024-01-02T03:04:05.000Z",
+          })),
+        );
+      },
+    });
+    await resumeAll(h);
+
+    const first = await h.deps.listGroupGalleryImages(GROUP_ID, "ggal_1", VIEWER, {
+      n: 2,
+      offset: 0,
+    });
+
+    expect(first.images[0]).toEqual({
+      id: "ggim_0",
+      imageUrl: "https://api.vrchat.cloud/api/1/file/ggim_0/1/256",
+      submittedByUserId: "usr_m0",
+      createdAt: Date.parse("2024-01-02T03:04:05.000Z"),
+    });
+    expect(first.hasMore).toBe(true);
+
+    const second = await h.deps.listGroupGalleryImages(GROUP_ID, "ggal_1", VIEWER, {
+      n: 2,
+      offset: 2,
+    });
+    expect(second.images).toEqual([]);
+    expect(second.hasMore).toBe(false);
+
+    // `/images` is vrc.zip's own trailing segment; upstream the images *are* the gallery.
+    expect(paths[0]).toBe(`/api/1/groups/${GROUP_ID}/galleries/ggal_1`);
+    h.stop();
+  });
+
+  /*
+   * The reason `group_forbidden` exists at all. Membership is required to read the member list,
+   * the board, or a members-only gallery on most groups, and VRChat refuses a non-member with a
+   * 403 rather than an empty body. Swallowing that into `[]` would put "this group has no members"
+   * on screen in front of a group with four hundred of them.
+   */
+  test("a 403 on any group sub-resource is group_forbidden, not a 502 and not an empty list", async () => {
+    const h = harness({ groupSub: () => new Response("{}", { status: 403 }) });
+    await resumeAll(h);
+
+    const forbidden = { status: 403, code: "group_forbidden" };
+    await expect(
+      h.deps.listGroupMembers(GROUP_ID, VIEWER, { n: 10, offset: 0 }),
+    ).rejects.toMatchObject(forbidden);
+    await expect(
+      h.deps.listGroupPosts(GROUP_ID, VIEWER, { n: 10, offset: 0 }),
+    ).rejects.toMatchObject(forbidden);
+    await expect(h.deps.listGroupInstances(GROUP_ID, VIEWER)).rejects.toMatchObject(forbidden);
+    await expect(
+      h.deps.listGroupGalleryImages(GROUP_ID, "ggal_1", VIEWER, { n: 10, offset: 0 }),
+    ).rejects.toMatchObject(forbidden);
+    h.stop();
+  });
+
+  /*
+   * A 403 on the *profile* routes is still an upstream surprise — an account that is signed in
+   * should not be forbidden its own mutual friends — so it keeps falling through to the 502. The
+   * mapping is opt-in per path rather than global for exactly that reason.
+   */
+  test("a 403 outside the group sub-resources is still a 502", async () => {
+    const h = harness({ mutuals: () => new Response("{}", { status: 403 }) });
+    await resumeAll(h);
+    await expect(
+      h.deps.listMutualFriends(SUBJECT, VIEWER, { n: 10, offset: 0 }),
+    ).rejects.toMatchObject({ status: 502, code: "mutuals_fetch_failed" });
+    h.stop();
+  });
+
+  test("a 404 on a group sub-resource is unknown_group, and offline is no_account", async () => {
+    const h = harness({ groupSub: () => new Response("{}", { status: 404 }) });
+    await resumeAll(h);
+
+    const missing = { status: 404, code: "unknown_group" };
+    await expect(
+      h.deps.listGroupMembers(GROUP_ID, VIEWER, { n: 10, offset: 0 }),
+    ).rejects.toMatchObject(missing);
+    await expect(
+      h.deps.listGroupPosts(GROUP_ID, VIEWER, { n: 10, offset: 0 }),
+    ).rejects.toMatchObject(missing);
+    await expect(h.deps.listGroupInstances(GROUP_ID, VIEWER)).rejects.toMatchObject(missing);
+    await expect(
+      h.deps.listGroupGalleryImages(GROUP_ID, "ggal_1", VIEWER, { n: 10, offset: 0 }),
+    ).rejects.toMatchObject(missing);
+    h.stop();
+
+    // Nothing signed in has no cookie to ask with, so it never reaches the 403/404 question.
+    const offline = harness();
+    await expect(offline.deps.listGroupInstances(GROUP_ID, VIEWER)).rejects.toMatchObject({
       status: 503,
       code: "no_account",
     });

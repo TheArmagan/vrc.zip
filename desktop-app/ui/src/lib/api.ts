@@ -27,6 +27,15 @@ import {
   type FriendStatus,
   familyOf,
   type GameSession,
+  type GroupGalleryImagePage,
+  type GroupGalleryImageSummary,
+  type GroupGallerySummary,
+  type GroupInstanceList,
+  type GroupInstanceSummary,
+  type GroupMemberPage,
+  type GroupMemberSummary,
+  type GroupPostPage,
+  type GroupPostSummary,
   type KnownEventKind,
   type LoginResult,
   type RateLimitSnapshot,
@@ -65,6 +74,15 @@ export {
   type FriendStatus,
   familyOf,
   type GameSession,
+  type GroupGalleryImagePage,
+  type GroupGalleryImageSummary,
+  type GroupGallerySummary,
+  type GroupInstanceList,
+  type GroupInstanceSummary,
+  type GroupMemberPage,
+  type GroupMemberSummary,
+  type GroupPostPage,
+  type GroupPostSummary,
   type KnownEventKind,
   type LoginResult,
   type RateLimitSnapshot as RateLimitStatus,
@@ -119,6 +137,14 @@ export interface UserProfile {
   readonly lastLogin: number | null;
   /** Absolute VRChat user-icon URL, or null. Load it through `imageUrl()`, never directly. */
   readonly iconUrl: string | null;
+  /**
+   * The **non-thumbnail** original of `iconUrl`, or null — what "Open profile image" opens.
+   *
+   * Never a fallback to the thumbnail: null means there is no full-size original, and the action
+   * hides rather than opening a 256px crop that looks like it worked. Same `imageUrl()` route as
+   * every other VRChat asset, because a browser cannot fetch these URLs itself.
+   */
+  readonly iconUrlFull: string | null;
   /** Unix ms this account first recorded the friendship. Null when never friends. */
   readonly friendedAt: number | null;
   /** The local, private note. Null when unset. */
@@ -211,6 +237,14 @@ export interface UserGroup {
   /** The owner's `usr_…`, or null. VRChat sends no display name with it — see `GroupModal`. */
   readonly ownerId: string | null;
   readonly isRepresenting: boolean;
+  /**
+   * The account this list was read through is in this group too — VRChat's own `mutualGroup`.
+   *
+   * Only `GET /users/{id}/groups` carries it, so it is false on a group that arrived any other way
+   * (a represented badge, `GET /groups/{id}`). False therefore means "not claimed here", and the
+   * badge is rendered only in the Groups tab, which is the one place the claim is made.
+   */
+  readonly mutualGroup: boolean;
 }
 
 /**
@@ -247,6 +281,13 @@ export interface GroupDetail extends UserGroup {
    * A statement about the viewer rather than about the group, so it moves when `accountId` does.
    */
   readonly membershipStatus: string | null;
+  /**
+   * The group's galleries.
+   *
+   * Rides in on the group record itself rather than costing a request of its own — VRChat puts it
+   * on the group body. The *images* in each are paged separately.
+   */
+  readonly galleries: readonly GroupGallerySummary[];
 }
 
 /** A friend the asking account and the viewed user have in common. */
@@ -515,6 +556,17 @@ export function isNoAccountOnline(error: unknown): boolean {
 /** True for a 404 — the daemon looked and VRChat does not know that user id. */
 export function isNotFound(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404;
+}
+
+/**
+ * True for a 403 — the account asking is not allowed to see this, and asking again will not help.
+ *
+ * Distinct from an error on purpose. Most VRChat groups show their member list only to members, so
+ * this is the ordinary answer for a group you have not joined: a rule about who may look, not a
+ * fault. Callers say "members only" and offer no retry, because a retry cannot acquire membership.
+ */
+export function isForbidden(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 403;
 }
 
 /** True for the 409 the daemon returns when no contact address has been configured yet. */
@@ -1071,6 +1123,68 @@ export const api = {
         query: { accountId },
         ...withSignal(signal),
       }),
+
+    /*
+     * The four paged sub-resources behind the group screen.
+     *
+     * Each one 403s for an account the group will not show it to, which `isForbidden` turns into a
+     * sentence rather than an error — see `PagedSection`. `hasMore` is the daemon's call, derived
+     * from a short page, because VRChat sends no total.
+     *
+     * `offset` is the count already held rather than a page number, which is what lets `PagedList`
+     * stay ignorant of how many pages it has read.
+     */
+    members: (
+      groupId: string,
+      offset: number,
+      n: number,
+      accountId?: string | null,
+      signal?: AbortSignal,
+    ): Promise<GroupMemberPage> =>
+      request<GroupMemberPage>(`/groups/${encodeURIComponent(groupId)}/members`, {
+        query: { accountId, n: String(n), offset: String(offset) },
+        ...withSignal(signal),
+      }),
+
+    posts: (
+      groupId: string,
+      offset: number,
+      n: number,
+      accountId?: string | null,
+      signal?: AbortSignal,
+    ): Promise<GroupPostPage> =>
+      request<GroupPostPage>(`/groups/${encodeURIComponent(groupId)}/posts`, {
+        query: { accountId, n: String(n), offset: String(offset) },
+        ...withSignal(signal),
+      }),
+
+    /** Not paged: VRChat returns every open instance at once, and there are never many. */
+    instances: (
+      groupId: string,
+      accountId?: string | null,
+      signal?: AbortSignal,
+    ): Promise<GroupInstanceList> =>
+      request<GroupInstanceList>(`/groups/${encodeURIComponent(groupId)}/instances`, {
+        query: { accountId },
+        ...withSignal(signal),
+      }),
+
+    /**
+     * One gallery's images. The gallery *list* rides in on the group record itself
+     * (`GroupDetail.galleries`), so opening the tab costs no extra request until an image loads.
+     */
+    galleryImages: (
+      groupId: string,
+      galleryId: string,
+      offset: number,
+      n: number,
+      accountId?: string | null,
+      signal?: AbortSignal,
+    ): Promise<GroupGalleryImagePage> =>
+      request<GroupGalleryImagePage>(
+        `/groups/${encodeURIComponent(groupId)}/galleries/${encodeURIComponent(galleryId)}/images`,
+        { query: { accountId, n: String(n), offset: String(offset) }, ...withSignal(signal) },
+      ),
   },
 
   worlds: {

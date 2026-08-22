@@ -35,6 +35,25 @@ noticeable change lands with its `PROGRESS.md` edit in the same commit:
 `PLAN.md` changes too when the *architecture* changes, but it is the plan, not the log — most work
 touches `PROGRESS.md` only.
 
+## Tooling (this is a Windows machine)
+
+**Use the dedicated tools, not shell commands, for anything a tool covers.** This is not a style
+preference — shell workarounds silently misbehave on Windows (path separators, quoting, encoding,
+BOM, CRLF, PowerShell vs Git Bash differences), and a command that *looks* like it worked is the
+usual failure mode.
+
+- **Write files with the `Write` tool. Always.** Never `Set-Content`, `Out-File`, `echo >`, `cat <<
+  EOF`, `tee`, or a redirect. Heredocs and here-strings are the single biggest source of mangled
+  files here.
+- **Edit files with `Edit`**, never `sed -i`, a regex-replace one-liner, or a rewrite-through-shell.
+- **Read with `Read`**, not `cat`/`Get-Content`/`head`/`sed -n`.
+- **Search with `Grep` and `Glob`**, not `rg`/`grep`/`Select-String`/`Get-ChildItem -Recurse`/`find`.
+- Reserve the shell for things that genuinely have no tool: `git`, `bun`, `bun run <script>`, and
+  other real process invocations.
+
+When a shell call *is* the right move, prefer PowerShell 7 syntax over POSIX — both shells are
+available and mixing their syntax is its own class of failure.
+
 ## Commands
 
 All from `desktop-app/`. Bun **1.4.0** is pinned in three places that must move together:

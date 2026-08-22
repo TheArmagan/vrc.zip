@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_SCOPES } from "@vrcz/shared";
+import { ALL_SCOPES, DEFAULT_SCOPES, expandSuperWildcard, expandWildcard } from "@vrcz/shared";
 import {
   isAccountPicker,
   missingScopes,
@@ -184,5 +184,37 @@ describe("a password is not a typo'd scope list", () => {
   test("the default set can draw every picture a client shows", () => {
     // Without files:read the default grant produces an app whose every avatar is a 403.
     expect(DEFAULT_SCOPES).toContain("files:read");
+  });
+});
+
+describe("wildcards", () => {
+  test("* grants every scope that is not dangerous", () => {
+    const result = parseScopeRequest("*");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.scopes).toEqual(expandWildcard());
+    // The rule `*` exists to enforce: dangerous scopes must be asked for by name.
+    expect(result.scopes).not.toContain("account:destroy");
+    expect(result.scopes).toContain("friends:read");
+  });
+
+  test("** grants every scope, dangerous ones included", () => {
+    const result = parseScopeRequest("**");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect([...result.scopes].sort()).toEqual([...ALL_SCOPES].sort());
+    expect(result.scopes).toContain("account:destroy");
+    expect(result.scopes).toContain("moderation:write");
+  });
+
+  test("** is strictly wider than *", () => {
+    // Ordering matters in the parser: matching `*` first would make `**` silently mean `*`.
+    expect(expandSuperWildcard().length).toBeGreaterThan(expandWildcard().length);
+  });
+
+  test("a wildcard mixed with anything else is not a wildcard", () => {
+    // `*,friends:read` is not a request for everything; `*` is only a wildcard on its own.
+    expect(parseScopeRequest("*,friends:read")).toEqual({ ok: false, unknown: ["*"] });
+    expect(parseScopeRequest("**,friends:read")).toEqual({ ok: false, unknown: ["**"] });
   });
 });

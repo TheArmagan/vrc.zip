@@ -14,7 +14,14 @@
  *    two precedence rules and an app that works against one build and not another.
  */
 
-import { ALL_SCOPES, DEFAULT_SCOPES, expandWildcard, isScope, type Scope } from "@vrcz/shared";
+import {
+  ALL_SCOPES,
+  DEFAULT_SCOPES,
+  expandSuperWildcard,
+  expandWildcard,
+  isScope,
+  type Scope,
+} from "@vrcz/shared";
 
 /** An app, as the consent sheet names it. */
 export interface AppIdentity {
@@ -187,9 +194,14 @@ export type ScopeRequest =
 /**
  * Parses the comma-separated scope list out of the password field.
  *
- * Empty means the minimal read-only default set. `*` expands to every non-dangerous scope —
- * dangerous ones are **never reachable through a wildcard** and must be named individually, which
- * is enforced in `expandWildcard` rather than here so there is one place it can be got wrong.
+ * Empty means the minimal read-only default set. `*` expands to every non-dangerous scope, and `**`
+ * to **every** scope including the dangerous ones. Both expansions live in `@vrcz/shared` rather
+ * than here, so there is one place the difference between them can be got wrong.
+ *
+ * `**` is the deliberate escape hatch, and it is not self-service: it decides what the consent sheet
+ * *asks for*, while the user reading a six-digit code out of vrc.zip decides whether it is granted,
+ * with the dangerous scopes in their own block behind a second toggle. The two hard denials are
+ * unaffected either way — they are route table flags, not scopes.
  *
  * An unknown scope string is a **hard failure, never silently dropped**: an app that asked for
  * `friends:reed` and got a working grant without it would fail later, somewhere unrelated, with a
@@ -202,6 +214,8 @@ export function parseScopeRequest(raw: string): ScopeRequest {
     .filter((part) => part !== "");
 
   if (parts.length === 0) return { ok: true, scopes: DEFAULT_SCOPES };
+  // `**` before `*`, or the shorter one matches first and the difference silently disappears.
+  if (parts.length === 1 && parts[0] === "**") return { ok: true, scopes: expandSuperWildcard() };
   if (parts.length === 1 && parts[0] === "*") return { ok: true, scopes: expandWildcard() };
 
   // A field that is not a scope request at all gets the same minimal default set as an empty one.

@@ -198,7 +198,27 @@ export const DEFAULT_SCOPES: readonly Scope[] = [
   "files:read",
 ] as const;
 
-/** Expands a wildcard grant. Dangerous scopes are excluded by construction — see `SCOPES`. */
+/** Expands `*`. Dangerous scopes are excluded by construction — see `SCOPES`. */
 export function expandWildcard(): Scope[] {
   return ALL_SCOPES.filter((s) => !SCOPES[s].dangerous);
+}
+
+/**
+ * Expands `**` — **every** scope, dangerous ones included.
+ *
+ * The deliberate escape hatch from the rule above, and it is spelled with two characters rather
+ * than being a flag on `*` so that the difference is visible in the one place it is typed. An app
+ * asking for `**` is asking for account deletion, 2FA management, moderation, and invite sending in
+ * a single string.
+ *
+ * What keeps it honest is that **it is not self-service**: it still raises a consent sheet, the
+ * dangerous scopes still render in their own block behind a second toggle, and the user still has
+ * to read a six-digit code out of vrc.zip and type it into the app. `**` decides what the sheet
+ * *asks for*; the person at the keyboard decides whether it is granted.
+ *
+ * The two hard denials are unaffected, because they are not scopes: `PUT /users/{id}/delete` and
+ * `DELETE /auth/twofactorauth` are refused on the route table regardless of what was granted.
+ */
+export function expandSuperWildcard(): Scope[] {
+  return [...ALL_SCOPES];
 }

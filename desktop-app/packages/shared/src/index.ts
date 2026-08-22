@@ -42,6 +42,7 @@ export { isJsonObject, type JsonObject, type JsonValue } from "./json.ts";
 export {
   ALL_SCOPES,
   DEFAULT_SCOPES,
+  expandSuperWildcard,
   expandWildcard,
   isDangerousScope,
   isScope,

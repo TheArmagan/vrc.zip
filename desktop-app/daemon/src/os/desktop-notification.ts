@@ -39,7 +39,10 @@ export interface NotifyResult {
 export async function notifyDesktop(
   notification: DesktopNotification,
   platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<NotifyResult> {
+  if (suppressed(env)) return { shown: false, reason: "suppressed" };
+
   const title = sanitise(notification.title);
   const body = sanitise(notification.body);
 
@@ -64,6 +67,27 @@ export async function notifyDesktop(
   } catch (error) {
     return { shown: false, reason: String(error) };
   }
+}
+
+/** Set this to stop the daemon raising OS notifications. Any non-empty value counts. */
+export const SUPPRESS_ENV = "VRCZIP_NO_DESKTOP_NOTIFICATIONS";
+
+/**
+ * Whether to stay silent.
+ *
+ * **The test-runner case is not a nicety.** The consent flow raises a toast the moment a login
+ * arrives, and the daemon's integration tests log apps in — so a full `bun test` fired a real
+ * Windows toast per test that touched the handshake, on the developer's actual desktop. That is
+ * both maddening and a genuine correctness signal: a unit test is not a user, and anything that
+ * escapes the process during one is a side effect nobody asked for.
+ *
+ * Checked here rather than at the callers for the same reason redaction lives in the logger: one
+ * choke point covers every path, including ones written later by someone who never read this.
+ * `bun test` sets `NODE_ENV=test` itself, so nothing has to be configured for it to work.
+ */
+function suppressed(env: NodeJS.ProcessEnv): boolean {
+  if ((env[SUPPRESS_ENV] ?? "") !== "") return true;
+  return env.NODE_ENV === "test";
 }
 
 /**

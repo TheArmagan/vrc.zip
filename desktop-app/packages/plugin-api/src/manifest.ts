@@ -24,7 +24,7 @@ import {
   type BusEventKind,
   EVENT_FAMILIES,
   type EventFamily,
-  isBusEventKind,
+  isEventPatternString,
   isScope,
   NATIVE_SCOPES,
   PLUGIN_API_PROTOCOL_MAJOR,
@@ -295,13 +295,13 @@ const accountsSchema = z
  */
 export type EventPattern = "*" | `${EventFamily}.*` | BusEventKind;
 
-function isEventPattern(value: string): boolean {
-  if (value === "*") return true;
-  if (value.endsWith(".*")) {
-    return (EVENT_FAMILIES as readonly string[]).includes(value.slice(0, -2));
-  }
-  return isBusEventKind(value);
-}
+/*
+ * The predicate moved to `@vrcz/shared` and is imported rather than kept here.
+ *
+ * Both sides need it now: this schema refuses a mistyped pattern at install, and the events bridge
+ * asks the same question per event to decide whether a *granted* pattern covers the kind in hand.
+ * Two copies would mean the set a user approved and the set the host enforces could drift.
+ */
 
 /**
  * Unknown kinds are rejected rather than tolerated, which is the opposite of how the *consumer* side
@@ -312,7 +312,7 @@ function isEventPattern(value: string): boolean {
  * of writes `family.*`, which is stable across daemon versions by construction.
  */
 const eventPatternSchema = stringMatching<EventPattern>(
-  isEventPattern,
+  isEventPatternString,
   (value) =>
     `${value} is not an event this build of vrc.zip publishes. Write one exact kind (for example "friend.online"), a whole family with "friend.*", or "*" for everything. Families: ${EVENT_FAMILIES.join(", ")}.`,
 );

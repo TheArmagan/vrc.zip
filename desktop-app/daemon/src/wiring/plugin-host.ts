@@ -47,7 +47,7 @@ import {
   type PluginManifest,
   parseManifest,
 } from "@vrcz/plugin-api";
-import { isScope, type Scope } from "@vrcz/shared";
+import { isEventPatternString, isScope, type Scope } from "@vrcz/shared";
 import type { AccountManager } from "../accounts/manager.ts";
 import type { EventBus } from "../bus/event-bus.ts";
 import { pluginDataDir } from "../paths.ts";
@@ -197,6 +197,7 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
       readonly scopes: string;
       readonly accountIds: string;
       readonly capabilities: string;
+      readonly events: string;
     } | null = null;
     for (const grant of store.listPluginGrants(pluginId)) {
       if (grant.revoked_at !== null || grant.version !== row.version) continue;
@@ -206,6 +207,7 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
           scopes: grant.scopes,
           accountIds: grant.account_ids,
           capabilities: grant.capabilities,
+          events: grant.events,
         };
       }
     }
@@ -225,6 +227,10 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
       // floor, which was harmless only for as long as no method required one. 3.7 adds methods that
       // do, so a dropped capability is now a denial rather than a no-op.
       capabilities: jsonStrings(best.capabilities).filter(isPluginCapability),
+      // What the consent sheet said the plugin would be told about. Enforced by the events bridge
+      // from migration 011 onward; before it, this column did not exist and the sheet was a claim
+      // nothing kept.
+      events: jsonStrings(best.events).filter(isEventPatternString),
       ...(dryRunScopes.length === 0 ? {} : { dryRunScopes }),
     };
   }
@@ -496,6 +502,7 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
         account_ids: JSON.stringify([...accountIds]),
         capabilities: JSON.stringify(manifest.permissions.capabilities),
         domains: JSON.stringify(manifest.permissions.fetch.domains),
+        events: JSON.stringify(manifest.permissions.events),
         granted_at: now,
       });
       /* ================================================================================= */

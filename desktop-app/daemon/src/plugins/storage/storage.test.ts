@@ -39,7 +39,7 @@ afterEach(() => {
 });
 
 function grantOf(capabilities: PluginGrant["capabilities"] = ["storage"]): PluginGrant {
-  return { pluginId: PLUGIN, scopes: [], accountIds: [], capabilities };
+  return { pluginId: PLUGIN, scopes: [], accountIds: [], capabilities, events: [] };
 }
 
 function req(method: string, params?: JsonValue): RequestFrame {
@@ -79,6 +79,7 @@ describe("the capability gate", () => {
       scopes: ["friends:read"],
       accountIds: [],
       capabilities: [],
+      events: ["*"],
     };
     const verdict = gate().check(req("storage.kv.get", { key: "a" }), scopedButNotCapable, NOW);
     expect(verdict.ok).toBe(false);

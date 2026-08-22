@@ -56,7 +56,7 @@ import {
   type SubscribeFrame,
   type UnsubscribeFrame,
 } from "@vrcz/plugin-api";
-import type { JsonValue, Scope } from "@vrcz/shared";
+import { anyEventPatternMatches, type JsonValue, type Scope } from "@vrcz/shared";
 import type { BusEvent, Subscription as BusSubscription, EventBus } from "../bus/event-bus.ts";
 import { scopeForEventKind } from "../servers/app-api.ts";
 import type { PluginChannel } from "./dispatcher.ts";
@@ -104,6 +104,12 @@ export type EventAuthority = (event: PluginEvent) => boolean;
  *     Behind `sessions:unlinked`, which is deliberately **not** a bypass of gate 3.
  *  3. **The kind.** Default-deny through {@link scopeForEventKind}: an unmapped family is dropped,
  *     so a kind from a future daemon is not plugin-readable by default.
+ *  4. **The granted event patterns.** What the consent sheet said this plugin would be told about.
+ *     Narrower than gate 3 and never wider: a pattern naming a kind the grant holds no scope for
+ *     grants nothing. Before migration 011 the grant could not carry these, so a plugin that
+ *     declared `friend.*` could subscribe to `gamelog.*` on the strength of `sessions:read` — never
+ *     more than its scopes allowed, but more than the sheet said, which made the sheet a claim
+ *     nothing kept.
  *
  * Sets rather than `Array.includes` because this runs per event per subscription, and the arrays it
  * closes over come from a grant row rather than from a bounded literal.
@@ -112,6 +118,7 @@ export function compileAuthority(grant: PluginGrant): EventAuthority {
   const accounts = new Set(grant.accountIds);
   const scopes = new Set<string>(grant.scopes);
   const unlinked = scopes.has("sessions:unlinked");
+  const patterns = grant.events;
 
   return (event) => {
     if (event.accountId === null) {
@@ -121,7 +128,8 @@ export function compileAuthority(grant: PluginGrant): EventAuthority {
     }
     const scope = scopeForEventKind(event.kind);
     if (scope === null) return false;
-    return scopes.has(scope);
+    if (!scopes.has(scope)) return false;
+    return anyEventPatternMatches(patterns, event.kind);
   };
 }
 
@@ -129,11 +137,15 @@ export function compileAuthority(grant: PluginGrant): EventAuthority {
  * A cheap identity for a grant's *authority*, so a flush tick can tell "unchanged" from "widened or
  * narrowed" without recompiling and re-filtering every queue every tick.
  *
- * Only the two fields {@link compileAuthority} reads. `dryRunScopes` is deliberately absent: it
+ * Only the three fields {@link compileAuthority} reads. `dryRunScopes` is deliberately absent: it
  * gates outbound actions, not what may be watched.
  */
 function authoritySignature(grant: PluginGrant): string {
-  return `${[...grant.scopes].sort().join(",")}|${[...grant.accountIds].sort().join(",")}`;
+  return [
+    [...grant.scopes].sort().join(","),
+    [...grant.accountIds].sort().join(","),
+    [...grant.events].sort().join(","),
+  ].join("|");
 }
 
 /**

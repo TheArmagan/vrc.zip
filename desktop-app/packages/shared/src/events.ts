@@ -351,3 +351,51 @@ export function familyOf(kind: string): EventFamily {
   const head = kind.split(".", 1)[0] ?? "";
   return (EVENT_FAMILIES as readonly string[]).includes(head) ? (head as EventFamily) : "other";
 }
+
+/**
+ * True for a pattern this build accepts in `permissions.events`: `*`, `family.*`, or an exact kind.
+ *
+ * Lives here rather than in the manifest schema because **both sides need it**. The manifest reads
+ * it to refuse a mistyped subscription at install; the events bridge reads it to decide, per event,
+ * whether a granted pattern covers the kind in hand. One definition, so the set a user approved and
+ * the set the host enforces cannot drift apart.
+ */
+export function isEventPatternString(value: string): boolean {
+  if (value === "*") return true;
+  if (value.endsWith(".*")) {
+    return (EVENT_FAMILIES as readonly string[]).includes(value.slice(0, -2));
+  }
+  return isBusEventKind(value);
+}
+
+/**
+ * Whether a granted event pattern covers a kind.
+ *
+ * Prefix matching is on the **family**, not on the string, and that is the part worth stating: a
+ * pattern is `friend.*` or an exact kind, never `friend.on*`. Matching by string prefix would make
+ * `friend.online` cover `friend.online_but_different` if a future daemon ever coined one, which is
+ * the kind of widening nobody consented to.
+ *
+ * An unknown kind — one from a newer daemon — matches `*` and its `family.*`, and no exact pattern.
+ * That is deliberate and matches the manifest's own note: an author who wants kinds this build has
+ * not heard of writes `family.*`, which is stable across versions by construction.
+ */
+export function eventPatternMatches(pattern: string, kind: string): boolean {
+  if (pattern === "*") return true;
+  if (pattern.endsWith(".*")) return familyOf(kind) === pattern.slice(0, -2);
+  return pattern === kind;
+}
+
+/**
+ * Whether any of a grant's patterns covers a kind. **An empty list matches nothing.**
+ *
+ * Default-deny, and the caller decides what to do about a grant that predates event enforcement —
+ * see `compileAuthority`. A list that matched everything when empty would mean a plugin declaring
+ * no events getting all of them, which inverts the whole point of asking.
+ */
+export function anyEventPatternMatches(patterns: readonly string[], kind: string): boolean {
+  for (const pattern of patterns) {
+    if (eventPatternMatches(pattern, kind)) return true;
+  }
+  return false;
+}

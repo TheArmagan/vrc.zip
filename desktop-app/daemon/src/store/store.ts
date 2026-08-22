@@ -893,6 +893,7 @@ export class Store {
       grant.account_ids,
       grant.capabilities,
       grant.domains,
+      grant.events,
       grant.granted_at,
     );
   }
@@ -1194,7 +1195,10 @@ function prepareAll(db: Database) {
     disablePlugin: q<void, [number, string, string, string]>(SQL.disablePlugin),
     enablePlugin: q<void, [string]>(SQL.enablePlugin),
 
-    insertPluginGrant: q<void, [string, string, string, string, string, string, string, number]>(
+    insertPluginGrant: q<
+      void,
+      [string, string, string, string, string, string, string, string, number]
+    >(
       SQL.insertPluginGrant,
     ),
     findPluginGrant: q<PluginGrantRow, [string, string, string]>(SQL.findPluginGrant),

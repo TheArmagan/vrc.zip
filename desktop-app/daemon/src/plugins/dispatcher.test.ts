@@ -15,6 +15,7 @@ const GRANT: PluginGrant = {
   scopes: ["friends:read", "invite:send"],
   accountIds: ["usr_a"],
   capabilities: [],
+  events: ["*"],
 };
 
 function channel(): PluginChannel & { sent: Envelope[] } {
@@ -132,7 +133,7 @@ describe("inbound calls", () => {
 
   test("a scope the grant does not hold never reaches the handler", async () => {
     const h = harness({
-      grant: { pluginId: "p", scopes: [], accountIds: ["usr_a"], capabilities: [] },
+      grant: { pluginId: "p", scopes: [], accountIds: ["usr_a"], capabilities: [], events: [] },
     });
     h.dispatcher.handleFrame("p", req("test.read"));
     await settle();

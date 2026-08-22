@@ -94,6 +94,7 @@ describe("grants", () => {
     account_ids: JSON.stringify(["usr_a"]),
     capabilities: JSON.stringify(["storage"]),
     domains: JSON.stringify([]),
+    events: JSON.stringify(["friend.*"]),
     granted_at: NOW,
   };
 

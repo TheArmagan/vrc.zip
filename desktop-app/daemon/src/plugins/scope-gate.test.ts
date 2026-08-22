@@ -35,7 +35,7 @@ function grantWith(
   accountIds: string[],
   capabilities: PluginGrant["capabilities"] = [],
 ): PluginGrant {
-  return { pluginId: "p", scopes, accountIds, capabilities };
+  return { pluginId: "p", scopes, accountIds, capabilities, events: ["*"] };
 }
 
 function req(method: string, params?: JsonValue): RequestFrame {
@@ -139,6 +139,7 @@ describe("isShadowed", () => {
       scopes: ["invite:send", "friends:read"],
       accountIds: ["usr_a"],
       capabilities: [],
+      events: ["*"],
       dryRunScopes: ["invite:send"],
     };
     expect(isShadowed(grant, null)).toBe(false);

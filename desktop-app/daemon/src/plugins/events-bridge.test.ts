@@ -34,10 +34,13 @@ const OTHER = "usr_beta";
 function grantOf(
   scopes: readonly Scope[] = ["friends:read", "sessions:read"],
   accountIds: readonly string[] = [ACCOUNT],
+  // "*" by default so the existing cases keep testing the scope and account gates. The event gate
+  // gets its own cases rather than silently changing what every other assertion means.
+  events: readonly string[] = ["*"],
 ): PluginGrant {
   // No capabilities: the events bridge is scope-and-account business, and a grant that carried one
   // here would be asserting something this file does not test.
-  return { pluginId: PLUGIN, scopes, accountIds, capabilities: [] };
+  return { pluginId: PLUGIN, scopes, accountIds, capabilities: [], events };
 }
 
 const DEFAULT_DELIVERY: DeliveryPolicy = { credits: 100, maxBatch: 32, overflow: "drop-oldest" };
@@ -175,6 +178,46 @@ describe("the scope filter", () => {
     expect(delivered(h).map((event) => event.subjectId)).toEqual(["usr_1"]);
     // And nothing was reported as dropped: these were never this plugin's events to lose.
     expect(h.drops()).toEqual([]);
+  });
+
+  /**
+   * The gate migration 011 exists for. Before it, the grant could not carry event patterns at all,
+   * so a plugin that declared `friend.*` on the consent sheet could subscribe to `gamelog.*` on the
+   * strength of an unrelated scope — never more than its scopes allowed, but more than the sheet
+   * said.
+   */
+  test("a granted pattern narrows what a held scope can see", () => {
+    const scopes: readonly Scope[] = ["friends:read", "sessions:read", "sessions:unlinked"];
+    const friendOnly = compileAuthority(grantOf(scopes, [ACCOUNT], ["friend.*"]));
+    const friend = toPluginEvent({ kind: "friend.online", accountId: ACCOUNT, ts: 1 });
+    const gamelog = toPluginEvent({ kind: "gamelog.player_join", accountId: ACCOUNT, ts: 1 });
+
+    // The scope covers both. The sheet said friends, so only friends arrive.
+    expect(friendOnly(friend)).toBe(true);
+    expect(friendOnly(gamelog)).toBe(false);
+
+    // And with both patterns granted, the same grant sees both — so the narrowing above is the
+    // pattern doing the work rather than the scope.
+    const both = compileAuthority(grantOf(scopes, [ACCOUNT], ["friend.*", "gamelog.*"]));
+    expect(both(gamelog)).toBe(true);
+  });
+
+  test("a pattern never widens: naming a kind you hold no scope for grants nothing", () => {
+    const allows = compileAuthority(grantOf(["friends:read"], [ACCOUNT], ["*"]));
+    expect(allows(toPluginEvent({ kind: "gamelog.player_join", accountId: ACCOUNT, ts: 1 }))).toBe(
+      false,
+    );
+  });
+
+  test("no patterns means no events, which is what a pre-011 grant row decays to", () => {
+    const allows = compileAuthority(grantOf(["friends:read"], [ACCOUNT], []));
+    expect(allows(toPluginEvent({ kind: "friend.online", accountId: ACCOUNT, ts: 1 }))).toBe(false);
+  });
+
+  test("an exact pattern does not match by string prefix", () => {
+    const allows = compileAuthority(grantOf(["friends:read"], [ACCOUNT], ["friend.online"]));
+    expect(allows(toPluginEvent({ kind: "friend.online", accountId: ACCOUNT, ts: 1 }))).toBe(true);
+    expect(allows(toPluginEvent({ kind: "friend.offline", accountId: ACCOUNT, ts: 1 }))).toBe(false);
   });
 });
 

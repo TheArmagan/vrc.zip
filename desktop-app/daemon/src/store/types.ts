@@ -331,6 +331,7 @@ export type PluginGrantRow = {
   scopes: string;
   account_ids: string;
   capabilities: string;
+  events: string;
   domains: string;
   granted_at: number;
   revoked_at: number | null;

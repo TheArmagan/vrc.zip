@@ -487,6 +487,7 @@ describe("dispatcher contract", () => {
     scopes: ["friends:read"],
     accountIds: ["usr_a"],
     capabilities: [],
+    events: ["*"],
   };
 
   const table: MethodTable = {

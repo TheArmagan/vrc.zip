@@ -743,6 +743,19 @@ export interface PluginGrant {
    * them all.
    */
   readonly capabilities: readonly PluginCapability[];
+  /**
+   * The event patterns the user was shown and approved: `*`, `family.*`, or exact kinds.
+   *
+   * **Empty denies everything**, which is why this is required rather than optional. It is a second
+   * gate rather than a replacement for the first: the scope decides what a plugin may *see at all*,
+   * and this decides which of that it asked to be told about. A pattern naming a kind the grant has
+   * no scope for grants nothing — the narrower of the two always wins.
+   *
+   * Strings rather than the manifest's `EventPattern` type, because this module may not import the
+   * manifest. `isEventPatternString` and `anyEventPatternMatches` in `@vrcz/shared` are the shared
+   * definition both sides use.
+   */
+  readonly events: readonly string[];
   /** Scopes still in dry-run: outbound actions are logged and not performed. Correction 4. */
   readonly dryRunScopes?: readonly Scope[];
 }

@@ -541,8 +541,9 @@ export const SQL = {
 
   insertPluginGrant: `
     INSERT INTO plugin_grants
-      (plugin_id, version, grant_hash, scopes, account_ids, capabilities, domains, granted_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      (plugin_id, version, grant_hash, scopes, account_ids, capabilities, domains, events,
+       granted_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(plugin_id, version, grant_hash) DO NOTHING`,
   /*
    * The consent lookup, and the whole point of the composite key. A version bump or a widened

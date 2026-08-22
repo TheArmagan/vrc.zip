@@ -2569,6 +2569,27 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      dependencies, not just to the author's code.** Any dependency a plugin bundles must itself be
      scan-clean, and that is a real constraint on what the published package may import.
 
+187. **`permissions.events` is enforceable, and the Gotcha that named it is closed.** Migration 011
+     adds `events` to `plugin_grants`, `PluginGrant` carries it, and `compileAuthority` gained a
+     fourth gate. A plugin that declared `friend.*` at consent can no longer subscribe to
+     `gamelog.*` on the strength of `sessions:read`.
+
+     Three details worth keeping. The gate is **narrowing only** — a pattern naming a kind the grant
+     holds no scope for grants nothing, so the two gates compose as an intersection and a pattern
+     can never widen a scope. **An empty list denies everything**, which is what a pre-011 row
+     decays to: those grants were written before anyone was asked about events, so there is no
+     approval to infer and the safe reading is none. And matching is on the **family**, never on the
+     string: `friend.*` matches by `familyOf`, so a future `friend.online_but_different` is not
+     silently covered by an exact `friend.online`.
+
+     The pattern predicate moved to `@vrcz/shared` on the way, because both sides need it — the
+     manifest schema refuses a mistyped pattern at install, and the bridge asks the same question
+     per event. Two copies would have let the set a user approved and the set the host enforces
+     drift apart, which is the shape of this Gotcha in the first place.
+
+     `authoritySignature` now includes the patterns, or a re-consent that narrowed only the events
+     would have been invisible to the per-tick "has this grant changed" check.
+
 ---
 
 ## Gotchas
@@ -2588,7 +2609,10 @@ Found by running code. Each of these contradicted an assumption, and most were s
   nothing fails when it goes stale — no test, no typecheck, no lint. `status.md` and the layer table
   in `security-model.md` are the two other places carrying that kind of claim, and 3.11's generated
   reference cannot cover any of them, because they are judgement rather than code.
-- **`PluginGrant` cannot carry `permissions.events`, so the consent-approved event patterns are
+- **~~`PluginGrant` cannot carry `permissions.events`~~ — closed by decision 187** (migration 011
+  adds the column, `compileAuthority` gained a fourth gate). Kept because the *shape* is worth
+  recognising again: a field that is validated, hashed and displayed, but that no code path reads,
+  looks exactly like an enforced one from the outside. **The consent-approved event patterns were
   unenforceable.** The manifest has them and `grantHash` covers them, but `plugin_grants` has columns
   for `scopes`, `account_ids`, `capabilities` and `domains` and **not** events, and the protocol's
   `PluginGrant` has no field for them either. So a plugin that declared `friend.*` at consent can

@@ -29,6 +29,15 @@ PLAN.md §Phase 5 only until the plugin host needs a real runtime to spawn; deci
 one real socket per account, fanned out to every connected app, filtered by scope. What remains for
 Phase 2 is 2.8 (rate budgets, audit rows, the kill switch and the Connected apps page) and 2.10.
 
+**A planning pass on 2026-08-22 settled sixteen open questions** — decisions 95–110, and the
+§Open questions section is now one live item rather than eight. It scopes the rest of Phase 2 (what a
+per-grant budget actually is, what earns an audit row, that 2.10 carries webhooks and the retention
+route), **cuts `local.vrc.zip`** rather than owning a renewal endpoint for the life of the product,
+and sets the run-up to Phase 3: plugins are next, they install from a local path or a pinned git URL
+with no registry, the hostile plugin is written immediately after the supervisor, and the single
+`.exe` stays and re-invokes itself as the plugin host. One sub-question is genuinely open and blocks
+the supervisor: whether JSC's small heap can be selected anywhere but at process launch.
+
 Before resuming 2.7, a foundations pass landed: the duplicated types and constants are hoisted into
 `@vrcz/shared` and the producers are typed against them (decisions 62, 63, 65, 66), `ui/` has a test
 runner for the first time (decision 64), and CI exists (decision 67). That pass was not bookkeeping
@@ -112,8 +121,9 @@ behind each line.
       unit, not `accounts`. Pre-auth events buffer and attribute retroactively; unmanaged accounts stay
       as unlinked sessions rather than being misattributed.
 - [x] **1.8 Servers** (`daemon/src/servers/`, `security/`) — three ports, Host + Origin validation,
-      session token, `state.json`. **Default URL is `http://127.0.0.1:PORT`**; `local.vrc.zip` is
-      opt-in with a resolve check and silent fallback.
+      session token, `state.json`. **Default URL is `http://127.0.0.1:PORT`**; `local.vrc.zip` was
+      opt-in with a resolve check and silent fallback, and is **cut** as of decision 101 — the code
+      removal is outstanding, see the housekeeping line under Phase 2.
 - [x] **1.9 UI** (`ui/`) — Svelte 5 + shadcn-svelte. Account switcher, login (all three 2FA paths),
       friend list, feed, game log, notifications, settings. **Command palette + command registry ship
       in Phase 1** even though plugins don't — retrofitting a registry is worse than building it empty.
@@ -201,13 +211,32 @@ handshake, because the alternative is a login flow that mints credentials with n
       otherwise keep streaming a revoked app events. Per-grant rate budgets and the audit row per
       mutating call are still outstanding — but the *measurement* they need now exists
       (`net/request-meter.ts`), so a budget has something to enforce against. Decisions 86–90.
+      **Scoped by the 2026-08-22 planning pass (decisions 95, 96, 100):** the budget is a rolling
+      per-hour window per grant on `invite:send` / `friends:write` / `groups:invite` only, answering
+      in VRChat's 429 shape; the audit log covers every mutating call *plus* reads behind a dangerous
+      scope; and `rateLimit.remaining`/`queued` become real numbers off the limiter while the single
+      gauge becomes the three ceilings that actually exist. Also here: the flaky control-deps test
+      (decision 103) and the roster cap + low-priority budget (decision 102).
 - [x] **2.9 Pipeline mirror** (`proxy/pipeline-mirror.ts`) — `wss://…:7774/` speaking VRChat's
       protocol, filtered per event type by the grant's scopes, fed from the daemon's single real
       socket per account. Frames are re-emitted **verbatim** and scanned before forwarding; a dead
       token gets VRChat's own `err` frame with the `authToken` and `ip` it echoes stripped. The token
       is read from `?authToken=`, `?auth=` (VRCX's spelling), or the `auth` cookie. Decisions 81–82.
+- [ ] **Housekeeping, before Phase 2 closes** — three items the 2026-08-22 planning pass created or
+      confirmed, none of which belong to a numbered step: **remove `local.vrc.zip`** from
+      `security/guards.ts`, `servers/bind.ts`, `settings.ts`, `os/open-url.ts`, `ui/src/lib/api.ts`,
+      `ui/src/lib/user-actions.ts`, `SettingsScreen.svelte` and their tests (decision 101 — the Host
+      allowlist narrows to `127.0.0.1`/`localhost`, which is a security-relevant narrowing, not just
+      a deletion); **fix the flaky control-deps test** (decision 103); and **cap + budget the roster
+      fallback** (decision 102).
 - [ ] **2.10 Control API** (`:7775`) — consent status, grant list/revoke, the enriched event stream
       with `sessionId`/`accountId`/`displayName` on every `gamelog.*`, and webhook registration.
+      **Scoped by the 2026-08-22 planning pass (decisions 97, 98, 99, 104):** webhooks ship *with*
+      the stream rather than after it, which means this step carries a real outbound-HTTP subsystem
+      (retries, backoff, dead-letter), not a route; unlinked sessions sit behind a dangerous
+      `sessions:unlinked` scope; `GET`/`PUT /api/retention` and a real per-event-type Settings
+      control land here, and the retention types move to `@vrcz/shared` with them; and the
+      `invite-request` / `boop` palette stubs get their routes.
 
 ---
 
@@ -270,7 +299,8 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
    virtualized tables, dialogs, context menus, forms, per-node click handlers. Charts especially: they
    were the one legitimate reason anyone would have wanted an iframe. A genuine wall is answered with a
    **new host node type contributed upstream**, available to everyone.
-10. **`127.0.0.1` is the runtime default; `local.vrc.zip` is opt-in.** Safety and zero dependencies win
+10. **`127.0.0.1` is the runtime default; `local.vrc.zip` is opt-in.** *(Second half reversed by
+    decision 101 — `local.vrc.zip` is cut entirely. The first half stands.)* Safety and zero dependencies win
     for what actually runs: no cert to renew, no DNS to resolve, nothing that can fail. The README
     still presents `local.vrc.zip` as the documented experience, since it is the nicer URL and its
     loopback origin dodges Chrome's Local Network Access prompt.
@@ -965,6 +995,105 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     scaling asks for): a size Windows cannot find it resamples, and that resample is exactly the
     blur that makes an icon look cheap.
 
+95. **A per-grant rate budget is a rolling window on the risky scopes, not on everything.** The three
+    scopes PLAN.md §Enforcement names — `invite:send`, `friends:write`, `groups:invite` — get a
+    rolling per-hour counter per grant, defaulted in the database and editable per app on the
+    Connected apps page; exceeding it answers in VRChat's own 429 shape so an app's existing backoff
+    handles it. A budget over *every* mutating call was the alternative and was dropped: it punishes
+    a chatty-but-harmless app for volume that costs the user nothing, and the thing actually being
+    defended against is visible-to-other-people abuse, not request count. Burst is already handled —
+    the per-account FIFO with its subordinate per-grant share caps *rate*; this caps *volume*, which
+    a burst limiter cannot.
+96. **The audit log covers mutating calls plus the reads that leak something.** Every non-GET
+    operation through the proxy gets a row, and so do reads gated behind a dangerous scope —
+    moderation lists, anything `account:credentials` reaches. A write-only log reads as complete
+    while an app quietly enumerates the user's moderation history, which is exactly the kind of thing
+    someone would want to find afterwards. Surfaced as per-app history on the Connected apps page.
+    Logging *every* request was considered for debuggability and dropped: `VRCZIP_PROXY_LOG` already
+    serves that case without putting the write on the hot path forever.
+97. **2.10 ships webhooks alongside the enriched stream, not after it.** Deferring them would close
+    Phase 2 with its stated purpose half-served — an app that isn't long-running has no way in at
+    all, and that app is the reason the control API exists separately from the pipeline mirror. It
+    does mean 2.10 carries a real outbound-HTTP subsystem (retries, backoff, a dead-letter policy)
+    rather than a route, and that cost is accepted here rather than discovered mid-step.
+98. **Unlinked sessions need `sessions:unlinked`, a dangerous scope.** A session from an account
+    vrc.zip does not manage leaks *the existence of an account the user never added* — a different
+    class of disclosure from anything else on the stream, and not something a `*` wildcard should
+    ever reach. Deny-by-default, reachable only through `**` or an explicit request, rendered in the
+    consent sheet's dangerous block. Making it a consent-sheet checkbox instead was rejected because
+    a checkbox is not enumerable by the scope registry, so it could not be audited, described, or
+    revoked by the same machinery as everything else.
+99. **The retention route lands with 2.10, and the retention types move to `@vrcz/shared` with it.**
+    The Settings screen currently renders a static alert explaining that no control exists, which is
+    honest but is a screen apologising for a missing route. `GET`/`PUT /api/retention` plus a real
+    per-event-type control closes it. This also settles the third item under the old type-hoisting
+    question: the retention types had no second copy *because* nothing exposed them, and the moment
+    the wire carries them they belong in `shared` like every other wire type.
+100. **`rateLimit.remaining` and `queued` become real, and the gauge becomes three gauges.** The
+     limiter will expose live token counts and queue depth, and the settings screen will draw the
+     three ceilings that actually exist (per-account 20/s, per-IP 100/s, files 300/s) instead of one.
+     Drawing a precise-looking gauge over an approximation was the thing worth fixing, and deleting
+     the gauge would have fixed it by removing information the Connected apps page needs anyway —
+     live per-app rate is 2.8's own requirement, so the plumbing is paid for twice over.
+101. **`local.vrc.zip` is cut.** It buys a nicer URL and a loopback origin that dodges Chrome's Local
+     Network Access prompt, and it costs a DNS record plus a DNS-01 renewal endpoint that has to stay
+     up *for the life of the product* — a permanent external dependency, owned by someone, for
+     cosmetics, in an app whose entire pitch is local-only. `127.0.0.1` was already the runtime
+     default (decision 10) and the silent-fallback path already exists, so what goes is the opt-in
+     branch, its resolve check, and the README section promising it. Reverses decision 10's second
+     half.
+102. **Roster hydration gets both a cap and its own budget.** The eager batch is capped to the
+     visible rows and the rest hydrate on hover, matching the resolver contract's "fetch on hover,
+     never on render"; what remains runs on a low-priority subordinate budget below the account
+     bucket, so it can never starve presence, a pipeline re-auth, or something the user just clicked.
+     Measuring first was the cheaper option and was passed over on purpose: eighty sequential
+     `GET /users/{id}` against a 20/s ceiling is the traffic pattern in this app most likely to draw
+     a 429, and a 429 is not a metric worth collecting on a real account to prove a point.
+103. **The flaky control-deps test gets fixed before Phase 2 closes.** `the user batch is cache-first,
+     sequential, and leaves the unreadable out` has passed every run since its one failure, which is
+     precisely the profile of a test that will start failing for real and be waved through. The fix
+     is to await the actual settle point or inject a clock, never to add a delay.
+104. **`invite-request` and `boop` are implemented as part of 2.10.** They are palette stubs that name
+     a missing route when run, and 2.10 is the step that owns control routes — the same slot
+     `invite-self` landed in.
+105. **Phase 3 is next after Phase 2, not Phase 4.** The plugin system is the largest remaining risk
+     in the project and the one everything else is shaped around: the packaging story, the scope
+     registry, the declarative UI, and the "don't call it a sandbox until it is one" posture all
+     exist to serve it. Node graphs reuse machinery that already exists and will be easier, not
+     harder, after the plugin host has defined how third-party code is hosted at all.
+106. **The single `.exe` stays, and the plugin host is the same executable re-invoked.** Decision 91
+     shipped one self-contained binary ahead of PLAN.md §Phase 5, and that section's argument for
+     `bun.exe` + `app/` was per-process runtime flags — `--smol` above all. Re-invoking our own
+     executable in a plugin-host mode keeps the one-file download, at the cost that the flag cannot
+     be argv. **Sub-question to settle before the supervisor is written:** whether JSC's small-heap
+     mode can be selected any way other than at process launch. If it cannot, `--smol` stops being a
+     per-plugin knob and becomes a property of the host mode — a real regression against §Phase 5's
+     reasoning, and the point at which shipping two artefacts gets reconsidered.
+107. **Plugins install from a local path or a pinned git URL. No registry in v1.** A registry is a
+     service to host, moderate and take down from, and `backend/` is explicitly out of scope. A git
+     URL pinned to a commit lets authors distribute without asking permission while keeping what ran
+     auditable after the fact — the property a registry would otherwise provide. Signing and trust
+     tiers still ship (PLAN.md §Corrections, 5): they are what makes the local case safe, not what
+     makes a registry possible.
+108. **The hostile plugin is written immediately after `ProcessTransport` + the supervisor**, ahead of
+     the dispatcher, the scope gate and the rate budget. Writing it later means validating a design
+     already committed to; writing it now means every subsequent claim — the deny-scan, the RSS
+     watchdog, event-flood backpressure — is tested against a live adversary as it is made. Spin
+     loop, memory bomb, `import("node:"+"fs")`, event flood, and a plugin that never returns from a
+     lifecycle hook.
+109. **Dry-run is lifted by an explicit per-plugin, per-scope gesture, with the dry-run log as the
+     evidence.** The user turns it off in the plugin's own management page after reading what the
+     plugin *would* have done. Nothing time-based: "it has behaved for seven days" is not information
+     about the eighth, and a timed prompt trains people to dismiss it. Per-action confirmation was the
+     other candidate and is worse — a stream of dialogs whose only rational answer is "always allow"
+     is consent theatre.
+110. **The first cut of the declarative UI vocabulary is forms, virtualized tables, dialogs, context
+     menus and per-node handlers; charts follow.** That set covers what a settings-and-list plugin
+     needs, which is most of them. Charts are held back deliberately rather than dropped: they were
+     the one legitimate argument for the iframe escape hatch that decision 9 cut, so shipping them
+     badly would reopen a decision that is otherwise closed. The first plugin genuinely blocked on a
+     chart is the signal to build them properly.
+
 ---
 
 ## Gotchas
@@ -1420,18 +1549,23 @@ active, wrong `Host` 403, wrong `Origin` 403, missing token 401, proxy 501, UI 2
 
 Unresolved; flag to the user rather than guessing.
 
-- **One control-deps test is flaky.** `control deps: groups and mutual friends > the user batch is
-  cache-first, sequential, and leaves the unreadable out` failed once in a full run and has passed
-  every run since, including three consecutive full runs. It is timing-dependent rather than
-  order-dependent as far as anyone has looked. Worth catching properly before it starts failing in
-  a way that gets ignored.
-- Whether `local.vrc.zip` DNS + the DNS-01 cert pipeline is stood up yet, and who owns the renewal
-  endpoint that has to stay up for the life of the product. Not blocking — it is opt-in and
-  `127.0.0.1` is the default — but the README documents it, so it should exist before release.
-- **Type hoisting: done, except for three candidates that turned out not to be duplicates.**
-  `JsonValue`/`JsonObject`, the bus-kind taxonomy, the control-API wire types, and the token/port
-  constants are all in `@vrcz/shared` now (decisions 62, 63, 65, 66). Three items on the original
-  list were **not** moved, each for a reason worth keeping:
+**A planning pass on 2026-08-22 closed most of what used to live here.** Sixteen questions were put
+to the user in batches and answered; the answers are decisions 95–110. What each one *was* is kept
+below in one line, because a question closed without a trace is a question that gets reopened.
+
+- **Can JSC's small-heap mode be selected any way other than at process launch?** The one genuinely
+  open item, and the only one with a code consequence nobody has checked. Decision 106 keeps the
+  single `.exe` and re-invokes it as the plugin host, which means `--smol` cannot be argv. If the
+  small heap can only be chosen at launch, it stops being a per-plugin knob and becomes a property of
+  the host mode — which is what PLAN.md §Phase 5 built the whole `bun.exe` + `app/` layout to avoid.
+  **Settle this before the plugin supervisor is written**, not after.
+- **The per-user roster fallback still wants a real measurement**, even though its design is now
+  decided (decision 102: cap the eager batch, hover-hydrate the rest, low-priority budget under the
+  account bucket). The number worth having is what a busy public instance actually costs against the
+  20/s ceiling *after* the cap — to size the cap, not to decide whether to have one.
+- **Type hoisting: done, except for two candidates that turned out not to be duplicates.** The third,
+  the retention types, is now a *pending* move rather than a non-duplicate — decision 99 puts them on
+  the wire with 2.10, and everything on the wire lives in `@vrcz/shared`. The two that stay put:
   - **`ParsedLocation` is a name collision, not a duplicate.** `game-logs/parser.ts` has
     `{location, worldId, instanceId, region, groupId}` with a non-nullable `worldId`, returning
     `null` for `private`/`offline`. `ui/src/lib/format.ts` has
@@ -1443,27 +1577,26 @@ Unresolved; flag to the user rather than guessing.
     `string`, and `ui`'s `isVrMode()` explicitly handles `Standalone`/`Oculus`/`OpenVR`/`None`. The
     wire keeps `string` deliberately (it crosses a version boundary; see the note on
     `GameSession.vrMode`), so the union is a parser-internal type and belongs where it is.
-  - **The retention types have no second copy.** The premise that "the settings UI renders them
-    verbatim" does not hold: `grep Retention ui/src` returns nothing, and the settings screen
-    renders a static alert saying no control exists. They are daemon-internal until a retention
-    route exists.
-- **No retention control on the API.** The retention job runs and is configurable in the database,
-  but nothing exposes it, so the Settings screen explains it rather than offering a control.
-- **The per-user roster fallback spends real rate budget.** A room of eighty strangers nobody has
-  looked at is up to eighty `GET /users/{id}` on first sight of it, sequentially through the
-  limiter. The daemon's `user_cache` absorbs the repeat cost and the UI holds an answer for 15s, so
-  a room you sit in settles quickly — but a user hopping public instances is a genuinely heavier
-  traffic pattern than before, and it is worth measuring against the 20/s per-account ceiling before
-  deciding whether it needs its own budget.
-- **No endpoints for invite-request / boop.** Both are registered in the command palette as stubs
-  that name the missing route when run. *Self-invite is now real* — `POST
-  /api/accounts/:id/invite-self` — because `vrchat://launch` starts a *second* game client instead
-  of moving the running one.
-- **`rateLimit.remaining` and `queued` are approximations, and the snapshot is now also
-  incomplete.** The limiter does not expose live token counts, and `StatusSnapshot.rateLimit` still
-  describes a single ceiling when there are three (per-account 20/s, per-IP 100/s, files 300/s).
-  `ratePerSecond` / `globalRatePerSecond` / `fileRatePerSecond` are all readable off the limiter
-  now, so the settings screen can show three honest numbers — but `remaining` and `queued` should
-  either become real or stop being drawn as a gauge that implies precision.
 
-- Nothing else open. (Retention → per-type, decided. Node-graph storage → shared store, decided.)
+### Closed by the 2026-08-22 planning pass
+
+- Shape of a per-grant rate budget → rolling per-hour window on the risky scopes only (95).
+- What earns an `audit_log` row → mutating calls plus dangerous-scope reads (96).
+- Whether 2.10 defers webhooks → no, they ship with the stream (97).
+- How unlinked sessions are gated on the stream → a dangerous `sessions:unlinked` scope (98).
+- When retention gets an API and a control → with 2.10 (99).
+- Whether `rateLimit.remaining`/`queued` become real or stop being drawn → become real, and the
+  single gauge becomes the three ceilings that exist (100).
+- Whether `local.vrc.zip` DNS + the DNS-01 cert pipeline gets stood up, and who owns the renewal
+  endpoint → **cut**, so nobody owns it (101).
+- Whether the roster fallback needs its own budget → cap *and* budget (102).
+- The one flaky control-deps test → fix it before Phase 2 closes, don't wait for it to recur (103).
+- Where `invite-request` and `boop` land → with 2.10 (104).
+- What follows Phase 2 → Phase 3, the plugin system (105).
+- Single `.exe` vs `bun.exe` + `app/` once plugins need a runtime → single `.exe`, re-invoked (106),
+  with the JSC sub-question above.
+- Where plugins come from in v1 → local path or pinned git URL, no registry (107).
+- How early the hostile plugin gets written → immediately after the supervisor (108).
+- What lifts dry-run on outbound social actions → an explicit per-scope gesture, never a timer (109).
+- How much declarative UI vocabulary ships first → forms, tables, dialogs, menus, handlers; charts
+  when a plugin is genuinely blocked on one (110).

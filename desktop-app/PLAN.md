@@ -34,7 +34,7 @@ VRChat's Creator Guidelines say *"Do not request log-in information from users i
 | Runtime | Bun + TypeScript. `bun:sqlite`. **Ships its own pinned `bun` binary** — never an external or `PATH` Bun. Runs the daemon and every plugin process. |
 | UI | Svelte 5 + shadcn-svelte, served over HTTP by the daemon. No native shell in v1. |
 | API client | **Generate our own** from a pinned `openapi.json` (v1.20.8) via `@hey-api/openapi-ts`. Not the `vrchat` npm package. |
-| Local URL | **Default `http://127.0.0.1:PORT`.** `local.vrc.zip` (DNS → 127.0.0.1, real DNS-01 cert) is supported and is what the README documents, but is opt-in at runtime. |
+| Local URL | **`http://127.0.0.1:PORT`, and only that.** A `local.vrc.zip` (DNS → 127.0.0.1, real DNS-01 cert) opt-in was planned and is **cut** — see PROGRESS.md decision 101. |
 | HTTP | **Hono** on `Bun.serve`, three separate app instances (one per port). Thin over `Request`/`Response`, which the byte-faithful mirror depends on. |
 | Ports | Four: UI, proxy mirror, control API, and a **forward proxy** an app is configured with rather than pointed at. |
 | Proxy | Byte-faithful passthrough. Apps log in per-account through the proxy; one grant per (app, account). |
@@ -388,13 +388,13 @@ Notes for the implementation:
   the hop-by-hop ones.
 
 Every request on every port:
-1. `Host` header ∈ `{local.vrc.zip:PORT, 127.0.0.1:PORT, localhost:PORT}` — this is what actually stops DNS rebinding.
+1. `Host` header ∈ `{127.0.0.1:PORT, localhost:PORT}` — this is what actually stops DNS rebinding.
 2. `Origin` validated where present.
 3. Session token required (UI port: header or the launch-URL token; proxy/control ports: bearer token from the token store).
 
 Startup writes `state.json` (tight perms) with `{ uiUrl, proxyUrl, controlUrl, sessionToken }`. Ports are configurable and fall back to ephemeral if taken; the CLI prints the URL and optionally opens the browser.
 
-**`http://127.0.0.1:PORT` is the runtime default.** It has no external dependency, no cert to renew, and no way to fail. `local.vrc.zip` is opt-in in settings and is what the README shows, because it is the nicer URL and its loopback origin avoids Chrome's Local Network Access prompt (shipped Chrome 142; covers WebSocket since 147) and mixed content. When enabled, resolve it at boot and fall back to `127.0.0.1` silently on NXDOMAIN — rebinding protection is common (Pi-hole, `stop-dns-rebind`, many routers, corporate DNS) — noting the fallback in settings. Never a hosts-file edit: needs admin, AV flags it, messy uninstall.
+**`http://127.0.0.1:PORT` is the only URL.** It has no external dependency, no cert to renew, and no way to fail. A `local.vrc.zip` opt-in was planned — nicer URL, and its loopback origin avoids Chrome's Local Network Access prompt (shipped Chrome 142; covers WebSocket since 147) and mixed content — and is **cut**: it costs a DNS record plus a DNS-01 renewal endpoint that has to stay up for the life of the product, which is a permanent external dependency, owned by someone, bought for cosmetics, in an app whose whole pitch is local-only. See PROGRESS.md decision 101. (A hosts-file edit was never on the table either: needs admin, AV flags it, messy uninstall.)
 
 ### 1.9 UI — `ui/`
 
@@ -581,7 +581,10 @@ consent modal can appear unprompted while the user is doing something else.
 - **Scope enforcement** off the generated route table. `resource:verb` taxonomy (`friends:read`,
   `invite:send`, `moderation:write`, `groups:owner`, …), with high-risk scopes deny-by-default and never
   reachable via the `*` wildcard: `account:credentials`, `account:destroy`, `moderation:*`,
-  `files:delete`, `invite:send`, `groups:owner`, `favorites:group:clear`, `instances:close`, `economy:*`.
+  `files:delete`, `invite:send`, `groups:owner`, `favorites:group:clear`, `instances:close`,
+  `economy:*`, `sessions:unlinked`. The last is not a VRChat capability at all — it exposes
+  sessions belonging to accounts vrc.zip does not manage, which discloses *the existence of an
+  account the user never added*, and that is a `**`-only disclosure. See PROGRESS.md decision 98.
   **`**` is the deliberate escape hatch** and expands to every scope, dangerous ones included — two
   characters rather than a flag on `*`, so the difference is visible where it is typed. It decides
   what the consent sheet *asks for*, never what is granted: the sheet still renders dangerous scopes
@@ -592,6 +595,11 @@ consent modal can appear unprompted while the user is doing something else.
 - **Scopes alone don't stop abuse**: per-grant rate budgets on `invite:send` / `friends:write` /
   `groups:invite`, an audit log of every mutating call attributed to the app, and a kill switch per
   grant and globally. A "Connected apps" page shows live request rate and rate-limit consumption per app.
+  The budget is a **rolling per-hour window per grant on those three scopes only** — burst is already
+  capped by the per-account FIFO, so what this adds is a *volume* ceiling, which a burst limiter
+  cannot express. It answers in VRChat's own 429 shape so an app's existing backoff handles it. The
+  audit log covers every mutating call **plus reads behind a dangerous scope**, because a write-only
+  log reads as complete while an app quietly enumerates the user's moderation history. Decisions 95, 96.
 - **The upstream User-Agent is always ours.** A downstream app's UA is used for *identity* and is never
   forwarded to VRChat — VRChat must see `vrc.zip/<version> (<user contact>)` so traffic is honestly
   attributed to the thing actually making it.
@@ -648,7 +656,16 @@ carries `sessionId`, `accountId` (nullable), and `displayName`, plus there are `
 concurrently running game clients without re-deriving any of it from raw logs — which is the whole
 reason this stream exists rather than telling people to tail the files themselves. A grant sees only
 its bound account's sessions; unlinked sessions (a client signed into an account vrc.zip doesn't
-manage) require an explicit scope, since they leak the existence of accounts the user never added.
+manage) require the dangerous `sessions:unlinked` scope, since they leak the existence of accounts
+the user never added.
+
+Webhooks ship **with** the stream, not after it: an app that isn't long-running is the reason this
+API exists separately from the pipeline mirror, so deferring them would close Phase 2 with its own
+purpose half-served. The cost, accepted knowingly, is that this step carries a real outbound-HTTP
+subsystem — retries, backoff, a dead-letter policy — rather than a route. Retention also gets its
+first API here (`GET`/`PUT /api/retention`) so the Settings screen can stop apologising for a control
+that does not exist, which puts the retention types on the wire and therefore into `@vrcz/shared`.
+Decisions 97, 99.
 
 ---
 
@@ -883,9 +900,19 @@ saved graphs; an incompatible plugin update prompts for migration rather than si
 4. **Outbound social actions need more than install-time consent.** `invite:send`, `moderation:write`,
    friend requests — these are visible to other people and are how a plugin gets a user banned or
    socially harmed. Dry-run by default for new plugins, a rolling per-hour cap absent an explicit user
-   gesture, and an exportable audit log attributing every outbound action.
+   gesture, and an exportable audit log attributing every outbound action. **Dry-run is lifted by an
+   explicit gesture, per plugin and per scope, in the plugin's management page — with the dry-run log
+   right there as the evidence.** Never on a timer: "it has behaved for seven days" says nothing about
+   the eighth, and a timed prompt only teaches people to dismiss it. Per-action confirmation is worse
+   still — a stream of dialogs whose only rational answer is "always allow" is consent theatre.
+   Decision 109.
 5. **Signing + trust tiers.** Ed25519 detached signature with a publisher key registered once. Without
-   it, "install this plugin" is "run this exe."
+   it, "install this plugin" is "run this exe." **v1 has no registry**: a plugin is installed from a
+   local path or from a git URL pinned to a commit. A registry is a service to host, moderate and
+   take down from, and `backend/` is out of scope; a pinned git URL gives authors distribution
+   without asking permission while keeping what ran auditable afterwards, which is the property the
+   registry would have been providing. Signing is what makes the *local* case safe — it is not
+   waiting on a registry to be worth having. Decision 107.
 6. **Don't call it a security sandbox until it is one.** Until process + OS sandboxing lands, the docs
    and the consent UI say "plugins run with your account's privileges; only install plugins you trust."
    Overclaiming here is how you get a supply-chain incident with your name on it.
@@ -902,10 +929,21 @@ Hand-write: the mental model, five end-to-end guides, and a blunt security-model
 
 ### Plugin build order
 
-`@vrcz/plugin-api` types → `ProcessTransport` + supervisor → dispatcher / scope gate / rate budget →
-install pipeline → events bridge → storage → consent and management UI → declarative UI renderer →
-nodes → scaffolder and docs. **Write a deliberately hostile plugin early** (spin loop, memory bomb,
-`import("node:"+"fs")`, event flood); it is the regression suite for every claim above.
+`@vrcz/plugin-api` types → `ProcessTransport` + supervisor → **the hostile plugin** → dispatcher /
+scope gate / rate budget → install pipeline → events bridge → storage → consent and management UI →
+declarative UI renderer → nodes → scaffolder and docs.
+
+**The deliberately hostile plugin comes third, immediately after the supervisor** — spin loop, memory
+bomb, `import("node:"+"fs")`, event flood, and a lifecycle hook that never returns. Written later it
+would only validate a design already committed to; written here, every claim after it — the
+deny-scan, the RSS watchdog, event-flood backpressure — is tested against a live adversary as it is
+made. It is the regression suite for everything above. Decision 108.
+
+The **declarative UI renderer's first cut is forms, virtualized tables, dialogs, context menus and
+per-node click handlers** — what a settings-and-list plugin needs, which is most of them. Charts
+follow rather than ship with it: they were the one legitimate argument for the iframe escape hatch
+that §UI cut, so shipping them badly reopens a closed decision. The first plugin genuinely blocked on
+a chart is the signal to build them properly. Decision 110.
 
 ## Phase 4 — Node-graph automation
 
@@ -927,6 +965,14 @@ retention policy to forget about.
 > the layout below is three files and a hash check guarding a capability nothing uses, against the
 > cost of turning "download and run this" into "unzip this and keep these together." The section
 > stands as written for the day that changes; see PROGRESS.md decision 91.
+>
+> **That day has now been decided against.** The single `.exe` stays, and the plugin host is the same
+> executable re-invoked in a host mode — one file to download, one file to hash-check. What it costs
+> is that `--smol` cannot be argv, which is the exact knob the layout below was designed to preserve.
+> **One sub-question blocks the plugin supervisor and must be answered before it is written:** whether
+> JSC's small heap can be selected anywhere other than at process launch. If it cannot, the small heap
+> becomes a property of the host mode rather than a per-plugin choice, and shipping two artefacts gets
+> reconsidered on the evidence. Decision 106.
 
 **vrc.zip ships its own `bun` binary.** It never uses a Bun the user may or may not have installed, and
 never one on `PATH`. The bundled runtime executes both the daemon and every plugin process.

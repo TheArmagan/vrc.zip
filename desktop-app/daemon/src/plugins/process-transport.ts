@@ -53,6 +53,7 @@ import type { Envelope } from "@vrcz/plugin-api";
 import { decodeEnvelope, encodeEnvelope, MAX_FRAME_BYTES } from "@vrcz/plugin-api";
 import { pluginDataDir, stateDir } from "../paths.ts";
 import { isPackaged } from "../servers/embedded-ui.ts";
+import { FrameBudget } from "./frame-budget.ts";
 import { assignMemoryCap, type JobHandle } from "./job-object.ts";
 import { planMemoryCap, warnIfUncapped } from "./limits.ts";
 import { encodePreludeConfig, PRELUDE_SOURCE } from "./prelude.ts";
@@ -383,6 +384,14 @@ class ProcessTransport implements PluginTransport {
   #logSuppressed = 0;
   #logSuppressionAnnounced = false;
 
+  /**
+   * The other half of the same pipe. See `frame-budget.ts` for why the frame channel needs a bound
+   * of its own, why it is a token bucket rather than a credit window, and why replies get a second
+   * bucket instead of an exemption.
+   */
+  readonly #frameBudget = new FrameBudget();
+  readonly #replyBudget = new FrameBudget();
+
   constructor(
     child: Bun.Subprocess<"pipe", "pipe", "pipe">,
     options: TransportSpawnOptions,
@@ -556,15 +565,35 @@ class ProcessTransport implements PluginTransport {
       });
       return;
     }
-    if (decoded.value.t === "hello") {
+    const frame = decoded.value;
+    if (frame.t === "hello") {
       this.#helloSeen = true;
       if (this.#helloTimer !== null) {
         clearTimeout(this.#helloTimer);
         this.#helloTimer = null;
       }
     }
+
+    /*
+     * The inbound frame budget. `pong` and `hello` are exempt because they are the *prelude's*
+     * frames rather than the plugin's — budgeting a pong would let a flooding plugin starve its own
+     * heartbeat and be killed as wedged, which is a true verdict reached by a false route. See
+     * `frame-budget.ts`.
+     */
+    if (frame.t !== "pong" && frame.t !== "hello") {
+      const budget = frame.t === "res" || frame.t === "err" ? this.#replyBudget : this.#frameBudget;
+      const verdict = budget.take();
+      if (verdict.report !== null) {
+        const detail = verdict.report;
+        this.#safely("protocol error", () => {
+          this.#handlers.onProtocolError(detail);
+        });
+      }
+      if (!verdict.accept) return;
+    }
+
     this.#safely("frame", () => {
-      this.#handlers.onFrame(decoded.value);
+      this.#handlers.onFrame(frame);
     });
   }
 

@@ -24,9 +24,14 @@
  *  - **The grant.** Read live from the store on every call — never cached — so a revoke takes effect
  *    on the next call rather than on the next restart.
  *
- * **What it deliberately does not own:** consent (3.8), the events bridge (3.6), per-plugin storage
- * (3.7). Frames the dispatcher does not claim are handed to {@link PluginHostOptions.onUnownedFrame}
- * exactly so 3.6 can chain behind it without this file learning what a subscription is.
+ *  - **The events bridge.** The second link in the frame chain: `PluginDispatcher.handleFrame`
+ *    answers `false` for `subscribe`/`unsubscribe`/`credit`, and {@link PluginEventsBridge} claims
+ *    exactly those. It attaches and detaches on the same supervisor state the dispatcher does, so a
+ *    dead plugin stops being a bus subscriber at the moment it dies.
+ *
+ * **What it deliberately does not own:** consent (3.8) and per-plugin storage (3.7). Frames neither
+ * owner claims are handed to {@link PluginHostOptions.onUnownedFrame}, which stays the seam for
+ * whatever chains behind them.
  */
 
 import {
@@ -38,8 +43,10 @@ import {
 } from "@vrcz/plugin-api";
 import { isScope, type Scope } from "@vrcz/shared";
 import type { AccountManager } from "../accounts/manager.ts";
+import type { EventBus } from "../bus/event-bus.ts";
 import { PluginBudget } from "../plugins/budget.ts";
 import { PluginDispatcher } from "../plugins/dispatcher.ts";
+import { PluginEventsBridge } from "../plugins/events-bridge.ts";
 import {
   createSpawnResolver,
   formatInstallFailure,
@@ -100,6 +107,11 @@ export type PluginInstallOutcome =
 export interface PluginHostOptions {
   readonly store: Store;
   readonly accounts: AccountManager;
+  /**
+   * The spine. Plugins are subscribers like any other (PLAN.md §Architecture) — they get no private
+   * side channel, and everything they may see arrives through {@link PluginEventsBridge}.
+   */
+  readonly bus: EventBus;
   readonly env?: NodeJS.ProcessEnv | undefined;
   /**
    * Overrides the transport. Real plugins are child processes; a test drives a fake through here
@@ -107,10 +119,11 @@ export interface PluginHostOptions {
    */
   readonly factory?: TransportFactory | undefined;
   /**
-   * Frames the dispatcher did not claim: `subscribe`, `unsubscribe`, `credit`.
+   * Frames no owner claimed.
    *
-   * `PluginDispatcher.handleFrame` answers `false` for exactly those so the owners can be chained
-   * without any of them knowing the others' tags. 3.6's events bridge is the next link.
+   * `PluginDispatcher.handleFrame` and `PluginEventsBridge.handleFrame` both answer `false` for a
+   * tag that is not theirs, so the owners chain without any of them knowing the others' tags. What
+   * reaches here today is a `hello` or a `pong` the supervisor has already acted on.
    */
   readonly onUnownedFrame?: ((pluginId: string, frame: Envelope) => void) | undefined;
 }
@@ -228,6 +241,18 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
   });
 
   // ---------------------------------------------------------------------------------------------
+  // The events bridge
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * The same `liveGrant` the dispatcher reads, for the same reason and with one difference in
+   * cadence: the dispatcher reads it per *call*, the bridge per *flush tick*. Events are orders of
+   * magnitude more frequent than calls, and a store read per event would put SQLite in the emit
+   * path. See the bridge's file header.
+   */
+  const events = new PluginEventsBridge({ bus: options.bus, grants: liveGrant });
+
+  // ---------------------------------------------------------------------------------------------
   // Attachment follows state
   // ---------------------------------------------------------------------------------------------
 
@@ -249,18 +274,24 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
 
     if (!live) {
       dispatcher.detach(status.pluginId);
+      events.detach(status.pluginId);
       attached.delete(status.pluginId);
       return;
     }
 
     const supervisor = registry.get(status.pluginId);
     if (supervisor === null) return;
-    dispatcher.attach({
+    const channel = {
       pluginId: status.pluginId,
       // The channel is valid for the supervisor's whole life; `send` answers false while nothing is
       // running. That is the point of the seam — nobody here holds a transport across a restart.
-      send: (frame) => supervisor.send(frame),
-    });
+      send: (frame: Envelope) => supervisor.send(frame),
+    };
+    dispatcher.attach(channel);
+    // One channel, two owners. The bridge's subscriptions die with the process for the same reason
+    // the dispatcher's in-flight calls do: a `sub` id is a handle on a queue a fresh process has no
+    // memory of.
+    events.attach(channel);
     attached.add(status.pluginId);
   }
 
@@ -273,11 +304,12 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
     factory: options.factory ?? makeProcessTransportFactory(env === undefined ? {} : { env }),
     spawnFor,
     onPluginFrame: (pluginId, frame) => {
-      // `handleFrame` answers false for `subscribe` / `unsubscribe` / `credit`, which belong to the
-      // events bridge. Chained rather than branched here so no owner has to know the others' tags.
-      if (!dispatcher.handleFrame(pluginId, frame)) {
-        options.onUnownedFrame?.(pluginId, frame);
-      }
+      // Chained rather than branched, so no owner has to know the others' tags: the dispatcher takes
+      // `req`/`res`/`err`, the bridge takes `subscribe`/`unsubscribe`/`credit`, and whatever neither
+      // claims falls out of the end.
+      if (dispatcher.handleFrame(pluginId, frame)) return;
+      if (events.handleFrame(pluginId, frame)) return;
+      options.onUnownedFrame?.(pluginId, frame);
     },
     onLog: (pluginId, stream, line) => {
       // Attribution and truncation already happened in the transport; this only decides where it
@@ -333,6 +365,9 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
       // Detaching before the stop, so a plugin's last-gasp call cannot arrive at a dispatcher whose
       // channel is about to write into a dead process. `stopAll` is bounded and always returns.
       for (const pluginId of attached) dispatcher.detach(pluginId);
+      // And the bus registrations with them, so a stopped daemon has no plugin subscriber left
+      // queueing events for a process that is on its way out.
+      events.detachAll();
       attached.clear();
       await registry.stopAll();
     },
@@ -460,6 +495,7 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
       // and `disable` is the one path that is instant and cannot be held open by the plugin.
       registry.disable(pluginId, "user", "Uninstalled.");
       dispatcher.detach(pluginId);
+      events.detach(pluginId);
       attached.delete(pluginId);
       refusals.delete(pluginId);
 

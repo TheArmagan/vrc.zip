@@ -5,7 +5,7 @@ the architecture and the reasoning. This file tracks only *state*: what exists, 
 was decided along the way.
 
 **Last updated:** 2026-08-22
-**Current phase:** Phase 3 — Plugin system (3.1–3.5 done and wired; next is 3.6, the events bridge)
+**Current phase:** Phase 3 — Plugin system (3.1–3.6 done and wired; next is 3.7, plugin storage)
 **Status: Phases 1 and 2 are both built.** Phase 1 was confirmed by hand on 2026-08-22 (1.10 and the
 profile card). Phase 2 closed on the same day: every numbered step is ticked, including 2.8's last
 two pieces (per-app budget overrides and a rate gauge that reports measured numbers instead of
@@ -31,12 +31,13 @@ PLAN.md §Phase 5 only until the plugin host needs a real runtime to spawn; deci
 remaining risk and the thing everything else was shaped around. `PLAN.md` §Phase 3 is the spec;
 decision 106 settles the host process (the same `.exe` re-invoked in a plugin-host mode).
 
-**Phase 3 status as of 2026-08-22: 3.1 through 3.5 are done and wired.** A plugin can be installed
+**Phase 3 status as of 2026-08-22: 3.1 through 3.6 are done and wired.** A plugin can be installed
 from a local directory, is compiled and scanned at install, is content-addressed and hash-verified on
 every start, spawns into a memory-capped process with a scrubbed environment, and calls a reads-only
 `ctx.vrchat` through a dispatcher that gates every call against the grant. Five session-token routes
-manage it. Verified against a running daemon, not only by tests. Remaining: 3.6 events bridge, 3.7
-storage, 3.8 consent UI, 3.9 renderer, 3.10 nodes, and the scaffolder half of 3.11.
+manage it, and it can subscribe to the bus through a credit-windowed, scope-filtered events bridge
+that coalesces rather than backlogs. Verified against a running daemon, not only by tests. Remaining:
+3.7 storage, 3.8 consent UI, 3.9 renderer, 3.10 nodes, and the scaffolder half of 3.11.
 
 **Two things to read before building on it.** Decision 177 lists four attacks the hostile suite
 asserts as *gaps*, the largest being that **a plugin which gets past install reaches the whole
@@ -375,9 +376,18 @@ say "plugins run with your account's privileges; only install plugins you trust.
       **Not yet done:** the pinned-git-URL source (a fetch step in front of an identical pipeline)
       and the real SHA-256 pins. Read the deny-scan Gotcha before describing this as a boundary —
       it catches syntax, and computed access walks past it.
-- [ ] **3.6 Events bridge** — declarative filters compiled to closures at subscribe time, credit
+- [x] **3.6 Events bridge** — declarative filters compiled to closures at subscribe time, credit
       windows with a per-subscription overflow policy, per-tick batching, and a `dropped` frame when
       the host sheds load. `EventBus.emit()` must never await anything plugin-related.
+      **Done** (decisions 180–181): `plugins/events-bridge.ts` plus `plugins/frame-budget.ts`, wired
+      through `wiring/plugin-host.ts`, chaining after the dispatcher on the same frame hook.
+      Verified against a running daemon on PLAN.md's own motivating case: **900 `friend.location`
+      events in, three out** — each friend's current world — with the 897 reported as
+      `dropped/coalesced` rather than hidden, while a second subscription kept flowing past the
+      stalled one. `emit` of those 900 returned synchronously in 8.3ms.
+      **Read decision 181 and the `permissions.events` Gotcha before 3.8**: backpressure needed a
+      fourth mechanism in the plugin → host direction that PLAN.md does not name, and the event
+      patterns shown on the consent sheet are not enforceable until the grant can carry them.
 - [ ] **3.7 Storage** — one SQLite file per plugin in its own data dir. Uninstall is `rm -rf`, quota
       is a `stat`, and a plugin cannot lock or corrupt the daemon's WAL.
 - [ ] **3.8 Consent and management UI** — the account picker, the dangerous block behind a second
@@ -2223,6 +2233,59 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      `memoryLimitFor(smol, platform)` is the one place that decides, and it is platform-injectable so
      a Windows machine can test what Linux would get. **Still unverified on real Linux.**
 
+180. **The events bridge is the EventBus's own bucketing plus one compiled closure, and it never
+     sends a frame from inside `emit`.** The kind half of every filter is handed to
+     `EventBus.subscribe({ kinds })`, so PLAN.md's *"no wakeup for irrelevant ones"* is a property of
+     the dispatch table rather than a claim in a comment — a `friend.location` subscription is not in
+     the bucket `gamelog.player_join` dispatches to, so the bridge closure is never entered. The
+     compiled `EventFilter` then decides accounts and subjects, which the bus has no vocabulary for.
+     **No new filter vocabulary was invented**: `EventFilter` and `DeliveryPolicy` were already
+     specified and tested in `protocol.ts`, and 3.6 is their host implementation.
+
+     Everything reachable from `emit` queues and returns — **900 events in 8.3ms in the real
+     daemon** — and every frame goes out on a later turn from one shared, unref'd per-tick flush.
+     Proved three ways rather than asserted: 5,000 events leave `sent.length` *unchanged*, 10,000
+     events across 20 rounds against a never-crediting plugin sum exactly to delivered + reported +
+     pending with a 4-event footprint, and the real run timed the burst.
+
+     **The grant is re-read per flush tick, not per call and not per event.** The dispatcher reads it
+     per call because calls are rare; events are three orders of magnitude more frequent and
+     `liveGrant` is three SQLite queries. It compiles to a predicate with a cheap authority
+     signature, so a changed grant recompiles *and purges what is already queued* — a revoke takes
+     effect within a tick, including for events approved before it.
+
+     **`applyOverflow` is the oracle, not the implementation.** It copies the queue per event and
+     scans it with `readKeyPath` per element, so a wire-legal `credits: 4096` would cost 4096 path
+     resolutions per event *inside `emit`*, at a rate the plugin chooses. `PendingQueue` is a key
+     index plus a head offset, O(1) amortised, and a conformance test asserts the two agree event for
+     event across every policy over 200 lumpy events. Reusing decision 130's *thinking* and proving
+     agreement is a stronger claim than reusing its code — and `applyOverflow`'s own doc calls itself
+     reference semantics.
+
+     **What a plugin may watch is enforced by scope, and refused at subscribe time.**
+     `compileAuthority` imports decision 135's `scopeForEventKind` rather than restating it, so a
+     plugin and a third-party app cannot drift about what `friends:read` covers. A filter naming an
+     ungranted account is `E_ACCOUNT_DENIED`; one whose every kind is unreadable is `E_SCOPE_DENIED`
+     naming the scope. Never a silently starved subscription.
+
+181. **Backpressure needed a fourth mechanism, in the direction PLAN.md does not cover.** All three
+     mechanisms PLAN.md names are host → plugin; decision 177's measured gap was **plugin → host**,
+     and 3.6 is exactly when "nothing is subscribed yet" stops being what makes it survivable.
+     `frame-budget.ts` is a token bucket in the transport rather than a credit window, because the
+     host never asks a plugin for frames — there is nothing to draw down.
+
+     **A single inbound bucket kills the plugin by the wrong mechanism, and this was measured, not
+     predicted.** With one bucket, `flood.js` spent its whole allowance on `req` frames at module
+     scope and then *failed to activate*, because the `res` answering its own `lifecycle: activate`
+     was the frame that got dropped. `pong`/`hello` are exempt — they are the prelude's frames, not
+     the plugin's, and budgeting a pong turns a flood into a heartbeat kill, a true verdict reached
+     by a false route. `res`/`err` get a **second bucket** rather than an exemption. This is the same
+     shape as the pong problem one layer up, which is why it is worth naming twice.
+
+     The hostile suite's flood assertion is now a **bound** (`< 64` frames per half-second) instead
+     of a floor, which is decision 177's promise being kept: the test that documented the gap is the
+     test that now proves it closed.
+
 ---
 
 ## Gotchas
@@ -2231,6 +2294,31 @@ Empirical notes. Add to this as you hit things — especially where the plan tur
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
 
+- **`PluginGrant` cannot carry `permissions.events`, so the consent-approved event patterns are
+  unenforceable.** The manifest has them and `grantHash` covers them, but `plugin_grants` has columns
+  for `scopes`, `account_ids`, `capabilities` and `domains` and **not** events, and the protocol's
+  `PluginGrant` has no field for them either. So a plugin that declared `friend.*` at consent can
+  subscribe to `gamelog.*` if it also holds `sessions:read`. Never *more* than its scopes allow, but
+  **more than the consent sheet said** — which is the half that matters, because the sheet is what
+  the user actually read. 3.8 owns adding the column and the field.
+- **The protocol has no `unsubscribed` frame**, so `overflow: "disconnect"` and a revoked grant are
+  both expressed as a `dropped` frame (`overflow` / `shutdown`) covering what is left. Honest, but a
+  closure reads to a plugin as a very large drop rather than as "this subscription is gone".
+- **`PluginChannel.send` returning `false` conflates "peer gone" with "frame over the byte cap"**,
+  and a `maxBatch: 256` batch of fat payloads can genuinely exceed `MAX_FRAME_BYTES`. The bridge
+  halves the batch until it fits and sheds a single oversized event as `overflow`, which terminates
+  either way — but neither the channel nor the bridge can tell the two causes apart.
+- **`BusEvent.payload` is `unknown`, `PluginEvent.payload` is `JsonValue`, and nothing bridged
+  them.** `encodeEnvelope` calls `JSON.stringify`, which **throws** on a cycle rather than returning
+  a result, and that throw would land in the flush loop and take *other subscriptions'* frames with
+  it. The bridge validates (does not clone) with depth and node caps, and omits an unencodable
+  payload rather than dropping the event.
+- **A smoke test that appends to a log file right after startup will see no `gamelog.*` events, and
+  that is the watcher working as designed.** `LogWatcher.adopt` sets `startOffset = size` for a
+  newly discovered file with no stored offset — tail-from-EOF — and a file already at its end starts
+  *dormant*, earning a session on its first new line (decision 132). So the events are not lost, they
+  are waiting for the next poll. Worth knowing before reading an empty `gamelog` stream as a bridge
+  or bus defect, which is what it looks like.
 - **JSC cannot be told to want less memory from inside Bun, so the OS cap is the only mechanism.**
   Asked directly, and measured on Bun 1.4.0 rather than taken on trust. `BUN_JSC_gcMaxHeapSize` and
   `BUN_JSC_forceRAMSize` are both *accepted* — an invalid option name errors, these do not — and both

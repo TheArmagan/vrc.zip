@@ -299,6 +299,9 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
   const plugins = createPluginHost({
     store,
     accounts,
+    // Plugins are bus subscribers like everything else; the events bridge inside the host is what
+    // turns a subscription frame into a filtered, credited, batched view of this stream.
+    bus,
     ...(env !== undefined ? { env } : {}),
   });
 

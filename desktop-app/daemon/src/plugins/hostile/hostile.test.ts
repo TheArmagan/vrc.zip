@@ -48,6 +48,7 @@ import {
 } from "@vrcz/plugin-api";
 import { MEMORY, Store } from "../../store/store.ts";
 import type { NewPlugin } from "../../store/types.ts";
+import { FRAME_BURST, FRAME_REFILL_PER_SECOND } from "../frame-budget.ts";
 import { writeArtifact } from "../install/artifact.ts";
 import { type InstallResult, installPluginFromDirectory } from "../install/pipeline.ts";
 import { createSpawnResolver } from "../install/spawn-resolver.ts";
@@ -572,7 +573,7 @@ describe('import("node:" + "fs")', () => {
 });
 
 describe("the event flood", () => {
-  test("the frame channel has no backpressure yet, and the log channel does", async () => {
+  test("both channels are bounded, and the host says so on each", async () => {
     const run = await launch("flood.js", "hostile.flood", {
       heartbeatIntervalMs: 150,
       pingTimeoutMs: 120,
@@ -584,10 +585,11 @@ describe("the event flood", () => {
     //    starts at module scope, before anything is listening, and the lifecycle frame still lands.
     await waitFor("flood to activate", () => (run.status().state === "running" ? true : null));
 
-    // 2. The frame channel. `req` is a tag a plugin may send, so every one of these is a valid frame
-    //    and the host takes all of them.
+    // 2. The frame channel. `req` is a tag a plugin may send, so every one of these is a valid
+    //    frame — the burst is legitimate traffic right up until it is not, which is why the bound
+    //    is a token bucket and the first `FRAME_BURST` of them arrive.
     await waitFor("flood frames", () =>
-      run.frames.filter((frame) => frame.t === "req").length > 200 ? true : null,
+      run.frames.filter((frame) => frame.t === "req").length >= FRAME_BURST ? true : null,
     );
 
     // 3. The log channel. `process.stdout.write` is replaced by the prelude with a write to stderr,
@@ -599,15 +601,27 @@ describe("the event flood", () => {
     expect(run.status().state).toBe("running");
     expect(run.status().lastFailure).toBeNull();
 
-    // 5. **The gap, stated rather than asserted away.** Credit windows, per-tick batching and the
-    //    `dropped` frame are step 3.6 and do not exist. Nothing bounds how many frames a plugin can
-    //    push at the host: `onPluginFrame` is called once per frame, forever, and the only thing
-    //    between a flooding plugin and unbounded host work is that nothing is subscribed yet. This
-    //    assertion documents the state of the world; when 3.6 lands it should start failing, and the
-    //    replacement is a bound on the count rather than a floor under it.
-    const delivered = run.frames.length;
-    await Bun.sleep(250);
-    expect(run.frames.length).toBeGreaterThan(delivered);
+    /*
+     * 5. **The gap decision 177 recorded, now closed.** It used to read: "the frame channel has no
+     *    backpressure at all — `onPluginFrame` is called once per frame, forever, and the only thing
+     *    between a flooding plugin and unbounded host work is that nothing is subscribed yet." Step
+     *    3.6 is what makes something subscribed, so the inbound frame budget landed with it. The
+     *    assertion is now a **bound on the count** rather than a floor under it.
+     *
+     *    Measured over half a second against a plugin issuing 500-frame bursts on a
+     *    `setInterval(…, 0)`, so the unbounded number here is in the tens of thousands.
+     */
+    await logLine(run, "frames too fast");
+
+    const before = run.frames.length;
+    await Bun.sleep(500);
+    const accepted = run.frames.length - before;
+    // Refill is 64/s, so half a second buys ~32 frames. The slack covers the heartbeat pongs, which
+    // are deliberately exempt — see `frame-budget.ts` for why budgeting one would be a kill by the
+    // wrong mechanism.
+    expect(accepted).toBeLessThan(FRAME_REFILL_PER_SECOND);
+    // And the channel is throttled rather than severed: a plugin that stops flooding keeps working.
+    expect(accepted).toBeGreaterThan(0);
 
     // 6. Disable still works instantly against a plugin doing this, which is the promise that has to
     //    hold whether or not backpressure exists.

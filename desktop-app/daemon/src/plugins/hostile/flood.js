@@ -5,12 +5,10 @@
  * transition and pipeline `friend-location` fires for every friend who moves, so backpressure is
  * load-bearing rather than a nicety. This file is the same burst with no upper bound and no pause.
  *
- * It is aimed at all three host-side mechanisms at once, and each fails differently if it is
- * missing: without credit windows the host buffers without limit, without batching it wakes per
- * event, and without the `dropped` frame the plugin is quietly told it saw everything when it did
- * not — which is the worst of the three, because it is the one nobody notices. **None of the three
- * exists yet** — they are step 3.6 — so what this file measures today is what the *transport* does
- * under the same pressure, and the suite says so rather than asserting a boundary that is not there.
+ * PLAN.md's three host-side mechanisms — credit windows, per-tick batching, the `dropped` frame —
+ * are all **host → plugin**, and this file runs the other way: it is a plugin outrunning the host.
+ * That direction has its own bound, an inbound token bucket in `frame-budget.ts`, and it landed with
+ * 3.6 because 3.6 is when `subscribe` and `credit` gave a plugin frames worth flooding with.
  *
  * **Two channels, because they turn out not to be the same channel.** `process.stdout.write` is the
  * obvious way to outrun the host and it does not work: the prelude replaces it with a write to

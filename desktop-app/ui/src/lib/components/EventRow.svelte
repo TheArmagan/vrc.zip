@@ -37,6 +37,8 @@ const FAMILY_RULE: Record<EventFamily, string> = {
   pipeline: "border-l-chart-4",
   economy: "border-l-chart-5",
   content: "border-l-chart-5",
+  // A third-party app asking for access is the one family here that wants a person to look at it.
+  consent: "border-l-destructive",
   other: "border-l-border",
 };
 

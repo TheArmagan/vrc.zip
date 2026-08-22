@@ -1,16 +1,26 @@
 /**
  * The typed client for the local daemon's control API.
  *
- * This file is the UI's copy of the daemon contract. It deliberately does not import from
- * `daemon/` — the UI is a browser bundle and the daemon is a Bun program; sharing types across
- * that boundary belongs in `@vrcz/shared` once the shapes have stopped moving. Until then this
- * is the single place in the UI where a wire shape is written down, and every screen reads its
- * types from here.
+ * This file is the UI's view of the daemon contract, and every screen reads its types from here.
+ * It does not import from `daemon/` — the UI is a browser bundle and the daemon is a Bun program.
+ * Shapes that both sides must agree on live in `@vrcz/shared` and are re-exported below, so a
+ * screen still writes `from "$lib/api.ts"` and gets the shared definition rather than a copy.
  *
- * Every shape below was read off `daemon/src/servers/control.ts` and
+ * The event-kind vocabulary went first, because the hand-copied version had drifted: it was missing
+ * ten kinds the daemon emits daily (`group.joined`, `instance.queue_ready`, `user.badge_assigned`
+ * and the rest), and nothing could notice while every producer typed its kinds as bare `string`.
+ *
+ * Shapes still written down here were read off `daemon/src/servers/control.ts` and
  * `daemon/src/wiring/control-deps.ts`, not guessed. All timestamps are integer unix milliseconds.
  */
 
+import {
+  EVENT_FAMILIES,
+  type EventFamily,
+  type EventKind,
+  familyOf,
+  type KnownEventKind,
+} from "@vrcz/shared";
 import { API_BASE } from "./config.ts";
 import { getToken } from "./session.ts";
 
@@ -105,84 +115,12 @@ export interface GameSession {
   readonly currentWorldId: string | null;
 }
 
-/**
- * Bus kinds the UI has vocabulary for. Deliberately a widened union: the daemon grows kinds faster
- * than this file does, and an unrecognised kind must still list rather than disappear from a feed
- * or break a filter.
+/*
+ * The bus-kind vocabulary is `@vrcz/shared`'s, re-exported so screens keep importing it from here.
+ * `EventKind` stays widened (`KnownEventKind | (string & {})`) on purpose: an event from a daemon
+ * newer than this bundle must still list in the feed and still match a filter rather than vanish.
  */
-export type KnownEventKind =
-  | "friend.online"
-  | "friend.offline"
-  | "friend.active"
-  | "friend.location"
-  | "friend.updated"
-  | "friend.added"
-  | "friend.removed"
-  | "user.updated"
-  | "user.location"
-  | "notification.received"
-  | "notification.received_v2"
-  | "notification.updated"
-  | "notification.deleted"
-  | "notification.responded"
-  | "notification.seen"
-  | "notification.hidden"
-  | "notification.cleared"
-  | "gamelog.player_join"
-  | "gamelog.player_leave"
-  | "gamelog.world_enter"
-  | "gamelog.location_join"
-  | "gamelog.portal_spawn"
-  | "gamelog.destination_set"
-  | "gamelog.left_room"
-  | "gamelog.join_failed"
-  | "gamelog.screenshot"
-  | "gamelog.app_quit"
-  | "gamelog.vr_mode"
-  | "gamelog.authenticated"
-  | "session.start"
-  | "session.update"
-  | "session.end"
-  | "account.state"
-  | "pipeline.state"
-  | "economy.update";
-
-export type EventKind = KnownEventKind | (string & {});
-
-/** The top-level namespace of a dotted bus kind: `gamelog.player_join` -> `gamelog`. */
-export type EventFamily =
-  | "friend"
-  | "user"
-  | "notification"
-  | "gamelog"
-  | "session"
-  | "account"
-  | "pipeline"
-  | "group"
-  | "instance"
-  | "economy"
-  | "content"
-  | "other";
-
-export const EVENT_FAMILIES: readonly EventFamily[] = [
-  "friend",
-  "notification",
-  "gamelog",
-  "session",
-  "user",
-  "group",
-  "instance",
-  "account",
-  "pipeline",
-  "economy",
-  "content",
-  "other",
-];
-
-export function familyOf(kind: string): EventFamily {
-  const head = kind.split(".", 1)[0] ?? "";
-  return (EVENT_FAMILIES as readonly string[]).includes(head) ? (head as EventFamily) : "other";
-}
+export { EVENT_FAMILIES, type EventFamily, type EventKind, familyOf, type KnownEventKind };
 
 /** One row of the unified feed. `payload` is the bus event's payload, shape-per-kind. */
 export interface FeedEvent {

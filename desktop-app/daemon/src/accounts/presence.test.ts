@@ -227,7 +227,7 @@ describe("PresenceService", () => {
     // `friend-update` frames carry a partial user with no image fields at all. Overwriting from it
     // would make every icon blink out the moment its owner changed status.
     bus.emit({
-      kind: "friend.update",
+      kind: "friend.updated",
       accountId: "usr_alice",
       ts: Date.now(),
       payload: { userId: "usr_on_0", user: { displayName: "Iconed", status: "busy" } },

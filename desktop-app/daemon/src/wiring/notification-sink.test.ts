@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test";
+import type { BusEventKind } from "@vrcz/shared";
 import { EventBus } from "../bus/event-bus.ts";
 import { MEMORY, Store } from "../store/index.ts";
 import { NotificationSink } from "./notification-sink.ts";
@@ -24,7 +25,7 @@ describe("NotificationSink", () => {
     sink.attach(bus);
   });
 
-  function receive(payload: unknown, kind = "notification.received"): void {
+  function receive(payload: unknown, kind: BusEventKind = "notification.received"): void {
     bus.emit({ kind, accountId: "usr_a", ts: NOW, payload });
   }
 

@@ -1,3 +1,4 @@
+import type { GamelogEventKind } from "@vrcz/shared";
 import type { EventBus } from "../bus/event-bus.ts";
 import type {
   ExitKind,
@@ -17,7 +18,7 @@ import type { Store } from "../store/index.ts";
  */
 
 /** Parser event kinds → bus kinds. Explicit, for the same reason as the pipeline map. */
-const KIND: Record<string, string> = {
+const KIND: Record<string, GamelogEventKind> = {
   "world-enter": "gamelog.world_enter",
   "location-join": "gamelog.location_join",
   "player-join": "gamelog.player_join",

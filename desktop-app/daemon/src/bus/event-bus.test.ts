@@ -1,8 +1,19 @@
 import { describe, expect, test } from "bun:test";
+import type { BusEventKind } from "@vrcz/shared";
 import { type BusEvent, EventBus } from "./event-bus.ts";
 
+/**
+ * Synthetic kinds on purpose.
+ *
+ * These tests are about the bus's *dispatch* — exact vs `prefix.*` matching, account filtering,
+ * delivering once when two filters both hit — and none of that has anything to do with the domain
+ * vocabulary. Writing them against real kinds would couple a routing test to a list that changes
+ * for unrelated reasons, and would hide the very case worth covering: a kind whose prefix nobody
+ * has registered. So the cast is here, at one boundary, rather than the taxonomy being widened for
+ * a test's convenience.
+ */
 function event(kind: string, overrides: Partial<BusEvent> = {}): BusEvent {
-  return { kind, accountId: "usr_a", ts: 1_750_000_000_000, ...overrides };
+  return { kind: kind as BusEventKind, accountId: "usr_a", ts: 1_750_000_000_000, ...overrides };
 }
 
 describe("EventBus", () => {

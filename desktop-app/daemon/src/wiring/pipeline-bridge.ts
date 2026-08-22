@@ -1,3 +1,4 @@
+import type { BusEventKind } from "@vrcz/shared";
 import type { BusEvent, EventBus } from "../bus/event-bus.ts";
 import type { DecodedPipelineEvent, PipelineEventType } from "../pipeline/index.ts";
 
@@ -12,7 +13,7 @@ import type { DecodedPipelineEvent, PipelineEventType } from "../pipeline/index.
  * matched nothing.
  */
 
-const KIND: Record<PipelineEventType, string> = {
+const KIND: Record<PipelineEventType, BusEventKind> = {
   notification: "notification.received",
   "notification-v2": "notification.received_v2",
   "notification-v2-update": "notification.updated",
@@ -44,7 +45,7 @@ const KIND: Record<PipelineEventType, string> = {
 };
 
 /** The bus kind for a pipeline event type. */
-export function busKindFor(type: PipelineEventType): string {
+export function busKindFor(type: PipelineEventType): BusEventKind {
   return KIND[type];
 }
 

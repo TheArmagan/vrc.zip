@@ -586,6 +586,17 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     the one now in `@vrcz/shared`, so this was a genuine dedupe rather than a move — the `null` case
     that guard exists for is the kind of thing you want written down once.
 
+63. **The bus vocabulary is `@vrcz/shared`'s, and `BusEvent.kind` is narrow while `EventKind` stays
+    wide.** Producers take `BusEventKind`; consumers take `EventKind = BusEventKind | (string & {})`.
+    The asymmetry is the whole design. A daemon inventing a kind by typo is a bug that costs nothing
+    to make and is nearly invisible — the event still emits, still dispatches to any `prefix.*`
+    subscriber, and still writes a feed row — so emission is where the strictness belongs. Display is
+    the opposite case: an event from a daemon newer than the bundle must still list in the feed and
+    still match a filter rather than vanish, so `eventLabel` and `familyOf` are total over `string`
+    and `familyOf` answers `other` instead of throwing. `BUS_EVENT_KINDS` is a runtime array beside
+    the union with a `satisfies` in one direction and an `Exclude`-based marker
+    (`EVENT_KIND_COVERAGE_NOTE`) in the other, so the two cannot drift apart in either direction.
+
 ---
 
 ## Gotchas
@@ -593,6 +604,20 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **The event-kind taxonomy had drifted in four directions at once, and nothing could see it.** The
+  two `wiring/*` bridges typed their kind maps as `Record<string, string>`, `ui/src/lib/api.ts` held
+  a hand-copied `KnownEventKind` union, and `ui/src/lib/format.ts` held a label table that was a
+  *superset* of that union. Typing the producers against one shared list found: the UI union was
+  missing **ten** kinds the pipeline bridge emits every day (`group.joined`, `group.left`,
+  `group.member_updated`, `group.role_updated`, `instance.queue_joined`, `instance.queue_ready`,
+  `user.badge_assigned`, `user.badge_unassigned`, `content.refresh`, `content.image_updated`); the
+  whole `consent.*` family from Phase 2.6 was in no list at all, and `EventRow` consequently had no
+  left-rule colour for it; and `presence.test.ts` asserted on **`friend.update`** — no `d` — a kind
+  nothing has ever emitted. That last one passed for months because `PresenceTracker` subscribes to
+  `friend.*` and its handler branches only on `friend.removed` and `friend.offline`, so the typo
+  took the generic path and the assertion held. A test can be green, exercise real behaviour, and
+  still be testing a string that does not exist.
 
 - **`clock.now` is frozen unless something calls `clock.subscribe()`.** The shared clock only runs
   its interval while a reader has claimed it, so a screen that reads `clock.now` inside a `$derived`

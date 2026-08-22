@@ -4,6 +4,7 @@
  * one place decides that `friend.location` reads "moved instance" and `otp` reads "recovery code".
  */
 
+import { type BusEventKind, isBusEventKind } from "@vrcz/shared";
 import type {
   AccountConnection,
   EventKind,
@@ -587,9 +588,15 @@ export function twoFactorLabel(method: TwoFactorMethod): string {
 
 /**
  * Bus kinds, in the app's own words. The map is over the dotted taxonomy the daemon actually
- * emits (`daemon/src/wiring/pipeline-bridge.ts` and `log-bridge.ts`), not VRChat's wire names.
+ * emits, not VRChat's wire names.
+ *
+ * Keyed on `BusEventKind` rather than `string`, so a label written for a kind that does not exist
+ * is a compile error. It stays `Partial` deliberately: several kinds are bookkeeping that no feed
+ * row ever shows (`friend.list_refreshed`, `notification.synced`), and forcing a label for those
+ * would mean inventing user-facing copy for events with no user-facing existence. `eventLabel`
+ * humanises anything absent, so a missing entry degrades to a readable row rather than a blank.
  */
-const EVENT_LABELS: Readonly<Record<string, string>> = {
+const EVENT_LABELS: Readonly<Partial<Record<BusEventKind, string>>> = {
   "friend.online": "Friend came online",
   "friend.offline": "Friend went offline",
   "friend.active": "Friend became active",
@@ -633,11 +640,15 @@ const EVENT_LABELS: Readonly<Record<string, string>> = {
   "group.role_updated": "Group role updated",
   "content.refresh": "Content refreshed",
   "content.image_updated": "Image updated",
+  "consent.pending": "App requested access",
+  "consent.resolved": "App access decided",
 };
 
 /** Falls back to humanising the raw kind, so a kind this build has never seen still reads. */
 export function eventLabel(kind: EventKind): string {
-  const known = EVENT_LABELS[kind];
+  // The guard is not ceremony: `EventKind` is widened so a kind from a newer daemon still reaches
+  // this function, and that is precisely the input the label table cannot answer for.
+  const known = isBusEventKind(kind) ? EVENT_LABELS[kind] : undefined;
   if (known !== undefined) return known;
   const words = kind
     .split(/[.\-_]/)

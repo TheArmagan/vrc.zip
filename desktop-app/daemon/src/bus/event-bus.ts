@@ -1,3 +1,4 @@
+import type { BusEventKind } from "@vrcz/shared";
 /**
  * The EventBus — the spine of the daemon. See PLAN.md §Architecture.
  *
@@ -12,8 +13,16 @@
 
 /** A normalized event. `kind` is a dotted path: `friend.online`, `gamelog.player_join`, `graph.run`. */
 export interface BusEvent {
-  /** Dotted kind. Subscribers may match a literal kind or a `prefix.*` wildcard. */
-  readonly kind: string;
+  /**
+   * Dotted kind, from the shared vocabulary. Subscribers may match a literal kind or a `prefix.*`
+   * wildcard (see {@link SubscribeOptions.kinds}, which is deliberately looser).
+   *
+   * Narrow on purpose: a producer inventing a kind by typo is a bug that costs nothing to make and
+   * is very hard to see, since the event still emits, still dispatches to any `prefix.*` subscriber,
+   * and still writes a feed row. One did exactly that for months (`friend.update`, no `d`). Adding
+   * a genuinely new kind means adding it to `@vrcz/shared` first, which is the point.
+   */
+  readonly kind: BusEventKind;
   /** Owning account, or null for events not attributable to one (an unlinked game session). */
   readonly accountId: string | null;
   /** Unix ms. */

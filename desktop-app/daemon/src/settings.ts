@@ -25,6 +25,22 @@ export interface Settings {
   /** Overrides log discovery. Empty means "use what discovery found", which is shown in settings. */
   logDirectories: string[];
   openBrowserOnStart: boolean;
+  /**
+   * Whether an avatar image file id may be looked up against **avtr.zip**, a third-party service.
+   *
+   * This is the only outbound request vrc.zip makes to anything other than VRChat, so it gets a
+   * switch of its own rather than riding along silently with everything else. See
+   * `daemon/src/net/avatar-ids.ts` for exactly what leaves the machine: a file id such as
+   * `file_d9ec5b06-6ea5-4ae0-ab67-78dfa3eea6df`, and nothing else — no account, no user id, no
+   * cookie, and not the vrc.zip contact string either.
+   *
+   * On by default because without it an avatar change is unopenable. VRChat's user record carries
+   * `currentAvatarImageUrl` and no avatar id at all, so the image file id is the only handle a
+   * "changed avatar" row has, and turning it into an `avtr_…` is what a third party is needed for.
+   * Off means the lookup route answers "not resolved", which is a normal answer rather than an
+   * error.
+   */
+  resolveAvatarIds: boolean;
 }
 
 /** See `daemon/src/forward-proxy/`. */
@@ -56,6 +72,7 @@ export const DEFAULT_SETTINGS: Settings = {
   forwardProxy: { enabled: true, interceptHosts: [...DEFAULT_INTERCEPT_HOSTS] },
   logDirectories: [],
   openBrowserOnStart: true,
+  resolveAvatarIds: true,
 };
 
 /** True until the user has completed first-run setup. The UI blocks on this. */
@@ -82,6 +99,12 @@ export async function loadSettings(env?: NodeJS.ProcessEnv): Promise<Settings> {
       },
       logDirectories: Array.isArray(parsed.logDirectories) ? parsed.logDirectories : [],
       openBrowserOnStart: parsed.openBrowserOnStart ?? DEFAULT_SETTINGS.openBrowserOnStart,
+      // `??` rather than a truthiness check, so a settings file that says `false` keeps saying
+      // false while one written before this key existed inherits the default.
+      resolveAvatarIds:
+        typeof parsed.resolveAvatarIds === "boolean"
+          ? parsed.resolveAvatarIds
+          : DEFAULT_SETTINGS.resolveAvatarIds,
     };
   } catch {
     // A corrupt settings file must not stop the daemon booting — the user would have no UI in

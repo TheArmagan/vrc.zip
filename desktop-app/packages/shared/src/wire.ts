@@ -225,6 +225,61 @@ export interface GroupPostPage {
 }
 
 /**
+ * How vrc.zip came to know an instance of a world exists.
+ *
+ * This is on the wire rather than inferred in the UI because it is the honest caveat on the whole
+ * list, and a caveat the reader cannot see is one that is not being made. See {@link WorldInstanceList}.
+ */
+export type WorldInstanceSource =
+  /** A friend of one of your accounts is standing in it. */
+  | "friend"
+  /** One of your own VRChat clients is standing in it, per the game log. */
+  | "client";
+
+/** One person vrc.zip can see in an instance. Deduplicated by id across accounts. */
+export interface WorldInstanceOccupant {
+  readonly id: string;
+  readonly displayName: string;
+  /** See {@link VrchatImageUrl} — not loadable directly by a browser. */
+  readonly iconUrl: VrchatImageUrl;
+  readonly status: string;
+}
+
+/** One instance of a world that vrc.zip can currently see, and how it can see it. */
+export interface WorldInstanceSummary {
+  /** The location string, which is also the row's key. Unique within the list by construction. */
+  readonly id: string;
+  readonly location: string;
+  /** The instance id with its tags, or null for a location with no instance part. */
+  readonly instanceId: string | null;
+  readonly worldId: string;
+  /** Never empty. Both entries when a friend and one of your clients are in the same room. */
+  readonly sources: readonly WorldInstanceSource[];
+  readonly friends: readonly WorldInstanceOccupant[];
+  /** `sessions.id` for each of your clients standing here. Empty for an instance you are not in. */
+  readonly clientSessionIds: readonly number[];
+}
+
+/**
+ * The answer to `GET /api/worlds/:id/instances`.
+ *
+ * **This is not a public listing, and VRChat has no endpoint that would make one.** There is no
+ * "instances of this world" call upstream — only `GET /instances/{worldId}:{instanceId}`, which
+ * needs an instance id you already hold. So this is derived entirely from what vrc.zip has already
+ * seen: friends' locations in the presence cache, and your own running clients from the game log.
+ * It costs no upstream request at all, which is why it is instant.
+ *
+ * The consequence has to be stated wherever this renders: a busy public instance with nobody you
+ * know in it is invisible here, and its absence is not a claim that it does not exist. That is the
+ * same rule the rest of the app follows about absence, applied to a list rather than to a badge.
+ */
+export interface WorldInstanceList {
+  readonly instances: readonly WorldInstanceSummary[];
+  /** How many accounts' friend lists were consulted. Zero means nothing could be seen at all. */
+  readonly accountsConsulted: number;
+}
+
+/**
  * One instance a group currently has open.
  *
  * The world is **flattened onto this row** rather than nested as a world summary. VRChat embeds a
@@ -276,6 +331,59 @@ export interface GroupGalleryImageSummary {
 export interface GroupGalleryImagePage {
   readonly images: readonly GroupGalleryImageSummary[];
   readonly hasMore: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Avatars
+// ---------------------------------------------------------------------------
+
+/**
+ * The answer to `GET /api/avatars/by-file/:fileId`.
+ *
+ * `avatarId` null is the ordinary answer, not a failure: the lookup is switchable
+ * (`Settings.resolveAvatarIds`), the index it consults does not know every avatar, and a feed row
+ * that cannot be opened is a normal feed row. The `fileId` is echoed so a batch of these can be
+ * matched up without the caller tracking request order.
+ */
+export interface AvatarFileResolution {
+  readonly fileId: string;
+  /** `avtr_…`, or null when no avatar is known for this file. */
+  readonly avatarId: string | null;
+}
+
+/**
+ * One avatar record, as `GET /api/avatars/:id` serves it.
+ *
+ * Explicitly named fields, never VRChat's body passed through — the same rule the world and user
+ * shapes follow. The avatar body is the largest record VRChat serves (`unityPackages` alone is
+ * dozens of entries carrying asset URLs and platform builds), and none of it belongs on a card.
+ *
+ * The image fields are absolute VRChat URLs: see {@link VrchatImageUrl} — a browser cannot load one
+ * directly.
+ */
+export interface AvatarDetail {
+  readonly id: string;
+  /** Falls back to the id, so a label is never empty. */
+  readonly name: string;
+  readonly description: string | null;
+  readonly authorId: string | null;
+  readonly authorName: string | null;
+  /** See {@link VrchatImageUrl} — not loadable directly by a browser. */
+  readonly imageUrl: VrchatImageUrl;
+  /** See {@link VrchatImageUrl} — not loadable directly by a browser. */
+  readonly thumbnailImageUrl: VrchatImageUrl;
+  /** VRChat's own word: `public`, `private`, `hidden`. Null when it did not say. */
+  readonly releaseStatus: string | null;
+  readonly tags: readonly string[];
+  readonly version: number | null;
+  /** Unix milliseconds, integer, or null. */
+  readonly createdAt: number | null;
+  /** Unix milliseconds, integer, or null. */
+  readonly updatedAt: number | null;
+  /** Unix milliseconds the VRChat body was fetched. */
+  readonly fetchedAt: number;
+  /** True when this came from `avatar_cache` rather than a live fetch. */
+  readonly cached: boolean;
 }
 
 // ---------------------------------------------------------------------------

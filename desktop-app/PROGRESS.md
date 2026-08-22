@@ -1671,6 +1671,41 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      A roster row whose player the log gave no id for renders no chevron at all rather than a dead
      one, and takes a spacer of the same width so the column does not jitter.
 
+152. **The world and group modals are tabbed, and the world's live half became a list.** Both were
+     one column on the argument that each is "one document". That was true of the *record* and false
+     of the dialog: half of the world modal described a world, which barely changes, and half
+     described one live instance, which changes by the minute — and the live half was pinned to
+     whichever location the dialog happened to be opened from, with no way to reach any other. A
+     reader asking "where can I actually go in this world" had nowhere to look.
+
+     So the instance being described is now a **selection** rather than a fact about how the dialog
+     was opened, with a list to select from. The old behaviour survives as the default: opening from
+     a location preselects that instance *and* starts on the Instances tab, because that instance is
+     still why the dialog was opened. Opening from a bare world id starts on Overview, since there is
+     no room to show. `EntityModal` already supported `tabs`, so neither modal needed shell changes.
+
+     The split earns itself the first time an account is offline: the world record 503s and the
+     instance list still renders, because the two halves no longer share a phase. That is visible in
+     the smoke test, and it is the shape the old single column could not express.
+
+154. **Avatar identity comes from a third party, and that is a real change of posture.** VRChat
+     exposes no avatar id on a public user — only `currentAvatarImageUrl` and friends — so
+     `friend.updated.avatar` could say "switched avatar" and nothing else. `avtr.zip` maps an image
+     *file* id to an `avtr_…` id, which is the only route from what the pipeline sends to what
+     `GET /avatars/{id}` needs.
+
+     This is the first request vrc.zip makes to anything that is not VRChat, and the Guardrails in
+     `PLAN.md` are explicit about local-only. It is therefore a setting (`resolveAvatarIds`, default
+     on, switchable), the module states plainly that exactly one image file id leaves the machine
+     and no account, cookie, user id or display name goes with it, and the resolver carries its own
+     10/s bucket because avtr.zip's ceiling is a different budget from VRChat's. A failed lookup is
+     never cached, so an outage cannot become six hours of dead rows.
+
+     `avatar_cache` was reused for the avatar record and a new `avatar_file_ids` table added for the
+     mapping, because the two are genuinely different shapes: the mapping's key is a *file* id, its
+     value is an id rather than a document, and "no avatar is known for this file" has to be
+     storable — which in `avatar_cache` would be an avatar row with no avatar in it.
+
 ---
 
 ## Gotchas

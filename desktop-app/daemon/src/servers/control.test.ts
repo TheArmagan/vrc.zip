@@ -13,6 +13,7 @@ import type { ControlDeps } from "./control.ts";
 import {
   type AppAuditEntry,
   type AuditQuery,
+  type AvatarDetail,
   type ConnectedApp,
   type ControlAccount,
   ControlError,
@@ -30,6 +31,8 @@ import {
   MAX_WORLD_IDS,
   type NotificationQuery,
   type PageQuery,
+  parseAvatarId,
+  parseImageFileId,
   parseInviteLocation,
   parseUserId,
   parseWorldId,
@@ -342,6 +345,30 @@ const WORLD_DETAIL: WorldDetail = {
   cached: false,
 };
 
+const AVATAR_ID = "avtr_eb5a1798-6f23-4ec6-b879-2d01f44a69c4";
+/** An avatar VRChat will not show this account — a 404 on its own route. */
+const AVATAR_MISSING = "avtr_00000000-0000-0000-0000-000000000000";
+const FILE_ID = "file_d9ec5b06-6ea5-4ae0-ab67-78dfa3eea6df";
+/** A file id avtr.zip has never heard of. Not an error: `avatarId: null`. */
+const FILE_UNKNOWN = "file_00000000-0000-0000-0000-000000000000";
+
+const AVATAR_DETAIL: AvatarDetail = {
+  id: AVATAR_ID,
+  name: "A Robot",
+  description: "beep",
+  authorId: "usr_author",
+  authorName: "Author",
+  imageUrl: ICON_URL,
+  thumbnailImageUrl: ICON_URL,
+  releaseStatus: "public",
+  tags: ["author_tag_robot"],
+  version: 3,
+  createdAt: 1_500_000_000_000,
+  updatedAt: 1_600_000_000_000,
+  fetchedAt: 1_700_000_000_000,
+  cached: false,
+};
+
 const INSTANCE_INFO: InstanceInfo = {
   worldId: WORLD_ID,
   instanceId: "12345",
@@ -366,6 +393,8 @@ interface Recorder {
   eventQueries: EventQuery[];
   worldLookups: string[];
   worldBatches: string[][];
+  avatarLookups: { avatarId: string; accountId: string | null }[];
+  avatarFileLookups: string[];
   instanceLookups: { target: InviteTarget; accountId: string | null }[];
   friendQueries: (string | null)[];
   notificationQueries: NotificationQuery[];
@@ -377,6 +406,7 @@ interface Recorder {
   groupMemberPages: { groupId: string; accountId: string | null; page: PageQuery }[];
   groupPostPages: { groupId: string; accountId: string | null; page: PageQuery }[];
   groupInstanceFetches: { groupId: string; accountId: string | null }[];
+  worldInstanceFetches: { worldId: string; accountId: string | null }[];
   galleryPages: {
     groupId: string;
     galleryId: string;
@@ -409,6 +439,8 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     eventQueries: [],
     worldLookups: [],
     worldBatches: [],
+    avatarLookups: [],
+    avatarFileLookups: [],
     instanceLookups: [],
     friendQueries: [],
     notificationQueries: [],
@@ -420,6 +452,7 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     groupMemberPages: [],
     groupPostPages: [],
     groupInstanceFetches: [],
+    worldInstanceFetches: [],
     galleryPages: [],
     userBatches: [],
     mutualLookups: [],
@@ -569,6 +602,15 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
       if (worldId === WORLD_MISSING) throw new ControlError(404, "unknown_world");
       return { ...WORLD_DETAIL, id: worldId };
     },
+    resolveAvatarByFile: async (fileId) => {
+      seen.avatarFileLookups.push(fileId);
+      return { fileId, avatarId: fileId === FILE_UNKNOWN ? null : AVATAR_ID };
+    },
+    getAvatar: async (avatarId, accountId) => {
+      seen.avatarLookups.push({ avatarId, accountId });
+      if (avatarId === AVATAR_MISSING) throw new ControlError(404, "unknown_avatar");
+      return { ...AVATAR_DETAIL, id: avatarId };
+    },
     listWorlds: async (worldIds) => {
       seen.worldBatches.push([...worldIds]);
       // One of the ids is a world that no longer exists: it is simply absent from the map rather
@@ -639,6 +681,23 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
       seen.groupInstanceFetches.push({ groupId, accountId });
       groupGate(groupId);
       return { instances: [GROUP_INSTANCE] };
+    },
+    listWorldInstances: async (worldId, accountId) => {
+      seen.worldInstanceFetches.push({ worldId, accountId });
+      return {
+        instances: [
+          {
+            id: `${worldId}:42~region(eu)`,
+            location: `${worldId}:42~region(eu)`,
+            instanceId: "42",
+            worldId,
+            sources: ["friend"],
+            friends: [{ id: "usr_ada", displayName: "Ada", iconUrl: null, status: "active" }],
+            clientSessionIds: [],
+          },
+        ],
+        accountsConsulted: 1,
+      };
     },
     listGroupGalleryImages: async (groupId, galleryId, accountId, page) => {
       seen.galleryPages.push({ groupId, galleryId, accountId, page });
@@ -1508,6 +1567,108 @@ describe("GET /api/worlds/:id", () => {
     const missing = await call(deps, `/api/worlds/${WORLD_MISSING}`);
     expect(missing.status).toBe(404);
     expect(await missing.json()).toMatchObject({ error: "unknown_world" });
+  });
+});
+
+describe("GET /api/avatars/by-file/:fileId", () => {
+  test("resolves a file id, and an unknown one is a 200 rather than an error", async () => {
+    const { deps, seen } = fakeDeps();
+
+    const res = await call(deps, `/api/avatars/by-file/${FILE_ID}`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ fileId: FILE_ID, avatarId: AVATAR_ID });
+
+    // Not knowing is a normal answer: the setting may be off, or the index may not have it.
+    const unknown = await call(deps, `/api/avatars/by-file/${FILE_UNKNOWN}`);
+    expect(unknown.status).toBe(200);
+    expect(await unknown.json()).toEqual({ fileId: FILE_UNKNOWN, avatarId: null });
+
+    expect(seen.avatarFileLookups).toEqual([FILE_ID, FILE_UNKNOWN]);
+  });
+
+  test("400s on anything that is not an image file id", async () => {
+    const { deps, seen } = fakeDeps();
+    for (const id of [
+      "avtr_1",
+      "file_1%2f..%2fauth",
+      "..%2fauth%2fuser",
+      "file_under_score",
+      `file_${"9".repeat(70)}`,
+    ]) {
+      const res = await call(deps, `/api/avatars/by-file/${id}`);
+      expect(res.status, id).toBe(400);
+      expect(await res.json()).toMatchObject({ error: "invalid_file_id" });
+    }
+    // Nothing reached the third party. That is the property this validator is really for.
+    expect(seen.avatarFileLookups).toEqual([]);
+  });
+});
+
+describe("GET /api/avatars/:id", () => {
+  test("serves the avatar and passes the asking account through", async () => {
+    const { deps, seen } = fakeDeps();
+    const res = await call(deps, `/api/avatars/${AVATAR_ID}?accountId=${ACCOUNT.id}`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(AVATAR_DETAIL);
+    expect(seen.avatarLookups).toEqual([{ avatarId: AVATAR_ID, accountId: ACCOUNT.id }]);
+  });
+
+  test("400s on anything that is not an avatar id, and surfaces a 404", async () => {
+    const { deps, seen } = fakeDeps();
+    for (const id of ["usr_1", "avtr_1%2fauth", "..%2fauth%2fuser", `avtr_${"9".repeat(70)}`]) {
+      const res = await call(deps, `/api/avatars/${id}`);
+      expect(res.status, id).toBe(400);
+      expect(await res.json()).toMatchObject({ error: "invalid_avatar_id" });
+    }
+    expect(seen.avatarLookups).toEqual([]);
+
+    const missing = await call(deps, `/api/avatars/${AVATAR_MISSING}`);
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toMatchObject({ error: "unknown_avatar" });
+  });
+
+  test("`by-file` is its own route, not an avatar id", async () => {
+    // Different segment counts, so Hono keeps them apart — asserted rather than assumed, because
+    // a collision would send a file id to `GET /avatars/{avatarId}` upstream.
+    const { deps, seen } = fakeDeps();
+    await call(deps, `/api/avatars/by-file/${FILE_ID}`);
+    expect(seen.avatarLookups).toEqual([]);
+  });
+});
+
+describe("parseAvatarId / parseImageFileId", () => {
+  test("accept the real shapes and refuse a second path segment", () => {
+    expect(parseAvatarId(AVATAR_ID)).toBe(AVATAR_ID);
+    expect(parseImageFileId(FILE_ID)).toBe(FILE_ID);
+    for (const bad of [undefined, "", "avtr_a/b", "wrld_a", "avtr_a?x=1"]) {
+      expect(() => parseAvatarId(bad)).toThrow();
+    }
+    for (const bad of [undefined, "", "file_a/b", "file_a#x", "avtr_a"]) {
+      expect(() => parseImageFileId(bad)).toThrow();
+    }
+  });
+});
+
+describe("GET /api/worlds/:id/instances", () => {
+  test("serves the derived instance list and passes the asking account through", async () => {
+    const { deps, seen } = fakeDeps();
+    const res = await call(deps, `/api/worlds/${WORLD_ID}/instances?accountId=${ACCOUNT.id}`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      accountsConsulted: 1,
+      instances: [{ instanceId: "42", sources: ["friend"] }],
+    });
+    expect(seen.worldInstanceFetches).toEqual([{ worldId: WORLD_ID, accountId: ACCOUNT.id }]);
+  });
+
+  test("validates the world id on the sub-path too", async () => {
+    // The `:id` segment is as reachable here as on `/api/worlds/:id`, and a route that skipped the
+    // validator would be a way around it.
+    const { deps, seen } = fakeDeps();
+    const res = await call(deps, "/api/worlds/usr_1/instances");
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "invalid_world_id" });
+    expect(seen.worldInstanceFetches).toEqual([]);
   });
 });
 

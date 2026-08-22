@@ -5,10 +5,25 @@
   why there is one instance rather than one per call site.
 
   Built on `EntityModal`, the shell the user and group cards share, so the banner, the header and
-  the scroll behaviour are identical in all three. The body is one column rather than the user
-  modal's tabs, because a world is one document: what it is, who made it, how big it is, and what
-  VRChat's own counters say. The instance sits at the top because it is the only live thing on the
-  page and usually the reason the dialog was opened.
+  the scroll behaviour are identical in all three.
+
+  ## Why this is three tabs now, when it used to be one column
+
+  It was one column on the argument that a world is one document. That was true of the *record* and
+  false of the dialog: half of it described a world, which barely changes, and half described one
+  live instance, which changes by the minute — and the live half was pinned to whichever location
+  the dialog happened to be opened from, with no way to reach any other. A reader asking "where can
+  I actually go in this world" had nowhere to look.
+
+  So the live half is a tab of its own with a list in it, and the instance being described is a
+  *selection* rather than a fixed fact about how the dialog was opened. The old behaviour survives
+  as the default: opening from a location preselects that instance and starts on this tab, because
+  that instance is still the reason the dialog was opened.
+
+  **The list is derived and it says so.** VRChat has no endpoint that enumerates a world's
+  instances, so this is built from friends' presence and the game clients on this machine. An
+  instance with nobody you know in it is invisible here, and the tab has to say that out loud
+  rather than let an empty list read as an empty world. See `WorldInstanceList`.
 
   **Every number here is one VRChat sent.** There is no vrc.zip score, rank, or "popularity out of
   ten" anywhere in this file, and adding one would be worse than showing nothing: a derived number
@@ -16,26 +31,81 @@
 -->
 <script lang="ts">
 import CalendarIcon from "@lucide/svelte/icons/calendar";
+import DoorOpenIcon from "@lucide/svelte/icons/door-open";
 import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
 import UsersIcon from "@lucide/svelte/icons/users";
 import DetailGrid from "$lib/components/DetailGrid.svelte";
 import EntityFooter from "$lib/components/EntityFooter.svelte";
-import EntityModal from "$lib/components/EntityModal.svelte";
+import EntityModal, { type ModalTab } from "$lib/components/EntityModal.svelte";
 import FailureNote from "$lib/components/FailureNote.svelte";
 import JoinAffordance from "$lib/components/JoinAffordance.svelte";
+import PagedSection from "$lib/components/PagedSection.svelte";
 import RelativeTime from "$lib/components/RelativeTime.svelte";
 import UserName from "$lib/components/UserName.svelte";
+import WorldInstanceRow from "$lib/components/WorldInstanceRow.svelte";
 import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
 import { Separator } from "$lib/components/ui/separator/index.js";
 import { Skeleton } from "$lib/components/ui/skeleton/index.js";
+import * as Tabs from "$lib/components/ui/tabs/index.js";
 import { accessLabel, calendarDay } from "$lib/format.ts";
+import { app } from "$lib/state/app.svelte.ts";
 import { modalBack } from "$lib/state/entity-modal.svelte.ts";
-import { worldModal } from "$lib/state/world-modal.svelte.ts";
+import {
+  WORLD_MODAL_TAB_LABELS,
+  WORLD_MODAL_TABS,
+  isWorldModalTab,
+  worldModal,
+} from "$lib/state/world-modal.svelte.ts";
 
 const world = $derived(worldModal.world);
 const instance = $derived(worldModal.instance);
 const parsed = $derived(worldModal.parsed);
+
+/*
+ * Where this machine's own clients are standing.
+ *
+ * From the game log rather than from the daemon's derived list, so it is right even for an instance
+ * the list does not contain — an old feed row can open a location nobody is in but you. The daemon
+ * answers the same question for the rows it returns; this is the same fact read locally, and it
+ * costs nothing because `app.sessions` is already in memory.
+ */
+const myLocations = $derived(
+  new Set(
+    app.sessions
+      .map((session) => session.currentLocation)
+      .filter((location): location is string => location !== null && location !== ""),
+  ),
+);
+
+const youAreHere = $derived(worldModal.selected !== null && myLocations.has(worldModal.selected));
+
+/**
+ * The count on the Instances tab.
+ *
+ * Null until the list has actually loaded: an absent count means "not read yet", never "none".
+ * The tab's own empty state is the only thing allowed to claim zero. See `ModalTab`.
+ */
+const tabs = $derived<ModalTab[]>(
+  WORLD_MODAL_TABS.map((tab) => ({
+    value: tab,
+    label: WORLD_MODAL_TAB_LABELS[tab],
+    count:
+      tab === "instances" && worldModal.instances.phase === "ready"
+        ? worldModal.instances.items.length
+        : null,
+  })),
+);
+
+const INSTANCE_FAILURE_TITLES: Record<string, string> = {
+  offline: "The daemon is not reachable",
+  other: "Could not read the instance list",
+};
+
+const INSTANCE_FAILURE_BODIES: Record<string, string> = {
+  offline: "vrc.zip's daemon is not answering, so it cannot say what it can see.",
+  other: "",
+};
 
 /** The banner image, then the thumbnail. Both are VRChat's; nothing is substituted for them. */
 const heroUrl = $derived(world?.imageUrl ?? world?.thumbnailImageUrl ?? null);
@@ -109,6 +179,12 @@ const INSTANCE_BODIES: Record<string, string> = {
   title={worldModal.title}
   titleClass="break-words"
   headerClass="-mt-6"
+  {tabs}
+  tab={worldModal.tab}
+  onSelectTab={(value) => {
+    if (isWorldModalTab(value)) worldModal.selectTab(value);
+  }}
+  tabsLabel="What to show about this world"
 >
   {#snippet subtitle()}
     {#if world !== null}
@@ -156,25 +232,14 @@ const INSTANCE_BODIES: Record<string, string> = {
     {/if}
   {/snippet}
 
-  {#if worldModal.phase === "loading"}
-    <div class="space-y-2">
-      <Skeleton class="h-4 w-2/3" />
-      <Skeleton class="h-4 w-1/2" />
-      <Skeleton class="h-4 w-1/3" />
-    </div>
-  {:else if worldModal.phase === "error" && worldModal.failure !== null}
-    <FailureNote
-      failure={worldModal.failure}
-      titles={FAILURE_TITLES}
-      bodies={FAILURE_BODIES}
-      message={worldModal.error}
-      onRetry={() => worldModal.retry()}
-    />
-  {/if}
-
-  <!-- The instance ------------------------------------------------------------ -->
-  {#if worldModal.hasInstance}
-    <section class="space-y-2 border border-border bg-muted/30 px-3 py-3">
+  <!-- Instances ---------------------------------------------------------------- -->
+  <Tabs.Content value="instances" class="space-y-4">
+    <!--
+      The selected instance, in full. Above the list rather than below it because it is what the
+      list is *for*: the rows are how you choose, this is the answer.
+    -->
+    {#if worldModal.hasInstance}
+      <section class="space-y-2 border border-border bg-muted/30 px-3 py-3">
       <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
         <p class="text-xs tracking-wide text-muted-foreground uppercase">This instance</p>
         <span class="tabular text-sm font-medium">{parsed.label}</span>
@@ -186,6 +251,19 @@ const INSTANCE_BODIES: Record<string, string> = {
             {parsed.region}
           </span>
         {/if}
+        {#if youAreHere}
+          <!--
+            Read off this machine's own game logs, so it holds for an instance the derived list
+            below does not contain — which is the common case for a location opened from old feed
+            scrollback.
+          -->
+          <Badge
+            variant="outline"
+            class="border-status-online/40 bg-status-online/10 text-status-online"
+          >
+            You are here
+          </Badge>
+        {/if}
 
         <div class="ml-auto flex items-center gap-2">
           <!--
@@ -193,7 +271,7 @@ const INSTANCE_BODIES: Record<string, string> = {
             that owns it: a self-invite when a client is running, the deep link only when none is.
           -->
           <JoinAffordance
-            location={worldModal.location}
+            location={worldModal.selected}
             accountId={worldModal.accountId}
             class="text-xs"
           />
@@ -265,8 +343,79 @@ const INSTANCE_BODIES: Record<string, string> = {
           {INSTANCE_BODIES[failure] === "" ? worldModal.instanceError : INSTANCE_BODIES[failure]}
         </p>
       {/if}
-    </section>
-  {/if}
+      </section>
+    {/if}
+
+    <!--
+      The list. `PagedSection` draws the skeleton, the empty state and the failure, exactly as the
+      group screen's four lists do; only the row differs.
+    -->
+    <div class="space-y-2">
+      <div class="flex items-center justify-between gap-3">
+        <p class="text-xs tracking-wide text-muted-foreground uppercase">Instances vrc.zip can see</p>
+        <Button
+          variant="ghost"
+          size="xs"
+          class="text-muted-foreground"
+          disabled={worldModal.instances.phase === "loading"}
+          onclick={() => worldModal.refreshInstances()}
+        >
+          <RefreshCwIcon />
+          Refresh
+        </Button>
+      </div>
+
+      <PagedSection
+        list={worldModal.instances}
+        icon={DoorOpenIcon}
+        emptyTitle="No instances vrc.zip can see"
+        emptyDescription="VRChat has no call that lists a world's instances, so this is built from where your friends are and where your own clients are. A busy public instance with nobody you know in it does not appear here, and that is a limit of what can be seen rather than a statement about the world."
+        titles={INSTANCE_FAILURE_TITLES}
+        bodies={INSTANCE_FAILURE_BODIES}
+        skeletonRows={3}
+      >
+        {#snippet row(entry)}
+          <WorldInstanceRow
+            instance={entry}
+            selected={entry.location === worldModal.selected}
+            youAreHere={myLocations.has(entry.location)}
+            accountId={worldModal.accountId}
+            onSelect={(location) => worldModal.selectInstance(location)}
+          />
+        {/snippet}
+      </PagedSection>
+
+      {#if !worldModal.instances.isEmpty && worldModal.instances.phase === "ready"}
+        <!--
+          The caveat again, and deliberately not only in the empty state: a list with three rows in
+          it reads as complete unless something says otherwise, and that is the reading this whole
+          tab has to avoid.
+        -->
+        <p class="text-xs text-muted-foreground">
+          Derived from where your friends are and where your own clients are, not from a listing
+          VRChat publishes. Instances with nobody you know in them are not shown.
+        </p>
+      {/if}
+    </div>
+  </Tabs.Content>
+
+  <!-- Overview ---------------------------------------------------------------- -->
+  <Tabs.Content value="overview" class="space-y-4">
+    {#if worldModal.phase === "loading"}
+      <div class="space-y-2">
+        <Skeleton class="h-4 w-2/3" />
+        <Skeleton class="h-4 w-1/2" />
+        <Skeleton class="h-4 w-1/3" />
+      </div>
+    {:else if worldModal.phase === "error" && worldModal.failure !== null}
+      <FailureNote
+        failure={worldModal.failure}
+        titles={FAILURE_TITLES}
+        bodies={FAILURE_BODIES}
+        message={worldModal.error}
+        onRetry={() => worldModal.retry()}
+      />
+    {/if}
 
   {#if world !== null}
     {#if world.description}
@@ -329,15 +478,19 @@ const INSTANCE_BODIES: Record<string, string> = {
       </DetailGrid>
     {/if}
   {/if}
+  </Tabs.Content>
 
-  <EntityFooter
-    id={worldModal.worldId}
-    href={worldModal.worldId === null
-      ? null
-      : `https://vrchat.com/home/world/${encodeURIComponent(worldModal.worldId)}`}
-    openLabel="Open on vrchat.com"
-    idLabel="World id"
-    jsonLabel="World details"
-    json={raw}
-  />
+  <!-- Raw JSON ---------------------------------------------------------------- -->
+  <Tabs.Content value="raw" class="space-y-4">
+    <EntityFooter
+      id={worldModal.worldId}
+      href={worldModal.worldId === null
+        ? null
+        : `https://vrchat.com/home/world/${encodeURIComponent(worldModal.worldId)}`}
+      openLabel="Open on vrchat.com"
+      idLabel="World id"
+      jsonLabel="World details"
+      json={raw}
+    />
+  </Tabs.Content>
 </EntityModal>

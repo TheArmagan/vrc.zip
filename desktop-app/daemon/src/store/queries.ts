@@ -195,6 +195,13 @@ export const SQL = {
     INSERT INTO avatar_cache (avatar_id, fetched_at, data) VALUES (?, ?, ?)
     ON CONFLICT(avatar_id) DO UPDATE SET fetched_at = excluded.fetched_at, data = excluded.data`,
   getAvatarCache: `SELECT avatar_id AS id, fetched_at, data FROM avatar_cache WHERE avatar_id = ?`,
+  // `avatar_id` may legitimately be NULL — see migration 009.
+  putAvatarFileId: `
+    INSERT INTO avatar_file_ids (file_id, avatar_id, resolved_at) VALUES (?, ?, ?)
+    ON CONFLICT(file_id) DO UPDATE SET
+      avatar_id = excluded.avatar_id, resolved_at = excluded.resolved_at`,
+  getAvatarFileId: `
+    SELECT file_id, avatar_id, resolved_at FROM avatar_file_ids WHERE file_id = ?`,
 
   // -- notes ----------------------------------------------------------------
   putNote: `

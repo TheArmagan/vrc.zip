@@ -1,4 +1,5 @@
 import type {
+  Avatar,
   Badge,
   Group,
   GroupGallery,
@@ -27,15 +28,25 @@ import {
   SCOPES,
   STREAM_RATE,
   type WebhookSummary,
+  type WorldInstanceList,
+  type WorldInstanceOccupant,
+  type WorldInstanceSource,
+  type WorldInstanceSummary,
 } from "@vrcz/shared";
 import type { Account, AccountSnapshot } from "../accounts/account.ts";
 import type { AccountManager } from "../accounts/manager.ts";
 import { type PresenceService, trustLevelOf } from "../accounts/presence.ts";
 import type { EventBus } from "../bus/event-bus.ts";
+// The one thing the control layer borrows from the log subsystem: the location grammar. Both
+// halves of `listWorldInstances` are location strings, and a second parser here would be a second
+// opinion on what `~region(` means.
+import { parseLocation } from "../game-logs/index.ts";
+import { AvatarIdResolver } from "../net/avatar-ids.ts";
 import { ImageCache } from "../net/image-cache.ts";
 import type { RateBucketSnapshot, RateLimiter } from "../net/rate-limiter.ts";
 import { vrcFetch } from "../net/request.ts";
 import { emptySeries, type RequestMeter, WINDOW_SECONDS } from "../net/request-meter.ts";
+import { buildUserAgent } from "../net/user-agent.ts";
 import { pickUserImageUrl, pickUserImageUrlFull } from "../net/user-image.ts";
 import type { ConsentRegistry, PendingConsent } from "../proxy/consent.ts";
 import { BUDGET_WINDOW_MS, DEFAULT_GRANT_BUDGETS } from "../proxy/passthrough.ts";
@@ -45,6 +56,8 @@ import {
   type AppAuditEntry,
   type AppBudget,
   type AuditQuery,
+  type AvatarDetail,
+  type AvatarFileResolution,
   type ConnectedApp,
   type ControlAccount,
   type ControlDeps,
@@ -146,6 +159,14 @@ export interface ControlDepsOptions {
    * "no webhooks are registered" is exactly true for a daemon that cannot register any.
    */
   readonly webhooks?: WebhookManager | undefined;
+  /**
+   * The avtr.zip lookup, injected.
+   *
+   * Optional, and normally absent: the default is built lazily below, because it needs a valid
+   * User-Agent and the contact that goes in one does not exist until first-run setup is done. A
+   * test injects one to stub the third-party host without a network.
+   */
+  readonly avatarIds?: AvatarIdResolver | undefined;
   readonly settings: Settings;
   readonly env?: NodeJS.ProcessEnv;
   readonly connectPipeline: (accountId: string) => void;
@@ -223,6 +244,13 @@ const INSTANCE_ROSTER_TTL_MS = 20_000;
  * old as `fetchedAt` — anything wanting live occupancy asks about an *instance*, not a world.
  */
 const WORLD_CACHE_TTL_MS = 24 * 60 * 60_000;
+
+/**
+ * How long a cached avatar stays fresh. **Twenty-four hours**, the same as a world and for the same
+ * reason: an avatar record only changes when its author re-uploads it, and the rows that ask about
+ * one are a feed page naming the same handful of avatars over and over.
+ */
+const AVATAR_CACHE_TTL_MS = 24 * 60 * 60_000;
 
 /**
  * One instance response as fetched, before either route reads its half.
@@ -573,6 +601,37 @@ function toWorldDetail(raw: World, fetchedAt: number, cached: boolean): WorldDet
     updatedAt: unixMsFromDate(raw.updated_at),
     version: numberOrNull(raw.version),
 
+    fetchedAt,
+    cached,
+  };
+}
+
+/**
+ * The avatar record, projected.
+ *
+ * Named fields rather than a passthrough, and the omissions are the point: `unityPackages`,
+ * `assetUrl` and `unityPackageUrl` are download locations for the avatar's actual build, and
+ * `publishedListings` is store inventory. None of it belongs on a card, and re-serving asset URLs
+ * from a local API is a distribution question this app has no reason to open.
+ */
+function toAvatarDetail(raw: Partial<Avatar>, fetchedAt: number, cached: boolean): AvatarDetail {
+  const id = emptyToNull(raw.id) ?? "";
+
+  return {
+    id,
+    name: emptyToNull(raw.name) ?? id,
+    description: emptyToNull(raw.description),
+    authorId: emptyToNull(raw.authorId),
+    authorName: emptyToNull(raw.authorName),
+    imageUrl: emptyToNull(raw.imageUrl),
+    thumbnailImageUrl: emptyToNull(raw.thumbnailImageUrl),
+    releaseStatus: emptyToNull(raw.releaseStatus),
+    tags: stringArray(raw.tags),
+    version: numberOrNull(raw.version),
+    // Same date-shaped guard as everywhere else here: `Date.parse("-5")` succeeds as a year, so
+    // VRChat's `""` would otherwise become a confident wrong timestamp.
+    createdAt: unixMsFromDate(raw.created_at),
+    updatedAt: unixMsFromDate(raw.updated_at),
     fetchedAt,
     cached,
   };
@@ -1219,6 +1278,98 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
     return await work;
   }
 
+  /** The same de-duplication for avatars, keyed by avatar id alone. See {@link loadWorld}. */
+  const avatarsInFlight = new Map<
+    string,
+    Promise<{ avatar: Partial<Avatar>; fetchedAt: number } | null>
+  >();
+
+  /**
+   * The avtr.zip lookup, built on first use.
+   *
+   * Lazy because the User-Agent it must send needs the first-run contact, which is empty until the
+   * user has set one — building eagerly would throw during construction of the whole control layer.
+   * Null means "no valid contact yet", and null resolves to no avatar, which is the same honest
+   * answer as any other miss.
+   */
+  let avatarIds: AvatarIdResolver | null = options.avatarIds ?? null;
+  function avatarIdResolver(): AvatarIdResolver | null {
+    if (avatarIds !== null) return avatarIds;
+    let userAgent: string;
+    try {
+      userAgent = buildUserAgent(settings.contact);
+    } catch {
+      return null;
+    }
+    avatarIds = new AvatarIdResolver({
+      userAgent,
+      store,
+      // Read per call rather than captured, so the switch takes effect the moment it is flipped.
+      enabled: () => settings.resolveAvatarIds,
+    });
+    return avatarIds;
+  }
+
+  /** One avatar, from `avatar_cache` if it is fresh there. De-duplicated exactly like a world. */
+  async function loadAvatar(
+    account: Account,
+    avatarId: string,
+  ): Promise<{ avatar: Partial<Avatar>; fetchedAt: number } | null> {
+    const pending = avatarsInFlight.get(avatarId);
+    if (pending !== undefined) return await pending;
+
+    const work = (async (): Promise<{ avatar: Partial<Avatar>; fetchedAt: number } | null> => {
+      const response = await vrcFetch(account.context(), `/avatars/${avatarId}`);
+      const body = await response.text();
+
+      // A 404 here is the *ordinary* answer: VRChat only serves an avatar record to accounts
+      // allowed to see it, so most avatars a feed names are private to their author.
+      if (response.status === 404) return null;
+      if (!response.ok) {
+        throw new ControlError(
+          502,
+          "avatar_fetch_failed",
+          `VRChat returned ${String(response.status)}`,
+        );
+      }
+
+      let avatar: Partial<Avatar>;
+      try {
+        avatar = JSON.parse(body) as Partial<Avatar>;
+      } catch {
+        throw new ControlError(502, "avatar_fetch_failed", "VRChat returned a non-JSON body");
+      }
+      if (typeof avatar !== "object" || avatar === null) return null;
+
+      const fetchedAt = Date.now();
+      // Not keyed by account, for the same reason `world_cache` is not: VRChat answers the same
+      // avatar record to everyone it answers at all.
+      store.putAvatarCache(avatarId, fetchedAt, body);
+      return { avatar, fetchedAt };
+    })().finally(() => {
+      avatarsInFlight.delete(avatarId);
+    });
+
+    avatarsInFlight.set(avatarId, work);
+    return await work;
+  }
+
+  /** A fresh `avatar_cache` row, or null. A corrupt row is a miss, never a throw. */
+  function cachedAvatar(
+    avatarId: string,
+    now: number,
+  ): { avatar: Partial<Avatar>; fetchedAt: number } | null {
+    const row = store.getAvatarCache(avatarId);
+    if (row === null || now - row.fetched_at >= AVATAR_CACHE_TTL_MS) return null;
+    try {
+      const avatar = JSON.parse(row.data) as Partial<Avatar>;
+      if (typeof avatar !== "object" || avatar === null) return null;
+      return { avatar, fetchedAt: row.fetched_at };
+    } catch {
+      return null;
+    }
+  }
+
   /** A fresh `world_cache` row, or null. Never throws on a corrupt row — it is treated as a miss. */
   function cachedWorld(worldId: string, now: number): { world: World; fetchedAt: number } | null {
     const row = store.getWorldCache(worldId);
@@ -1537,6 +1688,40 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       return toWorldDetail(fetched.world, fetched.fetchedAt, false);
     },
 
+    async resolveAvatarByFile(fileId): Promise<AvatarFileResolution> {
+      // No try/catch and no error branch on purpose: `resolve` is documented never to throw, and
+      // every way it can fail to find an id — setting off, no contact yet, avtr.zip down, avtr.zip
+      // simply does not know — is the same answer to the caller. See `net/avatar-ids.ts`.
+      const avatarId = (await avatarIdResolver()?.resolve(fileId)) ?? null;
+      return { fileId, avatarId };
+    },
+
+    async getAvatar(avatarId, accountId): Promise<AvatarDetail> {
+      // Cache before account, exactly as `getWorld` does: the record is not per account, so a warm
+      // cache answers with nobody signed in.
+      const hit = cachedAvatar(avatarId, Date.now());
+      if (hit !== null) return toAvatarDetail(hit.avatar, hit.fetchedAt, true);
+
+      const account = availableAccount(accountId);
+      if (account === null) {
+        throw new ControlError(
+          503,
+          "no_account",
+          "No account is signed in, so VRChat has nobody to ask about this avatar.",
+        );
+      }
+
+      const fetched = await loadAvatar(account, avatarId);
+      if (fetched === null) {
+        throw new ControlError(
+          404,
+          "unknown_avatar",
+          "VRChat has no such avatar, or this account cannot see it.",
+        );
+      }
+      return toAvatarDetail(fetched.avatar, fetched.fetchedAt, false);
+    },
+
     async listWorlds(worldIds, accountId): Promise<WorldBatch> {
       const now = Date.now();
       const worlds: Record<string, WorldSummary> = {};
@@ -1672,6 +1857,103 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         iconUrl: record.iconUrl,
         lastSeenAt: record.lastSeenAt,
       }));
+    },
+
+    /**
+     * The instances of one world that vrc.zip can currently see.
+     *
+     * **Derived, not fetched.** VRChat has no "list the instances of this world" endpoint — only
+     * `GET /instances/{worldId}:{instanceId}`, which needs an id you already hold — so there is
+     * nothing to pass through and this spends no upstream request at all. What it can see is what
+     * vrc.zip already knows: where friends are, from the in-memory presence cache, and where your
+     * own clients are, from the game log. Both are already in memory, which is why this is instant.
+     *
+     * The honest consequence rides along on the wire as `sources`: a busy public instance with
+     * nobody you know in it does not appear here, and its absence is not a claim that it is not
+     * there. See {@link WorldInstanceList}.
+     */
+    async listWorldInstances(worldId, accountId): Promise<WorldInstanceList> {
+      interface Draft {
+        readonly location: string;
+        readonly instanceId: string | null;
+        readonly friends: Map<string, WorldInstanceOccupant>;
+        readonly clientSessionIds: number[];
+      }
+
+      const drafts = new Map<string, Draft>();
+
+      /**
+       * An instance is only real here if its location parses as one.
+       *
+       * `private`, `traveling`, `offline` and the empty string all mean "somewhere, but not
+       * anywhere you can be told about", and a friend in one of those is not evidence that an
+       * instance of *this* world exists. `parseLocation` returning null is that test.
+       */
+      const draftFor = (location: string | null): Draft | null => {
+        if (location === null) return null;
+        const parsed = parseLocation(location);
+        if (parsed === null || parsed.worldId !== worldId) return null;
+        const existing = drafts.get(location);
+        if (existing !== undefined) return existing;
+        const created: Draft = {
+          location,
+          instanceId: parsed.instanceId,
+          friends: new Map(),
+          clientSessionIds: [],
+        };
+        drafts.set(location, created);
+        return created;
+      };
+
+      const records = accountId === null ? presence.listAll() : presence.list(accountId);
+      for (const record of records) {
+        const draft = draftFor(record.location);
+        // Keyed by user id, so the same friend seen through two accounts is one person in the
+        // room rather than two. `listAll` genuinely returns them twice.
+        draft?.friends.set(record.id, {
+          id: record.id,
+          displayName: record.displayName,
+          iconUrl: record.iconUrl,
+          status: record.status,
+        });
+      }
+
+      // Your own clients, which is what lets the UI say "you are here" — and what makes an
+      // instance you are standing in alone appear at all, since it has no friends to reveal it.
+      for (const session of store.listOpenSessions()) {
+        draftFor(session.current_location)?.clientSessionIds.push(session.id);
+      }
+
+      const instances: WorldInstanceSummary[] = [...drafts.values()].map((draft) => {
+        const sources: WorldInstanceSource[] = [];
+        if (draft.friends.size > 0) sources.push("friend");
+        if (draft.clientSessionIds.length > 0) sources.push("client");
+        return {
+          id: draft.location,
+          location: draft.location,
+          instanceId: draft.instanceId,
+          worldId,
+          sources,
+          friends: [...draft.friends.values()].sort((left, right) =>
+            left.displayName.localeCompare(right.displayName),
+          ),
+          clientSessionIds: draft.clientSessionIds,
+        };
+      });
+
+      // The room you are already in first, then the one with the most friends in it. Both beat
+      // alphabetical, because both are the reason somebody opened this list.
+      instances.sort(
+        (left, right) =>
+          Number(right.clientSessionIds.length > 0) - Number(left.clientSessionIds.length > 0) ||
+          right.friends.length - left.friends.length ||
+          left.location.localeCompare(right.location),
+      );
+
+      return {
+        instances,
+        accountsConsulted: accountId === null ? accounts.list().length : 1,
+      };
     },
 
     async listNotificationTypes() {
@@ -2401,6 +2683,10 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         ...(typeof patch.contact === "string" ? { contact: patch.contact } : {}),
         ...(typeof patch.openBrowserOnStart === "boolean"
           ? { openBrowserOnStart: patch.openBrowserOnStart }
+          : {}),
+        // The third-party avatar lookup. See `Settings.resolveAvatarIds` and `net/avatar-ids.ts`.
+        ...(typeof patch.resolveAvatarIds === "boolean"
+          ? { resolveAvatarIds: patch.resolveAvatarIds }
           : {}),
         ...(Array.isArray(patch.logDirectories)
           ? { logDirectories: patch.logDirectories.filter((d) => typeof d === "string") }

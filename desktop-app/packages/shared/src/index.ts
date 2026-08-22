@@ -63,6 +63,8 @@ export {
   type AccountRateCeiling,
   type AppAuditEntry,
   type AuditOutcome,
+  type AvatarDetail,
+  type AvatarFileResolution,
   type ControlAccount,
   type DaemonStatus,
   type EventKindCount,
@@ -111,4 +113,8 @@ export {
   type WebhookRegistered,
   type WebhookRegistration,
   type WebhookSummary,
+  type WorldInstanceList,
+  type WorldInstanceOccupant,
+  type WorldInstanceSource,
+  type WorldInstanceSummary,
 } from "./wire.ts";

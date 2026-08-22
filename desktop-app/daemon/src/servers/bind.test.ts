@@ -65,6 +65,10 @@ const deps: ControlDeps = {
     throw new Error("unused");
   },
   listWorlds: async () => ({ worlds: {} }),
+  resolveAvatarByFile: async (fileId) => ({ fileId, avatarId: null }),
+  getAvatar: async () => {
+    throw new Error("unused");
+  },
   getInstance: async () => {
     throw new Error("unused");
   },
@@ -77,6 +81,7 @@ const deps: ControlDeps = {
   listGroupMembers: async () => ({ members: [], hasMore: false }),
   listGroupPosts: async () => ({ posts: [], hasMore: false }),
   listGroupInstances: async () => ({ instances: [] }),
+  listWorldInstances: async () => ({ instances: [], accountsConsulted: 0 }),
   listGroupGalleryImages: async () => ({ images: [], hasMore: false }),
   inviteUserTo: async () => {
     throw new Error("unused");

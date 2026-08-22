@@ -6,6 +6,7 @@ import webhooks005 from "./005_webhooks.sql" with { type: "text" };
 import plugins006 from "./006_plugins.sql" with { type: "text" };
 import logOffsets007 from "./007_log_offsets.sql" with { type: "text" };
 import notificationsTs008 from "./008_notifications_ts.sql" with { type: "text" };
+import avatarFileIds009 from "./009_avatar_file_ids.sql" with { type: "text" };
 
 /** One numbered migration. `version` must be unique, contiguous from 1, and ascending. */
 export type Migration = {
@@ -27,4 +28,5 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 6, name: "006_plugins", sql: plugins006 },
   { version: 7, name: "007_log_offsets", sql: logOffsets007 },
   { version: 8, name: "008_notifications_ts", sql: notificationsTs008 },
+  { version: 9, name: "009_avatar_file_ids", sql: avatarFileIds009 },
 ];

@@ -33,6 +33,7 @@ describe("migrate", () => {
       "accounts",
       "audit_log",
       "avatar_cache",
+      "avatar_file_ids",
       "avatar_history",
       "events",
       "events_daily",

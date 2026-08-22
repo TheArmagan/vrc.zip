@@ -1,6 +1,8 @@
 import {
   APP_VERSION,
   type AppAuditEntry,
+  type AvatarDetail,
+  type AvatarFileResolution,
   type ControlAccount,
   type EventKindCount,
   type EventQuery,
@@ -32,6 +34,7 @@ import {
   type TwoFactorMethod,
   type VerifyTwoFactorInput,
   type WebhookSummary,
+  type WorldInstanceList,
 } from "@vrcz/shared";
 import type { ServerWebSocket } from "bun";
 import { Hono } from "hono";
@@ -59,6 +62,8 @@ import { APP_API_PREFIX, type AppApi, type AppApiDeps, createAppApi } from "./ap
  */
 export type {
   AppAuditEntry,
+  AvatarDetail,
+  AvatarFileResolution,
   ControlAccount,
   EventKindCount,
   EventQuery,
@@ -1068,6 +1073,41 @@ export interface ControlDeps {
   getWorld(worldId: string, accountId: string | null): Promise<WorldDetail>;
 
   /**
+   * The avatar id behind one image file id, via **avtr.zip — a third-party service**.
+   *
+   * The one non-VRChat request vrc.zip makes, and the only reason it exists is that VRChat exposes
+   * no avatar id on a public user: the image is the only handle a "changed avatar" row has. What
+   * leaves the machine is the file id and nothing else; `daemon/src/net/avatar-ids.ts` says so at
+   * length.
+   *
+   * **Never throws for an unresolved file.** `avatarId: null` is the answer when the setting is
+   * off, when avtr.zip does not know the file, and when avtr.zip cannot be reached — none of which
+   * is an error the caller can act on differently.
+   */
+  resolveAvatarByFile(fileId: string): Promise<AvatarFileResolution>;
+
+  /**
+   * One avatar, cached.
+   *
+   * Cached in `avatar_cache`, which like `world_cache` is **not per account**: an avatar record is
+   * the same object whoever asks. A fresh cache hit therefore needs no account at all.
+   *
+   * Throws `ControlError(404, "unknown_avatar")` when VRChat 404s — which is the ordinary answer
+   * for a private or deleted avatar — and `ControlError(503, "no_account")` when a live fetch is
+   * needed and nobody is signed in.
+   */
+  getAvatar(avatarId: string, accountId: string | null): Promise<AvatarDetail>;
+
+  /**
+   * The instances of one world vrc.zip can see, derived from friends' presence and your own clients.
+   *
+   * **Never reaches VRChat**, so it never throws `no_account`: an empty list is the answer when
+   * nothing is signed in, which is a true statement about what can be seen rather than a failure.
+   * See {@link WorldInstanceList} for why a derived list is the only kind there can be.
+   */
+  listWorldInstances(worldId: string, accountId: string | null): Promise<WorldInstanceList>;
+
+  /**
    * Many worlds at once, for a page of rows that each name one.
    *
    * **Never throws for an unresolvable world, and never throws `no_account`.** Cache hits are
@@ -1438,6 +1478,46 @@ export function parseGroupId(raw: string | undefined): string {
 }
 
 const GROUP_ID_PATTERN = /^grp_[0-9A-Za-z_-]{1,64}$/;
+
+/**
+ * Validates an avatar id, for the route that interpolates one into `GET /avatars/{avatarId}`.
+ *
+ * Same reasoning as {@link parseGroupId}: every avatar id VRChat has issued is `avtr_` plus a UUID,
+ * and what has to hold either way is that `/`, `?`, `#` and `%` cannot appear and turn one path
+ * segment into several.
+ */
+export function parseAvatarId(raw: string | undefined): string {
+  if (raw === undefined || raw === "") {
+    throw new ControlError(400, "invalid_avatar_id", "an avatar id is required");
+  }
+  if (!AVATAR_ID_PATTERN.test(raw)) {
+    throw new ControlError(400, "invalid_avatar_id", "that is not a VRChat avatar id");
+  }
+  return raw;
+}
+
+const AVATAR_ID_PATTERN = /^avtr_[0-9A-Za-z_-]{1,64}$/;
+
+/**
+ * Validates an image file id, for the route that sends one to **a third party**.
+ *
+ * Stricter than the other validators here, and for a different reason. Everywhere else the property
+ * being defended is that one path segment cannot become several; here it is also that the only
+ * thing that can ever leave this machine on that request is a VRChat file id — so the pattern is an
+ * exact shape rather than a character allowlist, and `_` is deliberately absent after the prefix
+ * because a VRChat file id is a UUID.
+ */
+export function parseImageFileId(raw: string | undefined): string {
+  if (raw === undefined || raw === "") {
+    throw new ControlError(400, "invalid_file_id", "a file id is required");
+  }
+  if (!IMAGE_FILE_ID_PATTERN.test(raw)) {
+    throw new ControlError(400, "invalid_file_id", "that is not a VRChat image file id");
+  }
+  return raw;
+}
+
+const IMAGE_FILE_ID_PATTERN = /^file_[0-9A-Za-z-]{1,64}$/;
 
 /**
  * Validates the `:galleryId` path parameter, which is interpolated into
@@ -1829,6 +1909,40 @@ export function createControlApp({ port, deps, appApi, token }: ControlAppOption
       const worldId = parseWorldId(c.req.param("id"));
       const accountId = nonEmpty(c.req.query("accountId")) ?? null;
       return c.json(await deps.getWorld(worldId, accountId));
+    })
+
+    /*
+     * Avatar identity, in two steps because VRChat only gives us the first half.
+     *
+     * `by-file` is the third-party hop — see {@link ControlDeps.resolveAvatarByFile} and
+     * `daemon/src/net/avatar-ids.ts` for what leaves the machine and how to switch it off. It takes
+     * no `accountId`: the lookup carries no account, and adding one to the route would imply
+     * otherwise.
+     *
+     * Registered before `/api/avatars/:id` for readability only — the two have different segment
+     * counts, so Hono matches them as distinct routes and the order is not load-bearing.
+     */
+    .get("/api/avatars/by-file/:fileId", async (c) => {
+      const fileId = parseImageFileId(c.req.param("fileId"));
+      return c.json(await deps.resolveAvatarByFile(fileId));
+    })
+
+    .get("/api/avatars/:id", async (c) => {
+      const avatarId = parseAvatarId(c.req.param("id"));
+      const accountId = nonEmpty(c.req.query("accountId")) ?? null;
+      return c.json(await deps.getAvatar(avatarId, accountId));
+    })
+
+    /*
+     * The instances of a world vrc.zip can see. Not paged, and not for the reason
+     * `/api/groups/:id/instances` is not paged: there is no upstream call here at all. The answer
+     * is derived from in-memory presence and the open sessions, both of which are bounded by the
+     * friend list, so a page boundary would be a slice of a list that is already whole.
+     */
+    .get("/api/worlds/:id/instances", async (c) => {
+      const worldId = parseWorldId(c.req.param("id"));
+      const accountId = nonEmpty(c.req.query("accountId")) ?? null;
+      return c.json(await deps.listWorldInstances(worldId, accountId));
     })
 
     /*

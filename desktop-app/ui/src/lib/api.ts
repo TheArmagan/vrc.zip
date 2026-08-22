@@ -52,6 +52,10 @@ import {
   type TwoFactorMethod,
   type VerifyTwoFactorResult,
   type WebhookSummary,
+  type WorldInstanceList,
+  type WorldInstanceOccupant,
+  type WorldInstanceSource,
+  type WorldInstanceSummary,
 } from "@vrcz/shared";
 import { API_BASE } from "./config.ts";
 
@@ -112,6 +116,10 @@ export {
   type TwoFactorMethod,
   type VerifyTwoFactorResult,
   type WebhookSummary,
+  type WorldInstanceList,
+  type WorldInstanceOccupant,
+  type WorldInstanceSource,
+  type WorldInstanceSummary,
 };
 
 /** Local aliases so this module's own signatures read the way its callers do. */
@@ -1442,6 +1450,28 @@ export const api = {
             query: { ids: ids.join(","), accountId },
             ...withSignal(signal),
           }).then(decodeWorldBatch),
+
+    /**
+     * The instances of a world vrc.zip can currently see.
+     *
+     * **Derived, and it never reaches VRChat.** There is no "instances of this world" call upstream
+     * to proxy — only `GET /instances/{worldId}:{instanceId}`, which needs an id you already have —
+     * so the daemon answers from the friend presence it already holds and the game clients it can
+     * already see. That is why this returns instantly and why it never 503s for "no account": an
+     * empty list is a true statement about what is visible, not a failure to look.
+     *
+     * The caller has to render the caveat, because the list cannot carry it alone: an instance with
+     * nobody you know in it does not appear, and its absence is not a claim that it is not there.
+     */
+    instances: (
+      worldId: string,
+      accountId?: string | null,
+      signal?: AbortSignal,
+    ): Promise<WorldInstanceList> =>
+      request<WorldInstanceList>(`/worlds/${encodeURIComponent(worldId)}/instances`, {
+        query: { accountId },
+        ...withSignal(signal),
+      }),
   },
 
   /**

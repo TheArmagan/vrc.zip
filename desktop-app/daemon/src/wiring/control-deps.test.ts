@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { Account } from "../accounts/account.ts";
 import type { AccountManager } from "../accounts/manager.ts";
-import type { PresenceService } from "../accounts/presence.ts";
+import type { FriendPresenceRecord, PresenceService } from "../accounts/presence.ts";
 import { EventBus } from "../bus/event-bus.ts";
+import { AvatarIdResolver } from "../net/avatar-ids.ts";
 import { RateLimiter } from "../net/rate-limiter.ts";
 import type { SecretsStore } from "../security/secrets.ts";
-import { DEFAULT_SETTINGS } from "../settings.ts";
+import { DEFAULT_SETTINGS, type Settings } from "../settings.ts";
 import { MEMORY, Store } from "../store/index.ts";
 import { createControlDeps } from "./control-deps.ts";
 
@@ -23,6 +24,9 @@ const OTHER = "usr_other";
 const SUBJECT = "usr_subject";
 /** Module-level: the stub answers for it from `harness`, above the `describe` that asserts on it. */
 const GROUP_ID = "grp_ba913a96-fac4-4048-a062-9aa5db092812";
+const AVATAR_ID = "avtr_eb5a1798-6f23-4ec6-b879-2d01f44a69c4";
+const AVATAR_MISSING = "avtr_00000000-0000-0000-0000-000000000000";
+const AVATAR_FILE_ID = "file_d9ec5b06-6ea5-4ae0-ab67-78dfa3eea6df";
 const T0 = 1_700_000_000_000;
 
 /** The two bodies VRChat hands out for one user, depending on who asks. See PLAN.md §1.3. */
@@ -155,6 +159,28 @@ function worldBody(worldId: string, overrides: Record<string, unknown> = {}) {
   };
 }
 
+/** An avatar as `GET /avatars/{id}` sends it — VRChat's own field names and date strings. */
+function avatarBody(avatarId: string, overrides: Record<string, unknown> = {}) {
+  return {
+    id: avatarId,
+    name: "A Robot",
+    description: "beep",
+    authorId: "usr_author",
+    authorName: "Author",
+    imageUrl: `https://api.vrchat.cloud/api/1/image/${AVATAR_FILE_ID}/1/1024`,
+    thumbnailImageUrl: `https://api.vrchat.cloud/api/1/image/${AVATAR_FILE_ID}/1/256`,
+    releaseStatus: "public",
+    tags: ["author_tag_robot", ""],
+    version: 3,
+    created_at: "2019-01-02T03:04:05.000Z",
+    updated_at: "2021-01-02T03:04:05.000Z",
+    // The half deliberately not projected: asset locations and store inventory.
+    unityPackages: [{ assetUrl: "https://api.vrchat.cloud/api/1/file/file_pkg/1/file" }],
+    assetUrl: "https://api.vrchat.cloud/api/1/file/file_pkg/1/file",
+    ...overrides,
+  };
+}
+
 interface Harness {
   readonly deps: ReturnType<typeof createControlDeps>;
   readonly store: Store;
@@ -171,6 +197,12 @@ function harness(
     instance?: (call: number) => Response;
     /** User ids the presence service reports as this account's friends. */
     friends?: string[];
+    /**
+     * Full presence records, for the tests that care about *where* a friend is rather than only
+     * that they are one. Answers both `list` and `listAll`, since the derivation reads whichever
+     * the caller's `accountId` selects.
+     */
+    located?: readonly Partial<FriendPresenceRecord>[];
     /** What `GET /users/{id}/groups/represented` answers with. Defaults to `{}` — nobody. */
     represented?: () => Response;
     /**
@@ -195,6 +227,12 @@ function harness(
     mutuals?: (n: number, offset: number) => Response;
     /** What `GET /worlds/{id}` answers with. */
     world?: (worldId: string, call: number) => Response;
+    /** What `GET /avatars/{id}` answers with. */
+    avatar?: (avatarId: string, call: number) => Response | Promise<Response>;
+    /** The avtr.zip lookup, stubbed. Absent means the lazy default, which makes no requests here. */
+    avatarIds?: AvatarIdResolver;
+    /** Settings the deps read live — `resolveAvatarIds` is the one these tests flip. */
+    settings?: Settings;
   } = {},
 ): Harness {
   const bus = new EventBus();
@@ -205,6 +243,7 @@ function harness(
 
   let instanceCalls = 0;
   let worldCalls = 0;
+  let avatarCalls = 0;
 
   const fetchStub = async (input: string, init?: RequestInit): Promise<Response> => {
     const path = new URL(input).pathname;
@@ -214,6 +253,12 @@ function harness(
       worldCalls += 1;
       const worldId = path.slice(path.lastIndexOf("/") + 1);
       return options.world?.(worldId, worldCalls) ?? Response.json(worldBody(worldId));
+    }
+
+    if (path.includes("/avatars/")) {
+      avatarCalls += 1;
+      const avatarId = path.slice(path.lastIndexOf("/") + 1);
+      return options.avatar?.(avatarId, avatarCalls) ?? Response.json(avatarBody(avatarId));
     }
 
     if (path.includes("/instances/")) {
@@ -314,19 +359,21 @@ function harness(
       // The friend list this account is already holding in memory. `isFriend` is a set membership
       // test against it and `trustLevel` is a lookup in it, which is why neither costs a request.
       list: () =>
+        options.located ??
         (options.friends ?? []).map((id) => ({
           id,
           displayName: id.toUpperCase(),
           trustLevel: "trusted",
           status: "join me",
         })),
-      listAll: () => [],
+      listAll: () => options.located ?? [],
       // A live profile read writes back into presence; here there is nothing to write into, so it
       // reports no news and no event is emitted. The behaviour itself is tested in presence.test.ts,
       // against a real map — this double exists to answer `list`, not to reimplement the service.
       observe: () => false,
     } as unknown as PresenceService,
-    settings: DEFAULT_SETTINGS,
+    settings: options.settings ?? DEFAULT_SETTINGS,
+    ...(options.avatarIds === undefined ? {} : { avatarIds: options.avatarIds }),
     connectPipeline: () => {},
     onSettingsSaved: async () => {},
   });
@@ -2099,6 +2146,321 @@ describe("control deps: app audit", () => {
       status: 404,
       code: "unknown_app",
     });
+    h.stop();
+  });
+});
+
+/**
+ * The derived world instance list.
+ *
+ * This is the one list in the app with no upstream call behind it, so what it gets right is
+ * entirely about the derivation: which locations count as instances, who is deduplicated against
+ * whom, and whether your own client shows up when nobody else can vouch for the room.
+ */
+describe("listWorldInstances", () => {
+  const WORLD = "wrld_ba913a96-fac4-4048-a062-9aa5db092812";
+  const OTHER_WORLD = "wrld_00000000-0000-0000-0000-000000000000";
+  const ROOM = `${WORLD}:12345~region(eu)`;
+  const QUIET = `${WORLD}:999~friends(usr_viewer)`;
+
+  function located(over: Partial<FriendPresenceRecord>): Partial<FriendPresenceRecord> {
+    return {
+      id: "usr_a",
+      displayName: "Ada",
+      status: "active",
+      iconUrl: null,
+      location: ROOM,
+      worldId: WORLD,
+      ...over,
+    };
+  }
+
+  test("groups friends by the instance they are standing in", async () => {
+    const h = harness({
+      located: [
+        located({ id: "usr_a", displayName: "Ada" }),
+        located({ id: "usr_b", displayName: "Bob" }),
+        located({ id: "usr_c", displayName: "Cass", location: QUIET }),
+      ],
+    });
+
+    const { instances } = await h.deps.listWorldInstances(WORLD, VIEWER);
+    expect(instances).toHaveLength(2);
+    // Busiest first, and the friends inside a row sorted by name.
+    expect(instances[0]?.location).toBe(ROOM);
+    expect(instances[0]?.friends.map((friend) => friend.displayName)).toEqual(["Ada", "Bob"]);
+    expect(instances[0]?.sources).toEqual(["friend"]);
+    expect(instances[0]?.instanceId).toBe("12345");
+    expect(instances[1]?.friends.map((friend) => friend.displayName)).toEqual(["Cass"]);
+    h.stop();
+  });
+
+  test("ignores friends whose location is not an instance of this world", async () => {
+    // `private`, `traveling`, `offline` and the empty string all mean "somewhere, but not
+    // anywhere you can be told about". A friend in one of them is not evidence of an instance.
+    const h = harness({
+      located: [
+        located({ id: "usr_p", location: "private", worldId: null }),
+        located({ id: "usr_t", location: "traveling", worldId: null }),
+        located({ id: "usr_o", location: "offline", worldId: null }),
+        located({ id: "usr_e", location: "", worldId: null }),
+        located({ id: "usr_n", location: null, worldId: null }),
+        located({ id: "usr_x", location: `${OTHER_WORLD}:1`, worldId: OTHER_WORLD }),
+      ],
+    });
+
+    expect((await h.deps.listWorldInstances(WORLD, VIEWER)).instances).toEqual([]);
+    h.stop();
+  });
+
+  test("counts the same friend once when two accounts can both see them", async () => {
+    // `listAll` genuinely returns one person per account that has them as a friend. Two rows for
+    // one human in the same room would overstate how busy it is.
+    const h = harness({ located: [located({}), located({})] });
+
+    const { instances } = await h.deps.listWorldInstances(WORLD, null);
+    expect(instances[0]?.friends).toHaveLength(1);
+    h.stop();
+  });
+
+  test("your own client makes an instance visible with no friends in it at all", async () => {
+    const h = harness({ located: [] });
+    const id = h.store.startSession({
+      account_id: null,
+      display_name: null,
+      log_path: "output_log_x.txt",
+      log_inode: 1,
+      started_at: T0,
+      vr_mode: null,
+      current_location: ROOM,
+      current_world_id: WORLD,
+    });
+
+    const { instances } = await h.deps.listWorldInstances(WORLD, null);
+    expect(instances).toHaveLength(1);
+    expect(instances[0]?.sources).toEqual(["client"]);
+    expect(instances[0]?.clientSessionIds).toEqual([id]);
+    expect(instances[0]?.friends).toEqual([]);
+    h.stop();
+  });
+
+  test("the room you are in sorts above a busier one, and reports both sources", async () => {
+    const h = harness({
+      located: [
+        located({ id: "usr_a", location: ROOM }),
+        located({ id: "usr_b", location: ROOM }),
+        located({ id: "usr_c", location: QUIET }),
+      ],
+    });
+    h.store.startSession({
+      account_id: null,
+      display_name: null,
+      log_path: "output_log_y.txt",
+      log_inode: 2,
+      started_at: T0,
+      vr_mode: null,
+      current_location: QUIET,
+      current_world_id: WORLD,
+    });
+
+    const { instances } = await h.deps.listWorldInstances(WORLD, null);
+    // `QUIET` has one friend against ROOM's two, and still leads: it is the room you are in.
+    expect(instances[0]?.location).toBe(QUIET);
+    expect(instances[0]?.sources).toEqual(["friend", "client"]);
+    expect(instances[1]?.location).toBe(ROOM);
+    h.stop();
+  });
+
+  test("answers with an empty list rather than throwing when nothing is signed in", async () => {
+    // It reaches VRChat for nothing, so `no_account` is not a failure mode it has. An empty list
+    // is a true statement about what can be seen.
+    const h = harness({ located: [] });
+    expect(await h.deps.listWorldInstances(WORLD, null)).toEqual({
+      instances: [],
+      accountsConsulted: 2,
+    });
+    h.stop();
+  });
+});
+
+describe("control deps: avatars", () => {
+  /** A resolver over the harness's own store, with avtr.zip stubbed. */
+  function stubResolver(
+    store: Store,
+    respond: () => Response,
+    enabled: () => boolean = () => true,
+  ): { resolver: AvatarIdResolver; requests: string[] } {
+    const requests: string[] = [];
+    const resolver = new AvatarIdResolver({
+      userAgent: "vrc.zip/test (tests@somewhere.dev)",
+      baseUrl: "https://avtr.example",
+      store,
+      enabled,
+      fetch: async (input) => {
+        requests.push(input);
+        return respond();
+      },
+    });
+    return { resolver, requests };
+  }
+
+  test("resolves a file id to an avatar id and writes the row", async () => {
+    const store = Store.open(MEMORY);
+    const { resolver, requests } = stubResolver(store, () =>
+      Response.json({ success: true, avatarId: AVATAR_ID }),
+    );
+    const h = harness({ avatarIds: resolver });
+
+    expect(await h.deps.resolveAvatarByFile(AVATAR_FILE_ID)).toEqual({
+      fileId: AVATAR_FILE_ID,
+      avatarId: AVATAR_ID,
+    });
+    expect(requests).toEqual([`https://avtr.example/v3/avatars/by-file/${AVATAR_FILE_ID}`]);
+    // The persisted row, not the return value: this is what survives a restart.
+    expect(store.getAvatarFileId(AVATAR_FILE_ID)?.avatar_id).toBe(AVATAR_ID);
+    store.close();
+    h.stop();
+  });
+
+  test("with the setting off it answers null and makes no third-party request", async () => {
+    const store = Store.open(MEMORY);
+    const { resolver, requests } = stubResolver(
+      store,
+      () => Response.json({ success: true, avatarId: AVATAR_ID }),
+      () => false,
+    );
+    const h = harness({
+      avatarIds: resolver,
+      settings: { ...DEFAULT_SETTINGS, resolveAvatarIds: false },
+    });
+
+    // A normal "not resolved" answer, never an error — see `ControlDeps.resolveAvatarByFile`.
+    expect(await h.deps.resolveAvatarByFile(AVATAR_FILE_ID)).toEqual({
+      fileId: AVATAR_FILE_ID,
+      avatarId: null,
+    });
+    expect(requests).toEqual([]);
+    expect(store.getAvatarFileId(AVATAR_FILE_ID)).toBeNull();
+    store.close();
+    h.stop();
+  });
+
+  test("an avtr.zip failure is a null answer, not a thrown route", async () => {
+    const store = Store.open(MEMORY);
+    const { resolver } = stubResolver(store, () => new Response("nope", { status: 502 }));
+    const h = harness({ avatarIds: resolver });
+
+    expect(await h.deps.resolveAvatarByFile(AVATAR_FILE_ID)).toEqual({
+      fileId: AVATAR_FILE_ID,
+      avatarId: null,
+    });
+    store.close();
+    h.stop();
+  });
+
+  test("the default resolver is built lazily and never runs without a contact", async () => {
+    // `DEFAULT_SETTINGS.contact` is `""`, which cannot make a valid User-Agent — so there is
+    // nothing to build and the answer is an honest null rather than a throw at construction.
+    const h = harness();
+    expect(await h.deps.resolveAvatarByFile(AVATAR_FILE_ID)).toEqual({
+      fileId: AVATAR_FILE_ID,
+      avatarId: null,
+    });
+    h.stop();
+  });
+
+  test("projects the avatar and caches the body in avatar_cache", async () => {
+    const h = harness();
+    await resumeAll(h);
+
+    const detail = await h.deps.getAvatar(AVATAR_ID, VIEWER);
+    expect(detail).toEqual({
+      id: AVATAR_ID,
+      name: "A Robot",
+      description: "beep",
+      authorId: "usr_author",
+      authorName: "Author",
+      imageUrl: `https://api.vrchat.cloud/api/1/image/${AVATAR_FILE_ID}/1/1024`,
+      thumbnailImageUrl: `https://api.vrchat.cloud/api/1/image/${AVATAR_FILE_ID}/1/256`,
+      releaseStatus: "public",
+      // The `""` VRChat pads its tag arrays with is dropped, not rendered as a blank chip.
+      tags: ["author_tag_robot"],
+      version: 3,
+      createdAt: Date.parse("2019-01-02T03:04:05.000Z"),
+      updatedAt: Date.parse("2021-01-02T03:04:05.000Z"),
+      fetchedAt: detail.fetchedAt,
+      cached: false,
+    });
+    // Asset locations are not projected — see `toAvatarDetail`.
+    expect(Object.keys(detail)).not.toContain("unityPackages");
+    expect(Object.keys(detail)).not.toContain("assetUrl");
+
+    // The row, not the return value.
+    const row = h.store.getAvatarCache(AVATAR_ID);
+    expect(row?.id).toBe(AVATAR_ID);
+    expect(JSON.parse(row?.data ?? "{}")).toMatchObject({ id: AVATAR_ID, name: "A Robot" });
+
+    // Second read is the cache, with no second request and `cached: true`.
+    const again = await h.deps.getAvatar(AVATAR_ID, VIEWER);
+    expect(again.cached).toBe(true);
+    expect(h.requests.filter((path) => path.includes("/avatars/"))).toHaveLength(1);
+    h.stop();
+  });
+
+  test("a warm cache answers with nobody signed in; a cold one is a 503", async () => {
+    const h = harness();
+    await resumeAll(h);
+    await h.deps.getAvatar(AVATAR_ID, VIEWER);
+
+    // A fresh deps over the same store, with no account resumed: the record is not per account.
+    const cold = harness();
+    cold.store.putAvatarCache(AVATAR_ID, Date.now(), JSON.stringify(avatarBody(AVATAR_ID)));
+    expect((await cold.deps.getAvatar(AVATAR_ID, null)).cached).toBe(true);
+
+    const empty = harness();
+    await expect(empty.deps.getAvatar(AVATAR_ID, null)).rejects.toMatchObject({
+      status: 503,
+      code: "no_account",
+    });
+    h.stop();
+    cold.stop();
+    empty.stop();
+  });
+
+  test("a VRChat 404 is unknown_avatar — the ordinary answer for a private avatar", async () => {
+    const h = harness({
+      avatar: (avatarId) =>
+        avatarId === AVATAR_MISSING
+          ? new Response(`{"error":{"message":"not found"}}`, { status: 404 })
+          : Response.json(avatarBody(avatarId)),
+    });
+    await resumeAll(h);
+
+    await expect(h.deps.getAvatar(AVATAR_MISSING, VIEWER)).rejects.toMatchObject({
+      status: 404,
+      code: "unknown_avatar",
+    });
+    // Nothing cached for an avatar that does not exist.
+    expect(h.store.getAvatarCache(AVATAR_MISSING)).toBeNull();
+    h.stop();
+  });
+
+  test("concurrent readers of one avatar make one request", async () => {
+    const h = harness({
+      avatar: async (avatarId) => {
+        await Bun.sleep(5);
+        return Response.json(avatarBody(avatarId));
+      },
+    });
+    await resumeAll(h);
+
+    const results = await Promise.all([
+      h.deps.getAvatar(AVATAR_ID, VIEWER),
+      h.deps.getAvatar(AVATAR_ID, VIEWER),
+      h.deps.getAvatar(AVATAR_ID, OTHER),
+    ]);
+    expect(results.map((r) => r.id)).toEqual([AVATAR_ID, AVATAR_ID, AVATAR_ID]);
+    expect(h.requests.filter((path) => path.includes("/avatars/"))).toHaveLength(1);
     h.stop();
   });
 });

@@ -11,6 +11,7 @@ import type { Migration } from "./schema/index.ts";
 import type {
   AccountRow,
   AuditRow,
+  AvatarFileIdRow,
   AvatarHistoryRow,
   CacheRow,
   EventRow,
@@ -408,6 +409,18 @@ export class Store {
 
   getAvatarCache(avatarId: string): CacheRow | null {
     return this.stmts.getAvatarCache.get(avatarId);
+  }
+
+  /**
+   * Records what avtr.zip said about one image file id. `avatarId` null is a negative answer with a
+   * cooldown, not a verdict — see migration 009.
+   */
+  putAvatarFileId(fileId: string, avatarId: string | null, resolvedAt: number): void {
+    this.stmts.putAvatarFileId.run(fileId, avatarId, resolvedAt);
+  }
+
+  getAvatarFileId(fileId: string): AvatarFileIdRow | null {
+    return this.stmts.getAvatarFileId.get(fileId);
   }
 
   // -- notes ----------------------------------------------------------------
@@ -1041,6 +1054,8 @@ function prepareAll(db: Database) {
     getWorldCache: q<CacheRow, [string]>(SQL.getWorldCache),
     putAvatarCache: q<void, [string, number, string]>(SQL.putAvatarCache),
     getAvatarCache: q<CacheRow, [string]>(SQL.getAvatarCache),
+    putAvatarFileId: q<void, [string, string | null, number]>(SQL.putAvatarFileId),
+    getAvatarFileId: q<AvatarFileIdRow, [string]>(SQL.getAvatarFileId),
 
     putNote: q<void, [string, string, string, number]>(SQL.putNote),
     getNote: q<NoteRow, [string, string]>(SQL.getNote),

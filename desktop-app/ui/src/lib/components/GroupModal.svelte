@@ -6,9 +6,14 @@
   means.
 
   Built on `EntityModal`, like the user and world cards, so the banner, the header and the scroll
-  behaviour are the same three in all three. One column rather than the user modal's tabs, for the
-  same reason the world card is one column: a group is one document — what it is, who runs it, how
-  big it is, how you would join — rather than four different kinds of thing.
+  behaviour are the same three in all three. The body is tabbed, the way the user modal's is, because
+  the three things worth knowing here are different *kinds* of thing rather than sections of one
+  document: what the group is, where it is gathering right now, and what VRChat actually sent.
+
+  Instances in particular do not belong in the middle of a document. They are a live answer that
+  changes minute to minute while the description and the rules do not, they cost a second request
+  nobody should pay for clicking a badge, and most groups have none — so they load when their tab is
+  opened and their empty state is allowed to say so, rather than a blank stretch of the card.
 
   **Every number here is one VRChat sent.** No vrc.zip activity score, no "how alive is this group"
   out of ten. The two counts sit side by side with the age of the second one, because VRChat
@@ -23,13 +28,16 @@
 import CalendarIcon from "@lucide/svelte/icons/calendar";
 import ChevronRightIcon from "@lucide/svelte/icons/chevron-right";
 import ExternalLinkIcon from "@lucide/svelte/icons/external-link";
+import ServerIcon from "@lucide/svelte/icons/server";
 import ShieldCheckIcon from "@lucide/svelte/icons/shield-check";
 import UsersIcon from "@lucide/svelte/icons/users";
 import { imageUrl } from "$lib/api.ts";
 import DetailGrid from "$lib/components/DetailGrid.svelte";
 import EntityFooter from "$lib/components/EntityFooter.svelte";
-import EntityModal from "$lib/components/EntityModal.svelte";
+import EntityModal, { type ModalTab } from "$lib/components/EntityModal.svelte";
 import FailureNote from "$lib/components/FailureNote.svelte";
+import JoinAffordance from "$lib/components/JoinAffordance.svelte";
+import PagedSection from "$lib/components/PagedSection.svelte";
 import RelativeTime from "$lib/components/RelativeTime.svelte";
 import UserName from "$lib/components/UserName.svelte";
 import { Avatar, AvatarFallback, AvatarImage } from "$lib/components/ui/avatar/index.js";
@@ -37,10 +45,25 @@ import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
 import { Separator } from "$lib/components/ui/separator/index.js";
 import { Skeleton } from "$lib/components/ui/skeleton/index.js";
-import { calendarDay, groupLink, groupTag, initials } from "$lib/format.ts";
+import * as Tabs from "$lib/components/ui/tabs/index.js";
+import {
+  accessLabel,
+  calendarDay,
+  groupLink,
+  groupTag,
+  initials,
+  parseLocation,
+  shortId,
+} from "$lib/format.ts";
 import { navigate } from "$lib/router.ts";
 import { modalBack } from "$lib/state/entity-modal.svelte.ts";
-import { groupModal } from "$lib/state/group-modal.svelte.ts";
+import {
+  GROUP_MODAL_TAB_LABELS,
+  GROUP_MODAL_TABS,
+  type GroupModalTab,
+  groupModal,
+} from "$lib/state/group-modal.svelte.ts";
+import { worldModal } from "$lib/state/world-modal.svelte.ts";
 
 const summary = $derived(groupModal.summary);
 const group = $derived(groupModal.group);
@@ -56,6 +79,27 @@ const tag = $derived(groupTag(summary?.shortCode, summary?.discriminator));
 const tags = $derived((group?.tags ?? []).map((entry) => entry.replace(/^system_/, "")));
 
 const raw = $derived(JSON.stringify(groupModal.snapshot, null, 2));
+
+/**
+ * Counts on the tab strip.
+ *
+ * Instances load lazily, so their count appears once the tab has been opened rather than on
+ * arrival. A count that is absent means "not read yet", never "none" — the empty state inside the
+ * tab is the only thing allowed to claim zero.
+ */
+function tabCount(tab: GroupModalTab): number | null {
+  if (tab !== "instances") return null;
+  if (groupModal.instances.phase !== "ready") return null;
+  return groupModal.instances.items.length || null;
+}
+
+const tabs = $derived<ModalTab[]>(
+  GROUP_MODAL_TABS.map((tab) => ({
+    value: tab,
+    label: GROUP_MODAL_TAB_LABELS[tab],
+    count: tabCount(tab),
+  })),
+);
 
 /**
  * How someone would join, in words rather than in VRChat's enum.
@@ -82,6 +126,7 @@ const MEMBERSHIP: Record<string, string> = {
 const FAILURE_TITLES: Record<string, string> = {
   "no-account": "No account is online",
   "not-found": "VRChat will not show this group",
+  forbidden: "Members only",
   offline: "The daemon is not reachable",
   other: "Could not load this group",
 };
@@ -100,6 +145,22 @@ const FAILURE_BODIES: Record<string, string> = {
   offline: "vrc.zip's daemon is not answering, so nothing about this group can be read.",
   other: "",
 };
+
+/**
+ * The instances tab's own words for the same failures.
+ *
+ * `forbidden` is the one worth spelling out, and it is not an error: a group deciding that only its
+ * members may see where it is gathering is a rule about who may look, so it gets a sentence rather
+ * than a retry that could never work.
+ */
+const INSTANCE_BODIES: Record<string, string> = {
+  "no-account":
+    "A group's instances can only be read through a signed-in account's credentials, and none of yours are connected right now.",
+  "not-found": "This group is gone, or it is private to the account asking.",
+  forbidden: "This group only tells its members where it is gathering.",
+  offline: "",
+  other: "",
+};
 </script>
 
 <EntityModal
@@ -111,6 +172,10 @@ const FAILURE_BODIES: Record<string, string> = {
   title={groupModal.title}
   titleClass="break-words"
   headerClass="-mt-8"
+  {tabs}
+  tab={groupModal.tab}
+  onSelectTab={(value) => groupModal.selectTab(value as GroupModalTab)}
+  tabsLabel="What to show about this group"
 >
   {#snippet avatar()}
     <!-- Square, not round: a group icon is a badge, and VRChat renders it as one. -->
@@ -168,166 +233,255 @@ const FAILURE_BODIES: Record<string, string> = {
     {/if}
   {/snippet}
 
-  {#if groupModal.phase === "loading" && group === null}
-    <div class="space-y-2">
-      <Skeleton class="h-4 w-2/3" />
-      <Skeleton class="h-4 w-1/2" />
-      <Skeleton class="h-4 w-1/3" />
-    </div>
-  {:else if groupModal.phase === "error" && groupModal.failure !== null}
-    <FailureNote
-      failure={groupModal.failure}
-      titles={FAILURE_TITLES}
-      bodies={FAILURE_BODIES}
-      message={groupModal.error}
-      onRetry={() => groupModal.retry()}
-    />
-  {/if}
-
-  {#if summary?.description}
-    <!-- Author-written, and it carries its own line breaks. -->
-    <p class="text-sm whitespace-pre-wrap">{summary.description}</p>
-  {/if}
-
-  {#if group !== null}
-    {#if tags.length > 0}
-      <div class="flex flex-wrap gap-1.5">
-        <!--
-          Keyed by index. VRChat's tag array is not guaranteed unique, and a repeated key is a hard
-          runtime error in Svelte 5 rather than a duplicate chip — it would take the card down. The
-          list is static for a given group, so the index is stable.
-        -->
-        {#each tags as entry, index (index)}
-          <Badge variant="secondary" class="font-normal">{entry}</Badge>
-        {/each}
+  <!-- Overview -------------------------------------------------------------- -->
+  <Tabs.Content value="overview" class="space-y-4">
+    {#if groupModal.phase === "loading" && group === null}
+      <div class="space-y-2">
+        <Skeleton class="h-4 w-2/3" />
+        <Skeleton class="h-4 w-1/2" />
+        <Skeleton class="h-4 w-1/3" />
       </div>
+    {:else if groupModal.phase === "error" && groupModal.failure !== null}
+      <FailureNote
+        failure={groupModal.failure}
+        titles={FAILURE_TITLES}
+        bodies={FAILURE_BODIES}
+        message={groupModal.error}
+        onRetry={() => groupModal.retry()}
+      />
     {/if}
 
-    <DetailGrid>
-      {#if group.memberCount !== null}
-        <dt class="flex items-center gap-1.5 text-muted-foreground">
-          <UsersIcon class="size-3.5" />
-          Members
-        </dt>
-        <dd class="tabular">{group.memberCount.toLocaleString()}</dd>
+    {#if summary?.description}
+      <!-- Author-written, and it carries its own line breaks. -->
+      <p class="text-sm whitespace-pre-wrap">{summary.description}</p>
+    {/if}
+
+    {#if group !== null}
+      {#if tags.length > 0}
+        <div class="flex flex-wrap gap-1.5">
+          <!--
+            Keyed by index. VRChat's tag array is not guaranteed unique, and a repeated key is a hard
+            runtime error in Svelte 5 rather than a duplicate chip — it would take the tab down. The
+            list is static for a given group, so the index is stable.
+          -->
+          {#each tags as entry, index (index)}
+            <Badge variant="secondary" class="font-normal">{entry}</Badge>
+          {/each}
+        </div>
       {/if}
-      {#if group.onlineMemberCount !== null}
-        <dt class="text-muted-foreground">Online now</dt>
-        <dd class="tabular">
-          {group.onlineMemberCount.toLocaleString()}
-          {#if group.memberCountSyncedAt !== null}
+
+      <DetailGrid>
+        {#if group.memberCount !== null}
+          <dt class="flex items-center gap-1.5 text-muted-foreground">
+            <UsersIcon class="size-3.5" />
+            Members
+          </dt>
+          <dd class="tabular">{group.memberCount.toLocaleString()}</dd>
+        {/if}
+        {#if group.onlineMemberCount !== null}
+          <dt class="text-muted-foreground">Online now</dt>
+          <dd class="tabular">
+            {group.onlineMemberCount.toLocaleString()}
+            {#if group.memberCountSyncedAt !== null}
+              <!--
+                The age, always, beside the count. VRChat recomputes this on its own schedule, and a
+                number with no age on it reads as this second's when it may be hours old.
+              -->
+              <span class="text-muted-foreground">
+                — counted <RelativeTime ts={group.memberCountSyncedAt} />
+              </span>
+            {/if}
+          </dd>
+        {/if}
+        {#if group.ownerId !== null}
+          <dt class="text-muted-foreground">Owner</dt>
+          <dd>
             <!--
-              The age, always, beside the count. VRChat recomputes this on its own schedule, and a
-              number with no age on it reads as this second's when it may be hours old.
+              A real `UserName`, so the owner is one click from their own profile — and the label is
+              the id, because VRChat's group record carries no display name for them. `UserName`
+              resolves nothing on its own; the modal it opens does.
             -->
-            <span class="text-muted-foreground">
-              — counted <RelativeTime ts={group.memberCountSyncedAt} />
+            <UserName
+              userId={group.ownerId}
+              name={group.ownerId}
+              accountId={groupModal.accountId}
+              class="font-mono"
+            />
+          </dd>
+        {/if}
+        {#if group.createdAt !== null}
+          <dt class="flex items-center gap-1.5 text-muted-foreground">
+            <CalendarIcon class="size-3.5" />
+            Created
+          </dt>
+          <dd class="tabular">{calendarDay(group.createdAt)}</dd>
+        {/if}
+        {#if group.languages.length > 0}
+          <dt class="text-muted-foreground">Languages</dt>
+          <dd class="uppercase">{group.languages.join(", ")}</dd>
+        {/if}
+      </DetailGrid>
+
+      {#if group.rules !== null}
+        <Separator />
+        <div class="space-y-1">
+          <p class="text-xs tracking-wide text-muted-foreground uppercase">Rules</p>
+          <!-- Author-written, line breaks and all. Not markdown — VRChat does not treat it as any. -->
+          <p class="text-sm whitespace-pre-wrap">{group.rules}</p>
+        </div>
+      {/if}
+
+      {#if group.links.length > 0}
+        <div class="space-y-1">
+          <p class="text-xs tracking-wide text-muted-foreground uppercase">Links</p>
+          <ul class="space-y-1">
+            <!--
+              Keyed by index: these are free text the group's owner controls, so the same URL twice
+              is entirely possible, and a repeated key would take the tab down.
+            -->
+            {#each group.links as link, index (index)}
+              <li class="min-w-0">
+                <a
+                  href={link}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  class="inline-flex max-w-full items-center gap-1 text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground"
+                >
+                  <span class="truncate">{link}</span>
+                  <ExternalLinkIcon class="size-3 shrink-0" />
+                </a>
+              </li>
+            {/each}
+          </ul>
+        </div>
+      {/if}
+    {/if}
+
+    <!--
+      Into the full group screen, for the three lists this dialog does not carry.
+
+      `dismiss()` rather than `close()`, and this is that method's first real caller. Close pops one
+      level of the shared back stack, which is right when a dialog opened another dialog; a route
+      change invalidates every level, because the screen the reader would be returning *to* is no
+      longer behind anything. Leaving the stack populated here would mean the next modal opened from
+      the group screen has a back button pointing at a profile from before the navigation.
+    -->
+    {#if groupModal.groupId !== null}
+      {@const id = groupModal.groupId}
+      <Separator />
+      <Button
+        variant="secondary"
+        class="w-full justify-between"
+        onclick={() => {
+          groupModal.dismiss();
+          navigate("groups", id);
+        }}
+      >
+        <span class="inline-flex items-center gap-2">
+          <UsersIcon class="size-4" />
+          Members, posts and galleries
+        </span>
+        <ChevronRightIcon class="size-4" />
+      </Button>
+    {/if}
+  </Tabs.Content>
+
+  <!-- Instances -------------------------------------------------------------- -->
+  <Tabs.Content value="instances" class="space-y-3">
+    <PagedSection
+      list={groupModal.instances}
+      icon={ServerIcon}
+      emptyTitle="Nothing open right now"
+      emptyDescription="This group has no instances running, or none this account may see."
+      titles={FAILURE_TITLES}
+      bodies={INSTANCE_BODIES}
+      skeletonRows={3}
+    >
+      {#snippet row(instance)}
+        {@const place = parseLocation(instance.location)}
+        {@const worldId = instance.worldId}
+        <div class="flex items-center gap-3 border border-border p-3">
+          {#if instance.worldThumbnailImageUrl !== null && instance.worldThumbnailImageUrl !== ""}
+            <!-- Through `imageUrl()`: a browser cannot load a VRChat asset URL directly. -->
+            <img
+              src={imageUrl(instance.worldThumbnailImageUrl)}
+              alt=""
+              loading="lazy"
+              class="size-12 shrink-0 border border-border object-cover"
+            />
+          {/if}
+
+          <div class="min-w-0 flex-1">
+            {#if worldId !== null}
+              <!--
+                The location rides along, which is what turns the world dialog from "a world" into
+                "that instance of it" — the whole reason it is worth opening from here.
+              -->
+              <button
+                type="button"
+                class="max-w-full cursor-pointer truncate rounded-xs text-left text-sm font-medium underline-offset-4 hover:underline focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
+                onclick={() =>
+                  worldModal.openWorld(worldId, {
+                    location: instance.location,
+                    name: instance.worldName,
+                    accountId: groupModal.accountId,
+                  })}
+              >
+                {instance.worldName ?? shortId(worldId, 14)}
+              </button>
+            {:else}
+              <p class="truncate text-sm font-medium">{instance.worldName ?? "Unknown world"}</p>
+            {/if}
+            <p class="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
+              <span class="font-mono">{place.label}</span>
+              <span aria-hidden="true">·</span>
+              <span>{accessLabel(place.access)}</span>
+              {#if place.region !== null}
+                <span aria-hidden="true">·</span>
+                <span class="uppercase">{place.region}</span>
+              {/if}
+            </p>
+          </div>
+
+          {#if instance.memberCount !== null}
+            <span class="tabular shrink-0 text-sm text-muted-foreground">
+              {instance.memberCount}{#if instance.worldCapacity !== null}/{instance.worldCapacity}{/if}
             </span>
           {/if}
-        </dd>
-      {/if}
-      {#if group.ownerId !== null}
-        <dt class="text-muted-foreground">Owner</dt>
-        <dd>
+
           <!--
-            A real `UserName`, so the owner is one click from their own profile — and the label is
-            the id, because VRChat's group record carries no display name for them. `UserName`
-            resolves nothing on its own; the modal it opens does.
+            The same join affordance as everywhere else: a self-invite when a client is running, the
+            deep link only when none is. See `planJoin`.
           -->
-          <UserName
-            userId={group.ownerId}
-            name={group.ownerId}
+          <JoinAffordance
+            location={instance.location}
             accountId={groupModal.accountId}
-            class="font-mono"
+            class="shrink-0 text-xs"
           />
-        </dd>
-      {/if}
-      {#if group.createdAt !== null}
-        <dt class="flex items-center gap-1.5 text-muted-foreground">
-          <CalendarIcon class="size-3.5" />
-          Created
-        </dt>
-        <dd class="tabular">{calendarDay(group.createdAt)}</dd>
-      {/if}
-      {#if group.languages.length > 0}
-        <dt class="text-muted-foreground">Languages</dt>
-        <dd class="uppercase">{group.languages.join(", ")}</dd>
-      {/if}
-    </DetailGrid>
+        </div>
+      {/snippet}
+    </PagedSection>
+  </Tabs.Content>
 
-    {#if group.rules !== null}
-      <Separator />
-      <div class="space-y-1">
-        <p class="text-xs tracking-wide text-muted-foreground uppercase">Rules</p>
-        <!-- Author-written, line breaks and all. Not markdown — VRChat does not treat it as any. -->
-        <p class="text-sm whitespace-pre-wrap">{group.rules}</p>
-      </div>
-    {/if}
+  <!-- Raw --------------------------------------------------------------------- -->
+  <Tabs.Content value="raw" class="space-y-2">
+    <p class="text-xs text-muted-foreground">
+      Exactly what the daemon sent, plus what vrc.zip added. Nothing here is interpreted.
+    </p>
+    <pre
+      class="max-w-full overflow-x-auto border border-border bg-muted/40 p-3 font-mono text-xs leading-relaxed">{raw}</pre>
 
-    {#if group.links.length > 0}
-      <div class="space-y-1">
-        <p class="text-xs tracking-wide text-muted-foreground uppercase">Links</p>
-        <ul class="space-y-1">
-          <!--
-            Keyed by index: these are free text the group's owner controls, so the same URL twice is
-            entirely possible, and a repeated key would take the card down.
-          -->
-          {#each group.links as link, index (index)}
-            <li class="min-w-0">
-              <a
-                href={link}
-                target="_blank"
-                rel="noreferrer noopener"
-                class="inline-flex max-w-full items-center gap-1 text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground"
-              >
-                <span class="truncate">{link}</span>
-                <ExternalLinkIcon class="size-3 shrink-0" />
-              </a>
-            </li>
-          {/each}
-        </ul>
-      </div>
-    {/if}
-  {/if}
-
-  <!--
-    Into the full group screen: members, posts, galleries and instances, each paged.
-    
-    `dismiss()` rather than `close()`, and this is that method's first real caller. Close pops one
-    level of the shared back stack, which is right when a dialog opened another dialog; a route
-    change invalidates every level, because the screen the reader would be returning *to* is no
-    longer behind anything. Leaving the stack populated here would mean the next modal opened from
-    the group screen has a back button pointing at a profile from before the navigation.
-  -->
-  {#if groupModal.groupId !== null}
-    {@const id = groupModal.groupId}
-    <Separator />
-    <Button
-      variant="secondary"
-      class="w-full justify-between"
-      onclick={() => {
-        groupModal.dismiss();
-        navigate("groups", id);
-      }}
-    >
-      <span class="inline-flex items-center gap-2">
-        <UsersIcon class="size-4" />
-        Members, posts, galleries and instances
-      </span>
-      <ChevronRightIcon class="size-4" />
-    </Button>
-  {/if}
-
-  <!--
-    vrchat.com stays in the footer as the way out to everything vrc.zip does not mirror - the
-    calendar, moderation, anything that needs a real session in a browser.
-  -->
-  <EntityFooter
-    id={groupModal.groupId}
-    href={groupModal.groupId === null ? null : groupLink(groupModal.groupId)}
-    openLabel="Open on vrchat.com"
-    idLabel="Group id"
-    jsonLabel="Group details"
-    json={raw}
-  />
+    <!--
+      vrchat.com stays down here as the way out to everything vrc.zip does not mirror - the calendar,
+      moderation, anything that needs a real session in a browser.
+    -->
+    <EntityFooter
+      id={groupModal.groupId}
+      href={groupModal.groupId === null ? null : groupLink(groupModal.groupId)}
+      openLabel="Open on vrchat.com"
+      idLabel="Group id"
+      jsonLabel="Group details"
+      json={raw}
+    />
+  </Tabs.Content>
 </EntityModal>

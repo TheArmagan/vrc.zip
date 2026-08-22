@@ -108,6 +108,16 @@ export type NotificationRow = {
   data: string | null;
 };
 
+/**
+ * One image-file-id → avatar-id mapping. `avatar_id` null is a *negative* answer on a cooldown,
+ * not a verdict — see migration 009 and `daemon/src/net/avatar-ids.ts`.
+ */
+export type AvatarFileIdRow = {
+  file_id: string;
+  avatar_id: string | null;
+  resolved_at: number;
+};
+
 export type AvatarHistoryRow = {
   account_id: string;
   avatar_id: string;

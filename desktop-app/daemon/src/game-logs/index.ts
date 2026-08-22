@@ -47,4 +47,4 @@ export {
   resolvePollSchedule,
   type TailRead,
 } from "./tail.ts";
-export { LogWatcher, type LogWatcherOptions } from "./watcher.ts";
+export { type LogOffsetStore, LogWatcher, type LogWatcherOptions } from "./watcher.ts";

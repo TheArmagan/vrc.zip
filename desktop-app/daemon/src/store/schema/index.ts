@@ -4,6 +4,7 @@ import grants003 from "./003_proxy_grants.sql" with { type: "text" };
 import grantBudgets004 from "./004_grant_budgets.sql" with { type: "text" };
 import webhooks005 from "./005_webhooks.sql" with { type: "text" };
 import plugins006 from "./006_plugins.sql" with { type: "text" };
+import logOffsets007 from "./007_log_offsets.sql" with { type: "text" };
 
 /** One numbered migration. `version` must be unique, contiguous from 1, and ascending. */
 export type Migration = {
@@ -23,4 +24,5 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 4, name: "004_grant_budgets", sql: grantBudgets004 },
   { version: 5, name: "005_webhooks", sql: webhooks005 },
   { version: 6, name: "006_plugins", sql: plugins006 },
+  { version: 7, name: "007_log_offsets", sql: logOffsets007 },
 ];

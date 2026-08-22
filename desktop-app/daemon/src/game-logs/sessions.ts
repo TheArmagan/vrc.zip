@@ -187,6 +187,21 @@ export class SessionTracker {
     }
   }
 
+  /**
+   * Attributes the session from an auth line **without** emitting it as an event.
+   *
+   * For the head scan: a resumed or EOF-adopted file has its `User Authenticated:` line thousands
+   * of lines behind the read position, and the account is only recoverable from it. Feeding that
+   * line through `ingest` would work, but it would also re-emit a `gamelog.authenticated` event
+   * for a line a previous run already recorded — one more copy of exactly the duplication the
+   * offset store exists to stop.
+   */
+  attribute(displayName: string, userId: string): void {
+    if (this.authenticated || this.ended) return;
+    this.start();
+    this.applyAuthentication(displayName, userId);
+  }
+
   private applyAuthentication(displayName: string, userId: string): void {
     this.authenticated = true;
     const accountId = this.resolveAccountId === null ? null : this.resolveAccountId(userId);

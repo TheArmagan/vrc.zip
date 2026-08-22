@@ -60,8 +60,14 @@ function clock(start = 1_700_000_000_000): { now: () => number; advance: (ms: nu
   };
 }
 
-function makeWatcher(directory: string, sink: LogSink, now: () => number, staleAfterMs = 60_000) {
-  return new LogWatcher({
+/** The base options every test's watcher shares. Split out so a test can add one more field. */
+function watcherOptions(
+  directory: string,
+  sink: LogSink,
+  now: () => number,
+  staleAfterMs = 60_000,
+) {
+  return {
     directories: [directory],
     sink,
     now,
@@ -70,9 +76,13 @@ function makeWatcher(directory: string, sink: LogSink, now: () => number, staleA
     activeIntervalMs: 0,
     idleIntervalMs: 0,
     jitterRatio: 0,
-    resolveAccountId: (userId) =>
+    resolveAccountId: (userId: string) =>
       userId === ALICE ? "acct_alice" : userId === BOB ? "acct_bob" : null,
-  });
+  };
+}
+
+function makeWatcher(directory: string, sink: LogSink, now: () => number, staleAfterMs = 60_000) {
+  return new LogWatcher(watcherOptions(directory, sink, now, staleAfterMs));
 }
 
 test("tails two concurrent clients on different accounts as separate sessions", async () => {
@@ -452,4 +462,113 @@ test("start/stop drives the timer loop without leaving one running", async () =>
 
   await watcher.stop({ endLiveSessions: true });
   expect(log.ends[0]?.exitKind).toBe("unknown");
+});
+
+/**
+ * An in-memory `LogOffsetStore`, standing in for the `log_offsets` table. Shared across two
+ * watchers in a test the way the real table is shared across two daemon runs.
+ */
+function offsetStore(): {
+  store: {
+    get: (k: string) => number | null;
+    set: (k: string, p: string, o: number) => void;
+    reset: (k: string) => void;
+  };
+  rows: Map<string, number>;
+} {
+  const rows = new Map<string, number>();
+  return {
+    rows,
+    store: {
+      get: (key) => rows.get(key) ?? null,
+      set: (key, _path, offset) => {
+        rows.set(key, Math.max(rows.get(key) ?? 0, offset));
+      },
+      reset: (key) => {
+        rows.delete(key);
+      },
+    },
+  };
+}
+
+test("a restart resumes a log rather than replaying it", async () => {
+  /*
+   * The duplicate-events bug, in the smallest form that reproduces it.
+   *
+   * Every daemon start used to re-read every log file from byte 0 and re-emit every line, so one
+   * VRChat shutdown became one "Client quit" row per daemon start. Under `bun --watch` that is one
+   * per code edit, which is where "six identical quit rows" came from.
+   */
+  const dir = tempDir();
+  const path = join(dir, "output_log_14-22-01.txt");
+  const offsets = offsetStore();
+
+  writeFileSync(
+    path,
+    `${authLine("14:22:07", "Alice", ALICE)}\n${joinLine("14:22:18", "Alice", ALICE)}\n${QUIT}\n`,
+  );
+
+  const first = recorder();
+  const timeA = clock();
+  const watcherA = new LogWatcher({
+    ...watcherOptions(dir, first.sink, timeA.now),
+    offsets: offsets.store,
+  });
+  await watcherA.tick();
+  await watcherA.stop();
+
+  expect(first.log.events.filter((event) => event.kind === "app-quit")).toHaveLength(1);
+  expect(offsets.rows.size).toBe(1);
+
+  // Second daemon run over the same, unchanged file.
+  const second = recorder();
+  const timeB = clock();
+  const watcherB = new LogWatcher({
+    ...watcherOptions(dir, second.sink, timeB.now),
+    offsets: offsets.store,
+  });
+  await watcherB.tick();
+
+  expect(second.log.events).toHaveLength(0);
+  // And no session either: the client quit last run, so re-announcing it would put a finished
+  // client back on the Live sessions screen, where the staleness reaper would then call it a crash.
+  expect(second.log.starts).toHaveLength(0);
+  await watcherB.stop();
+});
+
+test("a resumed file that grows again wakes up attributed", async () => {
+  // The other half: the daemon restarts while VRChat is still running. There is nothing new to
+  // read at first, so the file stays dormant — but the moment the client writes another line it
+  // must become a session again, with its account, which is only recoverable from the auth line
+  // thousands of lines behind the resume point.
+  const dir = tempDir();
+  const path = join(dir, "output_log_14-22-01.txt");
+  const offsets = offsetStore();
+
+  writeFileSync(path, `${authLine("14:22:07", "Alice", ALICE)}\n`);
+
+  const first = recorder();
+  const watcherA = new LogWatcher({
+    ...watcherOptions(dir, first.sink, clock().now),
+    offsets: offsets.store,
+  });
+  await watcherA.tick();
+  await watcherA.stop();
+
+  const second = recorder();
+  const time = clock();
+  const watcherB = new LogWatcher({
+    ...watcherOptions(dir, second.sink, time.now),
+    offsets: offsets.store,
+  });
+  await watcherB.tick();
+  expect(second.log.starts).toHaveLength(0);
+
+  appendFileSync(path, `${joinLine("14:40:18", "Zoe", BOB)}\n`);
+  await watcherB.tick();
+
+  expect(second.log.starts).toHaveLength(1);
+  expect(second.log.events.map((event) => event.kind)).toEqual(["player-join"]);
+  expect(second.log.events[0]?.accountId).toBe("acct_alice");
+  await watcherB.stop();
 });

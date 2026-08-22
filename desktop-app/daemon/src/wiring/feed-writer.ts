@@ -18,6 +18,10 @@ const EPHEMERAL = new Set([
   // A backfill summary, not something that happened to the user. Persisting it would put a row
   // reading "synced 250 notifications" into the feed on every poll, forever.
   "notification.synced",
+  // "the friend list poll came back" — the same shape of non-event, and the loudest one there was:
+  // it fires per account on every refresh cycle, so on a two-account setup it was several hundred
+  // feed rows a day saying nothing had happened. Migration 007 deletes the ones already stored.
+  "friend.list_refreshed",
   // "the presence map now agrees with a profile we just read" — a cache correction, not an event
   // in anybody's day. It exists to wake the friends list up, and opening a card would otherwise
   // write a feed row for every friend whose status had drifted.

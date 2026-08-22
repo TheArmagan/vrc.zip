@@ -1,6 +1,6 @@
 import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
 import { migrate } from "./migrate.ts";
-import { SQL } from "./queries.ts";
+import { buildEventPage, type EventPageFilter, SQL } from "./queries.ts";
 import type { Migration } from "./schema/index.ts";
 import type {
   AccountRow,
@@ -14,6 +14,7 @@ import type {
   GrantBudgetRow,
   GrantRow,
   KindCount,
+  LogOffsetRow,
   NewAuditEntry,
   NewEvent,
   NewFriendLogHistory,
@@ -289,6 +290,34 @@ export class Store {
     return kind === null
       ? this.stmts.listEventsBySubject.all(subjectId, before, limit)
       : this.stmts.listEventsBySubjectOfKind.all(subjectId, kind, before, limit);
+  }
+
+  /**
+   * A feed page for a filter the fixed statements cannot express: several kinds at once, a family
+   * prefix, or a text search. See {@link buildEventPage} for why this one case is assembled.
+   *
+   * Callers that need none of those keep using the four selector methods above — this is an
+   * addition to the paging API, not a replacement for it.
+   */
+  listEventsFiltered(filter: EventPageFilter): EventRow[] {
+    const { sql, params } = buildEventPage(filter);
+    return this.db.query<EventRow, SQLQueryBindings[]>(sql).all(...params);
+  }
+
+  // -- log offsets ----------------------------------------------------------
+
+  /** Where the watcher had read to in this log file, or null for a file it has never seen. */
+  getLogOffset(logKey: string): LogOffsetRow | null {
+    return this.stmts.getLogOffset.get(logKey);
+  }
+
+  /** Records progress through a log file. Never moves an offset backwards — see the SQL. */
+  putLogOffset(logKey: string, logPath: string, byteOffset: number, now = Date.now()): void {
+    this.stmts.putLogOffset.run(logKey, logPath, byteOffset, now);
+  }
+
+  deleteLogOffset(logKey: string): void {
+    this.stmts.deleteLogOffset.run(logKey);
   }
 
   /** Row count per event kind — the number Settings shows next to each retention window. */
@@ -967,6 +996,10 @@ function prepareAll(db: Database) {
     ),
     countEventsByKind: q<KindCount, []>(SQL.countEventsByKind),
     distinctEventKinds: q<{ kind: string }, []>(SQL.distinctEventKinds),
+
+    getLogOffset: q<LogOffsetRow, [string]>(SQL.getLogOffset),
+    putLogOffset: q<never, [string, string, number, number]>(SQL.putLogOffset),
+    deleteLogOffset: q<never, [string]>(SQL.deleteLogOffset),
     listEventsDaily: q<EventsDailyRow, [string, number, number]>(SQL.listEventsDaily),
 
     upsertFriend: q<void, [string, string, string, string | null, number, number | null]>(

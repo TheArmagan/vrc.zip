@@ -64,8 +64,17 @@ export const SQL = {
   listSessions: `SELECT * FROM sessions WHERE account_id = ? ORDER BY started_at DESC LIMIT ?`,
 
   // -- events ---------------------------------------------------------------
+  /*
+   * `OR IGNORE` pairs with the partial unique index migration 007 puts on `gamelog.%` rows.
+   *
+   * It is not a shrug at write errors: the index covers exactly the rows that are *derived* from an
+   * append-only file and are therefore reproducible by construction, so a second copy of one is
+   * always a replay and never a second fact. Everything else — a pipeline event, a notification —
+   * is uncovered by that index and inserts unconditionally, which is right: two identical VRChat
+   * messages a millisecond apart are two messages.
+   */
   insertEvent: `
-    INSERT INTO events (account_id, ts, session_id, kind, subject_id, location, payload)
+    INSERT OR IGNORE INTO events (account_id, ts, session_id, kind, subject_id, location, payload)
     VALUES (?, ?, ?, ?, ?, ?, ?)`,
   /*
    * The feed pages. Four selectors — every account, one account, one game-client session, one
@@ -124,6 +133,19 @@ export const SQL = {
     LIMIT ?`,
   countEventsByKind: `SELECT kind, COUNT(*) AS count FROM events GROUP BY kind ORDER BY count DESC`,
   distinctEventKinds: `SELECT DISTINCT kind FROM events`,
+
+  // -- log offsets ----------------------------------------------------------
+  getLogOffset: `SELECT * FROM log_offsets WHERE log_key = ?`,
+  putLogOffset: `
+    INSERT INTO log_offsets (log_key, log_path, byte_offset, updated_at) VALUES (?, ?, ?, ?)
+    ON CONFLICT(log_key) DO UPDATE SET
+      log_path    = excluded.log_path,
+      -- Never moves backwards. Two watchers over one file, or a stale write racing a fresh one,
+      -- would otherwise rewind the offset and replay everything between — the exact failure this
+      -- table exists to prevent.
+      byte_offset = MAX(log_offsets.byte_offset, excluded.byte_offset),
+      updated_at  = excluded.updated_at`,
+  deleteLogOffset: `DELETE FROM log_offsets WHERE log_key = ?`,
 
   // -- friend log -----------------------------------------------------------
   upsertFriend: `
@@ -536,3 +558,99 @@ export const SQL = {
   listPluginCrashes: `
     SELECT * FROM plugin_crashes WHERE plugin_id = ? ORDER BY ts DESC LIMIT ?`,
 } as const;
+
+// ---------------------------------------------------------------------------
+// The filtered feed page
+// ---------------------------------------------------------------------------
+
+/** What a caller can narrow a feed page by, beyond the four fixed selectors above. */
+export interface EventPageFilter {
+  /** Mutually exclusive; the route enforces that. */
+  readonly accountId?: string | undefined;
+  readonly sessionId?: number | undefined;
+  readonly subjectId?: string | undefined;
+  /** Exact kinds. Empty or absent means every kind. */
+  readonly kinds?: readonly string[] | undefined;
+  /** Dotted families (`gamelog`) — matched as a `kind` prefix, so a kind this build has never
+   *  heard of still lands in the right family rather than vanishing. */
+  readonly families?: readonly string[] | undefined;
+  /** Case-insensitive substring over the subject, location, kind and raw payload. */
+  readonly search?: string | undefined;
+  readonly before: number;
+  readonly limit: number;
+}
+
+/** A built statement: SQL text plus its positional bindings, in order. */
+export interface BuiltQuery {
+  readonly sql: string;
+  readonly params: (string | number)[];
+}
+
+/** LIKE metacharacters, escaped against `\` so a search for `100%` is not a wildcard. */
+function likeTerm(value: string): string {
+  return `%${value.replace(/[\\%_]/g, (char) => `\\${char}`)}%`;
+}
+
+/**
+ * Builds one feed page for a filter the eight fixed statements above cannot express.
+ *
+ * This is the *only* assembled SQL in this file, and the split is deliberate rather than an
+ * inconsistency. The eight written-out statements stay the hot path — every unfiltered page the
+ * feed and the game log fetch goes through one of them, and they can be read and their index use
+ * reasoned about without running anything. A multi-kind filter or a text search cannot be one of
+ * a fixed set of strings: the predicate depends on how many kinds the caller ticked. Assembling
+ * *that* case here, from a closed set of clauses with every value bound rather than interpolated,
+ * beats either writing out a combinatorial wall of statements or making the caller post-filter a
+ * page — which returns short pages and then an empty one, and reads as "history stops here".
+ *
+ * `bun:sqlite` caches prepared statements by SQL text, so the handful of shapes this produces are
+ * each prepared once.
+ *
+ * The search is a `LIKE` over the payload text and therefore a scan; `ts DESC` plus `LIMIT` keeps
+ * it bounded to the newest rows the caller actually asked for rather than the whole table.
+ */
+export function buildEventPage(filter: EventPageFilter): BuiltQuery {
+  const where: string[] = ["ts < ?"];
+  const params: (string | number)[] = [filter.before];
+
+  if (filter.accountId !== undefined) {
+    where.push("account_id = ?");
+    params.push(filter.accountId);
+  } else if (filter.sessionId !== undefined) {
+    where.push("session_id = ?");
+    params.push(filter.sessionId);
+  } else if (filter.subjectId !== undefined) {
+    where.push("subject_id = ?");
+    params.push(filter.subjectId);
+  }
+
+  const kinds = filter.kinds ?? [];
+  const families = filter.families ?? [];
+  if (kinds.length > 0 || families.length > 0) {
+    const clauses: string[] = [];
+    if (kinds.length > 0) {
+      clauses.push(`kind IN (${kinds.map(() => "?").join(", ")})`);
+      params.push(...kinds);
+    }
+    for (const family of families) {
+      clauses.push("kind LIKE ? ESCAPE '\\'");
+      params.push(`${family.replace(/[\\%_]/g, (char) => `\\${char}`)}.%`);
+    }
+    where.push(`(${clauses.join(" OR ")})`);
+  }
+
+  if (filter.search !== undefined && filter.search !== "") {
+    const term = likeTerm(filter.search);
+    where.push(
+      "(kind LIKE ? ESCAPE '\\' OR subject_id LIKE ? ESCAPE '\\'" +
+        " OR location LIKE ? ESCAPE '\\' OR payload LIKE ? ESCAPE '\\')",
+    );
+    params.push(term, term, term, term);
+  }
+
+  params.push(filter.limit);
+  return {
+    sql: `SELECT * FROM events WHERE ${where.join(" AND ")} ORDER BY ts DESC, id DESC LIMIT ?`,
+    params,
+  };
+}

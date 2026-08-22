@@ -40,6 +40,7 @@ describe("migrate", () => {
       "friend_log_history",
       "grant_budgets",
       "grants",
+      "log_offsets",
       "meta",
       "notes",
       "notifications",
@@ -181,5 +182,71 @@ describe("migrate", () => {
         .delete()
         .catch(() => {});
     }
+  });
+});
+
+/*
+ * Migration 007's two jobs, asserted on rows rather than on DDL.
+ *
+ * The dedupe index is the one piece of schema here that can be *subtly* wrong: an over-broad key
+ * silently deletes real events, and an over-narrow one lets the replay through. Both failures look
+ * like a working index from the outside, so the test drives the actual insert path.
+ */
+describe("007_log_offsets", () => {
+  function seeded(): Database {
+    const db = new Database(MEMORY);
+    migrate(db);
+    return db;
+  }
+
+  const INSERT = `INSERT OR IGNORE INTO events
+    (account_id, ts, session_id, kind, subject_id, location, payload)
+    VALUES (NULL, ?, ?, ?, ?, NULL, ?)`;
+
+  test("a replayed gamelog line is dropped even though its payload differs", () => {
+    const db = seeded();
+    // The watcher stamps its own per-run session UUID into the payload, so two reads of ONE line
+    // never produce identical payload text. Comparing payloads whole would miss this entirely.
+    db.run(INSERT, [1000, 1, "gamelog.app_quit", null, '{"kind":"app-quit","sessionId":"run-a"}']);
+    db.run(INSERT, [1000, 1, "gamelog.app_quit", null, '{"kind":"app-quit","sessionId":"run-b"}']);
+
+    expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM events").get()?.n).toBe(1);
+    db.close();
+  });
+
+  test("two people joining in the same second are two rows", () => {
+    const db = seeded();
+    db.run(INSERT, [1000, 1, "gamelog.player_join", null, '{"displayName":"Ada"}']);
+    db.run(INSERT, [1000, 1, "gamelog.player_join", null, '{"displayName":"Grace"}']);
+
+    expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM events").get()?.n).toBe(2);
+    db.close();
+  });
+
+  test("identical pipeline events are left alone — two messages are two facts", () => {
+    const db = seeded();
+    db.run(INSERT, [1000, null, "friend.online", "usr_1", '{"displayName":"Ada"}']);
+    db.run(INSERT, [1000, null, "friend.online", "usr_1", '{"displayName":"Ada"}']);
+
+    expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM events").get()?.n).toBe(2);
+    db.close();
+  });
+
+  test("log_offsets never rewinds on conflict", () => {
+    const db = seeded();
+    const put = `INSERT INTO log_offsets (log_key, log_path, byte_offset, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(log_key) DO UPDATE SET
+        log_path = excluded.log_path,
+        byte_offset = MAX(log_offsets.byte_offset, excluded.byte_offset),
+        updated_at = excluded.updated_at`;
+    db.run(put, ["dev:1", "/logs/a.txt", 900, 1]);
+    db.run(put, ["dev:1", "/logs/a.txt", 100, 2]);
+
+    expect(
+      db.query<{ byte_offset: number }, []>("SELECT byte_offset FROM log_offsets").get()
+        ?.byte_offset,
+    ).toBe(900);
+    db.close();
   });
 });

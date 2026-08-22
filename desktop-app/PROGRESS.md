@@ -1489,6 +1489,34 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      `"overflow"`: the plugin did not see them, and saying so is the host's job. There is
      deliberately no `block` policy — `EventBus.emit()` must never await anything plugin-related.
 
+131. **The game log deduplicates at the source — a persisted read offset — and the unique index is
+     only the guard.** `LogWatcher` adopted every log file at byte 0 and kept its position in
+     memory, so every daemon start re-read every `output_log_*.txt` in the directory and re-emitted
+     every line in it. Migration 007 adds `log_offsets`, keyed on the watcher's `logKey` (the file's
+     filesystem identity) rather than its path, because a rotated log reuses the path and must not
+     inherit the old file's offset. The partial unique index on `gamelog.%` rows plus
+     `INSERT OR IGNORE` is defence in depth, not the fix: it covers exactly the rows that are
+     *derived from an append-only file* and therefore reproducible by construction, which is what
+     makes them safe to deduplicate at all. Pipeline events are deliberately uncovered — two
+     identical VRChat messages a millisecond apart are two facts, not one fact twice.
+
+132. **A log file already read to its end starts *dormant*: no tracker, no session, until it grows.**
+     The obvious version of the resume fix — seek to the stored offset and carry on — resurrects
+     every finished session on every restart, because `startSession` conflicts onto the same row and
+     clears `ended_at`, and with the file already consumed there is no quit marker left to close it
+     again. So a client that exited cleanly last week came back live and was reaped as a *crash*
+     five minutes later. A dormant file earns its session on its first new line, and takes its
+     account from a head scan at that moment. `SessionTracker.attribute()` exists for that scan
+     specifically: it applies the auth line without emitting it, because re-emitting a
+     `gamelog.authenticated` a previous run already recorded is the same duplication in miniature.
+
+133. **`friend.list_refreshed` stops being persisted.** It fires per account on every friend-list
+     poll and no screen has ever rendered it, so on a two-account setup it was several hundred feed
+     rows a day saying nothing happened. It joins the feed writer's ephemeral set, and 007 deletes
+     the rows already stored — along with the other bookkeeping kinds (`friend.presence`,
+     `notification.synced`, `account.state`, `session.update`, `pipeline.state`, the two `consent.*`)
+     that older builds wrote before that set grew.
+
 ---
 
 ## Gotchas
@@ -1496,6 +1524,20 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **Six identical "Client quit" rows for one VRChat shutdown was six daemon starts, not six quits.**
+  The log watcher had no persisted read position, so every start replayed every log file it could
+  find and the feed writer appended all of it again. The session row was *stable* across those
+  replays — `sessions` conflicts on `(log_path, started_at)` — so the copies all landed on the same
+  session and were indistinguishable from the real thing. Under `bun --watch` it is one full replay
+  of the user's entire log history per code edit, which is why a development database accumulated
+  them so fast. Decisions 131 and 132.
+
+- **A gamelog payload cannot be compared whole to detect a replay.** It carries the *watcher's*
+  per-run session UUID, so two reads of one line never produce identical payload text. The dedupe
+  index keys on the fields that actually identify a line — `json_extract`'s multi-path form pulls
+  the display name, world, path, reason and location out as one JSON array — with `json_valid` in
+  front of it, because `json_extract` raises on non-JSON rather than returning null.
 
 - **The NUL byte got back into `instance-roster.svelte.ts`, in the comment explaining the NUL byte.**
   `keyFor` uses ` ` as a key separator, and the file already carries a note saying the *raw* byte

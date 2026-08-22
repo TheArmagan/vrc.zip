@@ -230,6 +230,24 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     // Attributes a log file to an account. Returns null for a client signed into an account
     // vrc.zip does not manage, which keeps the session unlinked rather than misattributed.
     resolveAccountId: (userId) => accounts.get(userId)?.id ?? null,
+    /*
+     * Persistent read positions, so a restart resumes each log rather than replaying it.
+     *
+     * Without this the watcher re-read every `output_log_*.txt` in the directory from byte 0 on
+     * every start and re-emitted every line as a fresh event — one full replay of the user's
+     * whole log history per daemon start, which under `bun --watch` is one per code edit. The
+     * feed showed the result as six identical "Client quit" rows for one shutdown. Migration 007
+     * has the long version and cleans up what already accumulated.
+     */
+    offsets: {
+      get: (logKey) => store.getLogOffset(logKey)?.byte_offset ?? null,
+      set: (logKey, logPath, byteOffset) => {
+        store.putLogOffset(logKey, logPath, byteOffset);
+      },
+      reset: (logKey) => {
+        store.deleteLogOffset(logKey);
+      },
+    },
   });
   watcher.start();
 

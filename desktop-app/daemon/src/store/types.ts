@@ -46,6 +46,20 @@ export type EventRow = {
 
 export type NewEvent = Omit<EventRow, "id">;
 
+/**
+ * Where the log watcher had read to in one log file, so a restart resumes rather than replays.
+ *
+ * Keyed on the watcher's `logKey` — the file's filesystem identity — not on its path. A rotated
+ * log reuses the path, and inheriting the old file's offset would skip the head of the new one,
+ * including the `User Authenticated:` line that is the only thing linking a log to an account.
+ */
+export type LogOffsetRow = {
+  log_key: string;
+  log_path: string;
+  byte_offset: number;
+  updated_at: number;
+};
+
 export type FriendLogRow = {
   account_id: string;
   user_id: string;

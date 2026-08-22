@@ -23,6 +23,25 @@ import {
   resolvePollSchedule,
 } from "./tail.ts";
 
+/**
+ * Where the watcher's read positions are kept between runs.
+ *
+ * Injected rather than imported, like the sink: the watcher is a pure file-to-events transform and
+ * must not know that a database exists. `app.ts` wires this to the `log_offsets` table.
+ *
+ * Without one, the watcher re-reads every log file from the top on every start and re-emits every
+ * line in it — which is how a single VRChat shutdown ended up in the feed six times, once per
+ * daemon restart. See migration 007.
+ */
+export interface LogOffsetStore {
+  /** Byte offset already consumed from this file, or `null` for a file never seen before. */
+  get(logKey: string): number | null;
+  /** Records progress. Called after every read that advanced the offset. */
+  set(logKey: string, logPath: string, byteOffset: number): void;
+  /** Forgets a file's position, for a file rewritten in place — its bytes are new bytes now. */
+  reset(logKey: string): void;
+}
+
 export interface LogWatcherOptions extends PollScheduleOptions {
   /** Directories to watch, from `discoverLogDirectories()` or a settings override. */
   directories: readonly string[];
@@ -41,6 +60,11 @@ export interface LogWatcherOptions extends PollScheduleOptions {
    */
   backfill?: boolean;
   resolveAccountId?: (userId: string) => string | null;
+  /**
+   * Persistent read positions. Absent means every run starts from `backfill`'s answer, which is
+   * the old — and duplicating — behaviour; tests that do not care about resumption omit it.
+   */
+  offsets?: LogOffsetStore;
   /** Injectable clock; tests drive it directly. */
   now?: () => number;
 }
@@ -49,7 +73,19 @@ interface WatchedFile {
   path: string;
   key: string;
   tail: FileTail;
-  tracker: SessionTracker;
+  /**
+   * `null` for a **dormant** file: one already read to its end on a previous run, whose client may
+   * or may not still be alive. It gets a tracker — and therefore a session, and therefore a place
+   * in the UI — the moment it writes another line, and not before.
+   *
+   * That laziness is the point. Adopting a finished log eagerly re-opens its session row on every
+   * daemon start, and with the file already consumed there is no quit marker left to close it
+   * again, so a client that exited cleanly last week reappears as live and is then reaped as a
+   * crash five minutes later.
+   */
+  tracker: SessionTracker | null;
+  /** When this file's client started, for the tracker a dormant file may still grow into. */
+  startedAt: number;
   /** Unix ms of the last observed growth, for staleness and poll backoff. */
   lastGrowthAt: number;
   /** Unix ms this file is next due to be polled. */
@@ -130,6 +166,7 @@ export class LogWatcher {
   private readonly staleAfterMs: number;
   private readonly backfill: boolean;
   private readonly resolveAccountId: ((userId: string) => string | null) | null;
+  private readonly offsets: LogOffsetStore | null;
   private readonly now: () => number;
 
   private readonly files = new Map<string, WatchedFile>();
@@ -146,12 +183,15 @@ export class LogWatcher {
     this.staleAfterMs = options.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
     this.backfill = options.backfill ?? true;
     this.resolveAccountId = options.resolveAccountId ?? null;
+    this.offsets = options.offsets ?? null;
     this.now = options.now ?? Date.now;
   }
 
   /** Snapshots of every session the watcher currently knows about. */
   sessions(): SessionSnapshot[] {
-    return [...this.files.values()].map((file) => file.tracker.snapshot());
+    return [...this.files.values()]
+      .map((file) => file.tracker?.snapshot() ?? null)
+      .filter((snapshot): snapshot is SessionSnapshot => snapshot !== null);
   }
 
   /** Starts the poll loop. Runs the first tick immediately so a caller can `await` a warm state. */
@@ -175,7 +215,7 @@ export class LogWatcher {
     }
     if (options.endLiveSessions === true) {
       for (const file of this.files.values()) {
-        if (!file.finished) this.finish(file, null, "unknown");
+        if (!file.finished && file.tracker !== null) this.finish(file, null, "unknown");
       }
     }
     await Promise.resolve();
@@ -239,26 +279,76 @@ export class LogWatcher {
     }
   }
 
-  /** Builds the watched-file record for a newly seen file, including its fresh session. */
+  /**
+   * Builds the watched-file record for a newly seen file.
+   *
+   * Where it starts reading is the whole question, and there are three answers:
+   *
+   *  - **A file with a stored offset** resumes there. This is what stops the daemon replaying
+   *    months of logs on every start (migration 007). If the offset already covers the file it
+   *    starts *dormant* — no tracker, no session — until the file writes something new.
+   *  - **A file we have never seen** backfills from 0, so a client that started before the daemon
+   *    did still gets its history and, more importantly, its `User Authenticated:` line.
+   *  - **A stored offset past the end of the file** is stale: the file was replaced under a key
+   *    the filesystem reused. Read it from the top; skipping to a byte that no longer exists would
+   *    silently swallow a whole run.
+   */
   private async adopt(path: string, key: string, modifiedAt: number): Promise<WatchedFile> {
-    const startOffset = this.backfill ? 0 : await fileSize(path);
+    const size = await fileSize(path);
+    const stored = this.offsets?.get(key) ?? null;
+    const resumable = stored !== null && stored <= size;
+    const startOffset = resumable ? stored : this.backfill ? 0 : size;
     const startedAt = await fileStartedAt(path, modifiedAt, this.now());
-    const file = this.makeFile(path, key, startedAt, new FileTail({ path, startOffset }));
 
-    // Staleness is measured from the file's last write, not from when we happened to adopt it.
-    // Seeding `lastGrowthAt` with `now` gives every long-dead log a fresh lease: the daemon
-    // restarts, re-adopts a log whose client exited hours ago, and presents it as a live session
-    // for a further `staleAfterMs` before deciding it crashed. Under `bun --watch` that is a dead
-    // client showing as live, permanently, because the timer resets faster than it expires.
-    file.lastGrowthAt = Math.min(modifiedAt, this.now());
+    const file: WatchedFile = {
+      path,
+      key,
+      tail: new FileTail({ path, startOffset }),
+      tracker: null,
+      startedAt,
+      // Staleness is measured from the file's last write, not from when we happened to adopt it.
+      // Seeding `lastGrowthAt` with `now` gives every long-dead log a fresh lease: the daemon
+      // restarts, re-adopts a log whose client exited hours ago, and presents it as a live session
+      // for a further `staleAfterMs` before deciding it crashed. Under `bun --watch` that is a dead
+      // client showing as live, permanently, because the timer resets faster than it expires.
+      lastGrowthAt: Math.min(modifiedAt, this.now()),
+      nextDueAt: 0,
+      finished: false,
+      primed: false,
+    };
 
-    // Tailing from EOF skips the whole head of the file — including the `User Authenticated:`
-    // line, which sits a couple of hundred lines in and is the *only* link between a log file and
-    // an account. A client already running when the daemon starts would otherwise stay unlinked
-    // for its entire remaining life. Reading just the head for that one line costs one small read
-    // and does not replay any history as events.
+    // Nothing left to read and we have read it before: stay dormant. `poll` wakes it if the file
+    // grows again, which is exactly the case of a client that was already running when the daemon
+    // restarted.
+    if (resumable && startOffset >= size) return file;
+
+    this.wake(file);
+    // Tailing from anywhere but the top skips the head of the file — including the
+    // `User Authenticated:` line, which sits a couple of hundred lines in and is the *only* link
+    // between a log file and an account. Without this a resumed or EOF-adopted client would stay
+    // unlinked for its entire remaining life, and its events would buffer unattributed. Reading
+    // just the head for that one line costs one small read and replays no history.
     if (startOffset > 0) await this.attributeFromHead(file);
     return file;
+  }
+
+  /**
+   * Gives a file a session tracker, announcing the session. Idempotent.
+   *
+   * Separated from adoption because a dormant file earns its session later, on its first new line,
+   * rather than at the moment it is discovered.
+   */
+  private wake(file: WatchedFile): void {
+    if (file.tracker !== null) return;
+    file.tracker = new SessionTracker({
+      id: randomUUID(),
+      logPath: file.path,
+      logKey: file.key,
+      startedAt: file.startedAt,
+      sink: this.sink,
+      ...(this.resolveAccountId === null ? {} : { resolveAccountId: this.resolveAccountId }),
+    });
+    file.tracker.start();
   }
 
   /**
@@ -284,36 +374,16 @@ export class LogWatcher {
       if (!line.includes("User Authenticated: ")) continue;
       const event = parseLine(line);
       if (event?.kind === "authenticated") {
-        file.tracker.ingest(event);
+        file.tracker?.attribute(event.displayName, event.userId);
         return;
       }
     }
   }
 
-  private makeFile(path: string, key: string, startedAt: number, tail: FileTail): WatchedFile {
-    const now = this.now();
-    const tracker = new SessionTracker({
-      id: randomUUID(),
-      logPath: path,
-      logKey: key,
-      startedAt,
-      sink: this.sink,
-      ...(this.resolveAccountId === null ? {} : { resolveAccountId: this.resolveAccountId }),
-    });
-    tracker.start();
-    return {
-      path,
-      key,
-      tail,
-      tracker,
-      lastGrowthAt: now,
-      nextDueAt: 0,
-      finished: false,
-      primed: false,
-    };
-  }
-
   private async poll(watched: WatchedFile): Promise<void> {
+    // Read before the read: whether this poll started mid-file is what decides if the tracker
+    // needs the head fetched separately for its `User Authenticated:` line.
+    const resumedMidFile = watched.tail.byteOffset > 0;
     const result = await watched.tail.read();
     let file = watched;
 
@@ -321,19 +391,48 @@ export class LogWatcher {
       // The file was rewritten in place. That is a new run of the client, so the old session ends
       // and a fresh one begins; the lines just re-read belong to the new one. The tail object is
       // carried over because it has already reset itself to offset 0.
-      this.finish(watched, null, "crash");
-      file = this.makeFile(watched.path, watched.key, this.now(), watched.tail);
+      //
+      // The stored offset has to go with it. It describes bytes that no longer exist, and the
+      // "never rewind" rule that protects it from a stale writer would otherwise pin it past the
+      // whole new run — the daemon would skip everything the restarted client writes.
+      this.offsets?.reset(watched.key);
+      if (watched.tracker !== null) this.finish(watched, null, "crash");
+      file = {
+        ...watched,
+        tracker: null,
+        startedAt: this.now(),
+        finished: false,
+        primed: false,
+      };
       this.files.set(file.path, file);
     }
 
-    for (const line of result.lines) {
-      file.tracker.ingest(parseLine(line));
-      if (!file.tracker.isLive) {
-        // A quit marker ended the session mid-chunk. Anything after it is shutdown noise.
-        file.finished = true;
-        break;
+    // A dormant file has just proved its client is still writing, so now it gets a session. The
+    // head read re-attributes it: the tracker is new and has not seen the `User Authenticated:`
+    // line, which by now is thousands of lines behind the resume point.
+    if (result.lines.length > 0 && file.tracker === null) {
+      this.wake(file);
+      // Not after a truncation: those lines *are* the head, and the tracker is about to read the
+      // auth line itself. Fetching it as well would authenticate the session twice.
+      if (resumedMidFile && !result.truncated) await this.attributeFromHead(file);
+    }
+
+    const tracker = file.tracker;
+    if (tracker !== null) {
+      for (const line of result.lines) {
+        tracker.ingest(parseLine(line));
+        if (!tracker.isLive) {
+          // A quit marker ended the session mid-chunk. Anything after it is shutdown noise.
+          file.finished = true;
+          break;
+        }
       }
     }
+
+    // Persisted **after** the lines are ingested, and only when the file was actually readable.
+    // The ordering is the durability rule: a crash between the two replays a chunk, which the
+    // dedupe index absorbs, where the other order would lose it outright.
+    if (!result.missing) this.offsets?.set(file.key, file.path, file.tail.byteOffset);
 
     const now = this.now();
     // The **first** read of a newly adopted file is catch-up on history that predates us, not the
@@ -349,18 +448,21 @@ export class LogWatcher {
   private reapStale(): void {
     const now = this.now();
     for (const file of this.files.values()) {
-      if (file.finished) continue;
+      if (file.finished || file.tracker === null) continue;
       if (now - file.lastGrowthAt < this.staleAfterMs) continue;
       this.finish(file, null, "crash");
     }
   }
 
+  /** Ends a file's session. Only ever called for a file that has one — a dormant file has none. */
   private finish(file: WatchedFile, endedAt: number | null, exitKind: ExitKind): void {
     file.finished = true;
+    const tracker = file.tracker;
+    if (tracker === null) return;
     // A hard crash can leave the last line unterminated; it is still a real line now that the file
     // is known to be done.
     const pending = file.tail.flushPending();
-    if (pending !== null && file.tracker.isLive) file.tracker.ingest(parseLine(pending));
-    file.tracker.end(endedAt, exitKind);
+    if (pending !== null && tracker.isLive) tracker.ingest(parseLine(pending));
+    tracker.end(endedAt, exitKind);
   }
 }

@@ -80,11 +80,18 @@ describe("parseTarget", () => {
     expect(parseTarget("https://example.com/home/user/usr_abc")).toBeNull();
   });
 
-  it("recognises what it cannot open, and says which it is", () => {
+  it("opens an avatar id now that there is an avatar modal", () => {
     const avatar = parseTarget("avtr_abc");
     if (avatar === null) throw new Error("an avtr_ id is a recognised target");
-    expect(avatar).toMatchObject({ kind: "avatar", supported: false });
-    expect(unsupportedReason(avatar)).toContain("avatar");
+    expect(avatar).toMatchObject({ kind: "avatar", id: "avtr_abc", supported: true });
+    expect(unsupportedReason(avatar)).toBeNull();
+  });
+
+  it("recognises what it cannot open, and says which it is", () => {
+    const file = parseTarget("file_abc");
+    if (file === null) throw new Error("a file_ id is a recognised target");
+    expect(file).toMatchObject({ kind: "file", supported: false });
+    expect(unsupportedReason(file)).toContain("file");
 
     const user = parseTarget("usr_abc");
     if (user === null) throw new Error("a usr_ id is a recognised target");

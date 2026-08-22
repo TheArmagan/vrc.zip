@@ -33,12 +33,10 @@ export type { CommandHost };
  * Routes with no meaningful bare form, so no palette entry.
  *
  * `login` needs to be reached through the accounts screen, which is where the "add an account"
- * affordance already lives. `groups` is the first route that *requires* a param: `#/groups` with no
- * group id is not a screen, and a palette command that navigates somewhere blank is worse than one
- * that is missing. Both stay in `ROUTE_IDS` because they are real routes; they are just not
- * destinations you can pick out of a list.
+ * affordance already lives. It stays in `ROUTE_IDS` because it is a real route; it is just not a
+ * destination you can pick out of a list.
  */
-const UNLISTED_ROUTES: readonly RouteId[] = ["login", "groups"];
+const UNLISTED_ROUTES: readonly RouteId[] = ["login"];
 
 const NAV_TITLES: Record<RouteId, string> = {
   sessions: "Go to Live sessions",
@@ -48,7 +46,6 @@ const NAV_TITLES: Record<RouteId, string> = {
   feed: "Go to Feed",
   gamelog: "Go to Game log",
   notifications: "Go to Notifications",
-  groups: "Go to a group",
   consent: "Go to App access",
   apps: "Go to Connected apps",
   settings: "Go to Settings",
@@ -62,7 +59,6 @@ const NAV_SUBTITLES: Record<RouteId, string> = {
   feed: "Everything that happened, newest first",
   gamelog: "Parsed lines from the running clients' log files",
   notifications: "Invites, friend requests, and messages",
-  groups: "Reached from a group badge or a profile, never on its own",
   consent: "Apps asking to use your VRChat accounts through vrc.zip",
   apps: "Standing app access, and the switch that cuts it off",
   settings: "Contact address, log directories, ports",

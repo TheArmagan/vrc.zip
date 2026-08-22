@@ -35,6 +35,7 @@ import SearchField from "$lib/components/SearchField.svelte";
 import StatusDot from "$lib/components/StatusDot.svelte";
 import UserActionsMenu from "$lib/components/UserActionsMenu.svelte";
 import UserName from "$lib/components/UserName.svelte";
+import WornAvatar from "$lib/components/WornAvatar.svelte";
 import {
   Avatar,
   AvatarBadge,
@@ -285,6 +286,13 @@ const TAB_FAILURE_BODIES: Record<string, string> = {
     {/if}
 
     {#if profile !== null}
+      <!--
+        Above the bio, because it is the one thing on this tab that changes hour to hour and the
+        one thing a reader is most often here to see. It draws VRChat's picture immediately and
+        layers the identity on separately; see the component for why those are two different jobs.
+      -->
+      <WornAvatar {profile} accountId={userModal.accountId} />
+
       {#if profile.bio}
         <!-- User-authored, and it carries its own line breaks; whitespace is kept. -->
         <p class="text-sm whitespace-pre-wrap">{profile.bio}</p>

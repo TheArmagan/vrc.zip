@@ -13,12 +13,13 @@
  *  - **It recognises, it does not guess.** An id prefix is the only evidence accepted. VRChat's
  *    legacy user ids have no prefix at all, so a bare word could be a user id, and offering to open
  *    every word anybody pastes would make the palette answer "open user 'hello'" to a search.
- *  - **Recognised is not the same as supported.** An avatar id is unmistakably an avatar id and
- *    vrc.zip has no screen for it. Saying "that is an avatar, and this build cannot open one" is a
- *    real answer; silently matching nothing is not.
+ *  - **Recognised is not the same as supported.** A file id is unmistakably a file id and vrc.zip
+ *    has no screen for one. Saying "that is a file, and this build cannot open one" is a real
+ *    answer; silently matching nothing is not. Avatars used to be in this bucket and are not any
+ *    more — the avatar modal is where an `avtr_…` goes now.
  */
 
-/** The kinds of thing an id can name. The last two parse but have nowhere to go. */
+/** The kinds of thing an id can name. Only the last parses and has nowhere to go. */
 export type TargetKind = "user" | "world" | "instance" | "group" | "avatar" | "file";
 
 export interface DirectTarget {
@@ -27,7 +28,7 @@ export interface DirectTarget {
   readonly id: string;
   /** The full `wrld_…:12345~region(eu)` location. Only ever set for `kind: "instance"`. */
   readonly location: string | null;
-  /** Whether this build has somewhere to put it. False for avatars and files. */
+  /** Whether this build has somewhere to put it. False for files. */
   readonly supported: boolean;
 }
 
@@ -45,6 +46,7 @@ const SUPPORTED: ReadonlySet<TargetKind> = new Set<TargetKind>([
   "world",
   "instance",
   "group",
+  "avatar",
 ]);
 
 function target(kind: TargetKind, id: string, location: string | null = null): DirectTarget {
@@ -188,7 +190,5 @@ export function describeTarget(entry: DirectTarget): string {
 /** Why a recognised target cannot be opened, or null when it can. */
 export function unsupportedReason(entry: DirectTarget): string | null {
   if (entry.supported) return null;
-  return entry.kind === "avatar"
-    ? "That is an avatar id. The daemon has no avatar endpoint, so this build has nowhere to open it."
-    : "That is a file id. vrc.zip reads files through the records that reference them, never on their own.";
+  return "That is a file id. vrc.zip reads files through the records that reference them, never on their own.";
 }

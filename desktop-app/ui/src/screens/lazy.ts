@@ -44,7 +44,6 @@ const loaders = {
   feed: () => import("./FeedScreen.svelte"),
   gamelog: () => import("./GameLogScreen.svelte"),
   notifications: () => import("./NotificationsScreen.svelte"),
-  groups: () => import("./GroupScreen.svelte"),
   consent: () => import("./ConsentScreen.svelte"),
   apps: () => import("./ConnectedAppsScreen.svelte"),
   settings: () => import("./SettingsScreen.svelte"),

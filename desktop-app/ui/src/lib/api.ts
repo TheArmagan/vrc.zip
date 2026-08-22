@@ -18,6 +18,8 @@ import {
   type AccountConnection,
   type AppAuditEntry,
   type AuditOutcome,
+  type AvatarDetail,
+  type AvatarFileResolution,
   type ControlAccount,
   type DaemonStatus,
   EVENT_FAMILIES,
@@ -29,6 +31,7 @@ import {
   type FriendPresence,
   type FriendStatus,
   familyOf,
+  fileIdFromImageUrl,
   type GameSession,
   type GroupGalleryImagePage,
   type GroupGalleryImageSummary,
@@ -83,6 +86,8 @@ export {
   type AccountConnection,
   type AppAuditEntry,
   type AuditOutcome,
+  type AvatarDetail,
+  type AvatarFileResolution,
   type ControlAccount as Account,
   type DaemonStatus,
   EVENT_FAMILIES,
@@ -94,6 +99,7 @@ export {
   type FriendPresence as Friend,
   type FriendStatus,
   familyOf,
+  fileIdFromImageUrl,
   type GameSession,
   type GroupGalleryImagePage,
   type GroupGalleryImageSummary,
@@ -177,6 +183,18 @@ export interface UserProfile {
    * every other VRChat asset, because a browser cannot fetch these URLs itself.
    */
   readonly iconUrlFull: string | null;
+  /**
+   * The avatar this user is *wearing*, as VRChat's picture of it, or null.
+   *
+   * Not the same claim as `iconUrl`, even when they happen to be the same URL: that one is "the
+   * best picture of this person" and this one is "the thing they have on". Only this may be used to
+   * look an avatar up, because VRChat exposes no avatar id on a public user and this URL's file id
+   * is the only handle there is.
+   */
+  readonly currentAvatarImageUrl: string | null;
+  readonly currentAvatarThumbnailImageUrl: string | null;
+  /** VRChat's content tags for the worn avatar. An open set. */
+  readonly currentAvatarTags: readonly string[];
   /** Unix ms this account first recorded the friendship. Null when never friends. */
   readonly friendedAt: number | null;
   /** The local, private note. Null when unset. */
@@ -1432,6 +1450,38 @@ export const api = {
         `/groups/${encodeURIComponent(groupId)}/galleries/${encodeURIComponent(galleryId)}/images`,
         { query: { accountId, n: String(n), offset: String(offset) }, ...withSignal(signal) },
       ),
+  },
+
+  avatars: {
+    /**
+     * The avatar id for one VRChat image file, or null when none is known.
+     *
+     * **This is the third-party lookup.** The daemon asks avtr.zip, because VRChat exposes no
+     * avatar id on a public user and a picture is the only handle there is. It is a setting the
+     * user can turn off (`resolveAvatarIds`), and when it is off this answers `avatarId: null`
+     * rather than failing — "not resolved" and "could not resolve" look the same to a caller on
+     * purpose, because neither is a reason to draw an error at somebody.
+     */
+    byFile: (fileId: string, signal?: AbortSignal): Promise<AvatarFileResolution> =>
+      request<AvatarFileResolution>(`/avatars/by-file/${encodeURIComponent(fileId)}`, {
+        ...withSignal(signal),
+      }),
+
+    /**
+     * One avatar record. Needs a signed-in account, since this one really is VRChat's.
+     *
+     * A 404 is ordinary: avatars are deleted and made private constantly, and an id recovered from
+     * a months-old feed row is exactly where a dead one comes from.
+     */
+    get: (
+      avatarId: string,
+      accountId?: string | null,
+      signal?: AbortSignal,
+    ): Promise<AvatarDetail> =>
+      request<AvatarDetail>(`/avatars/${encodeURIComponent(avatarId)}`, {
+        query: { accountId },
+        ...withSignal(signal),
+      }),
   },
 
   worlds: {

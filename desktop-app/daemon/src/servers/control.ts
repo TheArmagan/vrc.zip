@@ -546,6 +546,20 @@ export interface UserDetail {
    */
   iconUrlFull: string | null;
   /**
+   * The avatar this user is *wearing*, as VRChat's own picture of it, or null.
+   *
+   * Distinct from `iconUrl` and worth its own field even though `pickUserImageUrl` may fall back to
+   * it: as an icon it is "the best picture of this person", and here it is "the thing they are
+   * wearing", which is a different claim and the only one an avatar lookup may be built on. VRChat
+   * exposes no avatar *id* on a public user, so this URL's file id is the only handle there is —
+   * see `net/avatar-ids.ts`.
+   */
+  currentAvatarImageUrl: string | null;
+  /** The thumbnail of the same. Both are sent, and either can carry the file id. */
+  currentAvatarThumbnailImageUrl: string | null;
+  /** VRChat's content tags for the worn avatar. An open set, passed through verbatim. */
+  currentAvatarTags: readonly string[];
+  /**
    * The profile banner, or null. A plain field on VRChat's `User`, so it costs no extra call — it
    * simply was not being passed through. Already the full-size asset; there is no thumbnail of it.
    */

@@ -1768,6 +1768,71 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      with one component. The connected-app row also moved its audit fetch onto the expander, so the
      screen stopped maintaining a map of activity for rows nobody had opened.
 
+159. **An avatar is identified by its picture, which is why any of this is strange.** VRChat tells
+     you what an avatar looks like — `currentAvatarImageUrl` and its thumbnail — and never which
+     avatar it is: there is no avatar id anywhere on a public user. avtr.zip maps the image's *file
+     id* back to an `avtr_…`, and that is the only route from what the pipeline sends to what
+     `GET /avatars/{id}` needs.
+
+     Three consequences shaped the UI. **The picture and the identity are separate jobs**: the
+     picture is VRChat's own and is drawn immediately and unconditionally, while the identity is
+     slower, third-party and optional, and its absence is never drawn as a failure of the profile.
+     **Null is an answer, not a miss** — most pictures are not avatars, so "no avatar for this file"
+     is the common case and is cached exactly like an id; treating it as a cooldown the way
+     `world-names` treats an unresolved world would re-ask about every profile icon in the app
+     forever. And **the setting being off produces the same null as a genuine miss**, deliberately,
+     because neither is a reason to show somebody an error.
+
+     `fileIdFromImageUrl` moved to `@vrcz/shared` when the UI needed it: it decides which pictures
+     are worth offering a lookup for on one side and which may be sent to a third party on the
+     other, and two copies of that grammar would be two opinions about what a file id is.
+
+     `UserDetail` gained `currentAvatarImageUrl` as a field of its own rather than being read off
+     `iconUrl`. They are often the same URL and never the same claim: one is "the best picture of
+     this person" and the other is "the thing they have on", and only the second may be used to look
+     an avatar up.
+
+160. **A 404 on an avatar is a statement about the asker.** VRChat serves an avatar record only to
+     accounts allowed to see it, so an avatar private to its author is a 404 for everybody else —
+     including your own other accounts, and very often the account that *can* see it is the one
+     wearing it. `getAvatar` therefore asks each signed-in account in turn and reports which one
+     answered, so the reader can tell "this avatar is gone" from "your other account can see this
+     one". Sequential rather than parallel, unlike the world instance list: there the accounts each
+     add information, here the first answer ends the question and N requests to use one would be
+     waste. A named `accountId` is still asked alone, because naming one is the caller saying whose
+     eyes to use.
+
+     `avatar_cache` rows became an envelope to carry the answering account. The record itself is the
+     same bytes for everyone VRChat answers, which is why one global row is still right; *visibility*
+     is the part that is not shared. A bare body from an older build still parses, with the account
+     unknown, and unknown is rendered as nothing rather than as "nobody".
+
+161. **The group screen is gone; the modal absorbed it.** Members, posts, galleries and instances
+     are tabs of the group card now, and `#/groups/<id>` no longer exists. The split it replaced was
+     defensible on paper — "the modal answers what is this group in a glance, the screen is a place
+     with a URL" — and did not survive contact: the modal already had tabs and a back stack, so the
+     screen's only real advantage was width, and the price was that half a group's information sat
+     behind a navigation that threw away wherever you had been. The screen's own reasoning was
+     carried over rather than discarded, in particular that **which account is asking is part of the
+     question** (a group shows its member list to members and 403s everybody else), which is why the
+     modal grew an account picker rather than silently using whichever account opened it.
+
+     Lists still load only when their tab is opened. Four eager lists is four requests through a
+     20/s per-account bucket for three lists nobody looked at, and that arithmetic did not change by
+     moving house.
+
+162. **A worn avatar shows its name, not an offer to find one.** The profile section began as a
+     button reading "Open this avatar", which is the app admitting it has an id and nothing else.
+     `avatar-records.svelte.ts` reads the record so the row can print "Robot Kyle by Kung", with the
+     name itself as the control — the same rule `WorldLink` and `UserName` follow, and the reason
+     there is no separate open button beside a name the reader can already see.
+
+     Its caching rule differs from `world-names` on purpose: **a 404 latches here**. There, an
+     unresolvable world is a cooldown because the batch route omits what it cannot serve and omits
+     everything when nothing is signed in. Here a 404 means the daemon already asked every signed-in
+     account and none could see it, so re-asking costs a request per account per profile to hear the
+     same answer. `no-account` does not latch, for the mirror-image reason: nobody was asked.
+
 ---
 
 ## Gotchas
@@ -1775,6 +1840,20 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **`imageUrl()` is not idempotent, and double-applying it fails silently as a blank grey plate.**
+  `HeroBanner` proxies its `url` itself, so a caller that proxies first produces
+  `/api/image?url=/api/image?url=…`, which resolves to nothing. Nothing throws: the band is a
+  deliberate surface that draws whether or not an image lands on it, and a failed load is a
+  first-class state there — so the bug looks exactly like "this avatar has no picture". The rule is
+  that **`bannerUrl` takes VRChat's raw URL**, as the world, user and group modals all do; only a
+  bare `<img src>` calls `imageUrl` itself. Worth remembering as the general shape: a component that
+  handles absence gracefully cannot also report a malformed input, so the two look the same.
+
+- **A world's hero band is the wrong frame for an avatar.** `HeroBanner` centre-crops to a fixed
+  160px, which suits a letterbox world image and shows a horizontal slice of a portrait avatar. The
+  avatar modal draws the full image in its Overview tab at `object-contain` as well, because the
+  picture *is* the record for most readers.
 
 - **`economy-update` is documented as `balance` and arrives as `walletBalance`.** `PipelineEconomyUpdate`
   models `balance`, and the frames that actually land spell it `walletBalance` — the type's own

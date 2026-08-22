@@ -1,19 +1,27 @@
 <!--
-  One VRChat group, as vrc.zip knows them.
+  One VRChat group in full: what it is, who is in it, what has been said and shown in it, and where
+  it is gathering right now.
 
   Mounted exactly once, by `App.svelte`, and driven entirely by `groupModal` — see that module for
-  why there is one instance rather than one per call site, and for what a 404 on a group actually
-  means.
+  why there is one instance rather than one per call site, for what a 404 on a group actually means,
+  and for why the account this was opened through is part of the question rather than bookkeeping.
 
   Built on `EntityModal`, like the user and world cards, so the banner, the header and the scroll
   behaviour are the same three in all three. The body is tabbed, the way the user modal's is, because
-  the three things worth knowing here are different *kinds* of thing rather than sections of one
-  document: what the group is, where it is gathering right now, and what VRChat actually sent.
+  these are different *kinds* of thing rather than sections of one document: what the group is, its
+  roster, its board, its walls, where it is gathering, and what VRChat actually sent.
 
-  Instances in particular do not belong in the middle of a document. They are a live answer that
-  changes minute to minute while the description and the rules do not, they cost a second request
-  nobody should pay for clicking a badge, and most groups have none — so they load when their tab is
-  opened and their empty state is allowed to say so, rather than a blank stretch of the card.
+  Everything below Overview loads when its tab is first opened. Four lists fetched on arrival is four
+  requests through a 20/s per-account bucket for three lists nobody looked at, paid for by clicking a
+  badge — and most groups have no open instances at all, so their tab's empty state is allowed to say
+  so rather than leaving a blank stretch of the card.
+
+  ## A refused tab still renders
+
+  A 403 on members is the *normal* answer for a group you have not joined. It is drawn as a sentence
+  saying membership is required, with no retry button, because no number of retries acquires
+  membership. Hiding the tab instead would read as a bug in vrc.zip to anyone who can see that same
+  group's member list on vrchat.com.
 
   **Every number here is one VRChat sent.** No vrc.zip activity score, no "how alive is this group"
   out of ten. The two counts sit side by side with the age of the second one, because VRChat
@@ -26,13 +34,15 @@
 -->
 <script lang="ts">
 import CalendarIcon from "@lucide/svelte/icons/calendar";
-import ChevronRightIcon from "@lucide/svelte/icons/chevron-right";
 import ExternalLinkIcon from "@lucide/svelte/icons/external-link";
+import ImageIcon from "@lucide/svelte/icons/image";
+import MessageSquareIcon from "@lucide/svelte/icons/message-square";
 import ServerIcon from "@lucide/svelte/icons/server";
 import ShieldCheckIcon from "@lucide/svelte/icons/shield-check";
 import UsersIcon from "@lucide/svelte/icons/users";
 import { imageUrl } from "$lib/api.ts";
 import DetailGrid from "$lib/components/DetailGrid.svelte";
+import EmptyState from "$lib/components/EmptyState.svelte";
 import EntityFooter from "$lib/components/EntityFooter.svelte";
 import EntityModal, { type ModalTab } from "$lib/components/EntityModal.svelte";
 import FailureNote from "$lib/components/FailureNote.svelte";
@@ -44,6 +54,7 @@ import UserName from "$lib/components/UserName.svelte";
 import { Avatar, AvatarFallback, AvatarImage } from "$lib/components/ui/avatar/index.js";
 import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
+import * as Select from "$lib/components/ui/select/index.js";
 import { Separator } from "$lib/components/ui/separator/index.js";
 import { Skeleton } from "$lib/components/ui/skeleton/index.js";
 import * as Tabs from "$lib/components/ui/tabs/index.js";
@@ -56,7 +67,7 @@ import {
   parseLocation,
   shortId,
 } from "$lib/format.ts";
-import { navigate } from "$lib/router.ts";
+import { app } from "$lib/state/app.svelte.ts";
 import { modalBack } from "$lib/state/entity-modal.svelte.ts";
 import {
   GROUP_MODAL_TAB_LABELS,
@@ -68,6 +79,7 @@ import { worldModal } from "$lib/state/world-modal.svelte.ts";
 
 const summary = $derived(groupModal.summary);
 const group = $derived(groupModal.group);
+const galleries = $derived(groupModal.galleries);
 
 const tag = $derived(groupTag(summary?.shortCode, summary?.discriminator));
 
@@ -84,9 +96,10 @@ const raw = $derived(JSON.stringify(groupModal.snapshot, null, 2));
 /**
  * Counts on the tab strip.
  *
- * Instances load lazily, so their count appears once the tab has been opened rather than on
- * arrival. A count that is absent means "not read yet", never "none" — the empty state inside the
- * tab is the only thing allowed to claim zero.
+ * Only Instances gets one, and only once its tab has been opened: it is the one list that arrives
+ * whole, so its length is the answer rather than a page of it. A paged tab showing "50" would be
+ * claiming a total it does not have, and a count that is absent means "not read yet", never "none"
+ * — the empty state inside the tab is the only thing allowed to claim zero.
  */
 function tabCount(tab: GroupModalTab): number | null {
   if (tab !== "instances") return null;
@@ -100,6 +113,29 @@ const tabs = $derived<ModalTab[]>(
     label: GROUP_MODAL_TAB_LABELS[tab],
     count: tabCount(tab),
   })),
+);
+
+/**
+ * The account picker.
+ *
+ * Bound through a getter/setter rather than to `groupModal.accountId` directly, because assigning
+ * the id has to go through `setAccount()` - which re-reads the group *and* every list. Binding
+ * straight to the field would change the membership badge above lists still holding the previous
+ * account's answers, which is the "two true halves, one false whole" failure this dialog is built
+ * to avoid.
+ */
+const accountChoice = {
+  get value(): string {
+    return groupModal.accountId ?? "";
+  },
+  set value(next: string) {
+    groupModal.setAccount(next === "" ? null : next);
+  },
+};
+
+const accountLabel = $derived(
+  app.accounts.find((account) => account.id === groupModal.accountId)?.displayName ??
+    "Any account",
 );
 
 /**
@@ -147,20 +183,41 @@ const FAILURE_BODIES: Record<string, string> = {
   other: "",
 };
 
-/**
- * The instances tab's own words for the same failures.
+/*
+ * Each list's own words for each failure.
  *
- * `forbidden` is the one worth spelling out, and it is not an error: a group deciding that only its
- * members may see where it is gathering is a rule about who may look, so it gets a sentence rather
- * than a retry that could never work.
+ * `""` means "the daemon said it better than I can" and falls through to the raw message — see
+ * `FailureNote`. `forbidden` is the one that matters here and it is phrased as a fact about the
+ * group rather than an apology, because it is not a fault: a group deciding who may read its
+ * roster is a rule about who may look, so it gets a sentence rather than a retry that could never
+ * work.
  */
-const INSTANCE_BODIES: Record<string, string> = {
+const MEMBER_BODIES: Record<string, string> = {
   "no-account":
-    "A group's instances can only be read through a signed-in account's credentials, and none of yours are connected right now.",
+    "A group's members can only be read through somebody's credentials, and vrc.zip has none online right now.",
   "not-found": "This group is gone, or it is private to the account asking.",
-  forbidden: "This group only tells its members where it is gathering.",
+  forbidden:
+    "This group shows its member list to its own members. Join it, or switch to an account that already has, and it will appear here.",
   offline: "",
   other: "",
+};
+
+const POST_BODIES: Record<string, string> = {
+  ...MEMBER_BODIES,
+  forbidden:
+    "This group shows its posts to its own members. Join it, or switch to an account that already has, and they will appear here.",
+};
+
+const GALLERY_BODIES: Record<string, string> = {
+  ...MEMBER_BODIES,
+  forbidden: "This gallery is for members of the group only.",
+};
+
+const INSTANCE_BODIES: Record<string, string> = {
+  ...MEMBER_BODIES,
+  "no-account":
+    "A group's instances can only be read through a signed-in account's credentials, and none of yours are connected right now.",
+  forbidden: "This group only tells its members where it is gathering.",
 };
 </script>
 
@@ -204,6 +261,26 @@ const INSTANCE_BODIES: Record<string, string> = {
     {/if}
   {/snippet}
 
+  {#snippet actions()}
+    <!--
+      Who is asking, as a control rather than something the daemon picks. A group shows its roster
+      to its own members and refuses everyone else, and the membership badge below is a statement
+      about this account, so the answer on screen is only half an answer without it.
+    -->
+    {#if app.accounts.length > 0}
+      <Select.Root type="single" bind:value={accountChoice.value}>
+        <Select.Trigger size="sm" class="w-40 shrink-0" aria-label="Ask as which account">
+          <span class="truncate">{accountLabel}</span>
+        </Select.Trigger>
+        <Select.Content>
+          {#each app.accounts as account (account.id)}
+            <Select.Item value={account.id} label={account.displayName} />
+          {/each}
+        </Select.Content>
+      </Select.Root>
+    {/if}
+  {/snippet}
+
   {#snippet badges()}
     {#if group?.isVerified}
       <Badge variant="outline" title="VRChat verified this group">
@@ -226,7 +303,7 @@ const INSTANCE_BODIES: Record<string, string> = {
     {#if group?.membershipStatus}
       <!--
         About the account this was opened through, never about the group — which is why it can say
-        something different for the same group opened from two different rows.
+        something different for the same group asked about through two different accounts.
       -->
       <Badge variant="secondary">
         {MEMBERSHIP[group.membershipStatus] ?? group.membershipStatus}
@@ -357,33 +434,155 @@ const INSTANCE_BODIES: Record<string, string> = {
         </div>
       {/if}
     {/if}
+  </Tabs.Content>
 
-    <!--
-      Into the full group screen, for the three lists this dialog does not carry.
+  <!-- Members ---------------------------------------------------------------- -->
+  <Tabs.Content value="members" class="space-y-3">
+    <PagedSection
+      list={groupModal.members}
+      icon={UsersIcon}
+      emptyTitle="No members to show"
+      emptyDescription="This group's roster is empty, or VRChat is not describing it to this account."
+      titles={FAILURE_TITLES}
+      bodies={MEMBER_BODIES}
+      skeletonRows={4}
+    >
+      {#snippet row(member)}
+        <div class="flex items-center gap-3 border border-border p-3">
+          <UserName
+            userId={member.userId}
+            name={member.displayName}
+            accountId={groupModal.accountId}
+            class="min-w-0 flex-1"
+          />
+          {#if member.isRepresenting}
+            <Badge variant="outline" class="shrink-0">Represents</Badge>
+          {/if}
+          {#if member.joinedAt !== null}
+            <span class="shrink-0 text-xs text-muted-foreground">
+              joined <RelativeTime ts={member.joinedAt} />
+            </span>
+          {/if}
+        </div>
+      {/snippet}
+    </PagedSection>
+  </Tabs.Content>
 
-      `dismiss()` rather than `close()`, and this is that method's first real caller. Close pops one
-      level of the shared back stack, which is right when a dialog opened another dialog; a route
-      change invalidates every level, because the screen the reader would be returning *to* is no
-      longer behind anything. Leaving the stack populated here would mean the next modal opened from
-      the group screen has a back button pointing at a profile from before the navigation.
-    -->
-    {#if groupModal.groupId !== null}
-      {@const id = groupModal.groupId}
-      <Separator />
-      <Button
-        variant="secondary"
-        class="w-full justify-between"
-        onclick={() => {
-          groupModal.dismiss();
-          navigate("groups", id);
-        }}
+  <!-- Posts ------------------------------------------------------------------ -->
+  <Tabs.Content value="posts" class="space-y-3">
+    <PagedSection
+      list={groupModal.posts}
+      icon={MessageSquareIcon}
+      emptyTitle="No posts"
+      emptyDescription="Nothing has been posted to this group's board."
+      titles={FAILURE_TITLES}
+      bodies={POST_BODIES}
+      skeletonRows={3}
+    >
+      {#snippet row(post)}
+        <article class="space-y-2 border border-border p-3">
+          <div class="flex items-baseline justify-between gap-3">
+            <h3 class="min-w-0 truncate text-sm font-medium">{post.title ?? "Untitled post"}</h3>
+            {#if post.createdAt !== null}
+              <span class="shrink-0 text-xs text-muted-foreground">
+                <RelativeTime ts={post.createdAt} />
+              </span>
+            {/if}
+          </div>
+
+          {#if post.authorId !== null}
+            <!--
+              VRChat's post record carries only an author id; the daemon fills the name in from
+              presence and the friend log at no request cost and leaves it null otherwise. A post
+              whose author is a stranger is a normal post, so the id stands in rather than the row
+              pretending it has no author.
+            -->
+            <UserName
+              userId={post.authorId}
+              name={post.authorDisplayName ?? shortId(post.authorId, 12)}
+              accountId={groupModal.accountId}
+            />
+          {/if}
+
+          {#if post.text !== null}
+            <!-- Author-written, line breaks and all. VRChat does not treat it as markdown. -->
+            <p class="text-sm whitespace-pre-wrap">{post.text}</p>
+          {/if}
+
+          {#if post.imageUrl !== null && post.imageUrl !== ""}
+            <!-- Through `imageUrl()`: a browser cannot load a VRChat asset URL directly. -->
+            <img
+              src={imageUrl(post.imageUrl)}
+              alt=""
+              loading="lazy"
+              class="max-h-80 w-full border border-border object-contain"
+            />
+          {/if}
+        </article>
+      {/snippet}
+    </PagedSection>
+  </Tabs.Content>
+
+  <!-- Galleries -------------------------------------------------------------- -->
+  <Tabs.Content value="galleries" class="space-y-3">
+    {#if galleries.length === 0}
+      <EmptyState
+        icon={ImageIcon}
+        title="No galleries"
+        description="This group has not created any galleries, or none are visible to this account."
+      />
+    {:else}
+      <!--
+        The gallery list rides in on the group record, so switching galleries costs one request for
+        images and none for the list itself.
+      -->
+      <div class="flex flex-wrap gap-2">
+        {#each galleries as gallery (gallery.id)}
+          <Button
+            variant={gallery.id === groupModal.galleryId ? "secondary" : "ghost"}
+            size="sm"
+            onclick={() => groupModal.selectGallery(gallery.id)}
+          >
+            {gallery.name}
+            {#if gallery.membersOnly}
+              <Badge variant="outline" class="ml-1">Members</Badge>
+            {/if}
+          </Button>
+        {/each}
+      </div>
+
+      <PagedSection
+        list={groupModal.images}
+        icon={ImageIcon}
+        emptyTitle="Nothing in this gallery"
+        emptyDescription="No images have been added to it yet."
+        titles={FAILURE_TITLES}
+        bodies={GALLERY_BODIES}
+        skeletonRows={2}
       >
-        <span class="inline-flex items-center gap-2">
-          <UsersIcon class="size-4" />
-          Members, posts and galleries
-        </span>
-        <ChevronRightIcon class="size-4" />
-      </Button>
+        {#snippet row(image)}
+          <figure class="space-y-1 border border-border p-2">
+            {#if image.imageUrl !== null && image.imageUrl !== ""}
+              <img
+                src={imageUrl(image.imageUrl)}
+                alt=""
+                loading="lazy"
+                class="max-h-80 w-full object-contain"
+              />
+            {/if}
+            {#if image.submittedByUserId !== null}
+              <figcaption class="text-xs text-muted-foreground">
+                submitted by <UserName
+                  userId={image.submittedByUserId}
+                  name={shortId(image.submittedByUserId, 12)}
+                  accountId={groupModal.accountId}
+                  class="inline"
+                />
+              </figcaption>
+            {/if}
+          </figure>
+        {/snippet}
+      </PagedSection>
     {/if}
   </Tabs.Content>
 

@@ -2478,6 +2478,62 @@ describe("control deps: avatars", () => {
     h.stop();
   });
 
+  test("asks each signed-in account until one can see the avatar, and says which", async () => {
+    /*
+     * A 404 on an avatar is a statement about the asker, not the avatar: VRChat serves the record
+     * only to accounts allowed to see it, so an avatar private to its author is invisible to every
+     * other account including your own others. Asking through one account and reporting "no such
+     * avatar" would be wrong most of the time on a multi-account setup.
+     */
+    const h = harness({
+      avatar: (_avatarId, call) =>
+        call === 1 ? new Response("", { status: 404 }) : Response.json(avatarBody(AVATAR_ID)),
+    });
+    await resumeAll(h);
+
+    const detail = await h.deps.getAvatar(AVATAR_ID, null);
+    expect(detail.id).toBe(AVATAR_ID);
+    // The second account is the one that could see it, and the answer names it.
+    expect(detail.seenByAccountId).toBe(OTHER);
+    expect(h.requests.filter((path) => path.includes("/avatars/"))).toHaveLength(2);
+    h.stop();
+  });
+
+  test("stops at the first account that answers rather than asking them all", async () => {
+    // Sequential on purpose: the first answer ends the question, and firing one request per account
+    // to use one of them is waste the rate limiter would rather not carry.
+    const h = harness();
+    await resumeAll(h);
+
+    const detail = await h.deps.getAvatar(AVATAR_ID, null);
+    expect(detail.seenByAccountId).toBe(VIEWER);
+    expect(h.requests.filter((path) => path.includes("/avatars/"))).toHaveLength(1);
+    h.stop();
+  });
+
+  test("404s only when no account can see it, and says how many were asked", async () => {
+    const h = harness({ avatar: () => new Response("", { status: 404 }) });
+    await resumeAll(h);
+
+    await expect(h.deps.getAvatar(AVATAR_ID, null)).rejects.toMatchObject({
+      status: 404,
+      code: "unknown_avatar",
+    });
+    expect(h.requests.filter((path) => path.includes("/avatars/"))).toHaveLength(2);
+    h.stop();
+  });
+
+  test("a named account is asked alone, never fallen back from", async () => {
+    // Naming an account is the caller saying whose eyes to use. Silently trying somebody else's
+    // would answer a different question than the one asked.
+    const h = harness({ avatar: () => new Response("", { status: 404 }) });
+    await resumeAll(h);
+
+    await expect(h.deps.getAvatar(AVATAR_ID, VIEWER)).rejects.toMatchObject({ status: 404 });
+    expect(h.requests.filter((path) => path.includes("/avatars/"))).toHaveLength(1);
+    h.stop();
+  });
+
   test("projects the avatar and caches the body in avatar_cache", async () => {
     const h = harness();
     await resumeAll(h);
@@ -2499,15 +2555,22 @@ describe("control deps: avatars", () => {
       updatedAt: Date.parse("2021-01-02T03:04:05.000Z"),
       fetchedAt: detail.fetchedAt,
       cached: false,
+      // The account that could actually see it, which is the point of asking each in turn.
+      seenByAccountId: VIEWER,
     });
     // Asset locations are not projected — see `toAvatarDetail`.
     expect(Object.keys(detail)).not.toContain("unityPackages");
     expect(Object.keys(detail)).not.toContain("assetUrl");
 
-    // The row, not the return value.
+    // The row, not the return value. It is an envelope rather than a bare body, because the row
+    // has to remember which account could see this avatar as well as what it is.
     const row = h.store.getAvatarCache(AVATAR_ID);
     expect(row?.id).toBe(AVATAR_ID);
-    expect(JSON.parse(row?.data ?? "{}")).toMatchObject({ id: AVATAR_ID, name: "A Robot" });
+    expect(JSON.parse(row?.data ?? "{}")).toMatchObject({
+      v: 1,
+      seenByAccountId: VIEWER,
+      avatar: { id: AVATAR_ID, name: "A Robot" },
+    });
 
     // Second read is the cache, with no second request and `cached: true`.
     const again = await h.deps.getAvatar(AVATAR_ID, VIEWER);

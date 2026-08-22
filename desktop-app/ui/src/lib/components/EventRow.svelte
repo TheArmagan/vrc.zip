@@ -16,12 +16,15 @@
 -->
 <script lang="ts">
 import ChevronIcon from "@lucide/svelte/icons/chevron-down";
+import ShirtIcon from "@lucide/svelte/icons/shirt";
+import { fileIdFromImageUrl } from "$lib/api.ts";
 import GroupName from "$lib/components/GroupName.svelte";
 import LocationLine from "$lib/components/LocationLine.svelte";
 import UserName from "$lib/components/UserName.svelte";
 import { describeEvent, TONE_CLASSES } from "$lib/event-details.ts";
 import type { LiveEvent } from "$lib/events.ts";
 import { fullTimestamp, isGroupId, isUserId, shortId, timeOfDay } from "$lib/format.ts";
+import { avatarModal } from "$lib/state/avatar-modal.svelte.ts";
 
 let {
   event,
@@ -80,6 +83,36 @@ const subjectIsId = $derived(details.subject === null && subject !== null);
 const showsUser = $derived(
   details.subjectless !== true && (subject !== null || subjectUserId !== null),
 );
+
+/**
+ * The picture a "switched avatar" row is about, as a file id — or null when there is not one.
+ *
+ * The payload of `friend.updated.avatar` and `user.updated.avatar` carries the new
+ * `currentAvatarImageUrl`, and **that picture is the only handle VRChat gives out**: there is no
+ * avatar id anywhere on a user. So the file id inside the URL is what the avatar modal is opened
+ * with, and `avatar-ids.svelte.ts` turns it into an `avtr_…` on the other side.
+ *
+ * A URL that yields no file id renders no control at all. VRChat sends `""` for an unset image and
+ * the payload is its own shape forwarded verbatim, so "there is no picture here" is ordinary and a
+ * button that could only fail is worse than no button.
+ */
+const avatarFileId = $derived.by(() => {
+  if (event.kind !== "friend.updated.avatar" && event.kind !== "user.updated.avatar") return null;
+  const payload: unknown = event.payload;
+  if (typeof payload !== "object" || payload === null) return null;
+  const changes: unknown = (payload as Record<string, unknown>).changes;
+  if (!Array.isArray(changes)) return null;
+  for (const item of changes as readonly unknown[]) {
+    if (typeof item !== "object" || item === null) continue;
+    const change = item as Record<string, unknown>;
+    if (change.aspect !== "avatar") continue;
+    const to = change.to;
+    if (typeof to !== "string" || to === "") continue;
+    const fileId = fileIdFromImageUrl(to);
+    if (fileId !== null && fileId !== "") return fileId;
+  }
+  return null;
+});
 
 const repeatTitle = $derived(
   oldestTs === null || repeats < 2
@@ -165,6 +198,23 @@ const expandable = $derived(raw !== null || details.facts.length > 0 || details.
       <span class={subject === null ? "font-medium" : "text-muted-foreground"}>
         {details.action}
       </span>
+
+      {#if avatarFileId !== null}
+        <!--
+          A real `<button>`, a sibling of the name rather than a child of it: `UserName` is itself a
+          button, and nesting one control inside another is invalid and unreachable from a keyboard.
+          It sits in the same wrapping line as the rest of the sentence, so a row that has one is
+          not a taller row than a row that does not.
+        -->
+        <button
+          type="button"
+          class="inline-flex cursor-pointer items-center gap-1 rounded-xs text-xs text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-none"
+          onclick={() => void avatarModal.openByFile(avatarFileId, { accountId: event.accountId })}
+        >
+          <ShirtIcon class="size-3.5" aria-hidden="true" />
+          Open avatar
+        </button>
+      {/if}
 
       {#if repeats > 1}
         <!--

@@ -59,6 +59,11 @@ export {
 } from "./scopes.ts";
 export { APP_NAME, APP_VERSION, PLUGIN_API_PROTOCOL_MAJOR } from "./version.ts";
 export {
+  AVATAR_ID_PATTERN,
+  FILE_ID_PATTERN,
+  fileIdFromImageUrl,
+} from "./vrchat-files.ts";
+export {
   type AccountConnection,
   type AccountRateCeiling,
   type AppAuditEntry,

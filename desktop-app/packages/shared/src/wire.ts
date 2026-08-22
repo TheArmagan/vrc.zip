@@ -428,6 +428,18 @@ export interface AvatarDetail {
   readonly fetchedAt: number;
   /** True when this came from `avatar_cache` rather than a live fetch. */
   readonly cached: boolean;
+  /**
+   * Which signed-in account could actually see this avatar, or null.
+   *
+   * VRChat serves an avatar record only to accounts allowed to see it, so a 404 is a statement
+   * about the asker rather than about the avatar: an avatar private to its author is invisible to
+   * every other account, including your other ones. The daemon therefore asks each signed-in
+   * account in turn and names the one that answered, which is the difference between "this avatar
+   * is gone" and "your other account can see this one".
+   *
+   * Null on a row cached by a build that did not record it. Absence is "not known", never "nobody".
+   */
+  readonly seenByAccountId: string | null;
 }
 
 // ---------------------------------------------------------------------------

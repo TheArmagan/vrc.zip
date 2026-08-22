@@ -17,11 +17,6 @@ export const ROUTE_IDS = [
   "feed",
   "gamelog",
   "notifications",
-  // `#/groups/<groupId>` — the full group screen. The group *modal* is the quick card that a badge
-  // or a profile row opens; this is where members, posts, galleries and instances live, because
-  // four paged lists inside a dialog that shares a back stack with two other dialogs is a fight
-  // with the shell rather than a use of it.
-  "groups",
   // `#/consent/<pairingId>` — where the daemon's browser-open lands when an app asks for access.
   "consent",
   // `#/apps` — standing app access, and the kill switch. The consent route above is one moment;

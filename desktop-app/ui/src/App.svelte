@@ -10,6 +10,7 @@
 import { untrack } from "svelte";
 import { toast } from "svelte-sonner";
 import AppShell from "$lib/components/AppShell.svelte";
+import AvatarModal from "$lib/components/AvatarModal.svelte";
 import CommandPalette from "$lib/components/CommandPalette.svelte";
 import DaemonOffline from "$lib/components/DaemonOffline.svelte";
 import ErrorNote from "$lib/components/ErrorNote.svelte";
@@ -108,12 +109,10 @@ const screenProps = $derived<Record<string, unknown>>(
     ? { sessionId: route.param }
     : route.id === "login"
       ? { accountId: route.param }
-      : route.id === "groups"
-        ? { groupId: route.param }
-        : // `#/consent/<pairingId>` — where the daemon's browser-open lands.
-          route.id === "consent"
-          ? { pairingId: route.param }
-          : {},
+      : // `#/consent/<pairingId>` — where the daemon's browser-open lands.
+        route.id === "consent"
+        ? { pairingId: route.param }
+        : {},
 );
 </script>
 
@@ -182,3 +181,11 @@ const screenProps = $derived<Record<string, unknown>>(
   peers: opening a group from a profile must not depend on that profile staying open.
 -->
 <GroupModal />
+
+<!--
+  The fourth, and the one that is usually opened from a picture rather than from an id: VRChat puts
+  no avatar id on a user, so a "changed avatar" row carries a file and nothing else. Same singleton
+  terms as the other three, and it shares their back stack, so an avatar opened from a feed row
+  closes back to whatever was underneath it.
+-->
+<AvatarModal />

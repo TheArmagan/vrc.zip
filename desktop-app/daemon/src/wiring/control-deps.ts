@@ -644,7 +644,12 @@ function toWorldDetail(raw: World, fetchedAt: number, cached: boolean): WorldDet
  * `publishedListings` is store inventory. None of it belongs on a card, and re-serving asset URLs
  * from a local API is a distribution question this app has no reason to open.
  */
-function toAvatarDetail(raw: Partial<Avatar>, fetchedAt: number, cached: boolean): AvatarDetail {
+function toAvatarDetail(
+  raw: Partial<Avatar>,
+  fetchedAt: number,
+  cached: boolean,
+  seenByAccountId: string | null,
+): AvatarDetail {
   const id = emptyToNull(raw.id) ?? "";
 
   return {
@@ -664,6 +669,7 @@ function toAvatarDetail(raw: Partial<Avatar>, fetchedAt: number, cached: boolean
     updatedAt: unixMsFromDate(raw.updated_at),
     fetchedAt,
     cached,
+    seenByAccountId,
   };
 }
 
@@ -1316,7 +1322,7 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
   /** The same de-duplication for avatars, keyed by avatar id alone. See {@link loadWorld}. */
   const avatarsInFlight = new Map<
     string,
-    Promise<{ avatar: Partial<Avatar>; fetchedAt: number } | null>
+    Promise<{ avatar: Partial<Avatar>; fetchedAt: number; seenByAccountId: string } | null>
   >();
 
   /**
@@ -1349,11 +1355,15 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
   async function loadAvatar(
     account: Account,
     avatarId: string,
-  ): Promise<{ avatar: Partial<Avatar>; fetchedAt: number } | null> {
+  ): Promise<{ avatar: Partial<Avatar>; fetchedAt: number; seenByAccountId: string } | null> {
     const pending = avatarsInFlight.get(avatarId);
     if (pending !== undefined) return await pending;
 
-    const work = (async (): Promise<{ avatar: Partial<Avatar>; fetchedAt: number } | null> => {
+    const work = (async (): Promise<{
+      avatar: Partial<Avatar>;
+      fetchedAt: number;
+      seenByAccountId: string;
+    } | null> => {
       const response = await vrcFetch(account.context(), `/avatars/${avatarId}`);
       const body = await response.text();
 
@@ -1377,10 +1387,21 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       if (typeof avatar !== "object" || avatar === null) return null;
 
       const fetchedAt = Date.now();
-      // Not keyed by account, for the same reason `world_cache` is not: VRChat answers the same
-      // avatar record to everyone it answers at all.
-      store.putAvatarCache(avatarId, fetchedAt, body);
-      return { avatar, fetchedAt };
+      /*
+       * One row per avatar, not per account, but the row remembers *who could see it*.
+       *
+       * The record itself is the same bytes for everyone VRChat answers at all, exactly as
+       * `world_cache` assumes. Visibility is the part that is not shared: an avatar private to its
+       * author 404s for every other account, so which account got an answer is a real fact about
+       * this avatar and the only one a reader can act on. Stored in an envelope so a cache hit can
+       * still say it; a bare body from an older build parses as `avatar` with no account named.
+       */
+      store.putAvatarCache(
+        avatarId,
+        fetchedAt,
+        JSON.stringify({ v: 1, avatar, seenByAccountId: account.id }),
+      );
+      return { avatar, fetchedAt, seenByAccountId: account.id };
     })().finally(() => {
       avatarsInFlight.delete(avatarId);
     });
@@ -1393,13 +1414,34 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
   function cachedAvatar(
     avatarId: string,
     now: number,
-  ): { avatar: Partial<Avatar>; fetchedAt: number } | null {
+  ): { avatar: Partial<Avatar>; fetchedAt: number; seenByAccountId: string | null } | null {
     const row = store.getAvatarCache(avatarId);
     if (row === null || now - row.fetched_at >= AVATAR_CACHE_TTL_MS) return null;
     try {
-      const avatar = JSON.parse(row.data) as Partial<Avatar>;
-      if (typeof avatar !== "object" || avatar === null) return null;
-      return { avatar, fetchedAt: row.fetched_at };
+      const parsed = JSON.parse(row.data) as
+        | { v?: number; avatar?: Partial<Avatar>; seenByAccountId?: unknown }
+        | Partial<Avatar>;
+      if (typeof parsed !== "object" || parsed === null) return null;
+
+      // The envelope, or a bare body written before there was one. Both are valid rows; the older
+      // shape simply cannot say which account saw it, which is what `null` means here.
+      const envelope = parsed as {
+        v?: number;
+        avatar?: Partial<Avatar>;
+        seenByAccountId?: unknown;
+      };
+      const isEnvelope = envelope.v === 1 && typeof envelope.avatar === "object";
+      const avatar = isEnvelope ? (envelope.avatar ?? null) : (parsed as Partial<Avatar>);
+      if (avatar === null || typeof avatar !== "object") return null;
+
+      return {
+        avatar,
+        fetchedAt: row.fetched_at,
+        seenByAccountId:
+          isEnvelope && typeof envelope.seenByAccountId === "string"
+            ? envelope.seenByAccountId
+            : null,
+      };
     } catch {
       return null;
     }
@@ -1731,14 +1773,38 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       return { fileId, avatarId };
     },
 
+    /**
+     * One avatar, asked of every signed-in account until one can see it.
+     *
+     * **A 404 is about the asker, not the avatar.** VRChat serves an avatar record only to accounts
+     * allowed to see it, so an avatar private to its author is a 404 for everybody else. Asking
+     * through one account and reporting "no such avatar" would therefore be wrong most of the time
+     * on a multi-account setup: the account that *can* see it is very often the one that is wearing
+     * it. The accounts are tried in turn rather than at once, because the first answer ends the
+     * question and firing N requests to use one is waste the rate limiter would rather not carry.
+     *
+     * The answer names the account that produced it. That is the difference between "this avatar is
+     * gone" and "your other account can see this one", which is a distinction the reader can act on.
+     */
     async getAvatar(avatarId, accountId): Promise<AvatarDetail> {
-      // Cache before account, exactly as `getWorld` does: the record is not per account, so a warm
-      // cache answers with nobody signed in.
+      // Cache before account, exactly as `getWorld` does: the *record* is the same bytes for
+      // everyone VRChat answers, so a warm row answers with nobody signed in.
       const hit = cachedAvatar(avatarId, Date.now());
-      if (hit !== null) return toAvatarDetail(hit.avatar, hit.fetchedAt, true);
+      if (hit !== null) {
+        return toAvatarDetail(hit.avatar, hit.fetchedAt, true, hit.seenByAccountId);
+      }
 
-      const account = availableAccount(accountId);
-      if (account === null) {
+      const named = accountId === null ? null : availableAccount(accountId);
+      const candidates =
+        named !== null
+          ? [named]
+          : accounts
+              .list()
+              .filter((snapshot) => snapshot.state === "online")
+              .map((snapshot) => accounts.get(snapshot.id))
+              .filter((account): account is Account => account !== undefined);
+
+      if (candidates.length === 0) {
         throw new ControlError(
           503,
           "no_account",
@@ -1746,15 +1812,20 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         );
       }
 
-      const fetched = await loadAvatar(account, avatarId);
-      if (fetched === null) {
-        throw new ControlError(
-          404,
-          "unknown_avatar",
-          "VRChat has no such avatar, or this account cannot see it.",
-        );
+      for (const account of candidates) {
+        const fetched = await loadAvatar(account, avatarId);
+        if (fetched !== null) {
+          return toAvatarDetail(fetched.avatar, fetched.fetchedAt, false, fetched.seenByAccountId);
+        }
       }
-      return toAvatarDetail(fetched.avatar, fetched.fetchedAt, false);
+
+      throw new ControlError(
+        404,
+        "unknown_avatar",
+        candidates.length === 1
+          ? "VRChat has no such avatar, or this account cannot see it."
+          : `VRChat has no such avatar, or none of your ${String(candidates.length)} signed-in accounts can see it.`,
+      );
     },
 
     async listWorlds(worldIds, accountId): Promise<WorldBatch> {
@@ -2360,6 +2431,11 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         iconUrlFull: pickUserImageUrlFull(user),
         // Plain fields on VRChat's `User`, so they cost nothing — they were simply never passed
         // through. `""` is how VRChat spells "unset" here as everywhere else.
+        // The worn avatar's picture. Its file id is the only handle on avatar identity VRChat
+        // gives for somebody who is not you; see `net/avatar-ids.ts`.
+        currentAvatarImageUrl: emptyToNull(user.currentAvatarImageUrl),
+        currentAvatarThumbnailImageUrl: emptyToNull(user.currentAvatarThumbnailImageUrl),
+        currentAvatarTags: stringArray(user.currentAvatarTags),
         bannerUrl: emptyToNull(user.bannerUrl),
         bannerType: emptyToNull(user.bannerType),
         representedGroup,

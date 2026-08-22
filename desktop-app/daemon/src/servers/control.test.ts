@@ -152,6 +152,9 @@ const USER_DETAIL: UserDetail = {
   lastLogin: 1_700_000_000_000,
   iconUrl: ICON_URL,
   iconUrlFull: ICON_URL_FULL,
+  currentAvatarImageUrl: "https://api.vrchat.cloud/api/1/image/file_avatar/1/1024",
+  currentAvatarThumbnailImageUrl: "https://api.vrchat.cloud/api/1/image/file_avatar/1/256",
+  currentAvatarTags: [],
   bannerUrl: "https://api.vrchat.cloud/api/1/file/file_banner/1/1024",
   bannerType: "gallery",
   representedGroup: {
@@ -367,6 +370,7 @@ const AVATAR_DETAIL: AvatarDetail = {
   updatedAt: 1_600_000_000_000,
   fetchedAt: 1_700_000_000_000,
   cached: false,
+  seenByAccountId: null,
 };
 
 const INSTANCE_INFO: InstanceInfo = {

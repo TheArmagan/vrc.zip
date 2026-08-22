@@ -30,6 +30,7 @@ import { planJoin } from "../format.ts";
 import { requestJoin } from "../join.ts";
 import { navigate } from "../router.ts";
 import { app } from "../state/app.svelte.ts";
+import { avatarModal } from "../state/avatar-modal.svelte.ts";
 import { groupModal } from "../state/group-modal.svelte.ts";
 import { userModal } from "../state/user-modal.svelte.ts";
 import { worldModal } from "../state/world-modal.svelte.ts";
@@ -78,6 +79,9 @@ function openSupported(entry: DirectTarget): void {
       return;
     case "group":
       groupModal.openGroup(entry.id);
+      return;
+    case "avatar":
+      avatarModal.openAvatar(entry.id);
       return;
     default:
       // Unreachable: every caller checks `unsupportedReason` first. Kept because the kind union
@@ -216,7 +220,7 @@ function directSource(query: string): CommandDefinition[] {
 
   const refusal = unsupportedReason(entry);
   if (refusal !== null) {
-    // Listed and disabled rather than absent. A pasted avatar id that matches nothing at all looks
+    // Listed and disabled rather than absent. A pasted file id that matches nothing at all looks
     // like the palette failed to read it; this says which of the two happened.
     return [
       {
@@ -276,12 +280,14 @@ function directSource(query: string): CommandDefinition[] {
 
   if (entry.kind === "group") {
     commands.push({
-      id: "open.pasted.group-screen",
-      title: `Open the full group screen for ${entry.id}`,
-      subtitle: "Members, posts, galleries and instances, on their own screen",
+      id: "open.pasted.group-members",
+      title: `Open the members of ${entry.id}`,
+      subtitle: "Straight to the roster, rather than to the group's own description",
       group: "Open",
       run: (): void => {
-        navigate("groups", entry.id);
+        // Same dialog as the entry above it, opened on a different tab. Someone who pasted a group
+        // id under a heading that says "members" has told us which question they are asking.
+        groupModal.openGroup(entry.id, { tab: "members" });
       },
     });
   }
@@ -296,7 +302,7 @@ export function registerDirectCommands(host: CommandHost): () => void {
     {
       id: "open.clipboard",
       title: "Open what is on the clipboard",
-      subtitle: "A user, world, instance or group id, or a vrchat.com or vrchat:// link",
+      subtitle: "A user, world, instance, group or avatar id, or a vrchat.com or vrchat:// link",
       group: "Open",
       keybinding: "Ctrl+Shift+V",
       keywords: ["paste", "clipboard", "id", "link", "url", "jump", "go to"],
@@ -368,7 +374,7 @@ export function registerDirectCommands(host: CommandHost): () => void {
         title: "Open a group by id",
         subtitle: "The group card, as a badge or a profile would open it",
         placeholder: "grp_… or https://vrchat.com/home/group/grp_…",
-        hint: "For members, posts and instances, use the full group screen command.",
+        hint: "Members, posts, galleries and open instances are tabs on it.",
         keywords: ["grp", "community"],
         open: (entry) => {
           groupModal.openGroup(entry.id);
@@ -379,14 +385,14 @@ export function registerDirectCommands(host: CommandHost): () => void {
     promptCommand(
       "group",
       {
-        id: "open.group-screen",
-        title: "Open a group's full screen by id",
-        subtitle: "Members, posts, galleries and instances — four paged lists, not a dialog",
+        id: "open.group-members",
+        title: "Open a group's members by id",
+        subtitle: "The same card, opened on its roster instead of its description",
         placeholder: "grp_… or a vrchat.com group link",
-        hint: "The route a group card's full-screen control lands on.",
-        keywords: ["grp", "members", "posts", "gallery"],
+        hint: "Posts, galleries and open instances are tabs alongside it.",
+        keywords: ["grp", "members", "posts", "gallery", "roster"],
         open: (entry) => {
-          navigate("groups", entry.id);
+          groupModal.openGroup(entry.id, { tab: "members" });
         },
       },
       host,
@@ -395,7 +401,7 @@ export function registerDirectCommands(host: CommandHost): () => void {
     {
       id: "open.anything",
       title: "Open any id or link",
-      subtitle: "What it names — user, world, instance or group — decides where it opens",
+      subtitle: "What it names — user, world, instance, group or avatar — decides where it opens",
       group: "Open",
       keywords: ["paste", "id", "link", "url", "anything", "go to"],
       argument: {
@@ -413,7 +419,7 @@ export function registerDirectCommands(host: CommandHost): () => void {
           host.notify(
             "warning",
             "Nothing recognisable in that",
-            "vrc.zip opens a usr_, wrld_ or grp_ id, a wrld_…:12345 location, or a vrchat.com or vrchat:// link.",
+            "vrc.zip opens a usr_, wrld_, grp_ or avtr_ id, a wrld_…:12345 location, or a vrchat.com or vrchat:// link.",
           );
           return;
         }

@@ -54,49 +54,17 @@ export const AVTR_ZIP_RATE_LIMIT_PER_SECOND = 10;
  */
 export const AVATAR_ID_NEGATIVE_TTL_MS = 6 * 60 * 60_000;
 
-/** A VRChat file id, `file_` plus the uuid. The prefix is part of the id, and part of the path. */
-const FILE_ID_PATTERN = /^file_[0-9A-Za-z-]{1,64}$/;
-
-/** An avatar id as avtr.zip returns it. Checked before it is believed — see `#fetchOne`. */
-const AVATAR_ID_PATTERN = /^avtr_[0-9A-Za-z-]{1,64}$/;
-
-/**
- * The `file_…` id inside a VRChat image URL, or null.
- *
- * Both shapes VRChat serves land here — `/api/1/image/file_x/2/256` and `/api/1/file/file_x/1/1024`
- * — so this looks for a path *segment* shaped like a file id rather than matching either template.
- * The segment scan is also what makes it safe: whatever else is in the URL, the only thing that can
- * come out is one id matching {@link FILE_ID_PATTERN}, which is the thing that goes on to leave the
- * machine.
- *
- * Never throws. A string that is not a URL at all is an ordinary input here — VRChat sends `""` for
- * an unset image field — and is simply not a file id.
+/*
+ * The URL grammar moved to `@vrcz/shared` when the UI needed it too: it decides which pictures are
+ * worth offering a lookup for, and a second copy here would be a second opinion about what a file
+ * id is. Re-exported rather than re-imported at every call site, because this module is still where
+ * a reader looks for it.
  */
-export function fileIdFromImageUrl(url: string): string | null {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return null;
-  }
+import { AVATAR_ID_PATTERN, FILE_ID_PATTERN, fileIdFromImageUrl } from "@vrcz/shared";
 
-  // Only http(s). A `data:` or `file:` URL has no meaningful path segments and should never reach
-  // a third-party lookup even if one of them happened to spell a file id.
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
-
-  for (const segment of parsed.pathname.split("/")) {
-    // Decoded before it is tested, so a percent-encoded segment cannot smuggle a `/` past the
-    // pattern — and the pattern is what the rest of this module trusts.
-    let decoded: string;
-    try {
-      decoded = decodeURIComponent(segment);
-    } catch {
-      continue;
-    }
-    if (FILE_ID_PATTERN.test(decoded)) return decoded;
-  }
-  return null;
-}
+// Re-exported as well as imported: a bare `export … from` creates no local binding, and the two
+// patterns below are used in this file. Callers still find them here, which is where they look.
+export { AVATAR_ID_PATTERN, FILE_ID_PATTERN, fileIdFromImageUrl };
 
 /** What one persisted mapping looks like. `avatar_id` null means "avtr.zip knows of none". */
 export interface AvatarFileIdRecord {

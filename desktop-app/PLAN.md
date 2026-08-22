@@ -920,6 +920,14 @@ retention policy to forget about.
 
 ## Phase 5 — Packaging & polish
 
+> **Shipped ahead of this section, and deliberately simpler:** today `bun run package` compiles the
+> daemon, the UI bundle and the Bun runtime into a **single** `dist/vrc.zip.exe` with the app icon
+> and version metadata on it (`tools/src/package.ts`). Everything below is about giving *plugins* a
+> real runtime to spawn with real flags — and plugins are Phase 3, so until the plugin host exists
+> the layout below is three files and a hash check guarding a capability nothing uses, against the
+> cost of turning "download and run this" into "unzip this and keep these together." The section
+> stands as written for the day that changes; see PROGRESS.md decision 91.
+
 **vrc.zip ships its own `bun` binary.** It never uses a Bun the user may or may not have installed, and
 never one on `PATH`. The bundled runtime executes both the daemon and every plugin process.
 

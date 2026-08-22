@@ -158,3 +158,56 @@ describe("UI server session cookie", () => {
     expect(response.status).toBe(401);
   });
 });
+
+describe("UI server embedded bundle", () => {
+  /** What `Bun.embeddedFiles` looks like once `--asset=ui/dist` has run: paths, not directories. */
+  const bundle = new Map<string, Blob>([
+    ["index.html", new File(["<!doctype html><title>packaged</title>"], "index.html")],
+    [
+      "assets/app.js",
+      new File(["export const packaged = 1;\n"], "app.js", { type: "text/javascript" }),
+    ],
+  ]);
+
+  async function callPackaged(path: string): Promise<Response> {
+    const app = createUiApp({
+      port: PORT,
+      token: () => TOKEN,
+      // A `dist` that exists on disk, to prove the embedded copy is what answers.
+      distDir: dist,
+      embedded: bundle,
+      controlUrl: "http://127.0.0.1:7775",
+    });
+    return await app.fetch(
+      new Request(`http://127.0.0.1:${PORT}${path}`, {
+        headers: { host: `127.0.0.1:${PORT}`, ...AUTH },
+      }),
+    );
+  }
+
+  test("serves the embedded shell and assets", async () => {
+    expect(await (await callPackaged("/")).text()).toContain("<title>packaged</title>");
+    const asset = await callPackaged("/assets/app.js");
+    // Bun records the content type at build time and it rides along on the blob, so no mime table
+    // of ours is involved. Read before the body: on a blob-backed response the header is derived
+    // from the blob, and consuming the body drops it.
+    expect(asset.headers.get("content-type")).toContain("text/javascript");
+    expect(await asset.text()).toContain("export const packaged");
+  });
+
+  test("client-side routes get the shell, missing assets are still 404", async () => {
+    expect(await (await callPackaged("/accounts/usr_1")).text()).toContain("packaged");
+    expect((await callPackaged("/assets/missing-chunk.js")).status).toBe(404);
+  });
+
+  test("a file on disk never shadows the embedded bundle", async () => {
+    // A `ui/dist` beside a shipped exe belongs to whoever put it there. The packaged build reads
+    // itself and nothing else, so this file must not be reachable.
+    await writeFile(join(dist, "index.html"), "<!doctype html><title>on-disk</title>");
+    expect(await (await callPackaged("/")).text()).not.toContain("on-disk");
+  });
+
+  test("a traversal cannot address anything outside the bundle", async () => {
+    expect((await callPackaged("/..%2F..%2Fsecrets.enc")).status).toBe(404);
+  });
+});

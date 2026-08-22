@@ -12,6 +12,7 @@ import {
 } from "../security/guards.ts";
 import { sessionTokensMatch } from "../security/session-token.ts";
 import { type ControlDeps, createControlApp } from "./control.ts";
+import { type EmbeddedUi, embeddedUi } from "./embedded-ui.ts";
 
 /**
  * The UI server — the built bundle, plus the session API it needs. See PLAN.md §Architecture,
@@ -50,6 +51,12 @@ export interface UiAppOptions {
   deps?: ControlDeps;
   /** Where the built UI lives. Defaults to `<repo>/ui/dist`. */
   distDir?: string;
+  /**
+   * The bundle embedded in the executable, which wins over `distDir` when it is non-empty. Defaults
+   * to whatever this binary carries — empty from source, the built UI in a packaged build. Injected
+   * by tests; nothing else should pass it.
+   */
+  embedded?: EmbeddedUi;
   /** Shown on the placeholder page so a first-run user can find the API. */
   controlUrl?: string;
 }
@@ -59,8 +66,9 @@ export function defaultUiDistDir(): string {
   return resolve(import.meta.dir, "..", "..", "..", "ui", "dist");
 }
 
-export function createUiApp({ port, token, deps, distDir, controlUrl }: UiAppOptions) {
+export function createUiApp({ port, token, deps, distDir, embedded, controlUrl }: UiAppOptions) {
   const root = resolve(distDir ?? defaultUiDistDir());
+  const assets = embedded ?? embeddedUi();
 
   const app = new Hono()
     .use(hostGuard(port))
@@ -120,6 +128,22 @@ export function createUiApp({ port, token, deps, distDir, controlUrl }: UiAppOpt
     )
 
     .get("*", async (c) => {
+      /*
+       * The packaged build serves from inside the executable and never looks at the filesystem —
+       * a `ui/dist` that happens to sit beside a shipped exe is someone else's directory, not our
+       * bundle. Empty from source, so the dev daemon falls straight through to `root` below.
+       */
+      if (assets.size > 0) {
+        const embeddedHit = assets.get(stripLeadingSlashes(decodePath(c.req.path)));
+        if (embeddedHit !== undefined) return new Response(embeddedHit);
+
+        // Same split as the on-disk branch: an asset request is a real 404, a client-side route
+        // gets the shell.
+        if (hasExtension(c.req.path)) return c.notFound();
+        const shell = assets.get("index.html");
+        if (shell !== undefined) return new Response(shell);
+      }
+
       if (!existsSync(join(root, "index.html"))) {
         return c.html(placeholderPage(root, controlUrl), 200);
       }
@@ -158,23 +182,33 @@ function safeJoin(root: string, requestPath: string): string | undefined {
   return target;
 }
 
+function stripLeadingSlashes(path: string): string {
+  let i = 0;
+  while (path[i] === "/") i += 1;
+  return path.slice(i);
+}
+
 function hasExtension(path: string): boolean {
   const last = path.slice(path.lastIndexOf("/") + 1);
   return last.includes(".");
 }
 
 /**
- * The tab icon: a "Z" cut out of a rounded amber tile.
+ * The tab icon: "VZ" cut out of a rounded amber tile.
  *
  * Kept as a shape rather than a glyph so it does not depend on a font, and kept to two colours so
  * it still reads at 16px. It carries its own background rather than relying on `currentColor`,
  * which browsers do not resolve for a favicon — one opaque tile is legible against a light tab
  * strip and a dark one alike. `ui/index.html` inlines the same mark as a `data:` URI so the page
  * itself makes no second request; this route is for the `/favicon.ico` browsers ask for anyway.
+ *
+ * `tools/src/icon.ts` rasterises the same geometry into the Windows executable icon, so the two
+ * files are one mark: change the path here and regenerate with `bun run icon`.
  */
 const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">\
 <rect width="32" height="32" rx="6" fill="#f5c451"/>\
-<path d="M8 10h16l-11 12h11" stroke="#151515" stroke-width="3" fill="none" stroke-linecap="square"/>\
+<path d="M4 9.5 10.5 22.5 17 9.5H28L16.5 22.5H28" stroke="#151515" stroke-width="2.8" \
+fill="none" stroke-linecap="square" stroke-linejoin="round"/>\
 </svg>`;
 
 function placeholderPage(root: string, controlUrl: string | undefined): string {

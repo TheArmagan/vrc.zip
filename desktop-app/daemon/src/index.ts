@@ -1,5 +1,7 @@
 import { APP_NAME, APP_VERSION } from "@vrcz/shared";
 import { startDaemon } from "./app.ts";
+import { openUrl, shouldOpenBrowser } from "./os/open-url.ts";
+import { isPackaged } from "./servers/embedded-ui.ts";
 import { needsFirstRun } from "./settings.ts";
 
 /**
@@ -9,6 +11,11 @@ import { needsFirstRun } from "./settings.ts";
  * shutdown matters more than usual here: it flushes queued feed rows and closes the SQLite handle,
  * and it deliberately does **not** log accounts out, so the next start resumes from cookies instead
  * of minting a fresh session against an undisclosed cap.
+ *
+ * The packaged build opens the browser for you. Someone who double-clicked `vrc.zip.exe` is not
+ * reading a terminal, and a URL with a session token in it is not something to retype — but from
+ * source that would fight `bun --watch`, which restarts constantly and would open a tab each time.
+ * `--open` and `--no-open` override the default in either direction.
  */
 
 async function main(): Promise<void> {
@@ -21,6 +28,13 @@ async function main(): Promise<void> {
   console.log(`  control  ${daemon.servers.urls.controlUrl}`);
   console.log("");
   console.log(`  Open: ${daemon.launchUrl}`);
+
+  if (shouldOpenBrowser(process.argv.slice(2), isPackaged())) {
+    // Best-effort by contract: a machine with no default browser still has a running daemon and a
+    // URL on screen, which is a working app, not a failure to report.
+    const opened = await openUrl(daemon.launchUrl);
+    console.log(opened ? "  (opening it in your browser)" : "  (open that link to get started)");
+  }
 
   if (needsFirstRun(daemon.settings)) {
     console.log("");

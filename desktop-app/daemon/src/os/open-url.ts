@@ -34,6 +34,23 @@ export async function openUrl(
   }
 }
 
+/**
+ * Whether to open a browser at startup: `--open` / `--no-open` if either is given, otherwise only a
+ * packaged build does.
+ *
+ * The default splits that way because the two builds are used differently. Someone who
+ * double-clicked `vrc.zip.exe` is not reading a terminal, and a URL with a session token in it is
+ * not something to retype. From source the daemon usually runs under `bun --watch`, which restarts
+ * on every keystroke-sized edit and would open a tab each time.
+ */
+export function shouldOpenBrowser(argv: readonly string[], packaged: boolean): boolean {
+  // `--no-open` wins over `--open`: a flag that turns something off should not depend on the order
+  // a script happened to append them in.
+  if (argv.includes("--no-open")) return false;
+  if (argv.includes("--open")) return true;
+  return packaged;
+}
+
 /** The argv for this platform, or null if we do not know how to open a URL here. */
 export function openerArgv(url: string, platform: NodeJS.Platform): string[] | null {
   switch (platform) {

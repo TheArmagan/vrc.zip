@@ -20,6 +20,11 @@ the pass-through behind it: an operation is authorised against its grant and re-
 the bound account's pipeline, with the upstream response returned untouched. Verified end to end
 against VRCX, which now gets past `GET /config` and into the consent handshake.
 
+**The app is distributable now, ahead of Phase 5:** `bun run package` produces one self-contained
+`dist/vrc.zip.exe` — daemon, UI bundle and Bun runtime in a single file, with the VZ icon and the
+version metadata on it, opening a browser on launch. It supersedes the `bun.exe` + `app/` layout in
+PLAN.md §Phase 5 only until the plugin host needs a real runtime to spawn; decisions 91–94.
+
 **2.9 landed too**, so `pipeline.vrchat.cloud` in the intercept set now has something to answer it:
 one real socket per account, fanned out to every connected app, filtered by scope. What remains for
 Phase 2 is 2.8 (rate budgets, audit rows, the kill switch and the Connected apps page) and 2.10.
@@ -65,7 +70,7 @@ vrc.zip/
 │  │  └─ plugin-api/     @vrcz/plugin-api — empty until Phase 3 (the one publishable package)
 │  ├─ daemon/            @vrcz/daemon     — runnable entry point, no behaviour until 1.8
 │  ├─ ui/                @vrcz/ui         — workspace member, no deps until 1.9
-│  └─ tools/             @vrcz/tools      — codegen stub that exits 1
+│  └─ tools/             @vrcz/tools      — codegen, the app icon, and the single-exe packaging
 └─ LICENSE
 ```
 
@@ -916,6 +921,50 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     has to take the **maximum** per column, never the average, because a spike is precisely what
     gets the user rate-limited and averaging is what erases it.
 
+91. **v1 ships one self-contained `.exe`, not the `bun.exe` + `app/` tree PLAN.md §Phase 5
+    describes.** The plan's reasoning is about *plugins*: a bundled runtime lets the daemon spawn a
+    plugin host with `--smol` (or without it, per manifest), pinned to the Bun we tested against.
+    None of that exists yet — plugins are Phase 3 — and until it does, the bundled layout is three
+    files and a hash check protecting a capability nothing uses, against the very real cost that
+    "download and run this" turns into "unzip this, keep these next to each other, and do not delete
+    the folder." `bun build --compile` gives one file with the icon and version metadata on it, which
+    is what a person can actually be handed. The plan's layout is not wrong, it is early: when the
+    plugin host lands, the runtime comes back out of the binary and §Phase 5 applies as written.
+
+92. **The UI is embedded with `--asset`, not a generated import map, and the prefix is `dist/`.**
+    The alternative was a codegen step emitting `import x from "../ui/dist/…" with { type: "file" }`
+    per file — a generated module that has to exist for `tsc` and Biome, is stale the moment the UI
+    rebuilds, and is a second build artifact to keep honest. `--asset=ui/dist` needs none of it:
+    `Bun.embeddedFiles` hands the files back at runtime as blobs that already carry the right
+    content type. One measured surprise decides the prefix — **Bun keys an embedded directory by its
+    own name, not by the path you passed**, so `--asset=ui/dist` produces `dist/index.html`. Hence
+    `EMBEDDED_UI_PREFIX = "dist/"` in `@vrcz/shared`, shared by the build script and the server
+    because a prefix that agrees in only one of them serves a blank page from a healthy daemon.
+
+    The packaged build serves *only* from the embedded copy — a `ui/dist` beside a shipped exe is
+    someone else's directory, not our bundle. From source `Bun.embeddedFiles` is empty and the same
+    handler falls through to disk, so there is one code path and no build-only branch to rot.
+
+93. **The packaged build opens a browser; a source run does not.** Someone who double-clicked
+    `vrc.zip.exe` is not reading a terminal, and the launch URL carries a session token nobody is
+    going to retype. From source the daemon runs under `bun --watch`, which restarts on every edit
+    and would open a tab each time. `--open` / `--no-open` override it either way
+    (`shouldOpenBrowser` in `os/open-url.ts`). The console window stays: it carries the launch URL,
+    the first-run notice and the forward-proxy banner, and it is how you stop the daemon.
+    `--windows-hide-console` is for the day there is a tray icon to replace it.
+
+94. **The app icon is rasterised from the same geometry as the favicon, and encoded by ffmpeg.**
+    The mark is "VZ" as a single unbroken stroke — into the V, back up its right arm, straight on
+    into the Z's top bar and down — so the two letters share a stroke rather than sitting side by
+    side, and the only square caps are at the two real ends. Drawing it is ~50 lines of coverage
+    maths in `tools/src/icon.ts`, which is cheaper than depending on an SVG rasteriser and identical
+    on every machine; encoding it is ffmpeg's ICO muxer, because hand-rolling PNG framing (CRC-32,
+    zlib, Adler-32) for a file that changes once a year is not a trade worth making. **ffmpeg is a
+    prerequisite of `bun run icon` only** — the `.ico` is committed, so packaging needs nothing but
+    Bun. Ten sizes are rendered natively (16 through 256, including the 20/24/40/96 that display
+    scaling asks for): a size Windows cannot find it resamples, and that resample is exactly the
+    blur that makes an icon look cheap.
+
 ---
 
 ## Gotchas
@@ -923,6 +972,25 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **Inside a compiled binary there is no filesystem to be relative to.** `import.meta.dir` is
+  `B:\~BUN\root`, a path that exists nowhere, so every `resolve(import.meta.dir, "..", …)` silently
+  points at nothing and every `Bun.file()` built from one reports "does not exist". The daemon does
+  not fail on that — it serves the "UI not built" placeholder, which is a healthy-looking daemon
+  with no app in it, and it looked exactly like a broken build. Embedded assets are the only way
+  in: `Bun.embeddedFiles`, keyed by name, never by path.
+
+- **`bun build --asset=<dir>` names files after the directory's own basename, not the path given.**
+  `--asset=ui/dist` embeds `dist/index.html`, not `ui/dist/index.html`; the leading directories are
+  gone. Nothing errors — the lookup just misses every file and falls back to the placeholder. Verify
+  the names by printing `Bun.embeddedFiles` from a throwaway compiled binary before trusting a
+  prefix; that is how `EMBEDDED_UI_PREFIX` ended up being `dist/`.
+
+- **A blob-backed `Response` loses its `Content-Type` once the body is consumed.** The header is
+  derived from the blob rather than stored, so under `bun test`, `await res.text()` first and then
+  `res.headers.get("content-type")` reads `null` — while the same two lines in the other order pass.
+  It costs a confusing half hour, because the assertion that fails is not the one that is wrong.
+  **Assert headers before reading the body.**
 
 - **`fetch` decompresses the body and keeps the headers describing the compressed form.** VRChat
   gzips nearly everything, so a passed-through response reached the app announcing
@@ -1329,7 +1397,17 @@ bun daemon/src/index.ts      # prints a launch URL carrying the session token
 
 bun run test                 # daemon + packages + tools, under bun test
 bun run test:ui              # the ui workspace, under vitest (cd ui && bun run test:watch to iterate)
+
+bun run package              # → dist/vrc.zip.exe, one self-contained Windows binary
+bun run icon                 # regenerate tools/assets/vrczip.ico (needs ffmpeg; the .ico is committed)
 ```
+
+`bun run package` builds the UI, then compiles the daemon, the bundle and the Bun runtime into a
+single `.exe` with the app icon and version metadata on it. `--skip-ui` reuses whatever is in
+`ui/dist` while iterating on the packaging itself; `--outfile=` and `--target=` are there too.
+Smoke-test the result the same way as anything else — `VRCZIP_STATE_DIR=… ./dist/vrc.zip.exe
+--no-open` — and check that `/` returns the real bundle rather than the placeholder page, which is
+what a build with no UI embedded serves.
 
 Set `VRCZIP_STATE_DIR` to redirect the whole state tree (secrets, DB, `state.json`) somewhere
 disposable — that is how the tests and any manual poking should run, so a smoke test never touches

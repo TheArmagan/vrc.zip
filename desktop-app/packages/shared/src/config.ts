@@ -39,3 +39,16 @@ export const DEFAULT_HOSTNAME = "127.0.0.1";
 export function launchUrl(uiUrl: string, sessionToken: string): string {
   return `${uiUrl}/?${TOKEN_QUERY_PARAM}=${encodeURIComponent(sessionToken)}`;
 }
+
+/**
+ * Where the UI bundle lives inside the single-file build, as `bun build --compile --asset` names it.
+ *
+ * Measured, not assumed: Bun keys an embedded directory by its **own name**, not by the path it was
+ * given. `--asset=ui/dist` therefore produces `dist/index.html`, not `ui/dist/index.html`, and the
+ * flag's leading directories never appear. Rename Vite's `outDir` and this has to move with it.
+ *
+ * It lives here rather than in either half because the two halves are a build script and a runtime
+ * server that never import each other, and a prefix that agrees in only one of them serves a blank
+ * page from a daemon that looks perfectly healthy.
+ */
+export const EMBEDDED_UI_PREFIX = "dist/";

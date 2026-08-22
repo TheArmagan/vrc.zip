@@ -44,7 +44,8 @@ executes third-party plugin code, so it is a build input, not a developer prereq
 ```bash
 bun install
 bun run typecheck            # tsc --noEmit over the whole workspace (excludes ui/)
-bun test                     # all packages
+bun run test                 # daemon + packages + tools (bun test, scoped to those three)
+bun run test:ui              # ui/ (vitest + jsdom) - a different runner, see below
 bun test daemon/src/store    # one directory or file
 bun test -t "rate limiter"   # one test by name
 bun run lint                 # biome check
@@ -55,14 +56,22 @@ bun run codegen              # regenerate packages/api from the pinned openapi.j
 cd ui && bun run dev         # Vite on :5273, proxies /api to the daemon (DAEMON_PORT, default 7775)
 cd ui && bun run build       # → ui/dist, which the daemon serves statically
 cd ui && bun run check       # svelte-check — the gate for .svelte files; Biome cannot lint them
+cd ui && bun run test        # vitest; `test:watch` for the watcher
 ```
 
 `VRCZIP_STATE_DIR` redirects the entire state tree (secrets, SQLite DB, `state.json`). Use it for
 any manual run so a smoke test never touches the real credential store. `VRCZIP_STABLE_TOKEN=1`
 keeps the session token across restarts (implied under `--watch`/`--hot`).
 
-Verification is `bun test` + `bun run typecheck` + `bun run lint` + `cd ui && bun run check`. There
-is no CI workflow yet (it would live in the repo root, shared ground with `backend/`).
+Verification is `bun run test` + `bun run test:ui` + `bun run typecheck` + `bun run lint` +
+`cd ui && bun run check`. CI runs all five: `.github/workflows/desktop-app.yml` at the repo root,
+path-filtered to `desktop-app/**` because `.github/` is shared ground with `backend/`.
+
+**Two test runners, and the split is not negotiable.** `bun test` owns `daemon/`, `packages/` and
+`tools/`; `ui/` is Vitest, because its state modules are `.svelte.ts` and runes are compiler syntax
+that Bun's runner does not process. The root `test` script names its three directories for exactly
+this reason — a bare `bun test` globs `**/*.test.ts` and drags the Vitest files into the wrong
+runner, where `vi` and `$state` do not exist.
 
 ## Git
 
@@ -185,5 +194,10 @@ live in `ui/src/lib/state/*.svelte.ts`; screens in `ui/src/screens`.
 - User images are fetched by the daemon and served from `GET /api/image`; a browser cannot load
   VRChat image URLs directly (they need the auth cookie and UA). That route is the one place the
   daemon fetches a caller-chosen URL, so its host allowlist is exact-match, https-only, size-capped.
-- `ui/` has no test runner and no tests. Several silent bugs escaped through that gap — verify UI
+- `ui/` runs on Vitest + jsdom (`cd ui && bun run test`). Two things about runes under it, both
+  measured: `resolve.conditions` **must** include `"browser"`, or Vitest resolves Svelte's server
+  build whose effects are no-ops and `$effect` silently never runs; and runes are compiler syntax
+  keyed on filename, so `$state` in a plain `.test.ts` is a `ReferenceError` — reactive scaffolding
+  belongs in a `.svelte.ts` helper. Driving an existing state class from a `.test.ts` is fine.
+- Tests do not cover rendering yet. Several silent bugs escaped through this gap — still verify UI
   changes by running the app, not only by typechecking.

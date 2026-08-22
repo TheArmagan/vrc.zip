@@ -46,8 +46,9 @@ import {
   type PluginGrant,
   type PluginManifest,
   parseManifest,
+  type UiIntentDispatch,
 } from "@vrcz/plugin-api";
-import { isEventPatternString, isScope, type Scope } from "@vrcz/shared";
+import { isEventPatternString, isScope, type JsonValue, type Scope } from "@vrcz/shared";
 import type { AccountManager } from "../accounts/manager.ts";
 import type { EventBus } from "../bus/event-bus.ts";
 import { pluginDataDir } from "../paths.ts";
@@ -74,6 +75,12 @@ import { ensurePluginRuntime } from "../plugins/runtime-fetch.ts";
 import { PluginStorage } from "../plugins/storage/database.ts";
 import { createStorageMethods } from "../plugins/storage/methods.ts";
 import type { TransportFactory } from "../plugins/transport.ts";
+import {
+  createUiMethods,
+  type PanelChange,
+  PanelRegistry,
+  type PanelState,
+} from "../plugins/ui-panels.ts";
 import { DEFAULT_GRANT_BUDGETS } from "../proxy/passthrough.ts";
 import type { Store } from "../store/index.ts";
 
@@ -162,6 +169,8 @@ export interface PluginHostOptions {
    * some other way. This is the seam for both.
    */
   readonly onConsentPending?: ((pending: PendingPluginConsent) => void) | undefined;
+  /** Raised when a plugin draws, patches or closes a panel, for the control stream to forward. */
+  readonly onPanelChange?: ((change: PanelChange) => void) | undefined;
 }
 
 export interface PluginHost {
@@ -200,6 +209,17 @@ export interface PluginHost {
    * Never a timer: "it has behaved for seven days" says nothing about the eighth.
    */
   setDryRunLifted(pluginId: string, scope: string, lifted: boolean): void;
+
+  /** Every panel one plugin is currently drawing. Empty for a plugin that draws none. */
+  panels(pluginId: string): PanelState[];
+  /**
+   * Delivers a user action to the plugin and resolves when it has been received.
+   *
+   * The tree that results arrives separately, as a panel change — the plugin answers this frame to
+   * say it heard, then pushes whatever it decided to draw. Keeping the two apart is what lets the
+   * host mark one node busy without waiting on a redraw that may never come.
+   */
+  dispatchIntent(pluginId: string, dispatch: UiIntentDispatch): Promise<void>;
 
   /** Plugin installs waiting for someone to answer, and the two ways to answer them. */
   readonly consent: {
@@ -298,6 +318,18 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
    */
   const budget = new PluginBudget();
 
+  /**
+   * The panels every running plugin is drawing.
+   *
+   * Constructed here rather than inside the method table because two other things need it: the
+   * control API reads it for a browser that opened the screen after the panel was drawn, and
+   * `syncAttachment` clears a plugin's panels when it stops — a tree that outlived its process is a
+   * screen whose every button reaches nobody.
+   */
+  const panels = new PanelRegistry({
+    ...(options.onPanelChange === undefined ? {} : { onChange: options.onPanelChange }),
+  });
+
   const consent = new PluginConsentBroker({
     ...(options.onConsentPending === undefined ? {} : { onPending: options.onConsentPending }),
   });
@@ -335,6 +367,7 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
   const dispatcher = new PluginDispatcher({
     table: {
       ...createStorageMethods({ storageFor }),
+      ...createUiMethods({ panels }),
       ...createVrchatMethods({
         /*
          * The account's own request context, tagged with the plugin id so the meter can name who is
@@ -411,6 +444,8 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
       // A stopped plugin holds no file handle. It also means a `rm -rf` at uninstall is deleting
       // files nothing has open, which is the difference between working and not on Windows.
       closeStorage(status.pluginId);
+      // And draws nothing. Every button on a panel is an intent that would reach a dead process.
+      panels.closeAll(status.pluginId);
       return;
     }
 
@@ -666,6 +701,14 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
     setDryRunLifted(pluginId, scope, lifted) {
       if (lifted) store.liftPluginDryRun(pluginId, scope, Date.now());
       else store.restorePluginDryRun(pluginId, scope);
+    },
+
+    panels: (pluginId) => panels.list(pluginId),
+
+    async dispatchIntent(pluginId, dispatch) {
+      // `ui.intent` is the one method the *host* calls on the plugin. The dispatcher already owns
+      // the deadline and the late-reply drop, so this is a thin forward.
+      await dispatcher.call(pluginId, "ui.intent", dispatch as unknown as JsonValue);
     },
 
     consent: {

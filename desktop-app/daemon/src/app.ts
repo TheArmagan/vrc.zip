@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { launchUrl as buildLaunchUrl, DEFAULT_HOSTNAME } from "@vrcz/shared";
+import { launchUrl as buildLaunchUrl, DEFAULT_HOSTNAME, type JsonValue } from "@vrcz/shared";
 import { CookieJar } from "./accounts/cookie-jar.ts";
 import { AccountManager } from "./accounts/manager.ts";
 import { NotificationService } from "./accounts/notifications.ts";
@@ -15,6 +15,7 @@ import { openUrl } from "./os/open-url.ts";
 import { databasePath, ensureStateDir } from "./paths.ts";
 import { PipelineClient } from "./pipeline/index.ts";
 import type { PendingPluginConsent } from "./plugins/consent.ts";
+import type { PanelChange } from "./plugins/ui-panels.ts";
 import { ConsentRegistry } from "./proxy/consent.ts";
 import { PipelineMirror } from "./proxy/pipeline-mirror.ts";
 import { createProxyLogger, PROXY_LOG_ENV } from "./proxy/request-log.ts";
@@ -305,6 +306,11 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
    * than relied on: an install cannot happen before the servers are up, but a closure that would
    * throw if it did is not something to leave to reading order.
    */
+  let publishPanelChange: (change: PanelChange) => void = () => {
+    // Before the servers exist there is no browser to tell, and the panel is already stored — a
+    // reader that connects later gets it from `GET /api/plugins/:id/panels`.
+  };
+
   let alertPluginConsent: (pending: PendingPluginConsent) => void = (pending) => {
     console.warn(
       `[vrc.zip] ${pending.manifest.name} ${pending.manifest.version} is waiting to be installed, before the daemon finished starting.`,
@@ -328,6 +334,9 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
      * with 3.8's consent screen, which is what the second channel would open.
      */
     onConsentPending: (pending) => alertPluginConsent(pending),
+    // Forwarded to every attached browser. The holder is assigned once `deps` exists, for the same
+    // ordering reason as the consent alert above.
+    onPanelChange: (change) => publishPanelChange(change),
   });
 
   // --- servers --------------------------------------------------------------
@@ -542,6 +551,16 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
    * terminal, `curl`. There the request would otherwise park for five minutes and expire in
    * silence, so both channels fire: a toast, and a browser on the plugins screen.
    */
+  publishPanelChange = (change) => {
+    deps.publishPluginPanel({
+      pluginId: change.pluginId,
+      panelId: change.panelId,
+      op: change.op,
+      ...(change.op === "patch" ? { key: change.key } : {}),
+      tree: change.op === "close" ? null : (change.tree as unknown as JsonValue),
+    });
+  };
+
   alertPluginConsent = (pending) => {
     const what = `${pending.manifest.name} ${pending.manifest.version}`;
     if (deps.streamClientCount() > 0) {

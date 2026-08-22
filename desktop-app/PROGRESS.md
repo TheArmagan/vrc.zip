@@ -447,7 +447,7 @@ for the life of the product.
       is an explicit per-plugin per-scope hold, the budget readout names what each plugin has spent
       this hour (3.4's outstanding item, now closed), and an install with no UI client connected
       raises a toast and opens `#/plugins`.
-- [ ] **3.9 Declarative UI renderer** — forms, tables, dialogs, context menus and
+- [~] **3.9 Declarative UI renderer** — forms, tables, dialogs, context menus and
       per-node click handlers. Charts follow rather than ship with it (decision 110).
       **Scoped by decision 182:** the tree rides `/api/stream` as a new frame type carrying a
       **keyed patch**, not a whole-tree replace; `table` **pages** through `PagedSection` /
@@ -455,6 +455,11 @@ for the life of the product.
       a ceiling and not a rendering promise; sort and filter are host-side over the rows the host
       holds; an intent marks its own node `busy` and leaves the rest of the tree live, with an
       inline error on `E_TIMEOUT` or a crash.
+      **Host half built** (decision 191): `plugins/ui-panels.ts` holds every drawn tree, `ui.setPanel`
+      / `ui.patchPanel` / `ui.closePanel` change it, `STREAM_PLUGIN_PANEL` carries changes to
+      browsers, and `POST /api/plugins/:id/panels/:panelId/intent` sends a user action back through
+      `ui.intent`. **Not yet done:** the Svelte renderer that draws a `UINode` tree, which is what
+      makes any of it visible.
 - [ ] **3.10 Nodes** — plugin-contributed node types, registered from the same `NodeDefinition` the
       editor, the runtime and the type checker all read. **Scoped by decision 182: no editor here.**
       Registration, the runtime that arms triggers and executes actions, and `assignable()` enforced
@@ -2693,6 +2698,37 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 
      Verified against a running daemon: a plugin granted `invite:send` shows `0 of 60 used this
      hour` with `dryRun: true`; lifting flips only that scope; restoring flips it back.
+
+191. **3.9's host half: the panel registry, and why the host holds the tree.** A browser that opens
+     the plugins screen ten minutes after a plugin drew its panel has to get *something*. Asking the
+     plugin to redraw on demand would make every page load a round trip into a process that might be
+     wedged, and would make a panel's contents depend on whether anyone happened to be looking when
+     it was pushed. So the host keeps the current tree per (plugin, panel), answers
+     `GET /api/plugins/:id/panels` from it, and forwards changes.
+
+     **A patch is refused rather than upgraded when its target is gone.** `ui.patchPanel` names a
+     `key`; if the panel is not open, or the key is not in it, the call fails. Silently treating
+     that as a whole-tree `set` would hide the plugin's stale idea of what is drawn *and* discard
+     whatever the user had in the rest of the panel. Same posture one level down: an invalid tree is
+     refused with the validator's own issues and **leaves the previously drawn panel exactly as it
+     was** — losing a working panel because its next update was malformed punishes the user for the
+     author's bug.
+
+     **`ui.*` carries no scope and no capability**, which is a deliberate hole in an otherwise
+     default-deny table. A panel is the plugin's own surface, drawn from data it already holds;
+     nothing there reads an account or reaches VRChat. Requiring a scope would mean a consent sheet
+     asking permission for a plugin to draw its own settings page, which teaches people that the
+     scope list is noise. What bounds it instead is size: the validator, the node cap, a 32-panel
+     cap per plugin, and the transport's frame budget.
+
+     **Panels die with the process.** A tree that outlived the plugin that drew it is a screen whose
+     every button reaches nobody, so `syncAttachment` closes them wherever it detaches.
+
+     Two smaller notes. `STREAM_PLUGIN_PANEL` is its own frame type rather than a bus kind, for the
+     same reason `rate` is — nothing *happened*, and a bus kind would put panel trees in the feed,
+     the retention config and every webhook payload. And `isEventFrame`'s own comment predicted
+     this: it narrowed by excluding the two non-event types, so adding a fourth member meant
+     updating it or every screen reading `payload.accountId` would treat a panel frame as an event.
 
 ---
 

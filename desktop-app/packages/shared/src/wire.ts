@@ -599,6 +599,16 @@ export const STREAM_READY = "ready";
 export const STREAM_RATE = "rate";
 
 /**
+ * A plugin's panel tree, or a patch to one.
+ *
+ * Its own frame type rather than a bus kind, for the same reason `rate` is: nothing *happened*.
+ * This is a plugin redrawing its own surface, and putting it in `EventKind` would put panel trees
+ * in the feed, in retention config, and in webhook payloads — three places that would then have to
+ * learn to ignore them.
+ */
+export const STREAM_PLUGIN_PANEL = "plugin.panel";
+
+/**
  * How many one-second buckets a rate history carries. One minute.
  *
  * Here rather than in the daemon's meter because both sides have to agree on it: the daemon fills
@@ -677,7 +687,37 @@ export type StreamFrame =
    * happened, this is a sample. Putting it in `EventKind` would have put it in the feed, the
    * retention config, and the webhook payloads, none of which want a heartbeat.
    */
-  | { readonly type: typeof STREAM_RATE; readonly ts: number; readonly payload: RateFrame };
+  | { readonly type: typeof STREAM_RATE; readonly ts: number; readonly payload: RateFrame }
+  | {
+      readonly type: typeof STREAM_PLUGIN_PANEL;
+      readonly ts: number;
+      readonly payload: PluginPanelFrame;
+    };
+
+/**
+ * One plugin panel update on the event socket.
+ *
+ * **The tree is `JsonValue` here on purpose.** `UINode` lives in `@vrcz/plugin-api`, which depends
+ * on this package — typing it properly would invert that. The daemon validates the tree against
+ * `validateUINode` before it ever reaches this frame, and the renderer imports the real type from
+ * `@vrcz/plugin-api/ui`, so the untyped hop is between two ends that both know the shape.
+ */
+export interface PluginPanelFrame {
+  readonly pluginId: string;
+  readonly panelId: string;
+  /**
+   * `set` replaces the whole tree, `patch` replaces one keyed subtree, `close` removes the panel.
+   *
+   * A patch is what keeps a table off the wire on every intent: the plugin names the `key` of the
+   * node it is replacing, and everything else stays as drawn — which is also what keeps focus and
+   * scroll position, since the untouched nodes are never re-created.
+   */
+  readonly op: "set" | "patch" | "close";
+  /** The `key` of the subtree being replaced. Present only for `patch`. */
+  readonly key?: string;
+  /** The `UINode` tree, or null for `close`. */
+  readonly tree: JsonValue | null;
+}
 
 /** A frame carrying a bus event, as opposed to the `ready` handshake or a `rate` sample. */
 export type StreamEventFrame = Extract<StreamFrame, { payload: StreamEnvelope }>;
@@ -691,7 +731,16 @@ export type StreamEventFrame = Extract<StreamFrame, { payload: StreamEnvelope }>
  * three subtly different ways.
  */
 export function isEventFrame(frame: StreamFrame): frame is StreamEventFrame {
-  return frame.type !== STREAM_READY && frame.type !== STREAM_RATE;
+  return (
+    frame.type !== STREAM_READY && frame.type !== STREAM_RATE && frame.type !== STREAM_PLUGIN_PANEL
+  );
+}
+
+/** Narrows a frame to a plugin panel update. */
+export function isPluginPanelFrame(
+  frame: StreamFrame,
+): frame is Extract<StreamFrame, { payload: PluginPanelFrame }> {
+  return frame.type === STREAM_PLUGIN_PANEL;
 }
 
 /** Narrows a frame to a `rate` sample. */

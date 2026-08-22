@@ -20,6 +20,7 @@ import { PLUGIN_CAPABILITIES } from "@vrcz/plugin-api";
 import {
   isScope,
   type JsonValue,
+  type PluginPanelFrame,
   type RateCeilingSnapshot,
   type RateFrame,
   RETENTION_DEFAULT_KEY,
@@ -27,6 +28,7 @@ import {
   type RetentionSettings,
   type RetentionUpdate,
   SCOPES,
+  STREAM_PLUGIN_PANEL,
   STREAM_RATE,
   type WebhookSummary,
   type WorldInstanceList,
@@ -88,6 +90,7 @@ import {
   type NotificationItem,
   type PendingConsentRequest,
   type PendingPluginConsentSummary,
+  type PluginPanelSummary,
   type PluginSummary,
   type SettingsPatch,
   type StatusSnapshot,
@@ -874,6 +877,14 @@ function pluginOrThrow(host: PluginHost, pluginId: string): PluginSummary {
 }
 
 export function createControlDeps(options: ControlDepsOptions): ControlDeps {
+  /**
+   * Every attached browser's frame sink.
+   *
+   * Kept beside `streamClients` rather than derived from it, because a *count* cannot be fanned out
+   * to. Panel frames do not come from the bus — they come from a plugin drawing — so they need a
+   * list of sockets rather than a subscription.
+   */
+  const streamListeners = new Set<(event: StreamEvent) => void>();
   const { accounts, store, bus, limiter, secrets, presence, connectPipeline } = options;
   let settings = options.settings;
 
@@ -2409,6 +2420,38 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       return await Promise.resolve(pluginOrThrow(host, pluginId));
     },
 
+    async listPluginPanels(pluginId): Promise<PluginPanelSummary[]> {
+      const host = options.plugins;
+      if (host === undefined) return await Promise.resolve([]);
+      return await Promise.resolve(
+        host.panels(pluginId).map((panel) => ({
+          pluginId: panel.pluginId,
+          panelId: panel.panelId,
+          tree: panel.tree as unknown as JsonValue,
+          updatedAt: panel.updatedAt,
+        })),
+      );
+    },
+
+    async dispatchPluginIntent(pluginId, panelId, intent, formState): Promise<void> {
+      const host = options.plugins;
+      if (host === undefined) {
+        throw new ControlError(404, "unknown_plugin", `${pluginId} is not installed.`);
+      }
+      // A panel that is not open cannot have been clicked, so this is a stale browser rather than a
+      // valid action — refused rather than forwarded, which keeps a plugin from being handed
+      // intents for a surface it has already taken down.
+      const open = host.panels(pluginId).some((panel) => panel.panelId === panelId);
+      if (!open) {
+        throw new ControlError(404, "unknown_panel", `${pluginId} is not drawing "${panelId}".`);
+      }
+      await host.dispatchIntent(pluginId, {
+        panelId,
+        intent: intent as unknown as { name: string },
+        formState: formState as unknown as Record<string, string | number | boolean>,
+      });
+    },
+
     async setPluginDryRun(pluginId, scope, lifted): Promise<PluginSummary> {
       const host = options.plugins;
       if (host === undefined) {
@@ -3128,8 +3171,31 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       return streamClients;
     },
 
+    /**
+     * Fans one plugin panel change out to every attached browser.
+     *
+     * Not routed through the bus, and that is deliberate: a panel tree is not an event. Putting it
+     * on the bus would give it a retention window, a feed row and a webhook delivery, three things
+     * that would then each need to learn to ignore it. See `STREAM_PLUGIN_PANEL`.
+     */
+    publishPluginPanel(frame: PluginPanelFrame): void {
+      const event: StreamEvent = {
+        type: STREAM_PLUGIN_PANEL,
+        ts: Date.now(),
+        payload: frame,
+      };
+      for (const listener of streamListeners) {
+        try {
+          listener(event);
+        } catch {
+          // One wedged socket must not stop the others being told.
+        }
+      }
+    },
+
     subscribeEvents(listener: (event: StreamEvent) => void): () => void {
       streamClients += 1;
+      streamListeners.add(listener);
 
       /*
        * A `rate` frame every second, for as long as this client is attached.
@@ -3173,6 +3239,7 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         if (released) return;
         released = true;
         streamClients -= 1;
+        streamListeners.delete(listener);
         subscription.unsubscribe();
       };
     },

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type {
   DaemonStatus,
+  JsonValue,
   RetentionSettings,
   RetentionUpdate,
   WebhookSummary,
@@ -33,6 +34,7 @@ import {
   type PageQuery,
   type PendingPluginConsentSummary,
   type PluginConsentDecision,
+  type PluginPanelSummary,
   type PluginSummary,
   parseAvatarId,
   parseImageFileId,
@@ -496,6 +498,8 @@ interface Recorder {
   pluginToggles: { id: string; enabled: boolean }[];
   pluginsUninstalled: string[];
   dryRunWrites: { pluginId: string; scope: string; lifted: boolean }[];
+  panels: PluginPanelSummary[];
+  intents: { pluginId: string; panelId: string; intent: JsonValue; formState: JsonValue }[];
   pendingConsents: PendingPluginConsentSummary[];
   consentDecisions: { id: string; decision: PluginConsentDecision }[];
   consentDenials: string[];
@@ -545,6 +549,15 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     pluginToggles: [],
     pluginsUninstalled: [],
     dryRunWrites: [],
+    panels: [
+      {
+        pluginId: "acme.hello",
+        panelId: "notes",
+        tree: { type: "text", value: "hello" },
+        updatedAt: 1_700_000_000_000,
+      },
+    ],
+    intents: [],
     pendingConsents: [PENDING_CONSENT],
     consentDecisions: [],
     consentDenials: [],
@@ -622,6 +635,14 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     },
     uninstallPlugin: async (pluginId) => {
       seen.pluginsUninstalled.push(pluginId);
+    },
+    publishPluginPanel: () => {},
+    listPluginPanels: async (pluginId) => (pluginId === PLUGIN.id ? [...seen.panels] : []),
+    dispatchPluginIntent: async (pluginId, panelId, intent, formState) => {
+      if (!seen.panels.some((panel) => panel.panelId === panelId)) {
+        throw new ControlError(404, "unknown_panel");
+      }
+      seen.intents.push({ pluginId, panelId, intent, formState });
     },
     setPluginDryRun: async (pluginId, scope, lifted) => {
       if (pluginId !== PLUGIN.id) throw new ControlError(404, "unknown_plugin");

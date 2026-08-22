@@ -48,6 +48,9 @@ const deps: ControlDeps = {
     throw new Error("unused");
   },
   uninstallPlugin: async () => {},
+  publishPluginPanel: () => {},
+  listPluginPanels: async () => [],
+  dispatchPluginIntent: async () => {},
   setPluginDryRun: async () => {
     throw new Error("not used in this test");
   },

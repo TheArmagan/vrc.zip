@@ -18,9 +18,11 @@ import {
   type GroupMemberSummary,
   type GroupPostPage,
   type GroupPostSummary,
+  isJsonObject,
   type JsonValue,
   type LoginInput,
   type LoginResult,
+  type PluginPanelFrame,
   type RateLimitSnapshot,
   type RateSeries,
   RETENTION_DEFAULT_KEY,
@@ -849,6 +851,20 @@ export interface PluginConsentDecision {
   events?: string[];
 }
 
+/**
+ * One panel a plugin is currently drawing.
+ *
+ * `tree` is the validated `UINode`, typed loosely here for the same reason `PluginPanelFrame` types
+ * it loosely: this module may not import `@vrcz/plugin-api`'s UI vocabulary without inverting a
+ * dependency. It has already passed `validateUINode` in the panel registry.
+ */
+export interface PluginPanelSummary {
+  pluginId: string;
+  panelId: string;
+  tree: JsonValue;
+  updatedAt: number;
+}
+
 /** One budgeted scope on a plugin's card: what it has spent, and whether it is still shadowed. */
 export interface PluginBudgetSummary {
   scope: string;
@@ -1082,6 +1098,30 @@ export interface ControlDeps {
    * that was not running. PLAN.md is explicit that this one must always succeed.
    */
   disablePlugin(pluginId: string): Promise<PluginSummary>;
+
+  /**
+   * Pushes a plugin panel change to every attached browser.
+   *
+   * Called by the composition root when a plugin draws, patches or closes a panel. Not a route:
+   * nothing outside the daemon may put a tree on this socket.
+   */
+  publishPluginPanel(frame: PluginPanelFrame): void;
+
+  /** Every panel one plugin is drawing right now. Empty for a plugin that draws none. */
+  listPluginPanels(pluginId: string): Promise<PluginPanelSummary[]>;
+  /**
+   * Delivers a user action to a plugin.
+   *
+   * Resolves when the plugin has *received* it, not when it has redrawn. The new tree arrives on
+   * the event stream as a panel frame, which is what lets the browser mark one node busy instead of
+   * blocking on a redraw that may never come.
+   */
+  dispatchPluginIntent(
+    pluginId: string,
+    panelId: string,
+    intent: JsonValue,
+    formState: JsonValue,
+  ): Promise<void>;
 
   /**
    * Lifts or restores dry-run for one scope of one plugin.
@@ -2378,6 +2418,26 @@ export function createControlApp({ port, deps, appApi, token }: ControlAppOption
     .post("/api/plugins/:id/disable", async (c) =>
       c.json(await deps.disablePlugin(c.req.param("id"))),
     )
+
+    .get("/api/plugins/:id/panels", async (c) =>
+      c.json(await deps.listPluginPanels(c.req.param("id"))),
+    )
+
+    .post("/api/plugins/:id/panels/:panelId/intent", async (c) => {
+      const body = await readJsonObject(c.req.raw);
+      const intent = body?.intent;
+      if (!isJsonObject(intent) || typeof intent.name !== "string" || intent.name === "") {
+        return c.json({ error: "invalid_body", detail: "intent.name is required" }, 400);
+      }
+      const formState = body?.formState;
+      await deps.dispatchPluginIntent(
+        c.req.param("id"),
+        c.req.param("panelId"),
+        intent,
+        isJsonObject(formState) ? formState : {},
+      );
+      return c.body(null, 204);
+    })
 
     .put("/api/plugins/:id/dry-run/:scope", async (c) => {
       const body = await readJsonObject(c.req.raw);

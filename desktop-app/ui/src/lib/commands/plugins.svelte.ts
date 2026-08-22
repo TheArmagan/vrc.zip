@@ -20,10 +20,7 @@
  */
 
 import { api } from "$lib/api.ts";
-import {
-  type CommandDefinition,
-  registerCommands,
-} from "$lib/commands.svelte.ts";
+import { type CommandDefinition, registerCommands } from "$lib/commands.svelte.ts";
 import type { CommandContribution } from "$lib/state/plugin-contributions.svelte.ts";
 
 export interface PluginCommandDeps {

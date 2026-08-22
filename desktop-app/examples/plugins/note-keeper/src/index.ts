@@ -74,9 +74,10 @@ interface PluginCtx {
     };
     records: {
       append(key: string, value: unknown): Promise<{ id: number; ts: number }>;
-      query(options: { prefix?: string; limit?: number }): Promise<
-        { id: number; ts: number; value: unknown }[]
-      >;
+      query(options: {
+        prefix?: string;
+        limit?: number;
+      }): Promise<{ id: number; ts: number; value: unknown }[]>;
       delete(options: { prefix?: string; before?: number }): Promise<number>;
     };
     usage(): Promise<{ bytes: number; quotaBytes: number }>;

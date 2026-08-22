@@ -498,7 +498,10 @@ export function validateNodeDefinition(value: unknown): NodeValidation {
     // A trigger with inputs is the shape the whole inversion exists to prevent: nothing upstream
     // can hand a value to the thing a graph *starts* with.
     if (value.inputs !== undefined) {
-      issues.push({ path: "inputs", message: "a trigger has no inputs — it arms, it does not run" });
+      issues.push({
+        path: "inputs",
+        message: "a trigger has no inputs — it arms, it does not run",
+      });
     }
   } else if (kind === "action" || kind === "condition") {
     checkPorts(issues, "inputs", value.inputs);
@@ -520,7 +523,10 @@ export function validateNodeDefinition(value: unknown): NodeValidation {
           return;
         }
         if (!(CONFIG_KINDS as readonly unknown[]).includes(field.kind)) {
-          issues.push({ path: `${at}.kind`, message: `must be one of: ${CONFIG_KINDS.join(", ")}` });
+          issues.push({
+            path: `${at}.kind`,
+            message: `must be one of: ${CONFIG_KINDS.join(", ")}`,
+          });
         }
         checkString(issues, `${at}.id`, field.id, { required: true });
         checkString(issues, `${at}.label`, field.label, { required: true });

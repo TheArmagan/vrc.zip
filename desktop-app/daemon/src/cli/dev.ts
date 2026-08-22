@@ -93,14 +93,21 @@ async function install(
     return { ok: false, message: `could not reach vrc.zip: ${String(error)}` };
   }
 
-  const body = (await response.json().catch(() => null)) as
-    | { name?: string; version?: string; state?: string; message?: string; error?: string }
-    | null;
+  const body = (await response.json().catch(() => null)) as {
+    name?: string;
+    version?: string;
+    state?: string;
+    message?: string;
+    error?: string;
+  } | null;
 
   if (!response.ok) {
     // The daemon's sentences are written to be read — a manifest issue, a compile diagnostic with a
     // line and column, a deny-scan finding naming the construct. Printed unchanged.
-    return { ok: false, message: body?.message ?? body?.error ?? `install failed (${String(response.status)})` };
+    return {
+      ok: false,
+      message: body?.message ?? body?.error ?? `install failed (${String(response.status)})`,
+    };
   }
   return {
     ok: true,

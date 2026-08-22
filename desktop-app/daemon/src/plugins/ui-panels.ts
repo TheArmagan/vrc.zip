@@ -315,10 +315,7 @@ export function createUiMethods(deps: UiMethodDeps): GatedMethodTable {
 
     "ui.toast": {
       account: "none",
-      method: uiMethod<
-        { message: string; description?: string; tone: PluginToast["tone"] },
-        null
-      >({
+      method: uiMethod<{ message: string; description?: string; tone: PluginToast["tone"] }, null>({
         parse: (raw) => {
           if (!isJsonObject(raw)) throw new DispatchError("E_BAD_REQUEST", "Expected an object.");
           const message = raw.message;
@@ -335,8 +332,7 @@ export function createUiMethods(deps: UiMethodDeps): GatedMethodTable {
             value: {
               message,
               ...(description === undefined ? {} : { description: description.slice(0, 400) }),
-              tone:
-                tone === "success" || tone === "warn" || tone === "danger" ? tone : "neutral",
+              tone: tone === "success" || tone === "warn" || tone === "danger" ? tone : "neutral",
             },
           };
         },

@@ -40,7 +40,9 @@ function panel() {
     return {
       type: "card",
       title: "Friends Table",
-      children: [{ type: "alert", tone: "danger", title: "Could not read friends", description: error }],
+      children: [
+        { type: "alert", tone: "danger", title: "Could not read friends", description: error },
+      ],
     };
   }
 

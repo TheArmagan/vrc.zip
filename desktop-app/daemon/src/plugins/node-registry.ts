@@ -192,11 +192,7 @@ export interface NodeMethodDeps {
    * Phase 4's runtime is what listens; until it exists this is a seam rather than a no-op, so that
    * a plugin written against `fire()` today behaves identically the day the graph runtime lands.
    */
-  readonly onFire?: (event: {
-    pluginId: string;
-    instanceId: string;
-    outputs: JsonValue;
-  }) => void;
+  readonly onFire?: (event: { pluginId: string; instanceId: string; outputs: JsonValue }) => void;
 }
 
 /**

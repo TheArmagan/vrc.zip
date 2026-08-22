@@ -29,7 +29,16 @@
  * cleanly, imports at runtime, and shows every type as `any` in the author's editor.
  */
 
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join, resolve } from "node:path";
 
 const HERE = resolve(import.meta.dir, "..", "..", "packages", "plugin-api");

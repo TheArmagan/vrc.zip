@@ -1394,10 +1394,7 @@ export const api = {
 
     /** Every panel this plugin is drawing right now, as the daemon currently holds them. */
     panels: (pluginId: string, signal?: AbortSignal): Promise<PluginPanel[]> =>
-      request<PluginPanel[]>(
-        `/plugins/${encodeURIComponent(pluginId)}/panels`,
-        withSignal(signal),
-      ),
+      request<PluginPanel[]>(`/plugins/${encodeURIComponent(pluginId)}/panels`, withSignal(signal)),
 
     /**
      * Sends one user action to a plugin.

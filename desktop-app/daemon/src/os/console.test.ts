@@ -18,7 +18,11 @@ function record({
   type = KEY_EVENT,
   keyDown = true,
   char = "",
-}: { type?: number; keyDown?: boolean; char?: string } = {}): Uint8Array {
+}: {
+  type?: number;
+  keyDown?: boolean;
+  char?: string;
+} = {}): Uint8Array {
   const bytes = new Uint8Array(INPUT_RECORD_BYTES);
   const view = new DataView(bytes.buffer);
   view.setUint16(0, type, true);

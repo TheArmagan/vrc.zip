@@ -18,9 +18,9 @@
 
 import {
   type EventKind,
-  type RateFrame,
   type PluginPanelFrame,
   type PluginToastFrame,
+  type RateFrame,
   STREAM_PLUGIN_PANEL,
   STREAM_PLUGIN_TOAST,
   STREAM_RATE,

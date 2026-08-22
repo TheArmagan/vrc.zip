@@ -68,13 +68,9 @@ import {
   pruneArtifacts,
   removeArtifacts,
 } from "../plugins/install/index.ts";
+import { createNodeMethods, NodeRegistry, type RegisteredNode } from "../plugins/node-registry.ts";
 import { createVrchatMethods, type PluginAccountInfo } from "../plugins/plugin-vrchat.ts";
 import { makeProcessTransportFactory } from "../plugins/process-transport.ts";
-import {
-  createNodeMethods,
-  NodeRegistry,
-  type RegisteredNode,
-} from "../plugins/node-registry.ts";
 import { PluginRegistry, type PluginStatus } from "../plugins/registry.ts";
 import { ensurePluginRuntime } from "../plugins/runtime-fetch.ts";
 import { PluginStorage } from "../plugins/storage/database.ts";

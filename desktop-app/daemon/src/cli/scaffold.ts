@@ -46,7 +46,10 @@ function slugify(value: string): string {
   return slug === "" ? "my-plugin" : slug;
 }
 
-export function scaffoldPlugin(targetDir: string, options: { publisher?: string } = {}): ScaffoldResult {
+export function scaffoldPlugin(
+  targetDir: string,
+  options: { publisher?: string } = {},
+): ScaffoldResult {
   const root = resolve(targetDir);
   const name = basename(root);
   const slug = slugify(name);

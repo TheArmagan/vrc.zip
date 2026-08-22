@@ -66,9 +66,11 @@ function harness(declared: readonly string[] = ["note-added", "write-note"]) {
 describe("registering", () => {
   test("a declared node registers under its qualified id", async () => {
     const h = harness();
-    expect(await h.call("nodes.register", { definition: TRIGGER as unknown as JsonValue })).toEqual({
-      qualifiedId: "acme.notes/note-added",
-    });
+    expect(await h.call("nodes.register", { definition: TRIGGER as unknown as JsonValue })).toEqual(
+      {
+        qualifiedId: "acme.notes/note-added",
+      },
+    );
     expect(h.nodes.get("acme.notes/note-added")?.definition.title).toBe("A note was added");
   });
 

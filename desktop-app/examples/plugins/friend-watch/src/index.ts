@@ -35,7 +35,12 @@ function panel() {
     title: "Friend Watch",
     children: [
       rows.length === 0
-        ? { type: "empty", key: "rows", title: "Nothing yet", description: "Waiting for friends to move." }
+        ? {
+            type: "empty",
+            key: "rows",
+            title: "Nothing yet",
+            description: "Waiting for friends to move.",
+          }
         : {
             type: "table",
             key: "rows",

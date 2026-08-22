@@ -35,6 +35,7 @@
  * is an error rather than a second registration.
  */
 
+import type { NodeConfigValues, PortValues } from "./nodes.ts";
 import {
   type Deadline,
   type DeliveryPolicy,
@@ -44,7 +45,6 @@ import {
   type PluginEvent,
 } from "./protocol.ts";
 import type { StorageRecord, StorageUsage } from "./storage.ts";
-import type { NodeConfigValues, PortValues } from "./nodes.ts";
 import type { UiIntentDispatch } from "./ui.ts";
 
 /** What the prelude installs. Declared structurally so this file imports nothing from the host. */
@@ -410,7 +410,10 @@ class Runtime {
       this.#host.send({
         t: "err",
         id,
-        error: { code: "E_UNKNOWN_METHOD", message: `This plugin does not answer ${String(frame.method)}.` },
+        error: {
+          code: "E_UNKNOWN_METHOD",
+          message: `This plugin does not answer ${String(frame.method)}.`,
+        },
       });
       return;
     }

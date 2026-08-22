@@ -32,9 +32,9 @@ import {
   MAX_UI_DEPTH,
   MAX_UI_NODES,
   PLUGIN_CAPABILITIES,
-  pluginManifestSchema,
   PORT_TYPES,
   PROTOCOL_ERRORS,
+  pluginManifestSchema,
 } from "@vrcz/plugin-api";
 import { BUS_EVENT_KINDS, EVENT_FAMILIES, familyOf, SCOPES } from "@vrcz/shared";
 import { z } from "zod";
@@ -114,12 +114,7 @@ function eventCatalog(): string {
     .filter((family) => (byFamily.get(family) ?? []).length > 0)
     .map((family) => {
       const kinds = (byFamily.get(family) ?? []).sort();
-      return [
-        `## \`${family}.*\``,
-        "",
-        ...kinds.map((kind) => `- \`${kind}\``),
-        "",
-      ].join("\n");
+      return [`## \`${family}.*\``, "", ...kinds.map((kind) => `- \`${kind}\``), ""].join("\n");
     });
 
   return [
@@ -169,8 +164,7 @@ function portMatrix(): string {
 
 function limitsAndErrors(): string {
   const errors = Object.entries(PROTOCOL_ERRORS).map(
-    ([code, info]) =>
-      `| \`${code}\` | ${info.retryable ? "yes" : "no"} | ${info.description} |`,
+    ([code, info]) => `| \`${code}\` | ${info.retryable ? "yes" : "no"} | ${info.description} |`,
   );
   return [
     BANNER,

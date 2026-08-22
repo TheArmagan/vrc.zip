@@ -1,4 +1,5 @@
 import { APP_NAME, APP_VERSION } from "@vrcz/shared";
+import { startDaemon } from "./app.ts";
 import {
   attention,
   banner,
@@ -15,7 +16,6 @@ import {
   onConsoleKey,
   setConsoleTitle,
 } from "./os/console.ts";
-import { startDaemon } from "./app.ts";
 import { openUrl, shouldOpenBrowser } from "./os/open-url.ts";
 import { isPackaged } from "./servers/embedded-ui.ts";
 import { needsFirstRun } from "./settings.ts";
@@ -148,7 +148,9 @@ async function main(): Promise<void> {
     // Accented, because it is a thing to *do* rather than a thing to know: signing in before it is
     // set fails at VRChat rather than here, which is the least useful place to find out.
     console.log(attention("First run: set a contact address in settings before signing in."));
-    console.log(note("VRChat requires it in the User-Agent, and a placeholder is worse than none."));
+    console.log(
+      note("VRChat requires it in the User-Agent, and a placeholder is worse than none."),
+    );
   }
 
   for (const line of daemon.startupNotes) console.log(note(line));

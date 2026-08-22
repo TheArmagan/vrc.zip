@@ -8,7 +8,11 @@
   "engines": { "pluginApi": 0 },
   "permissions": {
     "scopes": [],
-    "accounts": { "mode": "one", "optional": true, "reason": "Notes are local; no account is used." },
+    "accounts": {
+      "mode": "one",
+      "optional": true,
+      "reason": "Notes are local; no account is used."
+    },
     "capabilities": ["storage"],
     "events": [],
     "fetch": { "domains": [], "reason": "It makes no requests." }

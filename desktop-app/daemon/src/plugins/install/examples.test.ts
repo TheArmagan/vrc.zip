@@ -30,28 +30,24 @@ describe("the example plugins", () => {
   });
 
   for (const name of examples) {
-    test(
-      `${name} compiles, passes the deny-scan and content-addresses`,
-      async () => {
-        const stateDir = mkdtempSync(join(tmpdir(), `vrczip-example-${name}-`));
-        try {
-          const built = await installPluginFromDirectory(join(EXAMPLES_DIR, name), {
-            env: { VRCZIP_STATE_DIR: stateDir },
-          });
-          // The whole sentence, not a boolean: a failure here is a compile diagnostic or a
-          // deny-scan finding, and both are written to be read.
-          const detail = built.ok ? "" : formatInstallFailure(built);
-          expect(detail).toBe("");
-          expect(built.ok).toBe(true);
-          if (!built.ok) return;
+    test(`${name} compiles, passes the deny-scan and content-addresses`, async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), `vrczip-example-${name}-`));
+      try {
+        const built = await installPluginFromDirectory(join(EXAMPLES_DIR, name), {
+          env: { VRCZIP_STATE_DIR: stateDir },
+        });
+        // The whole sentence, not a boolean: a failure here is a compile diagnostic or a
+        // deny-scan finding, and both are written to be read.
+        const detail = built.ok ? "" : formatInstallFailure(built);
+        expect(detail).toBe("");
+        expect(built.ok).toBe(true);
+        if (!built.ok) return;
 
-          expect(built.manifest.id.startsWith("example.")).toBe(true);
-          expect(built.bundleHash).toMatch(/^[0-9a-f]{64}$/);
-        } finally {
-          rmSync(stateDir, { recursive: true, force: true });
-        }
-      },
-      30_000,
-    );
+        expect(built.manifest.id.startsWith("example.")).toBe(true);
+        expect(built.bundleHash).toMatch(/^[0-9a-f]{64}$/);
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    }, 30_000);
   }
 });

@@ -74,9 +74,7 @@
           "maximum": 9007199254740991
         }
       },
-      "required": [
-        "pluginApi"
-      ],
+      "required": ["pluginApi"],
       "additionalProperties": false
     },
     "permissions": {
@@ -149,11 +147,7 @@
             "mode": {
               "default": "none",
               "type": "string",
-              "enum": [
-                "none",
-                "one",
-                "many"
-              ]
+              "enum": ["none", "one", "many"]
             },
             "optional": {
               "default": false,
@@ -267,13 +261,7 @@
           "type": "array",
           "items": {
             "type": "string",
-            "enum": [
-              "fetch:allowlist",
-              "notify",
-              "storage",
-              "storage:sql",
-              "webhook"
-            ],
+            "enum": ["fetch:allowlist", "notify", "storage", "storage:sql", "webhook"],
             "description": "A host capability. See docs/generated/capabilities.md."
           }
         },
@@ -333,17 +321,10 @@
               "placement": {
                 "default": "sidebar",
                 "type": "string",
-                "enum": [
-                  "sidebar",
-                  "main",
-                  "settings"
-                ]
+                "enum": ["sidebar", "main", "settings"]
               }
             },
-            "required": [
-              "id",
-              "title"
-            ],
+            "required": ["id", "title"],
             "additionalProperties": false
           }
         },
@@ -362,14 +343,7 @@
               },
               "type": {
                 "type": "string",
-                "enum": [
-                  "string",
-                  "number",
-                  "boolean",
-                  "select",
-                  "url",
-                  "secret"
-                ]
+                "enum": ["string", "number", "boolean", "select", "url", "secret"]
               },
               "label": {
                 "type": "string",
@@ -410,10 +384,7 @@
                       "maxLength": 64
                     }
                   },
-                  "required": [
-                    "value",
-                    "label"
-                  ],
+                  "required": ["value", "label"],
                   "additionalProperties": false
                 }
               },
@@ -422,11 +393,7 @@
                 "type": "boolean"
               }
             },
-            "required": [
-              "key",
-              "type",
-              "label"
-            ],
+            "required": ["key", "type", "label"],
             "additionalProperties": false
           }
         },
@@ -457,10 +424,7 @@
                 "maxLength": 64
               }
             },
-            "required": [
-              "id",
-              "title"
-            ],
+            "required": ["id", "title"],
             "additionalProperties": false
           }
         },
@@ -491,10 +455,7 @@
                 "maxLength": 200
               }
             },
-            "required": [
-              "id",
-              "title"
-            ],
+            "required": ["id", "title"],
             "additionalProperties": false
           }
         }
@@ -504,19 +465,9 @@
     "performance": {
       "default": "smol",
       "type": "string",
-      "enum": [
-        "smol",
-        "throughput"
-      ]
+      "enum": ["smol", "throughput"]
     }
   },
-  "required": [
-    "id",
-    "name",
-    "version",
-    "publisher",
-    "main",
-    "engines"
-  ],
+  "required": ["id", "name", "version", "publisher", "main", "engines"],
   "additionalProperties": false
 }

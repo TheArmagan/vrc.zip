@@ -1,9 +1,4 @@
-import {
-  isEventFrame,
-  isPluginPanelFrame,
-  isPluginToastFrame,
-  isRateFrame,
-} from "@vrcz/shared";
+import { isEventFrame, isPluginPanelFrame, isPluginToastFrame, isRateFrame } from "@vrcz/shared";
 /**
  * The shell's shared state: daemon status, accounts, live sessions, settings, and the live event
  * tail. Screens own their own queries; anything the sidebar, the palette, or two screens all need
@@ -37,8 +32,8 @@ import {
 } from "../stream.ts";
 import { consent } from "./consent.svelte.ts";
 import { liveSessions } from "./live-sessions.svelte.ts";
-import { prefs } from "./prefs.svelte.ts";
 import { pluginPanels } from "./plugin-panels.svelte.ts";
+import { prefs } from "./prefs.svelte.ts";
 import { rates } from "./rates.svelte.ts";
 
 /** How many live events the shell keeps in memory for the feed's "new since you looked" tail. */

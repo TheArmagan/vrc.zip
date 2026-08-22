@@ -1023,8 +1023,14 @@ export interface ControlDeps {
    */
   disablePlugin(pluginId: string): Promise<PluginSummary>;
 
-  /** Removes the row, the grant and the artifacts. Idempotent; an unknown id is not an error. */
-  uninstallPlugin(pluginId: string): Promise<void>;
+  /**
+   * Removes the row, the grant, the artifacts and — unless `keepData` — the plugin's own database.
+   *
+   * Idempotent; an unknown id is not an error. Deleting the data is the **default**, so a caller
+   * that says nothing gets the behaviour a person means by "uninstall". `keepData` exists for the
+   * reinstall case and is opt-in for the same reason.
+   */
+  uninstallPlugin(pluginId: string, options?: { readonly keepData?: boolean }): Promise<void>;
 
   /**
    * Every webhook registered on this daemon, newest first.
@@ -2295,7 +2301,10 @@ export function createControlApp({ port, deps, appApi, token }: ControlAppOption
     )
 
     .delete("/api/plugins/:id", async (c) => {
-      await deps.uninstallPlugin(c.req.param("id"));
+      // `?keepData=1` keeps the plugin's database. Absent means delete it, which is what uninstall
+      // means to the person clicking it; 3.8's checkbox is what sets this.
+      const keepData = c.req.query("keepData") === "1";
+      await deps.uninstallPlugin(c.req.param("id"), { keepData });
       return c.body(null, 204);
     })
 

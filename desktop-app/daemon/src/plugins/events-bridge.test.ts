@@ -35,7 +35,9 @@ function grantOf(
   scopes: readonly Scope[] = ["friends:read", "sessions:read"],
   accountIds: readonly string[] = [ACCOUNT],
 ): PluginGrant {
-  return { pluginId: PLUGIN, scopes, accountIds };
+  // No capabilities: the events bridge is scope-and-account business, and a grant that carried one
+  // here would be asserting something this file does not test.
+  return { pluginId: PLUGIN, scopes, accountIds, capabilities: [] };
 }
 
 const DEFAULT_DELIVERY: DeliveryPolicy = { credits: 100, maxBatch: 32, overflow: "drop-oldest" };

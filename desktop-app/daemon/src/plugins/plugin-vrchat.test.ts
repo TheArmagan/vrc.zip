@@ -87,6 +87,7 @@ const GRANT: PluginGrant = {
   pluginId: "plug",
   scopes: ["friends:read", "users:read", "worlds:read", "instances:read", "groups:read"],
   accountIds: ["usr_a"],
+  capabilities: [],
 };
 
 const limiter = new RateLimiter();

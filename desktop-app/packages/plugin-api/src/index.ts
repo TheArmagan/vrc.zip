@@ -18,6 +18,10 @@
  *    a DOM node, and there is no escape hatch.
  *  - `nodes.ts` — one `NodeDefinition` feeding the graph editor, the graph runtime and the type
  *    checker, so those three cannot disagree.
+ *  - `capabilities.ts` — the host-power vocabulary, in a leaf of its own precisely *because* of the
+ *    rule below: a capability is checked on the call path, so `protocol.ts` must be able to read it
+ *    without reaching into `manifest.ts`.
+ *  - `storage.ts` — the per-plugin database's shapes and limits.
  *
  * `protocol.ts` and `ui.ts` and `nodes.ts` do **not** import from `manifest.ts`, and that is a
  * safety property rather than tidiness: the manifest is what an author *requested*, a grant is what
@@ -56,6 +60,21 @@ export {
   parseManifest,
   pluginManifestSchema,
 } from "./manifest.ts";
+
+// ---------------------------------------------------------------------------
+// Storage — the plugin's own database
+// ---------------------------------------------------------------------------
+
+export {
+  DEFAULT_PLUGIN_QUOTA_BYTES,
+  DEFAULT_RECORDS_PAGE,
+  MAX_KV_KEYS_PAGE,
+  MAX_RECORDS_PAGE,
+  MAX_STORAGE_KEY_LENGTH,
+  MAX_STORAGE_VALUE_BYTES,
+  type StorageRecord,
+  type StorageUsage,
+} from "./storage.ts";
 
 // ---------------------------------------------------------------------------
 // Protocol — the wire between host and plugin process

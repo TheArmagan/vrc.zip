@@ -486,11 +486,13 @@ describe("dispatcher contract", () => {
     pluginId: "com.example.plugin",
     scopes: ["friends:read"],
     accountIds: ["usr_a"],
+    capabilities: [],
   };
 
   const table: MethodTable = {
     "vrchat.friends.list": defineMethod<{ n: number }, { count: number }>({
       scope: "friends:read",
+      capability: null,
       cost: 1,
       parse: (raw) =>
         typeof raw === "object" && raw !== null && !Array.isArray(raw) && typeof raw.n === "number"
@@ -500,12 +502,14 @@ describe("dispatcher contract", () => {
     }),
     "moderation.block": defineMethod<null, undefined>({
       scope: "moderation:write",
+      capability: null,
       cost: 1,
       parse: () => ({ ok: true, value: null }),
       handle: async () => undefined,
     }),
     "ui.setPanel": defineMethod<null, undefined>({
       scope: null,
+      capability: null,
       cost: 0,
       parse: () => ({ ok: true, value: null }),
       handle: async () => undefined,

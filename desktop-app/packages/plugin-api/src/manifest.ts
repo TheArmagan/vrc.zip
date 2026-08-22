@@ -32,6 +32,11 @@ import {
   type Scope,
 } from "@vrcz/shared";
 import { z } from "zod";
+import {
+  ALL_PLUGIN_CAPABILITIES,
+  isPluginCapability,
+  type PluginCapability,
+} from "./capabilities.ts";
 
 /* ------------------------------------------------------------------------------------------------
  * Small validation helpers
@@ -152,53 +157,21 @@ const enginesSchema = z.strictObject({
  * permissions.capabilities
  * ---------------------------------------------------------------------------------------------- */
 
-export interface PluginCapabilityDefinition {
-  /** Plain English, addressed to the user granting it. Rendered verbatim on the consent screen. */
-  readonly description: string;
-  /** Shown in the separate block behind a second toggle, alongside dangerous scopes. */
-  readonly dangerous: boolean;
-}
-
-/**
- * Host capabilities a plugin may request. The shape mirrors the scope registry in
- * `@vrcz/shared/scopes` on purpose: the consent screen renders both lists with the same component,
- * and the docs generator reads both the same way.
+/*
+ * The capability vocabulary moved to `capabilities.ts` and is re-exported here.
  *
- * **There is no `network` capability, and there is no way to spell one.** See {@link NETWORK_NOTE}.
+ * It had to: a capability is checked on the call path beside the scope, and the call path may not
+ * import this file — the manifest is the *request*, the grant is the *approval*, and nothing that
+ * authorises a call is allowed to read the request. Re-exported rather than relocated silently,
+ * because an author importing `PluginCapability` from `@vrcz/plugin-api` should not notice.
  */
-export const PLUGIN_CAPABILITIES = {
-  storage: {
-    description: "Keep its own settings and records in a private database on this computer.",
-    dangerous: false,
-  },
-  "storage:sql": {
-    description:
-      "Run raw SQL against its own private database. Only its own — it cannot reach vrc.zip's.",
-    dangerous: true,
-  },
-  webhook: {
-    description:
-      "Send messages to a web address that you type into its settings. The plugin chooses what to say, never where it goes.",
-    dangerous: false,
-  },
-  "fetch:allowlist": {
-    description:
-      "Ask vrc.zip to fetch pages from the specific websites listed below, and read the replies.",
-    dangerous: true,
-  },
-  notify: {
-    description: "Show you desktop and in-headset notifications.",
-    dangerous: false,
-  },
-} as const satisfies Record<string, PluginCapabilityDefinition>;
-
-export type PluginCapability = keyof typeof PLUGIN_CAPABILITIES;
-
-export const ALL_PLUGIN_CAPABILITIES = Object.keys(PLUGIN_CAPABILITIES) as PluginCapability[];
-
-export function isPluginCapability(value: string): value is PluginCapability {
-  return Object.hasOwn(PLUGIN_CAPABILITIES, value);
-}
+export {
+  ALL_PLUGIN_CAPABILITIES,
+  isPluginCapability,
+  PLUGIN_CAPABILITIES,
+  type PluginCapability,
+  type PluginCapabilityDefinition,
+} from "./capabilities.ts";
 
 /**
  * Why `permissions.network` does not exist, quoted at the schema so nobody re-adds it as a

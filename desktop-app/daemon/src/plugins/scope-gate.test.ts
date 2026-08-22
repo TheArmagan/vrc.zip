@@ -15,12 +15,14 @@ function table(): GatedMethodTable {
   return {
     "test.free": defineGatedMethod("none", {
       scope: null,
+      capability: null,
       cost: 0,
       parse: (raw) => ({ ok: true, value: raw }),
       handle: () => Promise.resolve("free"),
     }),
     "test.friends": defineGatedMethod("required", {
       scope: "friends:read",
+      capability: null,
       cost: 1,
       parse: (raw) => ({ ok: true, value: raw }),
       handle: () => Promise.resolve("friends"),
@@ -28,8 +30,12 @@ function table(): GatedMethodTable {
   };
 }
 
-function grantWith(scopes: PluginGrant["scopes"], accountIds: string[]): PluginGrant {
-  return { pluginId: "p", scopes, accountIds };
+function grantWith(
+  scopes: PluginGrant["scopes"],
+  accountIds: string[],
+  capabilities: PluginGrant["capabilities"] = [],
+): PluginGrant {
+  return { pluginId: "p", scopes, accountIds, capabilities };
 }
 
 function req(method: string, params?: JsonValue): RequestFrame {
@@ -79,6 +85,7 @@ describe("createScopeGate", () => {
         // The cast is the point of the test: a table can only get here by lying about its type,
         // and the gate must still refuse to be built rather than deny at runtime.
         scope: "plugin:invented" as PluginGrant["scopes"][number],
+        capability: null,
         cost: 0,
         parse: (raw: JsonValue | undefined) => ({ ok: true as const, value: raw }),
         handle: () => Promise.resolve(null),
@@ -131,6 +138,7 @@ describe("isShadowed", () => {
       pluginId: "p",
       scopes: ["invite:send", "friends:read"],
       accountIds: ["usr_a"],
+      capabilities: [],
       dryRunScopes: ["invite:send"],
     };
     expect(isShadowed(grant, null)).toBe(false);

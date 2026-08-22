@@ -2390,10 +2390,12 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       return await Promise.resolve(pluginOrThrow(host, pluginId));
     },
 
-    async uninstallPlugin(pluginId): Promise<void> {
+    async uninstallPlugin(pluginId, uninstallOptions): Promise<void> {
       // Idempotent, like every other removal here: an id that is already gone is the outcome asked
       // for, and the host's own uninstall is safe on a plugin with no supervisor.
-      await options.plugins?.uninstall(pluginId);
+      await options.plugins?.uninstall(pluginId, {
+        keepData: uninstallOptions?.keepData === true,
+      });
     },
 
     async listWebhooks(): Promise<WebhookSummary[]> {

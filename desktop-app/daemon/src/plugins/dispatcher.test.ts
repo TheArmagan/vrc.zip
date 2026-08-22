@@ -14,6 +14,7 @@ const GRANT: PluginGrant = {
   pluginId: "p",
   scopes: ["friends:read", "invite:send"],
   accountIds: ["usr_a"],
+  capabilities: [],
 };
 
 function channel(): PluginChannel & { sent: Envelope[] } {
@@ -48,6 +49,7 @@ function harness(
   const table: GatedMethodTable = {
     "test.read": defineGatedMethod("required", {
       scope: "friends:read",
+      capability: null,
       cost: 1,
       parse: (raw) => {
         if (raw !== undefined && typeof raw !== "object") {
@@ -62,6 +64,7 @@ function harness(
     }),
     "test.invite": defineGatedMethod("required", {
       scope: "invite:send",
+      capability: null,
       cost: 1,
       parse: (raw) => ({ ok: true, value: raw }),
       handle: () => Promise.resolve("sent"),
@@ -128,7 +131,9 @@ describe("inbound calls", () => {
   });
 
   test("a scope the grant does not hold never reaches the handler", async () => {
-    const h = harness({ grant: { pluginId: "p", scopes: [], accountIds: ["usr_a"] } });
+    const h = harness({
+      grant: { pluginId: "p", scopes: [], accountIds: ["usr_a"], capabilities: [] },
+    });
     h.dispatcher.handleFrame("p", req("test.read"));
     await settle();
     expect(errorOf(h.peer.sent[0]).code).toBe("E_SCOPE_DENIED");
@@ -218,6 +223,7 @@ describe("deadlines", () => {
     const table: GatedMethodTable = {
       "test.slow": defineGatedMethod("none", {
         scope: null,
+        capability: null,
         cost: 0,
         parse: (raw) => ({ ok: true, value: raw }),
         handle: (_params, ctx) =>

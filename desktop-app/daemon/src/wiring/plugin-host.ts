@@ -29,14 +29,20 @@
  *    exactly those. It attaches and detaches on the same supervisor state the dispatcher does, so a
  *    dead plugin stops being a bus subscriber at the moment it dies.
  *
- * **What it deliberately does not own:** consent (3.8) and per-plugin storage (3.7). Frames neither
- * owner claims are handed to {@link PluginHostOptions.onUnownedFrame}, which stays the seam for
- * whatever chains behind them.
+ *  - **Storage.** One {@link PluginStorage} per plugin, opened on first use, closed when the plugin
+ *    stops, and deleted at uninstall unless the caller asks to keep it. The lifecycle is here
+ *    rather than in the method table because a table that held open file handles would have to be
+ *    told about disable and uninstall.
+ *
+ * **What it deliberately does not own:** consent (3.8). Frames neither owner claims are handed to
+ * {@link PluginHostOptions.onUnownedFrame}, which stays the seam for whatever chains behind them.
  */
 
+import { rmSync } from "node:fs";
 import {
   type Envelope,
   grantHash,
+  isPluginCapability,
   type PluginGrant,
   type PluginManifest,
   parseManifest,
@@ -44,6 +50,7 @@ import {
 import { isScope, type Scope } from "@vrcz/shared";
 import type { AccountManager } from "../accounts/manager.ts";
 import type { EventBus } from "../bus/event-bus.ts";
+import { pluginDataDir } from "../paths.ts";
 import { PluginBudget } from "../plugins/budget.ts";
 import { PluginDispatcher } from "../plugins/dispatcher.ts";
 import { PluginEventsBridge } from "../plugins/events-bridge.ts";
@@ -58,6 +65,8 @@ import { createVrchatMethods, type PluginAccountInfo } from "../plugins/plugin-v
 import { makeProcessTransportFactory } from "../plugins/process-transport.ts";
 import { PluginRegistry, type PluginStatus } from "../plugins/registry.ts";
 import { ensurePluginRuntime } from "../plugins/runtime-fetch.ts";
+import { PluginStorage } from "../plugins/storage/database.ts";
+import { createStorageMethods } from "../plugins/storage/methods.ts";
 import type { TransportFactory } from "../plugins/transport.ts";
 import { DEFAULT_GRANT_BUDGETS } from "../proxy/passthrough.ts";
 import type { Store } from "../store/index.ts";
@@ -139,7 +148,15 @@ export interface PluginHost {
   enable(pluginId: string): Promise<void>;
   /** Instant, synchronous, always succeeds. The one control PLAN.md promises will work. */
   disable(pluginId: string): void;
-  uninstall(pluginId: string): Promise<void>;
+  /**
+   * Removes the plugin, and by default its data with it.
+   *
+   * `keepData` is the reinstall case: a user replacing a plugin with a newer copy of itself has no
+   * reason to lose its settings. Deleting is the default because the opposite — data outliving the
+   * thing that wrote it, counted against a quota nobody is watching, for a plugin the user believes
+   * they removed — is the worse surprise.
+   */
+  uninstall(pluginId: string, options?: { readonly keepData?: boolean }): Promise<void>;
 }
 
 export function createPluginHost(options: PluginHostOptions): PluginHost {
@@ -175,12 +192,21 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
     const row = store.getPlugin(pluginId);
     if (row === null) return null;
 
-    let best: { readonly at: number; readonly scopes: string; readonly accountIds: string } | null =
-      null;
+    let best: {
+      readonly at: number;
+      readonly scopes: string;
+      readonly accountIds: string;
+      readonly capabilities: string;
+    } | null = null;
     for (const grant of store.listPluginGrants(pluginId)) {
       if (grant.revoked_at !== null || grant.version !== row.version) continue;
       if (best === null || grant.granted_at > best.at) {
-        best = { at: grant.granted_at, scopes: grant.scopes, accountIds: grant.account_ids };
+        best = {
+          at: grant.granted_at,
+          scopes: grant.scopes,
+          accountIds: grant.account_ids,
+          capabilities: grant.capabilities,
+        };
       }
     }
     if (best === null) return null;
@@ -195,8 +221,38 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
       pluginId,
       scopes,
       accountIds: jsonStrings(best.accountIds),
+      // Migration 006 has stored this since the table existed and this function dropped it on the
+      // floor, which was harmless only for as long as no method required one. 3.7 adds methods that
+      // do, so a dropped capability is now a denial rather than a no-op.
+      capabilities: jsonStrings(best.capabilities).filter(isPluginCapability),
       ...(dryRunScopes.length === 0 ? {} : { dryRunScopes }),
     };
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Storage
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * One {@link PluginStorage} per plugin, created on first use and closed when the plugin stops.
+   *
+   * Held here rather than inside the method table because the *lifecycle* is the host's business:
+   * a database has to be closed when a plugin is disabled and deleted when it is uninstalled, and
+   * a method table that owned open file handles would have to be told about both.
+   */
+  const storages = new Map<string, PluginStorage>();
+
+  function storageFor(pluginId: string): PluginStorage {
+    const existing = storages.get(pluginId);
+    if (existing !== undefined) return existing;
+    const created = new PluginStorage(pluginId, { env });
+    storages.set(pluginId, created);
+    return created;
+  }
+
+  function closeStorage(pluginId: string): void {
+    storages.get(pluginId)?.close();
+    storages.delete(pluginId);
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -204,28 +260,31 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
   // ---------------------------------------------------------------------------------------------
 
   const dispatcher = new PluginDispatcher({
-    table: createVrchatMethods({
-      /*
-       * The account's own request context, tagged with the plugin id so the meter can name who is
-       * spending the user's rate limit. Tagging happens here rather than in `Account`, which is
-       * what keeps the account unaware that plugins exist at all.
-       */
-      context: (accountId, pluginId) => {
-        const account = accounts.get(accountId);
-        if (account === undefined) return null;
-        return { ...account.context(), grantId: `${PLUGIN_METER_PREFIX}${pluginId}` };
-      },
-      account: (accountId): PluginAccountInfo | null => {
-        const account = accounts.get(accountId);
-        if (account === undefined) return null;
-        const snapshot = account.snapshot();
-        return {
-          id: snapshot.id,
-          displayName: snapshot.displayName ?? snapshot.username,
-          online: snapshot.state === "online",
-        };
-      },
-    }),
+    table: {
+      ...createStorageMethods({ storageFor }),
+      ...createVrchatMethods({
+        /*
+         * The account's own request context, tagged with the plugin id so the meter can name who is
+         * spending the user's rate limit. Tagging happens here rather than in `Account`, which is
+         * what keeps the account unaware that plugins exist at all.
+         */
+        context: (accountId, pluginId) => {
+          const account = accounts.get(accountId);
+          if (account === undefined) return null;
+          return { ...account.context(), grantId: `${PLUGIN_METER_PREFIX}${pluginId}` };
+        },
+        account: (accountId): PluginAccountInfo | null => {
+          const account = accounts.get(accountId);
+          if (account === undefined) return null;
+          const snapshot = account.snapshot();
+          return {
+            id: snapshot.id,
+            displayName: snapshot.displayName ?? snapshot.username,
+            online: snapshot.state === "online",
+          };
+        },
+      }),
+    },
     grants: liveGrant,
     budget: new PluginBudget(),
     onCall: (record) => {
@@ -276,6 +335,9 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
       dispatcher.detach(status.pluginId);
       events.detach(status.pluginId);
       attached.delete(status.pluginId);
+      // A stopped plugin holds no file handle. It also means a `rm -rf` at uninstall is deleting
+      // files nothing has open, which is the difference between working and not on Windows.
+      closeStorage(status.pluginId);
       return;
     }
 
@@ -486,7 +548,7 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
       registry.disable(pluginId);
     },
 
-    uninstall(pluginId) {
+    uninstall(pluginId, uninstallOptions) {
       // Kill first. Everything below removes files and rows the running process may still be using,
       // and `disable` is the one path that is instant and cannot be held open by the plugin.
       registry.disable(pluginId, "user", "Uninstalled.");
@@ -501,13 +563,14 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
       store.deletePlugin(pluginId);
       removeArtifacts(pluginId, env);
 
-      // The plugin's own data directory is left alone on purpose: it lives outside `plugins/<id>/`
-      // precisely so that keeping data across an uninstall-reinstall is a decision rather than an
-      // accident of layout. 3.7 owns that decision.
-      //
-      // A promise even though every step above is synchronous: uninstall will grow a `rm -rf` over
-      // that directory the moment 3.7 gives the user the choice, and a caller that has to be
-      // rewritten to await it then is a caller that will not be.
+      // The data directory. Closed first — an open SQLite handle makes the delete fail outright on
+      // Windows rather than partially — then removed unless the caller asked to keep it. It lives
+      // outside `plugins/<id>/` precisely so that this is one decision about one directory.
+      closeStorage(pluginId);
+      if (uninstallOptions?.keepData !== true) {
+        rmSync(pluginDataDir(pluginId, env), { recursive: true, force: true });
+      }
+
       return Promise.resolve();
     },
   };

@@ -31,6 +31,7 @@
  */
 
 import type { JsonObject, JsonValue, Scope } from "@vrcz/shared";
+import type { PluginCapability } from "./capabilities.ts";
 
 // ---------------------------------------------------------------------------------------------
 // Limits. Every one of these exists because it is the only thing standing between a hostile peer
@@ -205,6 +206,18 @@ export const PROTOCOL_ERRORS = {
   /** A frame, parameter, or result exceeded a size cap. */
   E_TOO_LARGE: {
     description: "The payload exceeded a protocol size limit.",
+    retryable: false,
+  },
+  /**
+   * The method needs a host capability the user did not grant — `storage`, `notify`, `webhook`.
+   *
+   * Distinct from {@link PROTOCOL_ERRORS.E_SCOPE_DENIED} because the fix is different: a scope is
+   * authority over the user's VRChat account, a capability is a power of the host. Telling an
+   * author "you are missing the storage capability" when they are staring at a full scope list is
+   * worth a separate code.
+   */
+  E_CAPABILITY_DENIED: {
+    description: "The plugin does not hold the capability this method requires.",
     retryable: false,
   },
   /** The plugin's per-plugin SQLite quota is full. Deleting records is the fix, not waiting. */
@@ -720,6 +733,16 @@ export interface PluginGrant {
   readonly scopes: readonly Scope[];
   /** Accounts this grant covers. A plugin with `friends:read` does not get all six accounts. */
   readonly accountIds: readonly string[];
+  /**
+   * Host powers the user approved: a private database, notifications, the two network replacements.
+   *
+   * Required rather than optional, and the reason is the failure mode. Optional would mean a
+   * construction site that forgot it produces a grant holding *no* capabilities, which denies
+   * correctly today and reads as "this plugin asked for nothing" forever after — a silent,
+   * plausible wrong answer. Required makes every site say what it means, and the compiler finds
+   * them all.
+   */
+  readonly capabilities: readonly PluginCapability[];
   /** Scopes still in dry-run: outbound actions are logged and not performed. Correction 4. */
   readonly dryRunScopes?: readonly Scope[];
 }
@@ -752,6 +775,15 @@ export interface MethodDefinition<Params, Result extends JsonValue | undefined> 
    */
   readonly scope: Scope | null;
   /**
+   * The host capability this method requires, or `null` for one that needs none.
+   *
+   * Separate from {@link MethodDefinition.scope} because they are different questions: a scope is
+   * authority over the user's VRChat account, a capability is a power of the host itself. A method
+   * may need one, the other, both, or neither — `storage.kv.get` needs `storage` and no scope at
+   * all, because a plugin's own database says nothing about VRChat.
+   */
+  readonly capability: PluginCapability | null;
+  /**
    * Units charged against the plugin's subordinate rate budget. A method that reaches VRChat costs
    * at least 1; a purely local one costs 0. See PLAN.md §Phase 3 correction 3.
    */
@@ -766,6 +798,7 @@ export interface MethodDefinition<Params, Result extends JsonValue | undefined> 
  */
 export interface ErasedMethod {
   readonly scope: Scope | null;
+  readonly capability: PluginCapability | null;
   readonly cost: number;
   readonly invoke: (
     raw: JsonValue | undefined,
@@ -781,6 +814,7 @@ export function defineMethod<Params, Result extends JsonValue | undefined>(
 ): ErasedMethod {
   return {
     scope: definition.scope,
+    capability: definition.capability,
     cost: definition.cost,
     invoke: async (raw, ctx) => {
       const parsed = definition.parse(raw);
@@ -814,6 +848,14 @@ export function authorizeCall(
   }
   if (method.scope !== null && !grant.scopes.includes(method.scope)) {
     return fail("E_SCOPE_DENIED", `${frame.method} requires the ${method.scope} scope`);
+  }
+  // After the scope and before anything runs, for the same reason: a capability the user did not
+  // approve is not a thing a handler may be asked to decline for itself.
+  if (method.capability !== null && !grant.capabilities.includes(method.capability)) {
+    return fail(
+      "E_CAPABILITY_DENIED",
+      `${frame.method} requires the ${method.capability} capability`,
+    );
   }
   return { ok: true, value: method };
 }

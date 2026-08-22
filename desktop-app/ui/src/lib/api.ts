@@ -502,7 +502,7 @@ export interface ConnectedApp {
   readonly lastUsedAt: number | null;
   /** Live pipeline sockets this grant holds right now. */
   readonly liveSockets: number;
-  /** Ten minutes of one-second request counts, oldest first. Seeds the card's sparkline. */
+  /** A minute of one-second request counts, oldest first. Seeds the card's sparkline. */
   readonly rate: RateSeries;
 }
 

@@ -9,7 +9,7 @@ import { RATE_WINDOW_SECONDS, type RateSeries } from "@vrcz/shared";
  * app polling too hard gets **the user** rate-limited or moderated, and the user blames vrc.zip. You
  * cannot show them who is eating the budget without measuring who is eating the budget.
  *
- * The shape is a ring of one-second counters per series, ten minutes deep. Counters rather than
+ * The shape is a ring of one-second counters per series, a minute deep. Counters rather than
  * timestamps because the answer is always a count over a window, and a ring rather than a growing
  * list because this runs for weeks: a daemon that remembers every request it ever made in order to
  * draw a sparkline has replaced one resource problem with a worse one.
@@ -20,7 +20,7 @@ import { RATE_WINDOW_SECONDS, type RateSeries } from "@vrcz/shared";
  */
 
 /**
- * How far back the history goes. Ten minutes, one bucket per second.
+ * How far back the history goes. One minute, one bucket per second.
  *
  * Defined in `@vrcz/shared` and re-exported here: the UI sizes its own buffer from the same number,
  * and two declarations that must agree are one declaration that has not drifted *yet*.

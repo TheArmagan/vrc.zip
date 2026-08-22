@@ -1,5 +1,5 @@
 <!--
-  A request-rate sparkline: ten minutes of one-second buckets in a few hundred pixels.
+  A request-rate sparkline: a minute of one-second buckets, drawn small.
 
   Three decisions carry the whole thing, and the first two were wrong in the first version.
 
@@ -9,11 +9,11 @@
   this". The magnitude lives in the number printed beside it; the picture is for the shape. `max`
   still exists for the case where several charts must share a scale to be comparable.
 
-  **Resolution follows the element, not a constant.** A fixed column count meant 600 buckets
-  collapsed into 60 columns — ten seconds each — so a one-second spike came out as a ten-second
-  plateau and everything looked blocky. The width is measured and the series is resampled at
-  `density` columns per CSS pixel, so these stay detailed at the small sizes they are drawn at and a
-  wider card genuinely shows more.
+  **Resolution follows the element, not a constant.** A fixed column count once collapsed the
+  window into far fewer columns than it had buckets, so a one-second spike came out as a plateau and
+  everything looked blocky. The width is measured and the series is resampled at `density` columns
+  per CSS pixel — which at the current window means the cap below usually wins and every second gets
+  its own column, nothing averaged at all.
 
   **Downsampled by maximum, and drawn as steps.** Averaging turns a one-second burst of 20 into a
   column of 4, flattening exactly the shape worth seeing — a spike is what gets the user
@@ -31,10 +31,10 @@ let {
   /**
    * Columns per CSS pixel.
    *
-   * Above 1 because these are drawn small: at 3 a 56-pixel chart still resolves 168 columns out of
-   * 600 buckets — about 3.5 seconds each — so a one-second spike stays a spike rather than being
-   * averaged into its neighbours. `preserveAspectRatio="none"` stretches the viewBox to fit, so
-   * sub-pixel columns cost nothing but a slightly longer path string.
+   * Above 1 because these are drawn small: at 3 even a 20-pixel chart asks for more columns than a
+   * one-minute window has buckets, so the cap below wins and every second is drawn on its own —
+   * which is the most faithful the chart can be. `preserveAspectRatio="none"` stretches the viewBox
+   * to fit, so sub-pixel columns cost nothing but a slightly longer path string.
    */
   density = 3,
   class: className = "",

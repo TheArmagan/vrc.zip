@@ -162,7 +162,7 @@ async function confirmRemove(): Promise<void> {
                 values={accountRate}
                 height={14}
                 class="w-20"
-                label="{account.displayName} requests per second over the last ten minutes"
+                label="{account.displayName} requests per second over the last minute"
               />
               <span class="tabular text-xs text-muted-foreground">
                 {accountRate[accountRate.length - 1] ?? 0}/s

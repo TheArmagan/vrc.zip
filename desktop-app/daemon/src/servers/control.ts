@@ -677,7 +677,7 @@ export interface ConnectedApp {
   /** Live pipeline sockets this grant currently holds. */
   readonly liveSockets: number;
   /**
-   * What this app is spending, per second, over the last ten minutes.
+   * What this app is spending, per second, over the last minute.
    *
    * PLAN.md §Phase 3 calls the rate budget the sharpest edge in the system: an app polling too hard
    * gets *the user* rate-limited, and the user blames vrc.zip. Naming who is eating it is the half

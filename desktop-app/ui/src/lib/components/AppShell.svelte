@@ -92,7 +92,7 @@
           <Tooltip.Root>
             <Tooltip.Trigger class="hidden items-center gap-2 sm:flex">
               <!--
-                Ten minutes of load behind the current reading. This used to render `limit` — a
+                A minute of load behind the current reading. This used to render `limit` — a
                 constant off the daemon's configuration — as though it were a measurement, so it
                 said the same number whether the daemon was idle or saturated.
 
@@ -104,7 +104,7 @@
                 values={rates.total}
                 height={14}
                 class="w-14"
-                label="Requests per second over the last ten minutes"
+                label="Requests per second over the last minute"
               />
               <span class="tabular text-xs text-muted-foreground"
                 >{rates.current}/{rates.limit}/s</span
@@ -112,7 +112,7 @@
             </Tooltip.Trigger>
             <Tooltip.Content>
               {rates.current} requests in the last second, against the {rates.limit}/s
-              the daemon allows itself across every account. Peak in the last ten minutes:
+              the daemon allows itself across every account. Peak in the last minute:
               {rates.peak}/s.
             </Tooltip.Content>
           </Tooltip.Root>

@@ -119,7 +119,7 @@ function latest(history: readonly number[]): number {
  * Requests across the whole window.
  *
  * Summed from the live history rather than read off `entry.rate.total`, which was true when the
- * page loaded and is a minute stale by the time anyone looks at it.
+ * page loaded and is stale by the time anyone looks at it.
  */
 function windowTotal(history: readonly number[]): number {
   let sum = 0;
@@ -258,10 +258,10 @@ function ordinary(app: ConnectedApp): readonly { scope: string; description: str
                   values={history}
                   height={18}
                   class="w-24"
-                  label="{entry.app.name} requests per second over the last ten minutes"
+                  label="{entry.app.name} requests per second over the last minute"
                 />
                 <span class="tabular text-xs text-muted-foreground">
-                  {latest(history)}/s now · {windowTotal(history)} in the last 10 min
+                  {latest(history)}/s now · {windowTotal(history)} in the last minute
                 </span>
               </div>
 

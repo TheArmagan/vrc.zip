@@ -60,7 +60,7 @@ export interface ControlAccount {
   /** See {@link VrchatImageUrl} — not loadable directly by a browser. */
   readonly iconUrl: VrchatImageUrl;
   /**
-   * What this account is spending, per second, over the last ten minutes.
+   * What this account is spending, per second, over the last minute.
    *
    * On the card because "which account is eating the budget" is a question the user asks when six
    * accounts share one IP ceiling — see PLAN.md §1.4, where the per-IP bucket is the load-bearing
@@ -391,18 +391,22 @@ export const STREAM_READY = "ready";
 export const STREAM_RATE = "rate";
 
 /**
- * How many one-second buckets a rate history carries. Ten minutes.
+ * How many one-second buckets a rate history carries. One minute.
  *
  * Here rather than in the daemon's meter because both sides have to agree on it: the daemon fills
  * the array and the UI right-aligns the seed into a buffer of exactly this length, and a mismatch
  * would silently shift every sparkline rather than fail.
+ *
+ * A minute rather than ten: at this size the chart is a few dozen pixels wide, so a longer window
+ * buys history nobody can resolve while making every recent second narrower. Sixty buckets also
+ * means the sparkline never has to downsample at all — one column per second, nothing averaged.
  */
-export const RATE_WINDOW_SECONDS = 600;
+export const RATE_WINDOW_SECONDS = 60;
 
 /**
  * One series' worth of request rate, as a card draws it.
  *
- * `history` is the seed: ten minutes of one-second buckets, oldest first, fetched once with the
+ * `history` is the seed: a minute of one-second buckets, oldest first, fetched once with the
  * card. The live frame that follows carries **only the newest value**, which the UI appends. Sending
  * the whole window every second would be two kilobytes per series per second to say one number
  * changed, and the client already has the rest of it.

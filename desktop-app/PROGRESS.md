@@ -887,14 +887,14 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     its account and, on the pass-through, its grant. Same reasoning as the limiter living there: one
     path to VRChat means "everything is counted" is structural rather than a convention.
 
-    A ring of one-second buckets, ten minutes deep, per series. Counters not timestamps because the
+    A ring of one-second buckets, one minute deep, per series. Counters not timestamps because the
     answer is always a count over a window; a ring not a list because this runs for weeks. Series are
     **pruned when they go quiet** — apps come and go and the key set is not bounded by anything the
     daemon controls. The reading is the last *complete* second: the one in progress is a partial
     count that only reads low, and including it makes a steady 5/s flicker with sample timing.
 
 89. **History is seeded over REST and extended over the socket.** `/api/status`, `/api/accounts` and
-    `/api/apps` each carry the full 600-bucket window for their series; the once-a-second `rate`
+    `/api/apps` each carry the full window for their series; the once-a-second `rate`
     frame carries only the newest value and the UI appends. Re-sending the window every second would
     be kilobytes to say one number changed. Two consequences worth knowing: the frame omits
     zero-valued keys, so **absence means zero** and the client must advance *every* known series on
@@ -910,10 +910,11 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     against the 80/s ceiling, so a real 3/s reading sat in the bottom 4% of the box — honest about
     headroom, useless for shape, which is the only thing a chart that size can convey. It scales to
     its own peak now, with the absolute magnitude in the number beside it. Two more things that made
-    it look coarse: a fixed 60 columns meant ten seconds per column, so a one-second spike rendered
-    as a ten-second plateau — resolution follows the measured element width instead — and
-    downsampling has to take the **maximum** per column, never the average, because a spike is
-    precisely what gets the user rate-limited and averaging is what erases it.
+    it look coarse: a fixed column count collapsed many seconds into each column, so a one-second
+    spike rendered as a plateau — resolution follows the measured element width now, and the window
+    is a minute rather than ten, so in practice every second gets its own column — and downsampling
+    has to take the **maximum** per column, never the average, because a spike is precisely what
+    gets the user rate-limited and averaging is what erases it.
 
 ---
 

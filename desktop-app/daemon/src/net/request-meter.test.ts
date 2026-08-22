@@ -4,7 +4,7 @@ import { RequestMeter, WINDOW_SECONDS } from "./request-meter.ts";
 /**
  * The clock is driven rather than waited on, which is the only way the ring's interesting cases are
  * reachable at all: a gap wider than the window, a wrap around the end of the buffer, and a series
- * going quiet are each ten minutes of real time away.
+ * going quiet are each a full window of real time away.
  */
 
 function meterAt(start = 1_700_000_000_000): {
@@ -108,7 +108,7 @@ describe("history", () => {
 
   test("wraps around the end of the ring without smearing old values forward", () => {
     // The bug a ring invites: at second N + WINDOW, slot N is reused, and a buffer that is not
-    // cleared on the way past reports a ten-minute-old count as current.
+    // cleared on the way past reports a window-old count as current.
     const { meter, tick } = meterAt();
     meter.record({ accountId: "usr_a" });
     tick(WINDOW_SECONDS);

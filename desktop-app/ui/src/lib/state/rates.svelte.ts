@@ -3,8 +3,8 @@
  *
  * Two sources feed one picture, and the split is the whole design:
  *
- *  - **The REST payload seeds it.** `/api/status`, `/api/accounts` and `/api/apps` each carry ten
- *    minutes of one-second buckets for their series. That is the history, fetched once with the
+ *  - **The REST payload seeds it.** `/api/status`, `/api/accounts` and `/api/apps` each carry a
+ *    minute of one-second buckets for their series. That is the history, fetched once with the
  *    card it belongs to.
  *  - **The `rate` frame extends it.** Once a second, the daemon sends only the newest value per
  *    series, and this appends. Re-sending the whole window every second would be two kilobytes per
@@ -19,7 +19,7 @@
 import { RATE_WINDOW_SECONDS, type RateFrame, type RateSeries } from "@vrcz/shared";
 import { SvelteMap } from "svelte/reactivity";
 
-/** Ten minutes of one-second buckets. The daemon fills exactly this many. */
+/** One minute of one-second buckets. The daemon fills exactly this many. */
 export const WINDOW_SECONDS = RATE_WINDOW_SECONDS;
 
 /** A series the UI can draw: oldest first, always exactly `WINDOW_SECONDS` long. */

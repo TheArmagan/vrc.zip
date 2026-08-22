@@ -6,32 +6,20 @@
 -->
 <script lang="ts">
 import KeyRoundIcon from "@lucide/svelte/icons/key-round";
-import Trash2Icon from "@lucide/svelte/icons/trash-2";
 import UserPlusIcon from "@lucide/svelte/icons/user-plus";
 import UsersRoundIcon from "@lucide/svelte/icons/users-round";
 import { toast } from "svelte-sonner";
-import { api, describeError, imageUrl } from "$lib/api.ts";
-import ConnectionDot from "$lib/components/ConnectionDot.svelte";
+import { api, describeError } from "$lib/api.ts";
+import AccountRow from "$lib/components/AccountRow.svelte";
 import EmptyState from "$lib/components/EmptyState.svelte";
 import ErrorNote from "$lib/components/ErrorNote.svelte";
-import RelativeTime from "$lib/components/RelativeTime.svelte";
 import SectionHeader from "$lib/components/SectionHeader.svelte";
-import UserName from "$lib/components/UserName.svelte";
 import * as Alert from "$lib/components/ui/alert/index.js";
-import {
-  Avatar,
-  AvatarBadge,
-  AvatarFallback,
-  AvatarImage,
-} from "$lib/components/ui/avatar/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
 import * as Dialog from "$lib/components/ui/dialog/index.js";
 import { Separator } from "$lib/components/ui/separator/index.js";
 import { Skeleton } from "$lib/components/ui/skeleton/index.js";
-import Sparkline from "$lib/components/Sparkline.svelte";
-import { connectionLabel, initials } from "$lib/format.ts";
-import { rates } from "$lib/state/rates.svelte.ts";
-import { hrefFor, navigate } from "$lib/router.ts";
+import { hrefFor } from "$lib/router.ts";
 import { app } from "$lib/state/app.svelte.ts";
 
 let removing = $state<string | null>(null);
@@ -110,101 +98,17 @@ async function confirmRemove(): Promise<void> {
     <ul class="divide-y divide-border">
       {#each app.accounts as account (account.id)}
         <!-- `{@const}` is only legal as an immediate child of a block, hence up here. -->
-        {@const accountRate = rates.account(account.id)}
-        {@const sessionsForAccount = app.sessions.filter(
+        {@const sessionCount = app.sessions.filter(
           (session) => session.accountId === account.id,
-        )}
-        <li class="flex items-center gap-3 px-4 py-3">
-          <!--
-            alt="" on purpose: the display name is the very next element, so announcing the icon
-            too would read the name twice. The dot stays aria-hidden — `connectionLabel()` spells
-            the same state out in words directly under the name.
-          -->
-          <Avatar class="size-9">
-            <AvatarImage src={imageUrl(account.iconUrl)} alt="" loading="lazy" />
-            <AvatarFallback class="text-xs">{initials(account.displayName)}</AvatarFallback>
-            <AvatarBadge class="bg-transparent ring-background">
-              <ConnectionDot connection={account.connection} size={null} class="size-full" />
-            </AvatarBadge>
-          </Avatar>
-
-          <div class="min-w-0 flex-1">
-            <!--
-              An account is a user too, and its own profile is the one VRChat answers most fully —
-              the lookup runs through the account itself. See `userModal.openUser`.
-            -->
-            <p class="truncate text-sm font-medium">
-              <UserName
-                userId={account.id}
-                name={account.displayName}
-                accountId={account.id}
-                class="max-w-full truncate"
-              />
-            </p>
-            <p class="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
-              <span>{connectionLabel(account.connection)}</span>
-              <span aria-hidden="true">·</span>
-              <span>Added <RelativeTime ts={account.addedAt} /></span>
-              {#if account.lastSeenAt !== null}
-                <span aria-hidden="true">·</span>
-                <span>Last event <RelativeTime ts={account.lastSeenAt} /></span>
-              {/if}
-            </p>
-
-            <!--
-              What this account is spending. Worth showing per account rather than only in total,
-              because six accounts share one per-IP ceiling (PLAN.md §1.4) and the per-account
-              limiter is structurally unable to see that — so "which one is eating it" is a real
-              question with no other answer on screen.
-            -->
-            <div class="mt-1 flex items-center gap-2">
-              <Sparkline
-                values={accountRate}
-                height={14}
-                class="w-20"
-                label="{account.displayName} requests per second over the last minute"
-              />
-              <span class="tabular whitespace-nowrap text-xs text-muted-foreground">
-                {accountRate[accountRate.length - 1] ?? 0}/s
-              </span>
-            </div>
-          </div>
-
-          <span class="hidden shrink-0 text-xs text-muted-foreground sm:inline">
-            {#if sessionsForAccount.length === 0}
-              No client running
-            {:else}
-              {sessionsForAccount.length}
-              {sessionsForAccount.length === 1 ? "client" : "clients"} running
-            {/if}
-          </span>
-
-          {#if account.connection === "needs-2fa"}
-            <Button
-              size="sm"
-              variant="outline"
-              onclick={() => {
-                navigate("login", account.id);
-              }}
-            >
-              <KeyRoundIcon />
-              Enter code
-            </Button>
-          {/if}
-
-          <Button
-            size="icon-sm"
-            variant="ghost"
-            class="text-muted-foreground hover:text-destructive"
-            aria-label={`Remove ${account.displayName}`}
-            onclick={() => {
-              removing = account.id;
-              error = null;
-            }}
-          >
-            <Trash2Icon />
-          </Button>
-        </li>
+        ).length}
+        <AccountRow
+          {account}
+          {sessionCount}
+          onRemove={() => {
+            removing = account.id;
+            error = null;
+          }}
+        />
       {/each}
     </ul>
 

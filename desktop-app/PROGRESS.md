@@ -1659,6 +1659,18 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      daemon: the game log's three-hour-old rows fired zero instance requests, and the feed's one
      recent location fired exactly one, with no hover.
 
+151. **One row shape, applied everywhere a list of people is drawn.** `FriendRow` established the
+     pattern — avatar, name through `UserName`, summary columns, and a chevron whose *opening* is
+     what authorises the profile read — and the accounts list and the instance roster now follow it
+     (`AccountRow`, `RosterRowItem`). The point is not visual consistency for its own sake: it is
+     that "expand to see more" is the only gesture that can pay for a request per person, so a list
+     that has no expander has nowhere to put trust rank, age verification, bio or friendship, and
+     those facts simply were not on those screens. Deliberately no search or scroll sentinel on the
+     accounts list: people have a handful of accounts, and a filter over four rows is furniture.
+
+     A roster row whose player the log gave no id for renders no chevron at all rather than a dead
+     one, and takes a spacer of the same width so the column does not jitter.
+
 ---
 
 ## Gotchas

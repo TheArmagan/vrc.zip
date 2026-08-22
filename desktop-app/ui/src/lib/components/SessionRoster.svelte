@@ -11,37 +11,26 @@
   instance the account itself created, so a group or public room you walked into has none, and the
   store then falls back to reading the observed players one at a time), and a genuine fault. Only
   the third is drawn as a problem.
+
+  The per-person row lives in `RosterRowItem.svelte`. It moved out when it grew an expander, because
+  a row that holds its own open/closed state and authorises its own profile fetch is a component and
+  not a fragment. What stays here is everything about the *list*: the toolbar, the sort, the search,
+  and the sentence explaining where the chips came from.
 -->
 <script lang="ts">
 import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
 import SearchIcon from "@lucide/svelte/icons/search";
 import UsersIcon from "@lucide/svelte/icons/users";
-import { type GameSession, imageUrl } from "$lib/api.ts";
+import type { GameSession } from "$lib/api.ts";
 import EmptyState from "$lib/components/EmptyState.svelte";
 import ErrorNote from "$lib/components/ErrorNote.svelte";
-import PlayerAttributes from "$lib/components/PlayerAttributes.svelte";
-import StatusDot from "$lib/components/StatusDot.svelte";
-import UserName from "$lib/components/UserName.svelte";
-import {
-  Avatar,
-  AvatarBadge,
-  AvatarFallback,
-  AvatarImage,
-} from "$lib/components/ui/avatar/index.js";
+import RosterRowItem from "$lib/components/RosterRowItem.svelte";
 import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
 import * as InputGroup from "$lib/components/ui/input-group/index.js";
 import * as Select from "$lib/components/ui/select/index.js";
 import * as Tooltip from "$lib/components/ui/tooltip/index.js";
-import {
-  chosenStatus,
-  duration,
-  fullTimestamp,
-  initials,
-  parseLocation,
-  timeOfDay,
-  trustRank,
-} from "$lib/format.ts";
+import { parseLocation, timeOfDay, trustRank } from "$lib/format.ts";
 import type { ObservedPlayer } from "$lib/state/live-sessions.svelte.ts";
 import { app } from "$lib/state/app.svelte.ts";
 import { clock } from "$lib/state/clock.svelte.ts";
@@ -271,78 +260,7 @@ const refreshing = $derived(entry?.status === "loading");
       {:else}
         <ul class="divide-y divide-border/60">
           {#each sorted as row (row.key)}
-            {@const status = chosenStatus(row.attributes?.status)}
-            <!--
-              `onmouseenter` hydrates a row the fallback deliberately skipped past its cap, which is
-              the same rule the resolvers follow: fetch on hover, never on render. It is safe to fire
-              on every row and every pass — `ensureUser` ignores anyone already described, already
-              pending, or recently missing, and batches a pointer sweep into one request.
-
-              On the `<li>` rather than on the name, so the whole row is the target. No keyboard
-              equivalent is needed: the interactive thing in the row is the name button below, and
-              focusing it opens the modal, which fetches this person in full anyway.
-            -->
-            <li
-              class="flex items-center gap-3 px-4 py-2"
-              onmouseenter={() =>
-                instanceRoster.ensureUser(session.currentLocation, session.accountId, row.userId)}
-            >
-              <!-- alt="" deliberately: the name is the next column, so announcing it twice is noise. -->
-              <Avatar class="size-8 shrink-0">
-                <AvatarImage src={imageUrl(row.attributes?.iconUrl)} alt="" loading="lazy" />
-                <AvatarFallback class="text-[10px]">{initials(row.displayName)}</AvatarFallback>
-                {#if status !== null}
-                  <!--
-                    Only a status the person *chose* — see `chosenStatus`. This list is not asking
-                    whether they are online: the game log has them in the room, which is a better
-                    answer than VRChat's and the reason the column this replaced was a lie. So
-                    nobody here gets an offline dot, and somebody VRChat said nothing about gets no
-                    dot at all rather than a grey one meaning "we did not ask".
-
-                    `ring-background` and not `ring-popover`: these rows sit on the page, unlike the
-                    same badge inside the modals.
-                  -->
-                  <AvatarBadge class="bg-transparent ring-background">
-                    <StatusDot {status} size={null} class="size-full" />
-                  </AvatarBadge>
-                {/if}
-              </Avatar>
-
-              <div class="flex min-w-0 flex-1 items-center gap-2">
-                <span class="min-w-0 truncate text-sm">
-                  <!--
-                    `row.userId` may have come from the log or been recovered by matching the name
-                    against VRChat's answer. With neither, `UserName` degrades to plain text rather
-                    than offering a click that cannot resolve.
-                  -->
-                  <UserName
-                    userId={row.userId}
-                    name={row.displayName}
-                    accountId={session.accountId}
-                    class="max-w-full truncate"
-                  />
-                </span>
-                {#if row.isSelf}
-                  <Badge variant="outline" class="h-5 shrink-0 px-1.5 text-[10px]">You</Badge>
-                {/if}
-              </div>
-
-              <PlayerAttributes
-                trustLevel={row.attributes?.trustLevel ?? null}
-                ageVerificationStatus={row.attributes?.ageVerificationStatus ?? null}
-                ageVerified={row.attributes?.ageVerified ?? false}
-                isFriend={row.attributes?.isFriend ?? false}
-                seenThrough={account?.displayName ?? null}
-                matchedBy={row.matchedBy}
-              />
-
-              <span
-                class="tabular w-24 shrink-0 text-right text-xs text-muted-foreground"
-                title={`Seen joining at ${fullTimestamp(row.joinedAt)}`}
-              >
-                {timeOfDay(row.joinedAt)} · {duration(clock.now - row.joinedAt)}
-              </span>
-            </li>
+            <RosterRowItem {row} {session} seenThrough={account?.displayName ?? null} />
           {/each}
         </ul>
       {/if}

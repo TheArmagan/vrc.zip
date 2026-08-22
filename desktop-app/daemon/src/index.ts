@@ -1,4 +1,6 @@
 import { APP_NAME, APP_VERSION } from "@vrcz/shared";
+import { attention, banner, helpText, note, startupSummary, versionText } from "./cli/banner.ts";
+import { enableAnsiColour, setConsoleTitle } from "./os/console.ts";
 import { startDaemon } from "./app.ts";
 import { openUrl, shouldOpenBrowser } from "./os/open-url.ts";
 import { isPackaged } from "./servers/embedded-ui.ts";
@@ -29,6 +31,17 @@ import { needsFirstRun } from "./settings.ts";
 async function runSubcommand(argv: readonly string[]): Promise<number | null> {
   const [command, ...rest] = argv;
 
+  // Answered before the daemon starts, and before anything touches disk: someone asking what this
+  // is should not have a state directory created as a side effect of asking.
+  if (argv.includes("--help") || argv.includes("-h") || command === "help") {
+    console.log(helpText());
+    return 0;
+  }
+  if (argv.includes("--version") || argv.includes("-v") || command === "version") {
+    console.log(versionText());
+    return 0;
+  }
+
   if (command === "create-plugin") {
     const target = rest.find((arg) => !arg.startsWith("-"));
     if (target === undefined) {
@@ -53,33 +66,57 @@ async function runSubcommand(argv: readonly string[]): Promise<number | null> {
 }
 
 async function main(): Promise<void> {
+  /*
+   * The console window, before anything is printed into it.
+   *
+   * `enableAnsiColour` asks an older Windows console to interpret escapes at all — chalk decides
+   * whether to *use* them, but on `conhost` without this flag the escapes arrive as visible
+   * characters, which reads as a broken program rather than a plain one.
+   *
+   * The title matters for the double-click case: without it the window is named with the full path
+   * to the executable, which is both ugly and a way to put somebody's home directory in a
+   * screenshot.
+   */
+  enableAnsiColour();
+  setConsoleTitle(`${APP_NAME} ${APP_VERSION}`);
+
   const code = await runSubcommand(process.argv.slice(2));
   if (code !== null) {
     process.exit(code);
   }
 
-  console.log(`${APP_NAME} ${APP_VERSION} — starting (UNOFFICIAL, not affiliated with VRChat)`);
+  console.log(banner());
 
   const daemon = await startDaemon();
 
-  console.log(`  UI       ${daemon.servers.urls.uiUrl}`);
-  console.log(`  proxy    ${daemon.servers.urls.proxyUrl}  (VRChat API mirror)`);
-  console.log(`  control  ${daemon.servers.urls.controlUrl}`);
-  console.log("");
-  console.log(`  Open: ${daemon.launchUrl}`);
+  // Every address in one place, including the forward proxy's — which used to announce itself from
+  // inside its own startup path, several lines earlier and in a different format.
+  console.log(
+    startupSummary({
+      uiUrl: daemon.servers.urls.uiUrl,
+      proxyUrl: daemon.servers.urls.proxyUrl,
+      controlUrl: daemon.servers.urls.controlUrl,
+      forwardProxyUrl: daemon.forwardProxy?.url,
+      launchUrl: daemon.launchUrl,
+    }),
+  );
 
   if (shouldOpenBrowser(process.argv.slice(2), isPackaged())) {
     // Best-effort by contract: a machine with no default browser still has a running daemon and a
     // URL on screen, which is a working app, not a failure to report.
     const opened = await openUrl(daemon.launchUrl);
-    console.log(opened ? "  (opening it in your browser)" : "  (open that link to get started)");
+    console.log(note(opened ? "opening it in your browser…" : "open that link to get started"));
   }
 
   if (needsFirstRun(daemon.settings)) {
     console.log("");
-    console.log("  First run: set a contact address in settings before signing in.");
-    console.log("  VRChat requires it in the User-Agent, and a placeholder is worse than none.");
+    // Accented, because it is a thing to *do* rather than a thing to know: signing in before it is
+    // set fails at VRChat rather than here, which is the least useful place to find out.
+    console.log(attention("First run: set a contact address in settings before signing in."));
+    console.log(note("VRChat requires it in the User-Agent, and a placeholder is worse than none."));
   }
+
+  for (const line of daemon.startupNotes) console.log(note(line));
 
   let stopping = false;
   const shutdown = (signal: string): void => {

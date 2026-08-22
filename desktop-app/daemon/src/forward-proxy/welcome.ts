@@ -101,25 +101,28 @@ export interface BannerOptions {
  * The startup lines for the forward proxy.
  *
  * Returned rather than logged, so the wording is assertable without binding a port, and so the
- * "install the CA" half can be printed loudly only on the run that actually minted one. A setup
- * instruction repeated on every boot is one nobody reads by the third time.
+ * "install the CA" half is printed loudly only on the run that actually minted one — a setup
+ * instruction repeated every boot is one nobody reads by the third time.
+ *
+ * **The URL is no longer one of these lines.** It belongs with the other addresses in the startup
+ * summary, and announcing it from here put it above them, in a different format, before the block
+ * that lists everything else. What is left is the part that is genuinely this module's: an
+ * instruction, on the one run where it applies.
  */
-export function forwardProxyBanner({
-  proxyUrl,
-  caCertPath,
-  caIsNew,
-  hosts,
-}: BannerOptions): string[] {
-  const lines = [
-    `[vrc.zip] forward proxy on ${proxyUrl} - configure an app with it and its calls to ` +
-      `${hosts.join(", ")} are served by the local mirror.`,
+export function forwardProxyBanner({ proxyUrl, caCertPath, caIsNew }: BannerOptions): string[] {
+  if (!caIsNew) return [];
+  /*
+   * The page first, the command second.
+   *
+   * Installing a certificate is the one setup step here that a user can get *wrong* in a way that
+   * matters, and the page at the proxy explains what the certificate is and why a local one is
+   * needed before it asks anyone to trust it. A `certutil` line on its own is a command to paste
+   * without understanding, which is exactly the habit a tool handling someone's credentials should
+   * not be teaching.
+   */
+  return [
+    "The forward proxy needs its certificate installed before HTTPS through it will work.",
+    `Open ${proxyUrl}/ and follow the steps there — it explains what it is installing and why.`,
+    `The certificate itself is at ${caCertPath}`,
   ];
-  if (caIsNew) {
-    lines.push(
-      `[vrc.zip] a new local CA was created at ${caCertPath}. Until it is trusted, HTTPS through ` +
-        `the proxy will fail. On Windows: certutil -addstore -user Root "${caCertPath}". ` +
-        `Setup instructions are at ${proxyUrl}/`,
-    );
-  }
-  return lines;
 }

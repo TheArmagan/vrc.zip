@@ -77,6 +77,14 @@ export interface RunningDaemon {
   readonly webhooks: WebhookManager;
   readonly sessionToken: string;
   readonly launchUrl: string;
+  /**
+   * Lines for the entry point to print after the URL block.
+   *
+   * Returned rather than logged from wherever they arise, so that everything a user reads at
+   * startup is ordered by what it *means* — addresses first, then the things to do about them —
+   * instead of by which subsystem happened to construct itself first.
+   */
+  readonly startupNotes: readonly string[];
   stop(): Promise<void>;
 }
 
@@ -471,6 +479,9 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
   // A failure here is logged and survived. It is the one listener with a moving part outside our
   // control (minting and reading TLS material off disk), and losing an opt-in convenience port must
   // not cost the user their accounts, their feed, and their game log.
+  /** Lines the entry point prints after the URL block. See the forward proxy note below. */
+  const startupNotes: string[] = [];
+
   let forwardProxy: ForwardProxy | null = null;
   if (settings.forwardProxy.enabled) {
     try {
@@ -482,14 +493,22 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
         logger: proxyLogger,
         ...(env !== undefined ? { env } : {}),
       });
-      for (const line of forwardProxyBanner({
-        proxyUrl: forwardProxy.url,
-        caCertPath: forwardProxy.caCertPath,
-        caIsNew: forwardProxy.caIsNew,
-        hosts: forwardProxy.interceptHosts,
-      })) {
-        console.info(line);
-      }
+      /*
+       * Collected rather than printed.
+       *
+       * The URL now lives in the startup summary with every other address, and what is left here is
+       * an *instruction* that applies on exactly one run — the boot that minted a CA. Handing it
+       * back lets the entry point put it after the summary, where somebody reading top to bottom
+       * has already seen what the daemon is serving.
+       */
+      startupNotes.push(
+        ...forwardProxyBanner({
+          proxyUrl: forwardProxy.url,
+          caCertPath: forwardProxy.caCertPath,
+          caIsNew: forwardProxy.caIsNew,
+          hosts: forwardProxy.interceptHosts,
+        }),
+      );
     } catch (error) {
       console.error(
         "[vrc.zip] the forward proxy failed to start; the rest of the daemon is up:",
@@ -625,6 +644,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     accounts,
     servers,
     forwardProxy,
+    startupNotes,
     settings,
     webhooks,
     sessionToken,

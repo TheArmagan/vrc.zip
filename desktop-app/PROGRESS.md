@@ -2938,6 +2938,46 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      Verified by installing the built output into a scratch project: subpath imports resolve, `tsc
      --noEmit` passes, and Node loads both entry points.
 
+198. **The console is an interface, and it is now treated as one.** For anyone who double-clicked
+     the executable, the startup output *is* the app until they open the link — so it got the same
+     attention as a screen.
+
+     **Every URL in one block, including the forward proxy's.** It used to announce itself from
+     inside its own startup path: several lines earlier, in a different format, before the summary
+     listing everything else — so the one screen a user reads had the addresses in two places and
+     neither list was complete. `startDaemon` now *returns* its startup notes instead of printing
+     them, and the entry point orders what a reader sees by what it **means** — addresses, then the
+     things to do about them — rather than by which subsystem constructed itself first.
+
+     **The CA note points at the page, not at a command.** Installing a certificate is the one setup
+     step here somebody can get wrong in a way that matters, and the page at the proxy explains what
+     it is and why a local one is needed before asking anyone to trust it. A bare `certutil` line
+     teaches pasting commands without understanding, which is not a habit for a tool holding
+     someone's credentials to encourage.
+
+     **`--help` and `--version` answer before anything touches disk.** Asking what a program is
+     should not create a state directory as a side effect.
+
+     **Colour is chalk, and the accent is the brand `#f5c454` as truecolor** rather than
+     `chalk.yellow`. The terminal's own "yellow" is whatever the user's theme says, which is a muddy
+     olive on many and orange on a few — the app would be a different colour on every machine. Chalk
+     degrades the hex itself, and it already knows about `NO_COLOR`, dumb terminals and redirected
+     output, each of which is a rule that gets subtly wrong when hand-rolled.
+
+     **What the console *cannot* be told, and why there is FFI here anyway.** The icon was already
+     handled at build time — `--windows-icon` puts it on the exe and the console host draws the icon
+     of what it hosts — so a double-click already shows it. What was missing is the **title**:
+     without `SetConsoleTitleW` the window is named with the full path to the executable, which puts
+     somebody's home directory in every screenshot. `SetConsoleMode` is there for the older
+     `conhost` a double-click can still land in, which shows escape sequences as literal characters
+     unless asked not to — a program that looks broken rather than plain. Both are best-effort and
+     neither can fail a startup.
+
+     A console *of our own* — our chrome, not Windows' — would mean shipping a GUI, which is a
+     Phase 5 question rather than a formatting one. Running from PowerShell borrows PowerShell's
+     window by definition, and detaching to spawn a new one would be hostile to whoever typed the
+     command.
+
 ---
 
 ## Gotchas

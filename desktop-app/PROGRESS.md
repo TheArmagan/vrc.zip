@@ -3017,6 +3017,34 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      whoever typed the command. A window with our own chrome means shipping a GUI, which is a Phase
      5 question rather than a formatting one.
 
+200. **The Bun pin table is filled in, and it now fails a test rather than a user when it is not.**
+     `BUN_RUNTIME_PINS` had been left empty on purpose back when packaging did not exist — an
+     unpinned platform refuses to fetch, which is the right refusal — but once the executable
+     shipped, that refusal became total: a packaged build has no `bun` on `PATH` to fall back to, so
+     *no plugin could be installed at all*. Reported from a real build, with exactly the message the
+     code was written to print.
+
+     The five 1.4.0 hashes were taken two ways, because a pin transcribed wrong is worse than no pin
+     (it fails at install time on someone else's machine): each `.zip` was downloaded and hashed,
+     and those digests were then checked against the release's own `SHASUMS256.txt`. Both agree. The
+     two are not independent — same origin, same TLS — but the realistic failure here is a truncated
+     download, not a compromised release, and this catches that.
+
+     **Why every test passed while the table was empty.** They all supply their own pins, which is
+     correct for exercising the download path and is precisely why none of them looked at the real
+     table. So the table now has tests of its own: it covers every platform `runtimeAssetName` can
+     produce (derived, not listed), every value is a lowercase 64-character digest, and
+     `BUN_RUNTIME_PINS_VERSION` equals `.bun-version`. That last one is the new guard — the table is
+     keyed by asset name, which carries no version, so bumping Bun without re-hashing would
+     otherwise compare 1.4.0's hashes against a different release's bytes and tell the user their
+     download "is not the one this build expects" when nobody had re-hashed anything. It is a red CI
+     run instead, and `fetchPluginRuntime` refuses the mismatch outright with a message that says
+     packaging mistake rather than blaming the download.
+
+     This is the same lesson as decision 199's, in a different costume: a green suite says nothing
+     about the values a *build* is shipped with. Anything that is a build input needs a test that
+     reads the build input.
+
 ---
 
 ## Gotchas

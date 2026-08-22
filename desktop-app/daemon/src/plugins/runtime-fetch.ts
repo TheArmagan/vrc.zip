@@ -72,22 +72,40 @@ import {
  * (see the file header), and it is what makes decision 14's claim true — that the runtime executing
  * third-party plugin code is the exact one we tested against, on every machine.
  *
- * It is empty in this build, and that is the honest state rather than an oversight: the hashes are
- * produced by the packaging step, which does not exist yet, and inventing them here would mean
- * shipping a check that passes against nothing. An unpinned platform therefore **refuses to fetch**,
- * naming the URL and asking for the hash — which is the correct failure, since the alternative is
- * running a downloaded executable nobody vouched for.
+ * An unpinned platform **refuses to fetch**, naming the URL and asking for the hash. That is the
+ * correct failure — the alternative is running a downloaded executable nobody vouched for — but it
+ * is also a *total* one: a packaged build has no `bun` on `PATH` to fall back to, so an empty table
+ * means no plugin can be installed at all. It was empty until 1.4.0's hashes were taken, which is
+ * exactly the shape that bug had.
  *
- * To fill it: download each asset, `sha256sum` it, and paste the hex here in the same commit that
- * moves `packageManager`, `engines.bun` and `.bun-version`.
+ * These are the five assets for **Bun 1.4.0**, verified two ways: each `.zip` was downloaded and
+ * hashed, and the digests were then checked against the release's own `SHASUMS256.txt`. Both agree.
+ * The two are not fully independent — same origin, same TLS — but the second catches the realistic
+ * failure, which is a truncated or corrupted download rather than a compromised release.
+ *
+ * When the pin moves: download each asset, `sha256sum` it, and paste the hex here **in the same
+ * commit** that moves `packageManager`, `engines.bun` and `.bun-version`. This is the one of the
+ * four whose value cannot be checked by reading another file in the repository, so it is the one
+ * that has to be done by hand rather than assumed.
  */
 export const BUN_RUNTIME_PINS: Readonly<Record<string, string>> = {
-  // "bun-windows-x64.zip": "<sha256>",
-  // "bun-linux-x64.zip": "<sha256>",
-  // "bun-linux-aarch64.zip": "<sha256>",
-  // "bun-darwin-x64.zip": "<sha256>",
-  // "bun-darwin-aarch64.zip": "<sha256>",
+  "bun-windows-x64.zip": "e6f093d39da486b20262ca8cdd5ed6a9e8bc9c2f275b78e6d3a0c5b28cc95901",
+  "bun-linux-x64.zip": "2d03fb5fb83ac8b567aca0a281b2ce1a1a19d488f56c2968d88c3f25e92fe452",
+  "bun-linux-aarch64.zip": "4b1a332ee861983eb93bcfe6f770fff94e3e31b2c388bdaea3c8ed35e58eed0e",
+  "bun-darwin-x64.zip": "1d0211b8f1dc991182344687ad15e72ee86f154845a5f7fa477994cd341dd9b0",
+  "bun-darwin-aarch64.zip": "c669e97f6164e1c96e0701748db98dfa77492908cbd8394c7557134a735de381",
 };
+
+/**
+ * The Bun release {@link BUN_RUNTIME_PINS} speaks for.
+ *
+ * The table is keyed by asset name alone, and an asset name says nothing about a version — so
+ * without this the hashes would happily be compared against a *different* release's bytes after a
+ * Bun bump, and the user would be told the download "is not the one this build expects" when the
+ * truth is that nobody re-hashed anything. A test asserts this equals `.bun-version`, which turns
+ * bumping the pin without re-hashing into a red CI run rather than a broken install.
+ */
+export const BUN_RUNTIME_PINS_VERSION = "1.4.0";
 
 /**
  * Where releases come from.
@@ -188,6 +206,14 @@ export async function fetchPluginRuntime(
   const pins = deps.pins ?? BUN_RUNTIME_PINS;
   const expected = pins[asset];
   const url = runtimeAssetUrl(version, asset, deps.baseUrl ?? BUN_RELEASE_BASE_URL);
+  // Only when the table is the built-in one: a test passing its own pins is pinning whatever
+  // version it is exercising, and has no business being held to ours.
+  if (deps.pins === undefined && version !== BUN_RUNTIME_PINS_VERSION) {
+    return {
+      ok: false,
+      detail: `This build of vrc.zip runs Bun ${version}, but its pinned plugin-runtime checksums are for Bun ${BUN_RUNTIME_PINS_VERSION}. That is a packaging mistake rather than something you can fix here.`,
+    };
+  }
   if (expected === undefined) {
     // Deliberately a refusal. See BUN_RUNTIME_PINS.
     return {

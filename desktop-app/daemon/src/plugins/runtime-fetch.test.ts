@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { deflateRawSync } from "node:zlib";
 import { pluginRuntimePath } from "./process-transport.ts";
 import {
+  BUN_RUNTIME_PINS,
+  BUN_RUNTIME_PINS_VERSION,
   extractSingleFile,
   fetchPluginRuntime,
   installRuntimeFromFile,
@@ -305,5 +307,59 @@ describe("asset naming", () => {
     expect(runtimeAssetUrl("1.4.0", "bun-windows-x64.zip")).toBe(
       "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-windows-x64.zip",
     );
+  });
+});
+
+/**
+ * The pin table itself.
+ *
+ * These are here because the table shipped *empty* once. Every unit test passed — they all supply
+ * their own pins, which is right for exercising the download path and exactly why none of them
+ * noticed — and the packaged build then refused to install any plugin at all, because it has no
+ * `bun` on `PATH` to fall back to. The table is a build input, so it gets build-input tests.
+ */
+describe("BUN_RUNTIME_PINS", () => {
+  /** Every platform the daemon will ask for, derived rather than listed, so a new one is covered. */
+  const PLATFORMS: [string, string][] = [
+    ["win32", "x64"],
+    ["linux", "x64"],
+    ["linux", "arm64"],
+    ["darwin", "x64"],
+    ["darwin", "arm64"],
+  ];
+
+  test("covers every platform Bun publishes a release for", () => {
+    const missing = PLATFORMS.map(([platform, arch]) => runtimeAssetName(platform, arch))
+      .filter((asset): asset is string => asset !== null)
+      .filter((asset) => BUN_RUNTIME_PINS[asset] === undefined);
+    expect(missing).toEqual([]);
+  });
+
+  test("every pin is a lowercase 64-character SHA-256", () => {
+    // A placeholder, a truncated paste, or an uppercased digest would each fail the comparison at
+    // install time on a user's machine instead of here.
+    for (const [asset, digest] of Object.entries(BUN_RUNTIME_PINS)) {
+      expect(`${asset}: ${digest}`).toMatch(/^[a-z0-9.-]+\.zip: [0-9a-f]{64}$/);
+    }
+  });
+
+  test("names the same Bun as `.bun-version`", async () => {
+    // The table is keyed by asset name, which carries no version. This is the assertion that makes
+    // bumping Bun without re-hashing a red CI run rather than a broken install.
+    const pinned = (
+      await Bun.file(new URL("../../../.bun-version", import.meta.url)).text()
+    ).trim();
+    expect(BUN_RUNTIME_PINS_VERSION).toBe(pinned);
+  });
+
+  test("refuses rather than checking a hash from a different release", async () => {
+    const result = await fetchPluginRuntime({
+      version: "9.9.9",
+      platform: "win32",
+      arch: "x64",
+      env,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.ok ? "" : result.detail).toContain("9.9.9");
   });
 });

@@ -8,6 +8,8 @@ import type { NewPlugin } from "../../store/types.ts";
 import { writeArtifact } from "./artifact.ts";
 import {
   createSpawnResolver,
+  memoryLimitFor,
+  RLIMIT_AS_HEADROOM_FACTOR,
   SMOL_MEMORY_LIMIT_BYTES,
   THROUGHPUT_MEMORY_LIMIT_BYTES,
 } from "./spawn-resolver.ts";
@@ -89,8 +91,22 @@ describe("createSpawnResolver", () => {
     const spawn = resolver()("acme.hello");
     expect(spawn?.bundlePath).toBe(written.path);
     expect(spawn?.smol).toBe(true);
-    expect(spawn?.memoryLimitBytes).toBe(SMOL_MEMORY_LIMIT_BYTES);
+    expect(spawn?.memoryLimitBytes).toBe(memoryLimitFor(true));
     expect(refusals).toEqual([]);
+  });
+
+  test("Linux gets a far larger ceiling, because RLIMIT_AS caps address space", () => {
+    // Not a preference. A job object caps committed memory, so the intended figure is usable as
+    // written; `RLIMIT_AS` caps virtual address space, and JSC reserves gigabytes it never touches.
+    // Handing Linux the 100 MiB figure directly would stop `bun` starting rather than cap a plugin.
+    expect(memoryLimitFor(true, "win32")).toBe(SMOL_MEMORY_LIMIT_BYTES);
+    expect(memoryLimitFor(true, "linux")).toBe(SMOL_MEMORY_LIMIT_BYTES * RLIMIT_AS_HEADROOM_FACTOR);
+    expect(memoryLimitFor(false, "linux")).toBe(
+      THROUGHPUT_MEMORY_LIMIT_BYTES * RLIMIT_AS_HEADROOM_FACTOR,
+    );
+    // macOS accepts RLIMIT_AS and does not enforce it, so it takes the plain figure and `limits.ts`
+    // declines to claim a cap at all.
+    expect(memoryLimitFor(true, "darwin")).toBe(SMOL_MEMORY_LIMIT_BYTES);
   });
 
   test('a manifest that opted into "throughput" drops --smol and gets the larger ceiling', () => {

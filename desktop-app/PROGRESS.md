@@ -2201,6 +2201,28 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      `TMP` and `process.cwd()` disclose the same path for the same reason. No scan rule, no scrub.
      The blanking is still worth having; the claim attached to it was too strong.
 
+179. **The plugin memory ceiling is halved to 256 MiB, the watchdog moves with it to 192 MiB, and
+     Linux gets its own multiplier.** A 512 MiB ceiling let one plugin outweigh the entire daemon,
+     which reads badly against a product whose pitch is a 50-80MB idle footprint.
+
+     **The two numbers are a pair and cannot be set independently.** The watchdog is the *readable*
+     policy — it kills with a sentence naming the plugin and the number — while the OS cap is an
+     opaque out-of-memory the prelude swallows, leaving the plugin catatonic until the heartbeat
+     notices. So the watchdog must sit below the cap or it can never fire, and above realistic use or
+     it kills working plugins. 192 under 256 satisfies both.
+
+     **Lower numbers were measured and rejected, not argued about.** 100 MiB was the first target: it
+     starts a bare runtime, but a plugin holding 5,000 user objects dies 3/3 at that ceiling, and
+     `bun --smol` will not start at all at 90 MiB. See §Gotchas for the table. A ceiling near the
+     runtime's floor produces a plugin system that cannot start a plugin.
+
+     **Linux multiplies by `RLIMIT_AS_HEADROOM_FACTOR` (40x), because the platforms cap different
+     quantities.** A Job Object caps committed memory, so the intended figure is usable as written;
+     `RLIMIT_AS` caps *virtual address space*, and JSC reserves gigabytes it never touches — a fact
+     `limits.ts` already documented and which the old single constant quietly ignored.
+     `memoryLimitFor(smol, platform)` is the one place that decides, and it is platform-injectable so
+     a Windows machine can test what Linux would get. **Still unverified on real Linux.**
+
 ---
 
 ## Gotchas
@@ -2209,18 +2231,36 @@ Empirical notes. Add to this as you hit things — especially where the plan tur
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
 
+- **JSC cannot be told to want less memory from inside Bun, so the OS cap is the only mechanism.**
+  Asked directly, and measured on Bun 1.4.0 rather than taken on trust. `BUN_JSC_gcMaxHeapSize` and
+  `BUN_JSC_forceRAMSize` are both *accepted* — an invalid option name errors, these do not — and both
+  change nothing: the same workload measures 116.5 MiB RSS with `gcMaxHeapSize=64MB`, 113.7 MiB with
+  `forceRAMSize=64MB`, and 116.4 MiB with neither. `--max-old-space-size` is likewise accepted and
+  silently ignored. This matches open upstream issue oven-sh/bun#34917, unresolved as of July 2026,
+  whose reporter shows the same non-determinism in a memory-limited container. **The practical
+  consequence: `--smol` is a hint, the Job Object / `RLIMIT_AS` cap is the only enforcement, and any
+  future "just cap the heap" suggestion should be re-measured before it is believed.**
+- **A memory ceiling near the runtime's floor produces a plugin that cannot start, not a frugal
+  one.** Measured on Windows, where the Job Object caps *committed* memory: `bun --smol` running
+  nothing but one `setInterval` starts at 100 MiB and **fails at 90 MiB and below**, exiting 9 before
+  any plugin code runs. A plugin holding 5,000 user objects with per-tick string churn measures
+  ~116 MiB RSS, dies 3/3 at 100 MiB, and runs 2/2 at 128 MiB. The runtime is most of a 100 MiB
+  budget, so the interesting range is much narrower than it looks — and JSC grows to fill what it is
+  given (~45 MiB idle under a 100 MiB cap, ~106 MiB under a 128 MiB one), which means the ceiling
+  shapes the resident set rather than merely bounding it.
 - **`SupervisorOptions.readRssBytes` has no callers, so the RSS watchdog trusts the measured
   party.** The option's own comment says the OS reading "wins whenever a pid and a reader are both
   available" and is the one to trust against a hostile plugin. Nothing in the codebase supplies one,
   so the branch is dead and the watchdog's only input is the `rss` the plugin reports on its own
   pong. A plugin that stops yielding stops feeding it, and it can never fire.
-- **A Linux CI risk that is not the suite's:** `createSpawnResolver` hands out
-  `SMOL_MEMORY_LIMIT_BYTES` (512 MiB), which on Linux becomes `ulimit -v 524288` for *every* plugin
-  spawn. Whether `bun --smol` can start at all under a 512 MiB **address-space** cap is unproven —
-  and `RLIMIT_AS` counts JSC's untouched virtual reservations, which is exactly why the Windows cap
-  could use a realistic number and this one cannot. The hostile suite sidesteps it by raising the
-  ceiling except where the cap is the subject. **If Linux cannot start `bun` under it, that is a
-  production bug in `spawn-resolver.ts`**, and it wants a check on a real Linux box.
+- **A Linux risk, now mitigated but still unverified:** `createSpawnResolver` used to hand out one
+  constant for every platform, which on Linux becomes `ulimit -v` — a cap on *virtual address
+  space*, which JSC reserves gigabytes of without ever touching. Whether `bun --smol` can start
+  under a realistic figure there is unproven, and the tighter the ceiling got the more certainly it
+  would have broken. Decision 179 splits it: `memoryLimitFor()` multiplies by
+  `RLIMIT_AS_HEADROOM_FACTOR` on Linux only. **The factor is reasoned, not measured — this machine
+  is Windows — so it still wants a check on a real Linux box**, and it is the first thing to suspect
+  if plugins do not start there.
 - **The Job Object assertion does not run in CI.** It is win32-gated and CI is `ubuntu-latest`, so
   the memory-cap test — the one decision 166 exists for — skips there. A Linux `RLIMIT_AS`
   equivalent could not be made both honest and fast: a cap low enough to bite quickly stops `bun`

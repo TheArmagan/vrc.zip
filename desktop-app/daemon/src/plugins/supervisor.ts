@@ -238,11 +238,21 @@ const DEFAULTS = {
    */
   maxMissedBeats: 3,
   /**
-   * 256 MiB resident. The daemon's entire pitch against VRCX is a 50-80MB idle footprint, and N
-   * plugin processes are the most likely way to lose it; a `--smol` event-handler plugin idles well
-   * under 64MB, so this is roughly 4x headroom rather than a tight collar.
+   * 80 MiB resident. The daemon's entire pitch against VRCX is a 50-80MB idle footprint, and N
+   * plugin processes are the most likely way to lose it.
+   *
+   * **This number is bounded on both sides and cannot be chosen freely.** It must stay *below*
+   * `SMOL_MEMORY_LIMIT_BYTES` (256 MiB), because the watchdog is the readable policy — it kills with
+   * a sentence naming the plugin and the number — while the OS cap is an opaque out-of-memory the
+   * prelude swallows, leaving the plugin catatonic until the heartbeat notices. A watchdog *above*
+   * the cap can never fire at all, so the two move together or neither does.
+   *
+   * It must also stay well *above* real use, and real use is higher than it sounds: a plugin holding
+   * 5,000 user objects with ordinary per-tick string churn measures ~116 MiB RSS. 192 MiB is
+   * therefore about 75 MiB of working room over a realistic plugin, and still 64 MiB clear of the
+   * hard cap.
    */
-  rssLimitBytes: 256 * 1024 * 1024,
+  rssLimitBytes: 192 * 1024 * 1024,
   /** A plugin gets 10s to say `hello`. Booting a bundle is milliseconds; 10s covers a cold disk. */
   helloTimeoutMs: 10_000,
   /**

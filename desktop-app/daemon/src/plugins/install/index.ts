@@ -44,6 +44,8 @@ export {
 } from "./pipeline.ts";
 export {
   createSpawnResolver,
+  memoryLimitFor,
+  RLIMIT_AS_HEADROOM_FACTOR,
   SMOL_MEMORY_LIMIT_BYTES,
   type SpawnFor,
   type SpawnResolverOptions,

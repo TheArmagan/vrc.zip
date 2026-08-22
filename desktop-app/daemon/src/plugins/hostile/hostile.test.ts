@@ -184,16 +184,32 @@ type Tuning = Omit<SupervisorOptions, "pluginId" | "spawn" | "factory" | "disabl
  * The OS-level ceiling every test gets unless it asks for a smaller one.
  *
  * **Deliberately huge, and the reason is Linux.** `createSpawnResolver` hands out
- * `SMOL_MEMORY_LIMIT_BYTES` (512 MiB), and on Linux that becomes `ulimit -v 524288` — a cap on
- * *virtual address space*, which JavaScriptCore reserves gigabytes of without ever touching. Whether
- * `bun --smol` can start under it is a property of the runner rather than of anything under test, so
- * every test that is not about the cap sets it out of the way. The ones that are about it say so.
+ * `SMOL_MEMORY_LIMIT_BYTES` (100 MiB) — which on Linux is multiplied by
+ * `RLIMIT_AS_HEADROOM_FACTOR`, because there it becomes `ulimit -v` against *virtual address space*,
+ * which JavaScriptCore reserves gigabytes of without ever touching. Whether `bun --smol` can start
+ * under any given figure is a property of the runner rather than of anything under test, so every
+ * test that is not about the cap sets it out of the way. The ones that are about it say so.
  *
  * `spawnFor` is where this has to be applied, because `memoryLimitBytes` is a *spawn* option and not
  * a supervisor one — passing it in the supervisor tuning does nothing at all, silently, which is
  * exactly the mistake this comment exists to stop the next person repeating.
  */
 const NO_OS_CAP = 8 * 1024 * 1024 * 1024;
+
+/**
+ * The RSS watchdog, moved out of the way for the same reason and by the same rule as
+ * {@link NO_OS_CAP} — and it has to move *with* it, which is the part worth writing down.
+ *
+ * JavaScriptCore grows its heap to fill whatever ceiling it is given: the same idle plugin sits at
+ * ~45 MiB RSS under the production 100 MiB cap and comfortably past 100 MiB under this 8 GiB one.
+ * So raising the OS cap for a test that is not about memory silently raises idle RSS too, and the
+ * production watchdog default (80 MiB, deliberately just under the cap) then kills the *control*
+ * plugin for growing into space this suite handed it on purpose. That is a test artefact, not a
+ * defence firing, and it is exactly the kind of red the suite exists to avoid.
+ *
+ * Tests that are about the watchdog pass their own `rssLimitBytes` through `tuning` and override it.
+ */
+const NO_RSS_CAP = 8 * 1024 * 1024 * 1024;
 
 /**
  * The whole stack, for real: install pipeline → store row → spawn resolver → registry → supervisor
@@ -231,7 +247,7 @@ async function start(
       const spawn = resolve(pluginId);
       return spawn === null ? null : { ...spawn, memoryLimitBytes };
     },
-    supervisor: { helloTimeoutMs: HELLO_MS, ...tuning },
+    supervisor: { helloTimeoutMs: HELLO_MS, rssLimitBytes: NO_RSS_CAP, ...tuning },
     onPluginFrame: (_id, frame) => frames.push(frame),
     onLog: (_id, stream, line) => logs.push({ stream, line }),
     onStatus: (status) => statuses.push(status),

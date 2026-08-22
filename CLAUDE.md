@@ -56,9 +56,12 @@ available and mixing their syntax is its own class of failure.
 
 ## Commands
 
-All from `desktop-app/`. Bun **1.4.0** is pinned in three places that must move together:
-`packageManager`, `engines.bun`, and `.bun-version` — the binary is bundled and shipped and is what
-executes third-party plugin code, so it is a build input, not a developer prerequisite.
+All from `desktop-app/`. Bun **1.4.0** is pinned in four places that must move together:
+`packageManager`, `engines.bun`, `.bun-version`, and `BUN_RUNTIME_PINS` in
+`daemon/src/plugins/runtime-fetch.ts` — the binary is bundled and shipped and is what executes
+third-party plugin code, so it is a build input, not a developer prerequisite. The fourth is the
+SHA-256 of the release asset the plugin host is fetched from; **verify it by hand when the pin
+moves**, because it is the only one whose value cannot be checked by reading another file.
 
 ```bash
 bun install

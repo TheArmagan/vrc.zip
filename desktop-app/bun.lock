@@ -15,8 +15,10 @@
       "version": "0.1.0",
       "dependencies": {
         "@vrcz/api": "workspace:*",
+        "@vrcz/plugin-api": "workspace:*",
         "@vrcz/shared": "workspace:*",
         "hono": "4.13.3",
+        "typescript": "5.9.3",
       },
     },
     "packages/api": {
@@ -28,7 +30,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@vrcz/shared": "workspace:*",
-        "zod": "4.4.3",
+        "zod": "^4.4.3",
       },
     },
     "packages/shared": {

@@ -12,7 +12,9 @@
   },
   "dependencies": {
     "@vrcz/api": "workspace:*",
+    "@vrcz/plugin-api": "workspace:*",
     "@vrcz/shared": "workspace:*",
-    "hono": "4.13.3"
+    "hono": "4.13.3",
+    "typescript": "5.9.3"
   }
 }

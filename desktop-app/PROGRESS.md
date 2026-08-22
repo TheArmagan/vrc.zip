@@ -337,9 +337,19 @@ say "plugins run with your account's privileges; only install plugins you trust.
       **Not yet done:** wiring into `app.ts`, which needs a `send` seam the supervisor does not
       expose (see Gotchas), and the UI naming who is eating the budget. The budget itself is dormant
       until writes land, since all three budgeted scopes are writes.
-- [ ] **3.5 Install pipeline** — `Bun.build` with `target: "browser"` and `external: []`, then an AST
+- [~] **3.5 Install pipeline** — `Bun.build` with `target: "browser"` and `external: []`, then an AST
       deny-scan over the *bundled output*, then content-addressing at `plugins/<id>/<sha256>.js` with
       the hash verified on every load.
+      **Built** (decisions 168–170), under `daemon/src/plugins/install/`: `bundle.ts` (with the
+      `onResolve` plugin that makes host-builtin imports the hard error PLAN.md claimed they already
+      were), `deny-scan.ts` over the TypeScript compiler API, `artifact.ts` for content-addressing
+      and the synchronous verify-on-load, `pipeline.ts`, and `spawn-resolver.ts` — which is where
+      "verify the hash on every load" actually runs, since it is what `PluginRegistry` is
+      constructed with. `runtime-fetch.ts` carries decision 111's hash-pinned fetch, its own zip
+      reader, and the manual "use this bun instead" escape.
+      **Not yet done:** the pinned-git-URL source (a fetch step in front of an identical pipeline),
+      the real SHA-256 pins, and wiring into `app.ts`. Read the deny-scan Gotcha before describing
+      this as a boundary — it catches syntax, and computed access walks past it.
 - [ ] **3.6 Events bridge** — declarative filters compiled to closures at subscribe time, credit
       windows with a per-subscription overflow policy, per-tick batching, and a `dropped` frame when
       the host sheds load. `EventBus.emit()` must never await anything plugin-related.
@@ -1993,6 +2003,48 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      the user's *own* accounts' view into another's — the standing invariant, which applies just as
      much between two accounts the same person owns.
 
+168. **The install pipeline verifies the artifact back off disk before declaring success, through
+     the same `loadArtifact` the spawn path uses.** Re-reading a file we wrote a line earlier looks
+     redundant and is not: it makes the install path and the load path agree *by construction*
+     rather than by two people keeping them in step. `loadArtifact` is synchronous for the same
+     reason — `PluginRegistry.spawnFor` is synchronous, and an async verifier would have to be
+     called from somewhere else, which is how a codebase acquires a verified load path and an
+     unverified one beside it.
+
+     **The pipeline writes nothing to the store and decides no trust.** "We compiled it" and "you
+     agreed to run it" are different facts, and only the first is the pipeline's to assert, so the
+     `plugins` row, the grant and the trust tier all belong to 3.8. What it returns is what it
+     built.
+
+     **PLAN.md was wrong that `target: "browser"` plus `external: []` makes node builtins hard build
+     errors** — see Gotchas; Bun *stubs* them, silently. The promise is now kept by an `onResolve`
+     plugin refusing every bare specifier naming a host builtin, in both the `node:`-prefixed and
+     bare spellings, before Bun can stub it. The deny-scan still checks the output for the same
+     thing, because the two fail differently and usefully: the resolver names the author's own
+     source file, the scan catches whatever reached the bundle by a route the resolver never saw.
+
+169. **The runtime fetcher unzips with a central-directory reader over `node:zlib`, not `tar.exe`.**
+     Decision 111 asked for a deliberate choice here. bsdtar reads zip on Windows and macOS, but
+     Linux's `tar` is GNU tar and does not — and spawning whatever answers to `tar` on `PATH` *in
+     order to install the binary we are about to spawn* puts a step of the trust chain outside the
+     app. The reader only ever materialises one known entry, so archive path traversal is not
+     reachable through it.
+
+     **`BUN_RUNTIME_PINS` ships empty, on purpose**, and an unpinned platform **refuses to fetch**,
+     naming the URL and the hash it wanted, rather than downloading an executable nobody vouched
+     for. The hashes come from the packaging step, which does not exist yet. The practical
+     consequence is that `ensurePluginRuntime` currently succeeds only from a source checkout —
+     exactly the state `process-transport.ts`'s header already describes. This is the pin's fourth
+     home; CLAUDE.md said three and now says four, with the note that this is the only one whose
+     value cannot be checked by reading another file in the repo.
+
+170. **`typescript` and `@vrcz/plugin-api` were undeclared runtime dependencies of the daemon.**
+     The deny-scan imports `typescript` at run time, which makes the compiler a runtime dependency
+     rather than a build-time one; `@vrcz/plugin-api` had been imported by daemon code since 3.1.
+     Both resolved anyway through root hoisting, so every gate was green while `daemon/package.json`
+     named neither. Both are declared now. **The packaging step needs checking against this** — TS
+     is roughly 10 MB and `Bun.build --compile` will pull it into the single `.exe`.
+
 ---
 
 ## Gotchas
@@ -2001,6 +2053,32 @@ Empirical notes. Add to this as you hit things — especially where the plan tur
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
 
+- **`Bun.build` with `target: "browser"` and `external: []` does NOT make node builtins hard build
+  errors.** PLAN.md §"Install-time compilation" states it parenthetically and it is the load-bearing
+  half of that section's argument. Measured on Bun 1.4.0, it *stubs* them:
+  `import { readFileSync } from "node:fs"` compiles silently to
+  `var { readFileSync } = (() => ({}));`. That is worse than either alternative — the import is gone
+  from the output, so the deny-scan has nothing left to find, and the plugin gets `undefined` where
+  it expected a function and fails at run time with a `TypeError` naming neither the cause nor the
+  culprit. The bare spelling (`from "fs"`) behaves identically. Only `import { sql } from "bun"` is a
+  native build error. An `onResolve` plugin now makes the documented behaviour real.
+- **`import("node:" + "fs")` — the hostile plugin's own signature attack — never reaches the
+  deny-scan.** Bun constant-folds the concatenation before resolving, so it hits the resolver plugin
+  and fails at *compile*, not at *scan*. That is the better failure, but it means the
+  `dynamic-import` rule guards a different shape (`import(name)` where `name` is a genuine runtime
+  value) than the one decision 108 describes, and **the hostile suite should assert which stage
+  rejected it** rather than only that it was rejected.
+- **The deny-scan catches syntax, and that is the whole of what it catches.** Verified *passing*
+  against the real scanner: `({}).constructor.constructor("return globalThis")()`,
+  `globalThis["pro"+"cess"]["bind"+"ing"]`, a computed `require` assembled from an array join,
+  `import.meta.url`, plain `process.env` access, and `fetch("https://evil.example/")`. The
+  `constructor.constructor` chain in particular means the `new Function` rule is a convenience, not
+  a gate. What actually closes these is the prelude scrubbing globals, the environment, and the
+  process boundary. **The security-model page must describe the scan as making cheap attacks fail
+  loudly at install, and must not describe it as stronger than that.** Two more for the hostile
+  suite: a string-literal `eval("…")` is deliberately allowed, so a scan-clean bundle can still
+  contain an `eval`; and there is no rule for `fetch`/`WebSocket`/`XMLHttpRequest` at all, which is
+  correct only for exactly as long as the prelude really removes them.
 - **`authorizeCall` does not check the account, though its neighbouring doc comment implies someone
   does.** `DispatchContext.accountId` is documented as "already checked against
   `PluginGrant.accountIds`", and nothing in `protocol.ts` performs that check — it validates method,

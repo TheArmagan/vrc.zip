@@ -397,12 +397,16 @@ describe("the OS memory cap", () => {
   test.skipIf(process.platform !== "win32")(
     "stops a memory bomb at the ceiling instead of waiting for the watchdog",
     async () => {
-      // `hostile/memory-bomb.js` allocates a gigabyte of *touched* pages at module load, before
-      // `activate` is ever called. Under a 192 MiB job object the allocation is refused and the
-      // process dies of its own out-of-memory — which is why this reads as a crash rather than as a
-      // kill, and why nothing here waits on a watchdog tick.
+      // `hostile/memory-bomb-at-load.js` allocates touched pages without bound at module load,
+      // before `activate` is ever called. Under a 192 MiB job object the allocation is refused, the
+      // rejection lands on the prelude's own `import()`, and the process exits 1 — which is why this
+      // reads as a crash rather than as a kill, and why nothing here waits on a watchdog tick.
+      //
+      // **The load-time half specifically.** Its sibling `memory-bomb.js` allocates from a timer
+      // instead, where the same refusal is an *uncaught exception* the prelude deliberately
+      // swallows, and the process does not exit at all. See `hostile/hostile.test.ts`.
       const run = await start({
-        bundlePath: join(import.meta.dir, "hostile", "memory-bomb.js"),
+        bundlePath: join(import.meta.dir, "hostile", "memory-bomb-at-load.js"),
         memoryLimitBytes: 192 * 1024 * 1024,
         helloTimeoutMs: 20_000,
       });

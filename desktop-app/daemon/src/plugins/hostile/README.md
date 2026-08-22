@@ -12,19 +12,38 @@ so a failure names the attack rather than "the hostile plugin broke". Every one 
 different defences: module scope runs before the host has decided the plugin is healthy, and
 `activate` runs while the host is waiting on a deadline.
 
-These are **not** built by the install pipeline and must never be. They are source fixtures for the
-supervisor and, later, the deny-scan — several of them exist precisely because `Bun.build` should
-refuse them, and a fixture that passed the build would no longer be testing anything.
+`hostile.test.ts` beside them **is** the suite. Every attack goes through the real install pipeline
+(`Bun.build` with the host-builtin resolver, the deny-scan over the bundled output, the
+content-addressed write), the real spawn resolver, and a real `PluginRegistry` → `PluginSupervisor`
+→ `ProcessTransport`, which spawns an actual `bun` running the injected prelude. Nothing is mocked;
+the failures this directory exists to catch all live at the process boundary. The two attacks the
+pipeline refuses never get as far as a process, which is the assertion for those.
 
-| File | Attack | What it must fail against |
+**Assert the stage, not the refusal.** Two spellings of the same attack are rejected by two
+different layers — `import("node:" + "fs")` is constant-folded and dies at *compile*, while
+`import(["no","de:","fs"].join(""))` reaches the *deny-scan* — so "it was rejected" is not an
+assertion worth writing. Every test here names the layer.
+
+| File | Attack | Stopped at |
 |---|---|---|
-| `spin.js` | Blocks the event loop forever | Heartbeat, then `kill()` |
-| `memory-bomb.js` | Allocates without bound | RSS watchdog and the OS cap |
-| `filesystem.js` | `import("node:" + "fs")` | Install-time deny-scan; the process boundary behind it |
-| `flood.js` | Emits and requests without pause | Credit windows, batching, the `dropped` frame |
+| `spin.js` | Wedges the event loop after activating | Heartbeat, then `kill()` |
+| `spin-at-load.js` | Wedges during module evaluation | Activation deadline — the heartbeat is only armed once `running` |
+| `memory-bomb.js` | Allocates without bound, yielding | RSS watchdog; under an OS cap, the heartbeat |
+| `memory-bomb-at-load.js` | The same, synchronously at load | The OS cap, reported as `crashed` with exit code 1 |
+| `filesystem-folded.js` | `import("node:" + "fs")` | **compile** — Bun folds the concatenation before the scan sees it |
+| `filesystem.js` | `import(["no","de:","fs"].join(""))` | **deny-scan** — `dynamic-import` |
+| `flood.js` | Emits and requests without pause | The log token bucket. **Nothing bounds the frame channel yet** (3.6) |
 | `hang.js` | A lifecycle hook that never resolves | Activation deadline |
-| `liar.js` | Forges frames it is not allowed to send | `isFrameAllowedFrom`, protocol-error counting |
+| `liar.js` | Forges frames it is not allowed to send | The prelude for `pong`/`hello`; the stdout redirect for the rest |
+| `globals.js` | Computed reaches the deny-scan cannot see | **Nothing at install** — the prelude's scrubbing, at run time |
+| `network.js` | `fetch`, `WebSocket`, `eval` | **No scan rule exists** — the prelude's scrubbing is the whole defence |
+| `crash.js` | Dies during module evaluation, always | Crash-loop auto-disable, durable across a restart |
 | `polite.js` | Behaves perfectly | The control: none of the above may fire |
 
+`harness-entry.js` is not an attack. It is the thinnest possible stand-in for the plugin-side runtime
+step 3.6 will ship — without something answering a `lifecycle` frame, *every* plugin is reported as
+`activate-hung` and the control cannot pass. See its header.
+
 **`polite.js` is not filler.** A supervisor that kills everything passes every other test in this
-directory, and the control is the only thing that notices.
+directory, and the control is the only thing that notices. It runs under the same heartbeat budgets
+as `spin.js` for exactly that reason.

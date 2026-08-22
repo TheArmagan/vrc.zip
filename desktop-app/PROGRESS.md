@@ -320,12 +320,15 @@ say "plugins run with your account's privileges; only install plugins you trust.
       over-allocating child, and the environment is an explicit four-name minimum with everything
       else blanked. `env: {}` turned out to be a *merge* on Windows rather than a replacement, which
       is why it never worked — see Gotchas.
-- [~] **3.3 The hostile plugin** — spin loop, memory bomb, `import("node:"+"fs")`, event flood, and a
+- [x] **3.3 The hostile plugin** — spin loop, memory bomb, `import("node:"+"fs")`, event flood, and a
       lifecycle hook that never returns. The regression suite for everything above it.
-      **The attacks are written** (`daemon/src/plugins/hostile/`, one file per attack plus a polite
-      control), and the transport's own suite already covers framing, byte caps, forged tags and
-      kill-vs-stop. What is left is driving the hostile set as a suite against the supervisor, which
-      needs the loader from 3.5 to place a bundle where a plugin is loaded from.
+      **Closed** (decisions 176–178): `hostile/hostile.test.ts` drives sixteen attacks through the
+      real install pipeline, the real spawn resolver and a real supervisor, and **each test names
+      the layer that stopped it** rather than only that it was stopped — two spellings of the same
+      attack are caught by two different layers, so the stage is the assertion. ~8.0s, CI-safe.
+      **Read decision 177 before trusting any of this**: four attacks are asserted as *gaps*,
+      including that a plugin which gets past install reaches the whole filesystem. The prelude's
+      global scrubbing, by contrast, measured stronger than assumed.
 - [~] **3.4 Dispatcher, scope gate, rate budget** — one dispatcher doing arg parsing and the scope
       check, never the handlers. Every plugin call goes through the shared limiter tagged with the
       plugin id, with a subordinate per-plugin budget and a UI naming who is eating it.
@@ -2127,6 +2130,63 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      Reaching for the third-party middleware here would have conflated two authentication models
      that PLAN.md deliberately keeps apart.
 
+176. **The hostile suite drives the real stack, and asserts the *stage* rather than the refusal.**
+     3.3 closes as `hostile/hostile.test.ts`: sixteen tests, each installed through the real
+     pipeline, resolved through the real `createSpawnResolver`, and run under a real
+     `PluginRegistry` / supervisor / `ProcessTransport` spawning an actual `bun` with the real
+     prelude. No mocks anywhere.
+
+     Naming the stage is the whole discipline. Two spellings of the *same* attack are refused by two
+     different layers — `import("node:" + "fs")` is constant-folded and dies at **compile**, while
+     `import([…].join(""))` dies at **deny-scan** — so "it was rejected" is not an assertion worth
+     writing. ~8.0s wall clock, 13 consecutive clean runs, and one flake was found and fixed rather
+     than tolerated.
+
+     **A harness had to be written before the *control* could pass.** Nothing registers
+     `__vrczHost.onFrame` until 3.6, so a `lifecycle` frame reaches a plugin with no way to answer
+     and *every* plugin reports `activate-hung` — the polite control included. `harness-entry.js` is
+     the thinnest honest bridge, and it deliberately adds no defence of its own, because anything it
+     added would be a defence the suite was measuring instead of the host's.
+
+177. **Where nothing stops an attack, the test says so.** This is the part worth reading. Asserted
+     as gaps rather than papered over, because a test asserting a boundary that does not exist is
+     worse than no test:
+
+     - **A plugin that gets past install reaches the whole filesystem.** Asserted directly: a bundle
+       written straight to the artifact store does `import(["no","de:","fs"].join(""))` and gets a
+       working `readFileSync` — verified by hand reading `C:/Users`. **The install-time stages are
+       the entire defence, and the process boundary behind them is currently a boundary in name.**
+       This is PLAN.md correction 6's point restated as a measurement.
+     - **`const make = Function; make("…")` defeats the `function-constructor` rule**, which matches
+       on the callee identifier. A `require` reached through a string body survives too — correct
+       for a rule that must not read inside strings, but the route survives.
+     - **The frame channel has no backpressure at all.** `__vrczHost.send` → `onPluginFrame`, once
+       per frame, unbounded. Credit windows, per-tick batching and `dropped` are 3.6. The test
+       asserts frames *keep arriving* and says in place that the assertion inverts when 3.6 lands.
+       The only thing making it survivable is that nothing is subscribed yet.
+     - **Nothing anywhere supplies `SupervisorOptions.readRssBytes`.** Its own doc says an OS
+       reading "always wins" and is the one to trust against a hostile plugin. Zero callers, so the
+       branch is dead code and **the watchdog's only input is the `rss` a plugin puts on its own
+       pong** — the source that same comment says not to rely on. A plugin that stops yielding stops
+       feeding the watchdog, and the watchdog can then never fire.
+
+     **The prelude's scrubbing, by contrast, holds up better than expected.** `fetch`, `WebSocket`,
+     `XMLHttpRequest`, `EventSource`, `Worker`, `eval`, `require`, `Bun.file`, `Bun.spawn` and
+     `process.binding` are all genuinely gone, `process.env` is `{}`, and computed spellings find
+     nothing. The decisive measurement: `({}).constructor.constructor("return typeof fetch")()`
+     returns `"undefined"` — the `Function` constructor is reachable and unblockable, but the realm
+     it evaluates in is the scrubbed one, so it cannot conjure back a removed global. **That is what
+     makes the absent `fetch`/`WebSocket` scan rules and the string-literal `eval` carve-out
+     correct**, and `network.js` is the standing check keeping them so.
+
+178. **Decision 166 overstated the environment scrub, and `import.meta.url` is why.** The claim was
+     that the user's profile path is never spelled out for a plugin. It is: `import.meta.url`
+     discloses the artifact's absolute path, which under the default state tree is
+     `%LOCALAPPDATA%\vrc.zip\plugins\<id>\<hash>.js` — **the user's account name and home directory,
+     in full**, defeating the point of blanking `USERNAME`/`USERPROFILE`/`HOMEPATH`. `Bun.env.TEMP`,
+     `TMP` and `process.cwd()` disclose the same path for the same reason. No scan rule, no scrub.
+     The blanking is still worth having; the claim attached to it was too strong.
+
 ---
 
 ## Gotchas
@@ -2135,6 +2195,22 @@ Empirical notes. Add to this as you hit things — especially where the plan tur
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
 
+- **`SupervisorOptions.readRssBytes` has no callers, so the RSS watchdog trusts the measured
+  party.** The option's own comment says the OS reading "wins whenever a pid and a reader are both
+  available" and is the one to trust against a hostile plugin. Nothing in the codebase supplies one,
+  so the branch is dead and the watchdog's only input is the `rss` the plugin reports on its own
+  pong. A plugin that stops yielding stops feeding it, and it can never fire.
+- **A Linux CI risk that is not the suite's:** `createSpawnResolver` hands out
+  `SMOL_MEMORY_LIMIT_BYTES` (512 MiB), which on Linux becomes `ulimit -v 524288` for *every* plugin
+  spawn. Whether `bun --smol` can start at all under a 512 MiB **address-space** cap is unproven —
+  and `RLIMIT_AS` counts JSC's untouched virtual reservations, which is exactly why the Windows cap
+  could use a realistic number and this one cannot. The hostile suite sidesteps it by raising the
+  ceiling except where the cap is the subject. **If Linux cannot start `bun` under it, that is a
+  production bug in `spawn-resolver.ts`**, and it wants a check on a real Linux box.
+- **The Job Object assertion does not run in CI.** It is win32-gated and CI is `ubuntu-latest`, so
+  the memory-cap test — the one decision 166 exists for — skips there. A Linux `RLIMIT_AS`
+  equivalent could not be made both honest and fast: a cap low enough to bite quickly stops `bun`
+  starting, and one high enough needs the bomb to touch multiple GB on a shared runner.
 - **A content-addressed path does not verify itself, and "on every load" quietly meant "on every
   cold boot".** `PluginSupervisor` captured its spawn options once, so the hash check ran the first
   time and never again — through a crash-loop restart respawning every few seconds, and through
@@ -2211,9 +2287,14 @@ Found by running code. Each of these contradicted an assumption, and most were s
   `RLIMIT_AS`, which counts JavaScriptCore's huge *untouched* virtual reservations and therefore has
   to be set at a generous multiple of the intended RSS. On Windows the figure can be roughly the
   figure.
-- **Crossing that cap reads as a crash, not a kill.** The allocation is refused inside the plugin,
-  JSC raises `RangeError: Out of memory`, and the process exits 1 on its own. Nothing signals it and
-  nothing terminates it, so `ExitInfo.reason` is `"crashed"`. Conversely, a `KILL_ON_JOB_CLOSE`
+- **Crossing that cap reads as a crash, not a kill — but only during module evaluation.** The
+  allocation is refused inside the plugin, JSC raises `RangeError: Out of memory`, and the process
+  exits 1 on its own, so `ExitInfo.reason` is `"crashed"`. **That holds only when the refusal lands
+  on the prelude's own `import()`.** From a timer callback it is an uncaught exception the prelude
+  deliberately swallows: the process does not exit, and it goes *catatonic* at the ceiling — at the
+  commit limit it cannot allocate even the string its pong would need, so it stops logging and stops
+  answering. The **heartbeat** is then what kills it, `reason` is `"killed"`, and `rssBytes` stays
+  `null` throughout. A good outcome by accident rather than by design, and worth fixing deliberately. Conversely, a `KILL_ON_JOB_CLOSE`
   termination reports **exit code 0** through Bun — not a signal, not a non-zero code. That does not
   matter today because the job is only closed after the process is already gone, but a future caller
   that closes a job *to stop* a plugin would read the kill as a clean voluntary exit.

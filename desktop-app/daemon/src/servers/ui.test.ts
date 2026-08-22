@@ -90,6 +90,18 @@ describe("UI server static serving", () => {
     expect((await call("/assets/missing-chunk.js", AUTH)).status).toBe(404);
   });
 
+  test("answers /favicon.ico with an icon, built or not", async () => {
+    // The browser asks for it unprompted, so both states have to answer: unbuilt, the catch-all
+    // would hand back the placeholder *page* as the tab icon; built, there is no such file at all.
+    for (const _ of [0, 1]) {
+      const res = await call("/favicon.ico", AUTH);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain("image/svg+xml");
+      expect(await res.text()).toContain("<svg");
+      await writeFile(join(dist, "index.html"), "<!doctype html><title>vrc.zip</title>");
+    }
+  });
+
   test("refuses to walk out of the dist directory", async () => {
     await writeFile(join(dist, "index.html"), "<!doctype html><title>vrc.zip</title>");
     const outside = join(dist, "..", "escaped.txt");

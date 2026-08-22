@@ -22,15 +22,7 @@ import { isTypingTarget, matchKeybinding, runCommand } from "$lib/commands.svelt
 import { currentRoute, onRouteChange, type Route } from "$lib/router.ts";
 import { app } from "$lib/state/app.svelte.ts";
 import { theme } from "$lib/state/theme.svelte.ts";
-import AccountsScreen from "./screens/AccountsScreen.svelte";
-import ConsentScreen from "./screens/ConsentScreen.svelte";
-import FeedScreen from "./screens/FeedScreen.svelte";
-import FriendsScreen from "./screens/FriendsScreen.svelte";
-import GameLogScreen from "./screens/GameLogScreen.svelte";
-import LoginScreen from "./screens/LoginScreen.svelte";
-import NotificationsScreen from "./screens/NotificationsScreen.svelte";
-import SessionsScreen from "./screens/SessionsScreen.svelte";
-import SettingsScreen from "./screens/SettingsScreen.svelte";
+import { screenFor } from "./screens/lazy.ts";
 
 let route = $state<Route>(currentRoute());
 let paletteOpen = $state(false);
@@ -85,6 +77,27 @@ function onKeydown(event: KeyboardEvent): void {
 }
 
 const offline = $derived(!app.reachable);
+
+/**
+ * The one value a route contributes to its screen, under the name that screen calls it.
+ *
+ * Screens are loaded as chunks now (`screens/lazy.ts`), so the template renders whichever
+ * component the route resolved to rather than naming nine of them — and the props have to travel
+ * as a bag for that. Every screen that takes a param takes exactly one, so this stays a lookup
+ * rather than growing into a second route table.
+ */
+const screenProps = $derived<Record<string, unknown>>(
+  route.id === "sessions" || route.id === "gamelog"
+    ? { sessionId: route.param }
+    : route.id === "login"
+      ? { accountId: route.param }
+      : route.id === "groups"
+        ? { groupId: route.param }
+        : // `#/consent/<pairingId>` — where the daemon's browser-open lands.
+          route.id === "consent"
+          ? { pairingId: route.param }
+          : {},
+);
 </script>
 
 <svelte:window onkeydown={onKeydown} />
@@ -112,27 +125,22 @@ const offline = $derived(!app.reachable);
       </div>
     {/if}
 
-    {#if route.id === "sessions"}
-      <!-- `#/sessions/<id>` focuses one running client; see `SessionsScreen`. -->
-      <SessionsScreen sessionId={route.param} />
-    {:else if route.id === "accounts"}
-      <AccountsScreen />
-    {:else if route.id === "login"}
-      <LoginScreen accountId={route.param} />
-    {:else if route.id === "friends"}
-      <FriendsScreen />
-    {:else if route.id === "feed"}
-      <FeedScreen />
-    {:else if route.id === "gamelog"}
-      <GameLogScreen sessionId={route.param} />
-    {:else if route.id === "notifications"}
-      <NotificationsScreen />
-    {:else if route.id === "consent"}
-      <!-- `#/consent/<pairingId>` — where the daemon's browser-open lands. -->
-      <ConsentScreen pairingId={route.param} />
-    {:else}
-      <SettingsScreen />
-    {/if}
+    <!--
+      The screen is a chunk of its own, fetched on first visit. The pending branch is deliberately
+      empty rather than a spinner: the shell around it has already painted, the chunk comes off
+      loopback, and a spinner that flashes for one frame reads as a fault.
+    -->
+    {#await screenFor(route.id)}
+      <!-- nothing: the shell is the loading state -->
+    {:then Screen}
+      <Screen {...screenProps} />
+    {:catch}
+      <div class="p-4">
+        <ErrorNote
+          message="This screen could not be loaded. The daemon may have restarted onto a new build; reload the page."
+        />
+      </div>
+    {/await}
   </AppShell>
 {/if}
 

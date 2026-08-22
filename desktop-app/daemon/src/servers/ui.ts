@@ -103,6 +103,22 @@ export function createUiApp({ port, token, deps, distDir, controlUrl }: UiAppOpt
     // exactly the failure this mount exists to fix — a 200 of HTML where JSON was expected.
     .route("/", deps ? createControlApp({ port, deps, token }) : new Hono())
 
+    /*
+     * Before the catch-all, and before the `dist/` check inside it: browsers ask for
+     * `/favicon.ico` on their own no matter what `index.html` declares, and with no bundle built
+     * the catch-all would answer that request with the placeholder page — an HTML document served
+     * as a tab icon. A built tree has no such file either, so this route is the whole answer.
+     *
+     * The bytes are SVG under an `.ico` name on purpose: the icon format is decided by the
+     * `Content-Type`, not the extension, and this is the same mark `ui/index.html` inlines.
+     */
+    .get("/favicon.ico", (c) =>
+      c.body(FAVICON_SVG, 200, {
+        "content-type": "image/svg+xml",
+        "cache-control": "public, max-age=86400",
+      }),
+    )
+
     .get("*", async (c) => {
       if (!existsSync(join(root, "index.html"))) {
         return c.html(placeholderPage(root, controlUrl), 200);
@@ -147,12 +163,28 @@ function hasExtension(path: string): boolean {
   return last.includes(".");
 }
 
+/**
+ * The tab icon: a "Z" cut out of a rounded amber tile.
+ *
+ * Kept as a shape rather than a glyph so it does not depend on a font, and kept to two colours so
+ * it still reads at 16px. It carries its own background rather than relying on `currentColor`,
+ * which browsers do not resolve for a favicon — one opaque tile is legible against a light tab
+ * strip and a dark one alike. `ui/index.html` inlines the same mark as a `data:` URI so the page
+ * itself makes no second request; this route is for the `/favicon.ico` browsers ask for anyway.
+ */
+const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">\
+<rect width="32" height="32" rx="6" fill="#f5c451"/>\
+<path d="M8 10h16l-11 12h11" stroke="#151515" stroke-width="3" fill="none" stroke-linecap="square"/>\
+</svg>`;
+
 function placeholderPage(root: string, controlUrl: string | undefined): string {
   const control = controlUrl ?? "(not bound)";
   return `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>vrc.zip — UI not built</title>
+<link rel="icon" href="/favicon.ico">
+
 <style>
   :root { color-scheme: light dark; }
   body { font: 15px/1.6 system-ui, sans-serif; margin: 0; display: grid; place-items: center;

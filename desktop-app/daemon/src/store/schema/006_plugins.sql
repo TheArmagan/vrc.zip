@@ -57,7 +57,10 @@ CREATE TABLE plugins (
 
   -- Null while the plugin is allowed to run. Set by the user or by the crash-loop breaker.
   disabled_at     INTEGER,
-  -- 'user' | 'crash-loop' | 'protocol' | 'install'. Which sentence to show, and what to offer next.
+  -- The supervisor's `DisableRecord["reason"]`: 'user' | 'crash-loop' | 'protocol-mismatch'.
+  -- Which sentence to show, and what to offer next. Deliberately TEXT with no CHECK: a newer build
+  -- may write a reason this one has never heard of, and the reader degrades to "still disabled"
+  -- rather than the migration refusing a row it does not recognise.
   disabled_by     TEXT,
   -- Plain English, meant to be read by a person rather than parsed.
   disabled_reason TEXT

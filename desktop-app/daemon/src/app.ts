@@ -12,6 +12,7 @@ import { buildUserAgent } from "./net/user-agent.ts";
 import { databasePath, ensureStateDir } from "./paths.ts";
 import { PipelineClient } from "./pipeline/index.ts";
 import { ConsentRegistry } from "./proxy/consent.ts";
+import { PipelineMirror } from "./proxy/pipeline-mirror.ts";
 import { createProxyLogger, PROXY_LOG_ENV } from "./proxy/request-log.ts";
 import { loadOrCreateMasterKey } from "./security/keychain.ts";
 import { SecretsStore } from "./security/secrets.ts";
@@ -126,6 +127,18 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
   notifications.attach(bus);
 
   // --- pipeline sockets, one per online account -----------------------------
+  // One real socket per account, fanned out to however many apps are connected. That ratio is the
+  // whole reason the mirror exists: every extra socket against `pipeline.vrchat.cloud` is another
+  // session against an undisclosed cap. See PLAN.md §Phase 2.
+  const pipelineMirror = new PipelineMirror({
+    onViolation: ({ accountId, type }) => {
+      console.error(
+        `[vrc.zip] PIPELINE MIRROR WITHHELD A FRAME: a real VRChat credential appeared in a ` +
+          `${type} frame for ${accountId}. Connected apps did not receive it. See PLAN.md §Phase 2.`,
+      );
+    },
+  });
+
   const pipelines = new Map<string, PipelineClient>();
 
   function connectPipeline(accountId: string): void {
@@ -139,6 +152,9 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
       getAuthToken: async () => accounts.get(accountId)?.authToken() ?? "",
       onEvent: (decoded) => {
         publishPipelineEvent(bus, accountId, decoded);
+        // The mirror gets the frame as it arrived, not the normalised bus event: its contract is
+        // VRChat's wire format, and the bus event is deliberately a different shape.
+        pipelineMirror.publish(accountId, decoded);
       },
       onReauthRequired: () => {
         void accounts.get(accountId)?.reauthenticate();
@@ -253,6 +269,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     // so: on the handshake there are no upstream bytes to be faithful to, because the login never
     // reaches VRChat. Byte-fidelity starts at `passthrough` below.
     currentUser: (accountId: string) => accounts.get(accountId)?.user ?? null,
+    pipeline: pipelineMirror,
     passthrough: {
       grants: store,
       context: (accountId: string) => accounts.get(accountId)?.context() ?? null,

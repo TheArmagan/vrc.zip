@@ -61,6 +61,15 @@ export type DecodedPipelineEvent = {
      * notice; this is where they survive.
      */
     readonly raw: JsonValue;
+    /**
+     * The frame exactly as it arrived off the socket, before any parsing.
+     *
+     * The pipeline mirror re-emits this verbatim rather than re-serialising `raw`. Reconstructing
+     * would be *almost* identical, and almost is the wrong standard for a surface whose contract is
+     * byte-fidelity: key order, whitespace, and the three event types whose content is a bare string
+     * or absent entirely are all things a rebuild has to get right and this does not have to.
+     */
+    readonly frame: string;
     /** Integer unix ms at which the frame was received. */
     readonly receivedAt: number;
   };
@@ -456,7 +465,7 @@ export function decodePipelineMessage(
     case "absent": {
       // `clear-notification`. There is nothing to parse; a stray content field is ignored, not
       // rejected, because the event's meaning does not depend on it.
-      return finish(type, {}, content ?? null, receivedAt);
+      return finish(type, {}, content ?? null, raw, receivedAt);
     }
     case "bare-string": {
       const notificationId = extractNotificationId(content);
@@ -469,7 +478,7 @@ export function decodePipelineMessage(
           type,
         );
       }
-      return finish(type, { notificationId }, content ?? null, receivedAt);
+      return finish(type, { notificationId }, content ?? null, raw, receivedAt);
     }
     case "json-object": {
       if (content === undefined) {
@@ -499,7 +508,7 @@ export function decodePipelineMessage(
       if (isShapeFailure(shaped)) {
         return malformed(shaped.reason, `${type}: ${shaped.detail}`, raw, receivedAt, type);
       }
-      return finish(type, shaped, parsed, receivedAt);
+      return finish(type, shaped, parsed, raw, receivedAt);
     }
   }
 }
@@ -515,7 +524,8 @@ function finish(
   type: PipelineEventType,
   data: JsonObject,
   raw: JsonValue,
+  frame: string,
   receivedAt: number,
 ): DecodedPipelineEvent {
-  return { kind: "event", type, data, raw, receivedAt } as unknown as DecodedPipelineEvent;
+  return { kind: "event", type, data, raw, frame, receivedAt } as unknown as DecodedPipelineEvent;
 }

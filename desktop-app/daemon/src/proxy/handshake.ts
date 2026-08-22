@@ -30,6 +30,7 @@ import {
   parseScopeRequest,
 } from "./identity.ts";
 import type { PassthroughDeps } from "./passthrough.ts";
+import type { PipelineMirror } from "./pipeline-mirror.ts";
 import {
   invalidCredentials,
   missingCredentials,
@@ -70,6 +71,11 @@ export interface ProxyDeps {
    * than sending a request VRChat would reject with `waf_code 13799` anyway.
    */
   readonly passthrough?: PassthroughDeps | undefined;
+  /**
+   * The pipeline mirror. Absent, the WebSocket route answers with VRChat's dead-session frame and
+   * closes, which is a client's normal "reconnect later" path rather than a broken handshake.
+   */
+  readonly pipeline?: PipelineMirror | undefined;
   readonly now?: (() => number) | undefined;
 }
 

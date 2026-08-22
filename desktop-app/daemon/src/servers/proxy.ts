@@ -1,4 +1,7 @@
+import type { Scope } from "@vrcz/shared";
+import type { ServerWebSocket } from "bun";
 import { type Context, Hono } from "hono";
+import { createBunWebSocket } from "hono/bun";
 import { getCookie } from "hono/cookie";
 import {
   getCurrentUser,
@@ -9,10 +12,12 @@ import {
   verifyTwoFactor,
 } from "../proxy/handshake.ts";
 import { passthrough } from "../proxy/passthrough.ts";
+import { deadSessionFrame, type PipelineSink, pipelineToken } from "../proxy/pipeline-mirror.ts";
 import { createProxyLogger, type ProxyLogger, proxyAccessLog } from "../proxy/request-log.ts";
 import { matchRoute } from "../proxy/route-table.ts";
 import { vrchatError, vrczipError } from "../proxy/vrchat-shapes.ts";
 import { hostGuard, originGuard } from "../security/guards.ts";
+import { hashProxyToken } from "../security/proxy-tokens.ts";
 
 /**
  * The VRChat API mirror on `:7774`. See PLAN.md §1.8 and §Phase 2.
@@ -40,6 +45,11 @@ import { hostGuard, originGuard } from "../security/guards.ts";
 
 /** VRChat's own base path. An app changes its base URL and nothing else. */
 export const MIRROR_PREFIX = "/api/1";
+
+const { upgradeWebSocket, websocket } = createBunWebSocket<ServerWebSocket>();
+
+/** The Bun websocket handler for the mirror. `bind.ts` hands it to `Bun.serve`. */
+export const proxyWebSocketHandler = websocket;
 
 /** The logger every caller that does not want one gets. Its `enabled` is false, so nothing runs. */
 const NO_LOGGING: ProxyLogger = createProxyLogger({});
@@ -85,6 +95,42 @@ export function createProxyApp({ port, deps, logger }: ProxyAppOptions) {
     .get(`${MIRROR_PREFIX}/auth`, (c) => withDeps(deps, (d) => verifyAuthToken(request(c), d)))
     .put(`${MIRROR_PREFIX}/logout`, (c) => withDeps(deps, (d) => logout(request(c), d)))
 
+    // --- the pipeline mirror ------------------------------------------------
+    // `wss://pipeline.vrchat.cloud/?authToken=…` is path `/`, not under `/api/1` — the real pipeline
+    // is a different host entirely, and the forward proxy rewrites the host while leaving the path
+    // alone. So this route sits beside the mirror rather than inside it. See §2.9.
+    .get(
+      "/",
+      upgradeWebSocket((c) => {
+        let detach: (() => void) | undefined;
+        return {
+          onOpen(_event, ws) {
+            const bound = resolvePipelineClient(deps, c.req.url, c.req.header("cookie") ?? null);
+            if (bound === null) {
+              // Exactly what VRChat does with a dead token: accept the socket, say why, hang up.
+              // A client that reconnects on close and re-authenticates on this frame behaves
+              // correctly against the mirror for the same reason it does against VRChat.
+              ws.send(deadSessionFrame());
+              ws.close(1008, "unauthorized");
+              return;
+            }
+            detach = bound.subscribe({
+              send: (frame) => ws.send(frame),
+              close: (code, reason) => ws.close(code, reason),
+            });
+          },
+          onClose() {
+            detach?.();
+            detach = undefined;
+          },
+          onError() {
+            detach?.();
+            detach = undefined;
+          },
+        };
+      }),
+    )
+
     // --- everything else ----------------------------------------------------
     .all("*", async (c) => {
       const path = mirrorPath(c.req.path);
@@ -127,6 +173,39 @@ export type ProxyApp = ReturnType<typeof createProxyApp>;
 function mirrorPath(path: string): string | null {
   if (path === MIRROR_PREFIX) return "/";
   return path.startsWith(`${MIRROR_PREFIX}/`) ? path.slice(MIRROR_PREFIX.length) : null;
+}
+
+/**
+ * The grant behind a pipeline handshake, as something that can be subscribed with.
+ *
+ * Returns null for every failure — no token, an unknown or revoked one, a mirror with no pipeline
+ * wired — because a client cannot act differently on any of them and telling them apart would say
+ * whether a token it holds was ever valid.
+ */
+function resolvePipelineClient(
+  deps: ProxyDeps | undefined,
+  url: string,
+  cookieHeader: string | null,
+): { subscribe: (sink: PipelineSink) => () => void } | null {
+  if (deps?.pipeline === undefined) return null;
+
+  const token = pipelineToken(url, cookieHeader);
+  if (token === null) return null;
+
+  const grant = deps.grants.grantByTokenHash(hashProxyToken(token));
+  if (grant === null) return null;
+
+  let scopes: Scope[];
+  try {
+    const parsed: unknown = JSON.parse(grant.scopes);
+    scopes = Array.isArray(parsed) ? (parsed.filter((s) => typeof s === "string") as Scope[]) : [];
+  } catch {
+    // A grant row we cannot read authorises nothing, which fails closed.
+    scopes = [];
+  }
+
+  const mirror = deps.pipeline;
+  return { subscribe: (sink) => mirror.subscribe(grant.account_id, scopes, sink) };
 }
 
 /** `fetch` refuses a body on these, and VRChat defines none for them either. */

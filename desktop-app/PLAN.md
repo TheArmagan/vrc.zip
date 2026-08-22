@@ -580,8 +580,14 @@ consent modal can appear unprompted while the user is doing something else.
 
 - **Scope enforcement** off the generated route table. `resource:verb` taxonomy (`friends:read`,
   `invite:send`, `moderation:write`, `groups:owner`, …), with high-risk scopes deny-by-default and never
-  reachable via a wildcard grant: `account:credentials`, `account:destroy`, `moderation:*`,
+  reachable via the `*` wildcard: `account:credentials`, `account:destroy`, `moderation:*`,
   `files:delete`, `invite:send`, `groups:owner`, `favorites:group:clear`, `instances:close`, `economy:*`.
+  **`**` is the deliberate escape hatch** and expands to every scope, dangerous ones included — two
+  characters rather than a flag on `*`, so the difference is visible where it is typed. It decides
+  what the consent sheet *asks for*, never what is granted: the sheet still renders dangerous scopes
+  in their own block behind a second toggle, and the user still reads a six-digit code out of vrc.zip
+  and types it into the app. The two hard denials are unaffected, being route table flags rather than
+  scopes.
   `PUT /users/{id}/delete` and `DELETE /auth/twofactorauth` are **hard-denied regardless of scope**.
 - **Scopes alone don't stop abuse**: per-grant rate budgets on `invite:send` / `friends:write` /
   `groups:invite`, an audit log of every mutating call attributed to the app, and a kill switch per
@@ -589,8 +595,13 @@ consent modal can appear unprompted while the user is doing something else.
 - **The upstream User-Agent is always ours.** A downstream app's UA is used for *identity* and is never
   forwarded to VRChat — VRChat must see `vrc.zip/<version> (<user contact>)` so traffic is honestly
   attributed to the thing actually making it.
-- **Pipeline mirror**: `wss://…:7774/?authToken=<proxy auth cookie>` speaking the exact VRChat pipeline
-  protocol, filtered by the grant's scopes. Fed from the daemon's single real socket per account.
+- **Pipeline mirror**: `wss://…:7774/?authToken=<proxy auth cookie>` speaking the exact VRChat
+  pipeline protocol, filtered by the grant's scopes, fed from the daemon's single real socket per
+  account. The token is also accepted as `?auth=` (VRCX's spelling) and as the `auth` cookie.
+  Frames are re-emitted **verbatim** — the bytes as they arrived, not a re-serialisation — which is
+  the only way the three event types whose `content` is a bare id string or absent survive. Every
+  frame is scanned before forwarding, and a dead token gets VRChat's own `err` frame with the
+  `authToken` and `ip` it echoes stripped out.
 
 ### Forward proxy — `:7776`
 

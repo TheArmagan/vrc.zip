@@ -233,14 +233,18 @@ export function proxyAccessLog(logger: ProxyLogger, resolve: RouteResolver): Mid
     }
 
     const started = Date.now();
+    // An upgrade is not a request/response pair to buffer. By the time it returns, Bun owns the
+    // socket and the response is a formality; cloning it is at best pointless and at worst breaks
+    // the handshake. The frames themselves are the pipeline mirror's business, not the access log's.
+    const upgrade = c.req.header("upgrade") !== undefined;
     // Cloned before the route reads it, so the route still gets its own body.
-    const requestBody = logger.wantsBodies ? await bodyForLog(c.req.raw) : null;
+    const requestBody = logger.wantsBodies && !upgrade ? await bodyForLog(c.req.raw) : null;
     const app = c.req.header("user-agent")?.split(" ")[0] ?? "unknown";
 
     await next();
 
     const elapsed = Date.now() - started;
-    const operation = resolve(c.req.method, c.req.path);
+    const operation = upgrade ? "pipeline (websocket)" : resolve(c.req.method, c.req.path);
     logger.line(
       "proxy",
       `${c.req.method} ${c.req.path} -> ${String(c.res.status)} ${operation} ${app} ${String(elapsed)}ms`,
@@ -248,7 +252,7 @@ export function proxyAccessLog(logger: ProxyLogger, resolve: RouteResolver): Mid
     logger.headers("req", c.req.raw.headers);
     logger.body("req", requestBody);
     logger.headers("res", c.res.headers);
-    logger.body("res", logger.wantsBodies ? await bodyForLog(c.res) : null);
+    logger.body("res", logger.wantsBodies && !upgrade ? await bodyForLog(c.res) : null);
   };
 }
 

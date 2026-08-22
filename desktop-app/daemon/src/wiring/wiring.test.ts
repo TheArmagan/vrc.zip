@@ -29,7 +29,14 @@ function openStoreWithAccounts(...ids: string[]): Store {
 }
 
 function decoded(type: string, data: unknown): DecodedPipelineEvent {
-  return { kind: "event", type, data, raw: data, receivedAt: NOW } as DecodedPipelineEvent;
+  return {
+    kind: "event",
+    type,
+    data,
+    raw: data,
+    frame: JSON.stringify({ type, content: JSON.stringify(data) }),
+    receivedAt: NOW,
+  } as DecodedPipelineEvent;
 }
 
 describe("pipeline bridge", () => {

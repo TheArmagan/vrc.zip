@@ -11,7 +11,7 @@ import type { ProxyDeps } from "../proxy/handshake.ts";
 import type { ProxyLogger } from "../proxy/request-log.ts";
 import type { TokenSource } from "../security/guards.ts";
 import { type ControlDeps, controlWebSocketHandler, createControlApp } from "./control.ts";
-import { createProxyApp } from "./proxy.ts";
+import { createProxyApp, proxyWebSocketHandler } from "./proxy.ts";
 import { createUiApp } from "./ui.ts";
 
 /**
@@ -229,6 +229,10 @@ export async function bindServers(options: BindServersOptions): Promise<BoundSer
           ...(proxyLogger === undefined ? {} : { logger: proxyLogger }),
         }),
       ),
+    // The pipeline mirror lives on this port too, so it needs its own upgrade handler. A separate
+    // one from the control API's: two Hono instances, two adapters, and nothing shared between the
+    // byte-faithful mirror and the private control surface.
+    websocket: proxyWebSocketHandler as WebSocketHandler<unknown>,
   });
 
   const ui = bindServer({

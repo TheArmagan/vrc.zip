@@ -20,10 +20,9 @@ the pass-through behind it: an operation is authorised against its grant and re-
 the bound account's pipeline, with the upstream response returned untouched. Verified end to end
 against VRCX, which now gets past `GET /config` and into the consent handshake.
 
-**2.9 is the next real gap for a VRCX-shaped client**: the pipeline mirror does not exist, so
-`pipeline.vrchat.cloud` is in the intercept set but has nothing to answer it. Dropping that host from
-`forwardProxy.interceptHosts` leaves an app's event socket pointed at real VRChat while its REST
-calls come from vrc.zip, which is the useful posture until then.
+**2.9 landed too**, so `pipeline.vrchat.cloud` in the intercept set now has something to answer it:
+one real socket per account, fanned out to every connected app, filtered by scope. What remains for
+Phase 2 is 2.8 (rate budgets, audit rows, the kill switch and the Connected apps page) and 2.10.
 
 Before resuming 2.7, a foundations pass landed: the duplicated types and constants are hoisted into
 `@vrcz/shared` and the producers are typed against them (decisions 62, 63, 65, 66), `ui/` has a test
@@ -192,9 +191,11 @@ handshake, because the alternative is a login flow that mints credentials with n
 
 - [ ] **2.8 Rate budgets + audit + kill switch** — per-grant budgets on the abuse-adjacent scopes,
       an audit row per mutating call, revoke per grant and globally, and the "Connected apps" page.
-- [ ] **2.9 Pipeline mirror** — `wss://…:7774/?authToken=<proxy token>` speaking VRChat's protocol,
-      filtered by the grant's scopes, fed from the daemon's single real socket per account. Frames
-      are scanned: VRChat's own `authToken` error frame is on the leak table.
+- [x] **2.9 Pipeline mirror** (`proxy/pipeline-mirror.ts`) — `wss://…:7774/` speaking VRChat's
+      protocol, filtered per event type by the grant's scopes, fed from the daemon's single real
+      socket per account. Frames are re-emitted **verbatim** and scanned before forwarding; a dead
+      token gets VRChat's own `err` frame with the `authToken` and `ip` it echoes stripped. The token
+      is read from `?authToken=`, `?auth=` (VRCX's spelling), or the `auth` cookie. Decisions 81–82.
 - [ ] **2.10 Control API** (`:7775`) — consent status, grant list/revoke, the enriched event stream
       with `sessionId`/`accountId`/`displayName` on every `gamelog.*`, and webhook registration.
 
@@ -804,6 +805,34 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     user could recognise on a consent sheet, and VRChat's WAF really does block several — so that 403
     is both byte-faithful and true. The consent screen renders a missing contact and a missing version
     explicitly, rather than trailing off into nothing.
+
+81. **The pipeline mirror re-emits the frame verbatim, so `DecodedPipelineEvent` carries it.**
+    Rebuilding `{type, content}` from the parsed payload would be *almost* identical, and almost is
+    the wrong standard for a surface whose whole contract is byte-fidelity: key order and whitespace
+    would drift, and the three event types whose `content` is a bare id string or absent entirely —
+    `see-notification`, `hide-notification`, `clear-notification` — are precisely where a rebuild goes
+    wrong. Those are the same three the plan calls out as the bug in the `vrchat` npm package. So
+    `decode.ts` keeps the original text alongside the parsed `raw`, and the mirror forwards it.
+
+    Scopes are `Record<PipelineEventType, Scope>` rather than a map with a fallback, so a new event
+    type VRChat ships fails to compile until someone decides what seeing it should cost. A default
+    would have quietly forwarded whatever came next.
+
+82. **VRCX opens the pipeline as `?auth=`, not `?authToken=`.** VRChat documents the latter and VRCX
+    sends the former; both are accepted, along with the `auth` cookie, since a browser-based client
+    cannot always set a query string on a socket it opens. Accepting three spellings costs nothing,
+    and each of the other two is otherwise a client that fails at the handshake with no way to tell
+    why — the symptom being a bare `404` on the upgrade, which says nothing at all.
+
+83. **`**` grants every scope including the dangerous ones, by request.** `*` still excludes them, as
+    PLAN.md requires. `**` is the deliberate escape hatch, spelled with two characters rather than a
+    flag on `*` so the difference is visible in the one place it is typed, and it matters that it is
+    **not self-service**: it decides what the consent sheet *asks for*, while the person reading a
+    six-digit code out of vrc.zip decides whether it is granted, with dangerous scopes still in their
+    own block behind a second toggle. It is also how an app that cannot request scopes at all asks for
+    everything — typing `**` into the password field is the only lever such a client has. The two hard
+    denials (`PUT /users/{id}/delete`, `DELETE /auth/twofactorauth`) are unaffected: they are route
+    table flags, refused regardless of what was granted.
 
 ---
 

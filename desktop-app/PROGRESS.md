@@ -13,6 +13,10 @@ next**, and three calls are already made for it: register every operation the ro
 the hard denials, always hit upstream rather than serving a cached body (a re-encoded body is not
 byte-faithful), and share the per-account bucket FIFO with a subordinate per-grant budget.
 
+The forward proxy on `:7776` landed on 2026-08-22 (2.11): apps that can only be *configured* with a
+proxy, VRCX above all, now reach the mirror without knowing it exists. It is a delivery mechanism for
+`:7774`, so **2.7 is still what makes any of it answer something other than 501.**
+
 Before resuming 2.7, a foundations pass landed: the duplicated types and constants are hoisted into
 `@vrcz/shared` and the producers are typed against them (decisions 62, 63, 65, 66), `ui/` has a test
 runner for the first time (decision 64), and CI exists (decision 67). That pass was not bookkeeping
@@ -168,6 +172,14 @@ handshake, because the alternative is a login flow that mints credentials with n
       catch-all, so an unknown path falls through to VRChat's real 404 and a route with no scope
       mapping fails to register. `scopeGuard` off the route table, hard denials regardless of scope,
       upstream `Response` passed through untouched.
+- [x] **2.11 Forward proxy** (`:7776`, `daemon/src/forward-proxy/`) — a real HTTP proxy an app is
+      *configured* with, for the apps that cannot be pointed at a different base URL. VRCX is the
+      motivating case: it drives its HTTP through Chromium, which takes `--proxy-server=` and nothing
+      else. `CONNECT` for an intercepted host is spliced into an internal TLS listener holding a leaf
+      signed by a CA the daemon mints itself, so the traffic comes out in plaintext and is rewritten
+      onto `:7774`; every other host is a blind byte pipe. Numbered out of order because it is a
+      delivery mechanism for the mirror rather than a step toward it. Decisions 70–73.
+
 - [ ] **2.8 Rate budgets + audit + kill switch** — per-grant budgets on the abuse-adjacent scopes,
       an audit row per mutating call, revoke per grant and globally, and the "Connected apps" page.
 - [ ] **2.9 Pipeline mirror** — `wss://…:7774/?authToken=<proxy token>` speaking VRChat's protocol,
@@ -667,6 +679,39 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     conclude the app is broken. The tab still renders either way — hiding it would read as a vrc.zip
     bug to anyone who can see that same list on vrchat.com. `classifyFailure` gained the case and
     `isForbidden` the predicate.
+
+70. **The forward proxy terminates TLS with a CA the daemon mints itself, and there was no way
+    around it.** `:7774` asks an app to change its base URL, which is fine for a library and
+    impossible for VRCX — Chromium takes `--proxy-server=` and nothing else. A proxy-shaped port is
+    the only delivery mechanism those apps have, and since VRChat is HTTPS, every request through it
+    arrives as `CONNECT api.vrchat.cloud:443`. Rewriting that onto a plaintext mirror means being the
+    TLS server for a hostname we do not own. The alternatives were both worse: blind-tunnelling
+    `CONNECT` sends the traffic to real VRChat and the proxy does nothing, and refusing it leaves the
+    port useful only for the plaintext absolute-form nobody sends.
+
+71. **The X.509 issuer is ~200 lines of hand-rolled DER, not a dependency.** Neither Bun nor
+    `node:crypto` can *issue* a certificate — `X509Certificate` parses, it does not sign. The choices
+    were a pure-JS PKI package, shelling out to an `openssl` that is not present on a stock Windows
+    box, or writing the encoder. X.509 is a fixed structure and we emit exactly one shape of it, so
+    the encoder has no parser half — which is where the interesting ASN.1 bugs live. It is verified
+    against a real TLS handshake under strict verification rather than only structurally, because
+    "parses" and "a client accepts it" are different claims and only the second one matters.
+
+72. **Only the hosts the mirror actually serves are decrypted; everything else is a blind pipe.**
+    The leaf's SANs are exactly the intercept set, which is also what stops a client from coalescing
+    an unlisted origin onto an open connection. And it is a *setting* rather than a constant, because
+    the mirror does not serve all of it yet: dropping `pipeline.vrchat.cloud` leaves an app's event
+    socket pointed at real VRChat while its REST calls come from vrc.zip, which is the useful posture
+    until 2.9 lands. Decrypting more than we serve would be reading a user's unrelated traffic for no
+    benefit.
+
+73. **Origin-form requests are never routed to the mirror, and that is the boundary.** The proxy sees
+    three request shapes and answers each differently: `CONNECT` is intercepted or tunnelled,
+    absolute-form is rewritten onto the mirror, and origin-form (`GET /`) gets the setup page and the
+    CA download and nothing else. Origin-form is the **only shape a web page can produce** — a page
+    cannot set a proxy, cannot send `CONNECT`, and cannot write an absolute-form request line. Making
+    that the non-routing case is what keeps a drive-by page off the mirror structurally, rather than
+    by a header check it could satisfy.
 
 ---
 

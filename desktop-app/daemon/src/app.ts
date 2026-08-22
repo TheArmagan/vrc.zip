@@ -1,9 +1,10 @@
 import { resolve } from "node:path";
-import { launchUrl as buildLaunchUrl } from "@vrcz/shared";
+import { launchUrl as buildLaunchUrl, DEFAULT_HOSTNAME } from "@vrcz/shared";
 import { AccountManager } from "./accounts/manager.ts";
 import { NotificationService } from "./accounts/notifications.ts";
 import { PresenceService } from "./accounts/presence.ts";
 import { EventBus } from "./bus/event-bus.ts";
+import { type ForwardProxy, forwardProxyBanner, startForwardProxy } from "./forward-proxy/index.ts";
 import { discoverLogDirectories, LogWatcher } from "./game-logs/index.ts";
 import { RateLimiter } from "./net/rate-limiter.ts";
 import { buildUserAgent } from "./net/user-agent.ts";
@@ -49,6 +50,8 @@ export interface RunningDaemon {
   readonly store: Store;
   readonly accounts: AccountManager;
   readonly servers: BoundServers;
+  /** Null when the forward proxy is switched off in settings, or when it failed to start. */
+  readonly forwardProxy: ForwardProxy | null;
   readonly settings: Settings;
   readonly sessionToken: string;
   readonly launchUrl: string;
@@ -254,6 +257,40 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     uiDistDir: resolve(import.meta.dir, "..", "..", "ui", "dist"),
   });
 
+  // --- the forward proxy ----------------------------------------------------
+  // Started after `bindServers` and given `servers.proxy.port` rather than the configured one: if
+  // the mirror fell back to an ephemeral port, a forward proxy pointed at 7774 would relay every
+  // VRChat request into whatever else is squatting there.
+  //
+  // A failure here is logged and survived. It is the one listener with a moving part outside our
+  // control (minting and reading TLS material off disk), and losing an opt-in convenience port must
+  // not cost the user their accounts, their feed, and their game log.
+  let forwardProxy: ForwardProxy | null = null;
+  if (settings.forwardProxy.enabled) {
+    try {
+      forwardProxy = await startForwardProxy({
+        port: settings.ports.forward,
+        hostname: DEFAULT_HOSTNAME,
+        mirrorPort: servers.proxy.port,
+        interceptHosts: settings.forwardProxy.interceptHosts,
+        ...(env !== undefined ? { env } : {}),
+      });
+      for (const line of forwardProxyBanner({
+        proxyUrl: forwardProxy.url,
+        caCertPath: forwardProxy.caCertPath,
+        caIsNew: forwardProxy.caIsNew,
+        hosts: forwardProxy.interceptHosts,
+      })) {
+        console.info(line);
+      }
+    } catch (error) {
+      console.error(
+        "[vrc.zip] the forward proxy failed to start; the rest of the daemon is up:",
+        error,
+      );
+    }
+  }
+
   // `bindServer` has always returned `fellBack` and nothing has ever read it, which is why a daemon
   // orphaned by an earlier `bun --watch` could hold 7773-7775 while every later start quietly moved
   // to a random ephemeral port — breaking the bookmarked URL, the saved `curl`, and the open tab
@@ -264,6 +301,15 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
       { name: "UI", server: servers.ui, wanted: settings.ports.ui },
       { name: "proxy", server: servers.proxy, wanted: settings.ports.proxy },
       { name: "control", server: servers.control, wanted: settings.ports.control },
+      ...(forwardProxy === null
+        ? []
+        : [
+            {
+              name: "forward proxy",
+              server: forwardProxy,
+              wanted: settings.ports.forward,
+            },
+          ]),
     ]
       .filter((entry) => entry.server.fellBack)
       .map(({ name, server, wanted }) => ({ name, wanted, bound: server.port })),
@@ -275,6 +321,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
   await writeStateFile(
     {
       ...servers.urls,
+      ...(forwardProxy === null ? {} : { forwardProxyUrl: forwardProxy.url }),
       sessionToken,
       pid: process.pid,
       startedAt: Date.now(),
@@ -301,6 +348,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     store,
     accounts,
     servers,
+    forwardProxy,
     settings,
     sessionToken,
     launchUrl,
@@ -316,6 +364,9 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
       feedWriter.detach();
       notifications.detach();
 
+      // Before the mirror it forwards to, so an in-flight request cannot be relayed into a port
+      // that has just stopped listening.
+      await forwardProxy?.stop();
       await servers.stop();
 
       // In dev mode the file is deliberately left behind, because it is the only place the token

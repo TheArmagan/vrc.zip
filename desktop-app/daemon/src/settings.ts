@@ -1,6 +1,12 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { DEFAULT_CONTROL_PORT, DEFAULT_PROXY_PORT, DEFAULT_UI_PORT } from "@vrcz/shared";
+import {
+  DEFAULT_CONTROL_PORT,
+  DEFAULT_FORWARD_PROXY_PORT,
+  DEFAULT_PROXY_PORT,
+  DEFAULT_UI_PORT,
+} from "@vrcz/shared";
+import { DEFAULT_INTERCEPT_HOSTS } from "./forward-proxy/server.ts";
 import { settingsPath } from "./paths.ts";
 
 /**
@@ -14,7 +20,8 @@ export interface Settings {
    * daemon refuses to make requests without it. See PLAN.md §1.4.
    */
   contact: string;
-  ports: { ui: number; proxy: number; control: number };
+  ports: { ui: number; proxy: number; control: number; forward: number };
+  forwardProxy: ForwardProxySettings;
   /**
    * `local.vrc.zip` is opt-in. `127.0.0.1` is the runtime default because it has no external
    * dependency, no cert to renew, and nothing that can fail. See PLAN.md §1.8.
@@ -25,9 +32,33 @@ export interface Settings {
   openBrowserOnStart: boolean;
 }
 
+/** See `daemon/src/forward-proxy/`. */
+export interface ForwardProxySettings {
+  /**
+   * Off means the port is never bound and no CA is minted. Default on: the port is loopback-only
+   * and, unlike the mirror, is inert until an app is deliberately configured to use it.
+   */
+  enabled: boolean;
+  /**
+   * Hosts whose TLS the proxy terminates so their traffic can be routed to the mirror. Everything
+   * else is tunnelled through untouched.
+   *
+   * This is a setting rather than a constant because the mirror does not serve all of it yet:
+   * dropping `pipeline.vrchat.cloud` here leaves an app's event socket pointed at real VRChat while
+   * its REST calls come from vrc.zip, which is the useful posture until §2.9 lands.
+   */
+  interceptHosts: string[];
+}
+
 export const DEFAULT_SETTINGS: Settings = {
   contact: "",
-  ports: { ui: DEFAULT_UI_PORT, proxy: DEFAULT_PROXY_PORT, control: DEFAULT_CONTROL_PORT },
+  ports: {
+    ui: DEFAULT_UI_PORT,
+    proxy: DEFAULT_PROXY_PORT,
+    control: DEFAULT_CONTROL_PORT,
+    forward: DEFAULT_FORWARD_PROXY_PORT,
+  },
+  forwardProxy: { enabled: true, interceptHosts: [...DEFAULT_INTERCEPT_HOSTS] },
   useLocalDomain: false,
   logDirectories: [],
   openBrowserOnStart: true,
@@ -49,6 +80,12 @@ export async function loadSettings(env?: NodeJS.ProcessEnv): Promise<Settings> {
     return {
       contact: typeof parsed.contact === "string" ? parsed.contact : DEFAULT_SETTINGS.contact,
       ports: { ...DEFAULT_SETTINGS.ports, ...parsed.ports },
+      forwardProxy: {
+        enabled: parsed.forwardProxy?.enabled ?? DEFAULT_SETTINGS.forwardProxy.enabled,
+        interceptHosts: Array.isArray(parsed.forwardProxy?.interceptHosts)
+          ? parsed.forwardProxy.interceptHosts
+          : [...DEFAULT_SETTINGS.forwardProxy.interceptHosts],
+      },
       useLocalDomain: parsed.useLocalDomain ?? DEFAULT_SETTINGS.useLocalDomain,
       logDirectories: Array.isArray(parsed.logDirectories) ? parsed.logDirectories : [],
       openBrowserOnStart: parsed.openBrowserOnStart ?? DEFAULT_SETTINGS.openBrowserOnStart,

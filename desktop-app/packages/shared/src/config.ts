@@ -19,6 +19,12 @@ export const DEFAULT_UI_PORT = 7773;
 export const DEFAULT_PROXY_PORT = 7774;
 export const DEFAULT_CONTROL_PORT = 7775;
 
+/**
+ * The forward proxy: a real HTTP proxy an app is configured with, rather than a base URL it points
+ * at. It rewrites VRChat traffic onto `DEFAULT_PROXY_PORT`. See `daemon/src/forward-proxy/`.
+ */
+export const DEFAULT_FORWARD_PROXY_PORT = 7776;
+
 /** Loopback by name resolves to 127.0.0.1; binding the literal keeps IPv6 out of the picture. */
 export const DEFAULT_HOSTNAME = "127.0.0.1";
 

@@ -36,7 +36,7 @@ VRChat's Creator Guidelines say *"Do not request log-in information from users i
 | API client | **Generate our own** from a pinned `openapi.json` (v1.20.8) via `@hey-api/openapi-ts`. Not the `vrchat` npm package. |
 | Local URL | **Default `http://127.0.0.1:PORT`.** `local.vrc.zip` (DNS → 127.0.0.1, real DNS-01 cert) is supported and is what the README documents, but is opt-in at runtime. |
 | HTTP | **Hono** on `Bun.serve`, three separate app instances (one per port). Thin over `Request`/`Response`, which the byte-faithful mirror depends on. |
-| Ports | Three: UI, proxy mirror, control API. |
+| Ports | Four: UI, proxy mirror, control API, and a **forward proxy** an app is configured with rather than pointed at. |
 | Proxy | Byte-faithful passthrough. Apps log in per-account through the proxy; one grant per (app, account). |
 | Credentials | Encrypted local store; the key lives in the OS keychain. |
 | Plugins | Isolated child process + capability RPC (Worker is not a security boundary). Contributes event handlers, UI panels, node types, settings, commands, notifications. |
@@ -72,6 +72,11 @@ We keep the same *upstream*: pin `vrchatapi/specification` `openapi.json`, run `
    3rd-party apps ─────►│  :7775  control API                          │
                         │   consent · token mgmt · enriched event      │
                         │   stream · webhook registration              │
+                        └─────────────────────────────────────────────┘
+                        ┌─────────────────────────────────────────────┐
+   apps that can only ─►│  :7776  forward proxy (HTTP CONNECT)         │
+   be *configured*      │         terminates TLS with a local CA and   │
+   with a proxy         │         rewrites VRChat hosts onto :7774     │
                         └─────────────────────────────────────────────┘
                                         │
    ┌────────────────────────────────────┴──────────────────────────────┐
@@ -580,6 +585,38 @@ consent modal can appear unprompted while the user is doing something else.
   attributed to the thing actually making it.
 - **Pipeline mirror**: `wss://…:7774/?authToken=<proxy auth cookie>` speaking the exact VRChat pipeline
   protocol, filtered by the grant's scopes. Fed from the daemon's single real socket per account.
+
+### Forward proxy — `:7776`
+
+The mirror asks an app to change its base URL. **Plenty of apps cannot.** VRCX drives its HTTP
+through Chromium, which takes `--proxy-server=` and nothing else; the same is true of most Electron
+apps, and of anything that only reads `HTTP_PROXY`. For those, `:7776` is a real forward proxy: an
+app is *configured* with it, and its VRChat calls arrive at the mirror without the app knowing the
+mirror exists.
+
+This is a delivery mechanism for `:7774`, not a second mirror. Every request it accepts is rewritten
+onto `:7774` and answered there, so scopes, grants, consent, the audit log, and the egress filter all
+apply exactly as they do to an app that changed its base URL.
+
+- **`CONNECT api.vrchat.cloud:443` is the only shape that matters**, because VRChat is HTTPS. Serving
+  it means being the TLS server for a hostname we do not own, so the daemon mints its own CA
+  (`forward-proxy/ca.ts`, hand-rolled DER over `node:crypto` — nothing in Bun or Node can *issue* a
+  certificate) and signs a leaf whose SANs are exactly the intercepted hosts. The user installs the
+  CA once. **`ca.key` is the most dangerous file vrc.zip writes** — its blast radius is every site the
+  user's browser trusts, not merely their VRChat accounts — so it lives at `0600` in
+  `<state>/tls/`, is never transmitted, and the setup page says so in plain words.
+- **Only hosts the mirror actually serves are decrypted.** Everything else is a blind byte pipe to
+  the real server. vrc.zip is not in the business of reading a user's unrelated traffic, and a proxy
+  that refused everything else would need a bypass list maintained by hand. The intercept set is a
+  setting, not a constant, because the mirror does not serve all of it yet.
+- **Three request shapes, three answers, and the third is a security boundary.** `CONNECT` is
+  intercepted or tunnelled; absolute-form (`GET http://api.vrchat.cloud/...`) is rewritten onto the
+  mirror, which is the one path needing no CA at all; and **origin-form (`GET /`) is never routed**,
+  because origin-form is the only shape a web page can produce. It gets the setup page and the CA
+  download and nothing else.
+- **Bodies are forwarded verbatim, framing included.** The proxy segments the request stream so it
+  can rewrite `Host` on *every* request of a kept-alive connection, and never decodes a body — so
+  byte-fidelity here is structural rather than something to be careful about.
 
 ### Control API — `:7775`
 

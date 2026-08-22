@@ -22,6 +22,12 @@ export interface DaemonState {
   proxyUrl: string;
   /** The control API the UI and CLI talk to. */
   controlUrl: string;
+  /**
+   * The forward proxy an app is configured with. Absent when it is switched off in settings, which
+   * is why it is optional rather than empty-string: a consumer has to be able to tell "not running"
+   * from "running at nowhere".
+   */
+  forwardProxyUrl?: string;
   /** The UI session token for this run. See `session-token.ts`. */
   sessionToken: string;
   pid: number;
@@ -82,6 +88,7 @@ function isDaemonState(value: unknown): value is DaemonState {
     typeof v.uiUrl === "string" &&
     typeof v.proxyUrl === "string" &&
     typeof v.controlUrl === "string" &&
+    (v.forwardProxyUrl === undefined || typeof v.forwardProxyUrl === "string") &&
     typeof v.sessionToken === "string" &&
     typeof v.pid === "number" &&
     typeof v.startedAt === "number"

@@ -72,6 +72,17 @@ export function stateFilePath(env?: NodeJS.ProcessEnv): string {
   return join(stateDir(env), "state.json");
 }
 
+/**
+ * The forward proxy's TLS material: the local CA and the leaf it signs. See `forward-proxy/ca.ts`.
+ *
+ * Its own directory rather than loose files in the state root, because `ca.key` is the single most
+ * dangerous file vrc.zip writes — anyone holding it can impersonate any site the user trusts — and
+ * keeping it beside its siblings makes "what do I delete to revoke this" a one-line answer.
+ */
+export function tlsDir(env?: NodeJS.ProcessEnv): string {
+  return join(stateDir(env), "tls");
+}
+
 /** User settings, in the clear — nothing secret goes here. */
 export function settingsPath(env?: NodeJS.ProcessEnv): string {
   return join(stateDir(env), "settings.json");

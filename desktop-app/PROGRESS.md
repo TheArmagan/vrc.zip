@@ -131,7 +131,8 @@ behind each line.
 - [x] **1.8 Servers** (`daemon/src/servers/`, `security/`) — three ports, Host + Origin validation,
       session token, `state.json`. **Default URL is `http://127.0.0.1:PORT`**; `local.vrc.zip` was
       opt-in with a resolve check and silent fallback, and is **cut** as of decision 101 — the code
-      removal is outstanding, see the housekeeping line under Phase 2.
+      removal landed with it (see the housekeeping line under Phase 2), and `guards.test.ts` now
+      asserts the hostname is *rejected* rather than merely unused.
 - [x] **1.9 UI** (`ui/`) — Svelte 5 + shadcn-svelte. Account switcher, login (all three 2FA paths),
       friend list, feed, game log, notifications, settings. **Command palette + command registry ship
       in Phase 1** even though plugins don't — retrofitting a registry is worse than building it empty.
@@ -1868,6 +1869,57 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      what we *think* VRChat now returns would be the app inventing an answer, and a deletion is
      correct whatever the body looked like.
 
+164. **`EAGER_FILL_LIMIT` stops being an open question, and does not become a measurement.** It sat
+     in §Open questions asking for what a busy public instance actually costs against the 20/s
+     ceiling after the cap of 24 (decisions 112, 113), so the "roughly a screenful" number would
+     have something behind it. Dropped on the user's call. The cap and the `"low"` priority are what
+     actually bound the cost, and both are already in place; the eager number only decides how much
+     of the tail is drawn before a hover, which is a feel question rather than a rate-limit one.
+     Measuring it needs a real busy instance and a person at the keyboard, and it would have bought
+     a better default for something no user has complained about. It stays as it is until one does.
+
+165. **A second planning pass (2026-08-22) scoped the middle of Phase 3.** Twelve questions, four at
+     a time. The answers, each of which is a decision the next person should not re-litigate:
+
+     **3.4 and 3.5 are built in parallel, not in the order PLAN.md lists them.** The stated order is
+     dispatcher then install pipeline, but 3.3's hostile suite is blocked on 3.5's loader — it needs
+     somewhere a plugin is actually loaded from — and decision 108 is that the adversary exists as
+     early as possible. Building both at once gets the loader to 3.3 without stalling the dispatcher.
+
+     **The runtime fetcher lands with 3.5**, because first install is exactly when a runtime is first
+     needed. **The install pipeline takes a local directory path only** in this pass; the pinned git
+     URL of decision 107 is a fetch step in front of an otherwise identical pipeline and can follow.
+     **Signing and trust tiers go to 3.8**, not here: verification is an install-time gate, but the
+     tier only means anything at consent, where the hold-to-confirm already lives.
+
+     **The deny-scan parses with the TypeScript compiler API.** Bun exposes no parser. `typescript`
+     is already a workspace dependency for `typecheck` and `ts.createSourceFile` reads plain JS, so
+     this is the only option of the three that adds no dependency at all — and a new native
+     dependency (oxc) is a packaging risk for the single `.exe` specifically.
+
+     **Plugins reuse the existing shared scope registry.** One registry, not a `plugin:` namespace:
+     `friends:read` means the same thing whoever holds it, and the plain-English descriptions are
+     already written once. Plugin-only concerns — capabilities, event subscriptions, the fetch
+     allowlist — stay in the manifest beside the scopes rather than being inflated into scopes.
+     **The per-plugin rate budget reuses the per-grant rolling hourly window from decision 95**,
+     keyed by plugin id, for the same reason: one mechanism to understand and one UI to build.
+
+     **`ctx.vrchat` ships reads first.** Friends, users, worlds, instances, groups. The outbound
+     social actions wait for 3.8, because correction 4's dry-run lift is a consent gesture and
+     shipping the actions before the thing that ungates them would mean shipping them permanently
+     dry-run or ungated — and neither is the design.
+
+     **Windows gets its OS memory cap and a real scrubbed env now, before 3.4/3.5.** Decision 140
+     wrote both down as known limitations on the primary platform; leaving them there while building
+     the adversary that exists to test them is the wrong order.
+
+     **The hostile suite runs in CI with tight budgets**, not behind a local opt-in flag. It is the
+     regression suite for the whole phase, so it has to run where regressions actually appear; small
+     memory ceilings and short deadlines are what keep it from being slow or flaky.
+
+     **Verification is the five-command gate plus a real daemon run** under `VRCZIP_STATE_DIR`,
+     because PLAN.md's own warning is that typechecking has already let silent bugs through.
+
 ---
 
 ## Gotchas
@@ -2432,6 +2484,13 @@ Unresolved; flag to the user rather than guessing.
 to the user in batches and answered; the answers are decisions 95–110. What each one *was* is kept
 below in one line, because a question closed without a trace is a question that gets reopened.
 
+**A second pass the same day scoped the middle of Phase 3** — twelve more questions, four at a time,
+all of them answered in decision 165: the build order for 3.4 and 3.5, where the runtime fetcher and
+signing land, what parses the deny-scan, whether plugins get their own scope namespace, the shape of
+the per-plugin budget, how much of `ctx.vrchat` ships first, the two Windows limitations, how the
+hostile suite runs in CI, and what counts as verification. It also **dropped the `EAGER_FILL_LIMIT`
+measurement** outright rather than leaving it open (decision 164).
+
 - **~~Can JSC's small-heap mode be selected any way other than at process launch?~~ Closed by
   decision 111**, which removes the need to know: the plugin host is a real `bun` fetched on demand,
   so `--smol` is ordinary argv again. What replaced it is smaller and concrete — **verify the Bun
@@ -2448,11 +2507,6 @@ below in one line, because a question closed without a trace is a question that 
   fix — the assertions now compare whole path arrays instead of counts, so **the next occurrence
   identifies itself**. A test timeout under a loaded full run remains the leading hypothesis and is
   the first thing to check if it fires again.
-- **The per-user roster fallback still wants a real measurement**, now that it is *built* rather
-  than merely decided (decisions 112, 113: cap at 24, hover for the tail, `"low"` priority under
-  both buckets). The number worth having is what a busy public instance actually costs against the
-  20/s ceiling *after* the cap — to size `EAGER_FILL_LIMIT`, which was picked as "roughly a
-  screenful" and has nothing behind it but that. `net/request-meter.ts` can answer it.
 - **Type hoisting: done, except for two candidates that turned out not to be duplicates.** The third,
   the retention types, is now a *pending* move rather than a non-duplicate — decision 99 puts them on
   the wire with 2.10, and everything on the wire lives in `@vrcz/shared`. The two that stay put:

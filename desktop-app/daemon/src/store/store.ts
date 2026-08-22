@@ -850,8 +850,6 @@ export class Store {
       plugin.bundle_hash,
       plugin.source_kind,
       plugin.source_ref,
-      plugin.trust,
-      plugin.publisher_key,
       plugin.installed_at,
       plugin.updated_at,
     );
@@ -1187,10 +1185,9 @@ function prepareAll(db: Database) {
     markWebhookDeliveryDead: q<void, [number, number | null, string | null, string]>(
       SQL.markWebhookDeliveryDead,
     ),
-    insertPlugin: q<
-      void,
-      [string, string, string, string, string, string, string, string | null, number, number]
-    >(SQL.insertPlugin),
+    insertPlugin: q<void, [string, string, string, string, string, string, number, number]>(
+      SQL.insertPlugin,
+    ),
     getPlugin: q<PluginRow, [string]>(SQL.getPlugin),
     listPlugins: q<PluginRow, []>(SQL.listPlugins),
     deletePlugin: q<void, [string]>(SQL.deletePlugin),

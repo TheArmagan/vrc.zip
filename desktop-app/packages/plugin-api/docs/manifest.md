@@ -1,13 +1,19 @@
 # `vrcz-plugin.json` reference
 
 > [!IMPORTANT]
-> **You cannot install or run a plugin from the app yet**, and a good deal more is built than that
-> sentence suggests. The install pipeline compiles, deny-scans and content-addresses a bundle; the
-> daemon spawns, memory-caps and supervises a plugin process; a dispatcher answers scope-checked and
-> account-checked read calls against VRChat. None of it is constructed by the daemon's composition
-> root, and there is no consent screen, so nothing can be installed, granted anything, or started
-> from the app. Lifecycle dispatch to your exported functions, storage, events, outbound actions and
-> the UI renderer are not built at all.
+> **A plugin can be installed and started today, but only over the control API with the session
+> token, and nobody is asked first.** There is no plugin UI and no consent screen, so the grant is
+> written straight from what the manifest requested. Step 3.8 replaces that with a real consent
+> gesture, and grants made this way are not something to rely on.
+>
+> Built and wired: the install pipeline (compile, deny-scan, content-address, verify the hash on
+> every load), the supervisor (spawn, memory cap, heartbeat, watchdog, restart backoff), the
+> dispatcher answering scope-checked and account-checked **read** calls against VRChat, and the
+> events bridge.
+>
+> Not built: **lifecycle dispatch to your exported functions** (the host sends the frame; nothing
+> routes it to your `activate`), the `ctx` object those docs describe, storage, outbound actions,
+> the UI renderer, and nodes.
 >
 > These pages document what is **real today** and mark clearly what is not. Read
 > [status.md](./status.md) for the line-by-line breakdown before you build anything you are relying
@@ -54,7 +60,6 @@ a refinement, that is the bar.
 | `permissions` | object | no | see below | see [permissions](#permissions) |
 | `contributes` | object | no | see below | see [contributes](#contributes) |
 | `performance` | `"smol"` \| `"throughput"` | no | `"smol"` | see [performance](#performance) |
-| `signing` | object | no | — | see [signing](#signing) |
 
 `permissions` and `contributes` are optional objects that default to a fully-populated empty shape,
 so a manifest that omits both still parses into `permissions.scopes: []`, `permissions.accounts.mode:
@@ -510,29 +515,24 @@ performance must be "smol" (the default — the plugin runs in a small-heap proc
 Worth knowing: `--smol` is a hint, not a limit. It caps nothing. The RSS watchdog and the OS-level
 caps are what actually stop a runaway plugin.
 
-## `signing`
+## `signing` — removed
 
-| Field | Type | Required | Constraints |
-|---|---|---|---|
-| `algorithm` | `"ed25519"` | **yes** | the only accepted value |
-| `publisherKey` | string | **yes** | base64 Ed25519 public key: 32 bytes, 44 chars, matching `^[A-Za-z0-9+/]{43}=$` |
-| `keyId` | string | no | ≤ 64 chars |
+There is no `signing` field. It existed, declaring an Ed25519 publisher key for a detached signature
+the install pipeline would verify, and **it was cut** along with signature checking and trust tiers.
+A manifest that still carries one is refused, with a message saying it was removed rather than the
+generic unknown-field sentence — an author meeting this is out of date, not mistyped:
 
-The detached signature itself is **not** in here, and that is what "detached" means — a signature
-stored inside the document it signs cannot cover itself. The manifest names the publisher key the
-signature must verify against; the signature ships beside the bundle and is checked against the
-content-addressed artifact.
+```
+signing was removed rather than mistyped: it declared a publisher key for a signature vrc.zip no
+longer checks. Delete the field.
+```
 
-Note what is absent: **there is no trust-tier field.** A plugin does not get to declare itself
-trusted. The tier is derived by the host from whether a valid signature exists and whether the user
-has seen this publisher key before, which is why the unsigned case gets a hold-to-confirm rather than
-a checkbox.
-
-> **Not implemented.** `manifest.ts` parses this block and nothing verifies it. The install pipeline
-> exists now and deliberately does **not** do this: signature checking and the trust tier both belong
-> to step 3.8. Verification is an install-time gate, but a tier only means anything at consent, which
-> is where the hold-to-confirm lives, and the pipeline's rule is that it decides no trust at all. The
-> `plugins` table already has `trust` and `publisher_key` columns waiting for it.
+Why, in one paragraph: with no registry, the publisher key would arrive in the same file as the code
+it vouches for, which proves only that whoever wrote the plugin also wrote the key. What pins a
+plugin instead is its `id`, the install source (a local path, or a git URL pinned to a commit) and
+the content-addressed artifact whose hash is re-verified on every load. Because nothing is signed,
+there is no tier either — every install gets the same hold-to-confirm. See
+[security-model.md](./security-model.md#nothing-is-signed-and-there-are-no-trust-tiers).
 
 ## `grantHash`
 
@@ -564,16 +564,15 @@ and neither is reformatting the file or changing the key order.
 | Field | Why not |
 |---|---|
 | `id`, `version` | They are the other two components of the grant key. Hashing them would change the hash on every release even when nothing new was asked for, destroying the one thing it is for. |
-| `name`, `description`, `publisher`, `homepage`, `repository`, `license`, `keywords`, `icon`, every `reason` string | Presentation. None of them can widen what the plugin may do, and re-prompting on a typo fix trains people to click through prompts. Identity is pinned by `id` and by `signing`, not by a display name. |
+| `name`, `description`, `publisher`, `homepage`, `repository`, `license`, `keywords`, `icon`, every `reason` string | Presentation. None of them can widen what the plugin may do, and re-prompting on a typo fix trains people to click through prompts. Identity is pinned by `id`, which is part of the grant key, not by a display name. |
 | `contributes` | A new panel, command, setting or node type adds *surface*, not *authority*. All of them still run inside the granted scopes, events and capabilities. |
 | `main` | The entry path does not describe what the plugin may do, and the code behind it is pinned separately and more strongly: the artifact is content-addressed as `plugins/<id>/<sha256>.js` and its hash is verified on every load. |
 | `engines.pluginApi` | The schema pins it to the one major this build serves, so it is a constant for any manifest that reached a consent screen. A constant contributes nothing. |
-| `signing` | Trust tier is evaluated at install against the signature, and it is not something the user grants. Folding it in would make a routine key rotation read as a permission change. |
 
 ### What this means for you
 
-Ship a patch release that fixes a typo in your description, adds a panel, renames yourself, and
-rotates your signing key: same hash, no re-prompt, the user's existing grant still applies at the new
+Ship a patch release that fixes a typo in your description, adds a panel and renames yourself: same
+hash, no re-prompt, the user's existing grant still applies at the new
 version (subject to the version component of the key — see [lifecycle.md](./lifecycle.md)). Add one
 scope, one event pattern, one capability, one fetch domain, or flip `performance` to `"throughput"`:
 new hash, and the consent sheet is unavoidable.

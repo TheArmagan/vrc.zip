@@ -158,8 +158,6 @@ async function installOrThrow(attackFile: string, id: string): Promise<string> {
     bundle_hash: result.bundleHash,
     source_kind: "local",
     source_ref: result.sourceRef,
-    trust: "unsigned",
-    publisher_key: null,
     installed_at: Date.now(),
     updated_at: Date.now(),
   };
@@ -558,8 +556,6 @@ describe('import("node:" + "fs")', () => {
       bundle_hash: written.hash,
       source_kind: "local",
       source_ref: "smuggled",
-      trust: "unsigned",
-      publisher_key: null,
       installed_at: Date.now(),
       updated_at: Date.now(),
     });
@@ -672,8 +668,6 @@ describe("a lifecycle hook that never returns", () => {
       bundle_hash: result.bundleHash,
       source_kind: "local",
       source_ref: result.sourceRef,
-      trust: "unsigned",
-      publisher_key: null,
       installed_at: Date.now(),
       updated_at: Date.now(),
     });

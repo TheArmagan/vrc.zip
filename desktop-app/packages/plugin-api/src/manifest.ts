@@ -557,36 +557,17 @@ const contributesSchema = z
   });
 
 /* ------------------------------------------------------------------------------------------------
- * Signing
+ * Signing — cut
  * ---------------------------------------------------------------------------------------------- */
 
 /**
- * The manifest's half of signing (PLAN.md §Phase 3 correction 5): what a signed plugin *declares*.
+ * Why `signing` does not exist, quoted at the schema so nobody re-adds it as a convenience.
  *
- * The detached Ed25519 signature itself is **not** in here, and that is the point of "detached" — a
- * signature stored inside the document it signs cannot cover itself. The manifest names the
- * publisher key the signature must verify against; the signature ships beside the bundle and is
- * checked against the content-addressed artifact by the install pipeline.
- *
- * Note what is *absent*: there is no trust-tier field. A plugin does not get to declare itself
- * trusted. The tier is derived by the host from whether a valid signature exists and whether the
- * user has seen this publisher key before, which is why the unsigned case gets a hold-to-confirm
- * rather than a checkbox.
- *
- * Verification is not implemented here — this file parses, it does not decide.
+ * This field *did* exist, declaring an Ed25519 publisher key for a detached signature the install
+ * pipeline would check. PLAN.md §Phase 3 correction 5 cut the whole mechanism.
  */
-const signingSchema = z.strictObject({
-  algorithm: z.literal("ed25519", {
-    error: 'must be "ed25519" — the only signature algorithm vrc.zip accepts.',
-  }),
-  /** The publisher's Ed25519 public key: 32 raw bytes, base64, which is 44 characters with padding. */
-  publisherKey: z.string().regex(/^[A-Za-z0-9+/]{43}=$/, {
-    error:
-      "must be a base64-encoded Ed25519 public key (32 bytes, 44 characters). This is the key the plugin's signature is checked against.",
-  }),
-  /** Lets a publisher rotate keys while staying identifiable across the rotation. */
-  keyId: z.string().max(64).optional(),
-});
+const SIGNING_NOTE =
+  'vrc.zip verifies no signatures. A plugin is installed from a local path or a git URL pinned to a commit, and that pin is the provenance: it says exactly what code ran, and anyone can read it afterwards. A signature checked against a key handed over in the same manifest proves only that the key signed the thing it signed, and there is no registry to distribute publisher keys through. Because nothing is signed, nothing is "more trusted" either — every plugin gets the same install confirmation, which says plainly that it can do anything your computer can do.';
 
 /* ------------------------------------------------------------------------------------------------
  * The manifest
@@ -604,7 +585,11 @@ export const pluginManifestSchema = z.strictObject({
   name: z.string().min(1).max(64),
   version: versionSchema,
   description: z.string().max(300).optional(),
-  /** Display name of the author or organisation. Identity is pinned by `id` and `signing`, not by this. */
+  /**
+   * Display name of the author or organisation. Presentation only — anyone may write anything here,
+   * and nothing verifies it. What actually pins identity is `id` plus the install source: a local
+   * path, or a git URL pinned to a commit.
+   */
   publisher: z.string().min(1).max(64),
   homepage: z.url({ error: "must be a full URL, like https://example.com/my-plugin." }).optional(),
   repository: z
@@ -638,8 +623,6 @@ export const pluginManifestSchema = z.strictObject({
         'must be "smol" (the default — the plugin runs in a small-heap process) or "throughput" (more memory, for a plugin that genuinely computes).',
     })
     .default("smol"),
-
-  signing: signingSchema.optional(),
 });
 
 /**
@@ -708,6 +691,15 @@ function toIssues(error: z.ZodError): ManifestIssue[] {
         return {
           path: parent === "" ? "network" : `${parent}.network`,
           message: `There is no "network" permission in vrc.zip, on purpose: a plugin that can read your friends list and also call any server can put your friends list on that server. ${NETWORK_NOTE}`,
+        };
+      }
+      // `signing` was a real field until correction 5 cut it, so a manifest carrying one is more
+      // likely to be out of date than mistyped. Saying so beats "is not something the manifest
+      // accepts", which reads as a typo the author cannot find.
+      if (parent === "" && keys.includes("signing")) {
+        return {
+          path: "signing",
+          message: `was removed rather than mistyped: it declared a publisher key for a signature vrc.zip no longer checks. Delete the field. ${SIGNING_NOTE}`,
         };
       }
       const first = keys[0] ?? "";
@@ -784,7 +776,7 @@ export const GRANT_HASH_VERSION = 1;
  * - **`name`, `description`, `publisher`, `homepage`, `repository`, `license`, `keywords`, `icon`,
  *   and every `reason` string** — presentation. None of them can widen what the plugin may do, and
  *   re-prompting on a typo fix trains people to click through prompts, which costs more than it
- *   buys. Identity is pinned by `id` (a grant-key component) and by `signing`, not by a display name.
+ *   buys. Identity is pinned by `id`, which is a grant-key component, not by a display name.
  * - **`contributes`** — a new panel, command, setting or node type adds *surface*, not *authority*.
  *   Every one of them still runs inside the same scopes, events and capabilities that were granted.
  *   A plugin cannot reach anything new by declaring another panel.
@@ -794,9 +786,13 @@ export const GRANT_HASH_VERSION = 1;
  *   without changing the version is caught there rather than here.
  * - **`engines.pluginApi`** — the schema pins it to the one major this build serves, so it is a
  *   constant for any manifest that got as far as a consent screen. A constant contributes nothing.
- * - **`signing`** — trust tier is evaluated at install against the signature and the publisher key,
- *   and it is not something the user grants. Folding it in would also mean a routine key rotation
- *   read as a permission change.
+ *
+ * ## Why {@link GRANT_HASH_VERSION} did not bump when `signing` was removed
+ *
+ * Because `signing` was never hashed. The version guards the *set of hashed fields*, and that set is
+ * unchanged: a grant made before the removal answers exactly the same question as one made after it,
+ * so invalidating it would re-prompt every user for nothing. Removing an unhashed field is not a
+ * change to what anybody agreed to.
  */
 export function grantHash(manifest: PluginManifest): string {
   const { permissions } = manifest;

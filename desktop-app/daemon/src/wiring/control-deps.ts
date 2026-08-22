@@ -834,7 +834,6 @@ function toPluginSummary(view: InstalledPluginView): PluginSummary {
     version: status.version,
     publisher: view.publisher,
     state: status.state,
-    trust: status.trust,
     installedAt: view.installedAt,
     // The supervisor's live record first, then the stored row: an auto-disable that happened this
     // session is the more specific of the two, and both say the same thing after a restart.

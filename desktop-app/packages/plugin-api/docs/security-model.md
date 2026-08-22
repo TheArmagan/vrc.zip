@@ -1,14 +1,20 @@
 # The security model, stated bluntly
 
-This page is deliberately unflattering. `PLAN.md` correction 6 says not to call this a security
-sandbox until it is one, and the way that commitment is kept is by writing down what does not hold
-as carefully as what does.
+This page is deliberately unflattering. `PLAN.md` correction 6 says this is not a security sandbox,
+and — this is the part that changed — **it is not going to become one**. Sandboxing at the OS level
+was cut from the plan rather than postponed. The way that commitment is kept is by writing down what
+does not hold as carefully as what does.
 
 > [!WARNING]
 > **Plugins run with your account's privileges. Only install plugins you trust.**
 >
-> This is the accurate description of the system today, and it is what the consent screen will say.
-> Everything below is the detail behind that sentence.
+> This is the accurate description of the system, it is what the consent screen says, and it is not a
+> description of an early version. It is the design. Everything below is the detail behind that
+> sentence.
+
+Two things this page used to promise and no longer does: an OS-level sandbox, and signature
+verification. Both were cut. If you read an older copy of these docs, or a blog post about them,
+assume the security story is *weaker* than what you remember and read this page instead.
 
 ## What a plugin can do to you
 
@@ -34,10 +40,16 @@ const fs = await import("no" + "de:" + "fs");   // works, today
 Bun also has no `resourceLimits` for workers, no `--no-addons`, and no permissions flag, so a worker
 cannot be memory-capped, and `terminate()` is not documented to preempt a synchronous spin loop.
 
-A process buys four things a worker cannot: a real memory cap where the OS provides one, a `kill(9)`
-that always wins, crash containment, and — the one that matters most in the long run — it is the only
-granularity from which OS-level sandboxing (AppContainer on Windows, seccomp on Linux) becomes
-reachable **without changing the plugin API by one character**.
+A process buys three things a worker cannot: a real memory cap where the OS provides one, a `kill(9)`
+that always wins, and crash containment.
+
+This paragraph used to name a fourth: that a process is the only granularity from which OS-level
+sandboxing (AppContainer on Windows, seccomp on Linux) becomes reachable without changing the plugin
+API. That is still architecturally true and it is no longer an argument for anything, because the
+sandbox is not coming. **A child process is the right choice for the three reasons above, on their
+own merits.** If a future version ever does confine a plugin at the kernel, this is the shape it
+would attach to — but nothing here is built in anticipation of it, and you should not read the
+process boundary as a down payment on confinement.
 
 ## The layers, and which of them exist
 
@@ -55,9 +67,13 @@ reachable **without changing the plugin API by one character**.
 | Per-plugin rate budget | A plugin spending the user's account into a moderation problem | Built, and dormant: every budgeted scope is a write, and no write is reachable yet |
 | Dry-run shadow on outbound actions | A new plugin inviting or moderating on your behalf | The seam exists (`isShadowed`); the actions it guards do not exist yet (step 3.8) |
 | Consent | Granting anything at all | **Not built** (step 3.8) |
-| OS sandbox (AppContainer, seccomp) | Filesystem and network reach at the kernel | Not built, and not scheduled |
+| ~~OS sandbox (AppContainer, seccomp)~~ | ~~Filesystem and network reach at the kernel~~ | **Cut.** Not a layer, not scheduled, not coming |
+| ~~Signature verification~~ | ~~Running code the named publisher did not write~~ | **Cut.** Nothing is signed and nothing is checked |
 
-Two honest readings of that table, and the second matters more than the first.
+The last two rows are struck through rather than deleted, because a table that never mentioned them
+would read as though nobody had considered the question.
+
+Three honest readings of that table, and the last two matter more than the first.
 
 The layers which contain *accidents* are built, and the one layer that decides what a plugin may ask
 for at all, consent, is not. Everything below the scope gate is enforcement machinery waiting for a
@@ -67,6 +83,13 @@ And **none of the built layers is a barrier to a determined author.** The scan i
 is hygiene, and the process boundary is containment rather than confinement. What they buy is that a
 plugin doing something dangerous had to go out of its way, in a form a reviewer can see. That is
 worth having and it is not a sandbox.
+
+**That is now the finished state of the design, not a snapshot of an unfinished one.** The two rows
+that would have made it a boundary are struck through above. What defends you, in full: the code is
+compiled and scanned before it is ever stored, the stored artifact is content-addressed and
+re-verified on every load, the process it runs in is memory-capped and killable, and what it may
+*ask the daemon for* is gated by scope, account and rate. What is not defended: the filesystem, and
+therefore everything on it.
 
 ## The deny-scan catches syntax, and only syntax
 
@@ -104,9 +127,20 @@ at install will notice.
 
 So the accurate description of the scan is: **it makes cheap attacks fail loudly at install, with a
 line and column and a sentence the user reads, instead of silently at 3 AM.** It is not a proof of
-anything. What actually provides isolation is the process boundary, the prelude scrubbing globals,
-and the scrubbed environment. The scan is the layer that makes the lazy version of an attack
-embarrassing, and that is its whole claim.
+anything.
+
+This paragraph used to end "what actually provides isolation is the process boundary, the prelude
+scrubbing globals, and the scrubbed environment." **That sentence was wrong**, and it was wrong in
+the flattering direction. None of those three confines anything: the process boundary contains
+crashes, the prelude is hygiene against the easy reach, and the scrubbed environment stops
+disclosure. Nothing in the list stops a plugin from opening a file.
+
+What the built layers actually provide, stated without the word isolation: **integrity of what runs**
+(compiled at install, scanned, content-addressed, hash-verified on every load, so the code running is
+the code reviewed) and **resource containment** (memory cap, heartbeat, watchdog, frame budgets, so a
+plugin cannot take the daemon or the machine down with it). Those are real and they are not
+confinement. The scan is the layer that makes the lazy version of an attack embarrassing, and that is
+its whole claim.
 
 One thing it genuinely does close, and worth knowing because the mechanism is not the obvious one:
 `import("node:" + "fs")`, the hostile plugin's signature attack, never reaches the scan at all. Bun
@@ -233,30 +267,36 @@ grant is what the person at the consent screen approved, which is narrower whene
 something. `protocol.ts` is structurally unable to import `manifest.ts`, so nothing on the call path
 can consult the request by accident.
 
-## Signing and trust tiers
+## Nothing is signed, and there are no trust tiers
 
-Ed25519 detached signatures with a publisher key registered once. Without signing, "install this
-plugin" means "run this executable", and the local case is exactly where that matters — signing is
-not waiting on a registry to be worth having.
+**vrc.zip verifies no signatures.** There is no `signing` field in the manifest — a manifest carrying
+one is refused with a message saying it was removed — no publisher keys, no signed and unsigned
+tiers, and no code path anywhere that checks a signature. This was designed in and then cut, so if
+you are looking for where verification happens: nowhere, on purpose.
 
-**There is no registry in v1**, on purpose. A registry is a service to host, moderate and take down
-from. A plugin is installed from a local path or from a git URL pinned to a commit, which gives
-authors distribution without asking anyone's permission while keeping what ran auditable afterwards.
+The argument for cutting it, since "we ran out of time" would be the wrong thing to infer. **A
+signature is only as useful as the key distribution behind it.** With no registry, the publisher key
+would arrive in the same manifest as the code it vouches for, which proves that whoever wrote the
+plugin also wrote the key — a tautology, dressed as a check mark. Making it mean anything requires
+somewhere trustworthy to publish keys, which is a registry, which is a service to host, moderate and
+take down from.
 
-A plugin does not declare its own trust tier. The tier is derived at install from whether a signature
-verified, and the unsigned tier gets a hold-to-confirm on the sentence at the top of this page.
+**What replaces it is the install source.** A plugin comes from a local directory or from a git URL
+pinned to a commit. That pin is the provenance: it names exactly what code ran, it is readable by
+anyone afterwards, and it cannot be quietly changed under you the way a moving branch could. Combined
+with content-addressing — the built artifact's hash is its filename, re-verified on every load — you
+can always answer "what exactly ran on my machine", which is the question a signature was going to
+answer.
 
-> [!WARNING]
-> **None of this paragraph is implemented.** The manifest parses a `signing` block and nothing
-> verifies it. Signature checking and the trust tier both belong to step 3.8 rather than to the
-> install pipeline: verification is an install-time gate, but a tier only means anything at consent,
-> which is where the hold-to-confirm lives. The install pipeline deliberately decides no trust at
-> all. It compiles, scans, content-addresses and verifies the artifact back off disk, and returns
-> what it built. "We compiled it" and "you agreed to run it" are different facts and only the first
-> is the pipeline's to assert.
->
-> The pipeline also takes **a local directory only** right now. The pinned git URL is a fetch step in
-> front of an otherwise identical pipeline and has not been built.
+**And because nothing is signed, nothing is more trusted than anything else.** There is no tier to
+derive and no ladder to climb, so every install gets the same confirmation: a hold-to-confirm on the
+sentence at the top of this page. That is not a penalty applied to unsigned plugins. It is the
+accurate statement about all of them.
+
+> [!NOTE]
+> The install pipeline takes **a local directory only** right now. The pinned git URL is a fetch step
+> in front of an otherwise identical pipeline and has not been built yet — that one genuinely is
+> unfinished work rather than a cut.
 
 ## If you are auditing this
 

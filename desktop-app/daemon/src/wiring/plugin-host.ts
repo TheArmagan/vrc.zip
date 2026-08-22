@@ -404,9 +404,6 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
         // schema's vocabulary wins here, since it is what a later reader will grep for.
         source_kind: built.sourceKind === "local" ? "path" : built.sourceKind,
         source_ref: built.sourceRef,
-        // Never self-declared, and never anything but this until 3.8 verifies a signature.
-        trust: "unsigned",
-        publisher_key: null,
         installed_at: store.getPlugin(manifest.id)?.installed_at ?? now,
         updated_at: now,
       });
@@ -468,7 +465,6 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
                   version: manifest.version,
                   disabledReason: null,
                   disabledBy: null,
-                  trust: "unsigned",
                 },
                 name: manifest.name,
                 publisher: manifest.publisher,

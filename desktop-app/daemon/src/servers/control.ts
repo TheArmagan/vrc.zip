@@ -816,8 +816,6 @@ export interface PluginSummary {
    * a crash" and "the user turned it off" are the two states someone opens this page to tell apart.
    */
   state: string;
-  /** `unsigned` or `signed`, derived at install and never self-declared. */
-  trust: string;
   /** Unix milliseconds, integer. */
   installedAt: number;
   /** Plain English, or null while it is allowed to run. */

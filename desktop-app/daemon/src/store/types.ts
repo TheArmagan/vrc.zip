@@ -309,8 +309,6 @@ export type PluginRow = {
   bundle_hash: string;
   source_kind: string;
   source_ref: string;
-  trust: string;
-  publisher_key: string | null;
   installed_at: number;
   updated_at: number;
   disabled_at: number | null;

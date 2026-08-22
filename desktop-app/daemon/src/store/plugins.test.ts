@@ -27,8 +27,6 @@ function plugin(overrides: Partial<NewPlugin> = {}): NewPlugin {
     bundle_hash: "a".repeat(64),
     source_kind: "path",
     source_ref: "C:/plugins/hello",
-    trust: "unsigned",
-    publisher_key: null,
     installed_at: NOW,
     updated_at: NOW,
     ...overrides,

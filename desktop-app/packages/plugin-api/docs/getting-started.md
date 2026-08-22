@@ -1,13 +1,19 @@
 # Getting started
 
 > [!IMPORTANT]
-> **You cannot install or run a plugin from the app yet**, and a good deal more is built than that
-> sentence suggests. The install pipeline compiles, deny-scans and content-addresses a bundle; the
-> daemon spawns, memory-caps and supervises a plugin process; a dispatcher answers scope-checked and
-> account-checked read calls against VRChat. None of it is constructed by the daemon's composition
-> root, and there is no consent screen, so nothing can be installed, granted anything, or started
-> from the app. Lifecycle dispatch to your exported functions, storage, events, outbound actions and
-> the UI renderer are not built at all.
+> **A plugin can be installed and started today, but only over the control API with the session
+> token, and nobody is asked first.** There is no plugin UI and no consent screen, so the grant is
+> written straight from what the manifest requested. Step 3.8 replaces that with a real consent
+> gesture, and grants made this way are not something to rely on.
+>
+> Built and wired: the install pipeline (compile, deny-scan, content-address, verify the hash on
+> every load), the supervisor (spawn, memory cap, heartbeat, watchdog, restart backoff), the
+> dispatcher answering scope-checked and account-checked **read** calls against VRChat, and the
+> events bridge.
+>
+> Not built: **lifecycle dispatch to your exported functions** (the host sends the frame; nothing
+> routes it to your `activate`), the `ctx` object those docs describe, storage, outbound actions,
+> the UI renderer, and nodes.
 >
 > These pages document what is **real today** and mark clearly what is not. Read
 > [status.md](./status.md) for the line-by-line breakdown before you build anything you are relying
@@ -39,10 +45,13 @@ Four consequences worth internalising before you design anything:
 - **You do not choose which accounts you get.** Your manifest requests `one` or `many`; the user
   picks at the consent screen. There is no way to spell "all accounts".
 
-**None of this is a security sandbox yet, and the docs will not call it one.** A plugin runs with
-your user account's privileges. The process boundary, the global scrubbing and the scrubbed
-environment are what provide such isolation as there is; the install-time deny-scan catches syntax
-and only syntax, and a determined author walks around it in one line. Together they raise the cost of
+**This is not a security sandbox, it is not going to become one, and the docs will not call it
+one.** OS-level confinement was cut from the plan rather than postponed, so "yet" would be the wrong
+word. A plugin runs with your user account's privileges and can reach your filesystem. What the built
+layers do give you: the code is compiled, scanned and content-addressed before it runs, its hash is
+re-checked on every load, the process it runs in is memory-capped and killable, and what it may ask
+the daemon for is gated by scope and account. The install-time deny-scan catches syntax and only
+syntax, and a determined author walks around it in one line. Together they raise the cost of
 misbehaving and make it visible. They do not make it impossible. Only install plugins you trust.
 [security-model.md](./security-model.md) is the blunt version, and it lists exactly what gets through.
 
@@ -400,7 +409,8 @@ and is marked where it applies.
 | You cannot | Because | Step |
 |---|---|---|
 | Install a plugin from the app | The pipeline is **built**: it parses the manifest, compiles, deny-scans the output, content-addresses the artifact and verifies it back off disk. Nothing calls it. There is no route and no UI, and it deliberately writes no `plugins` row, because recording that you agreed to run something is consent's job rather than the compiler's. | **3.5 built, 3.8 to reach it** |
-| Install from a git URL, or install anything signed | The pipeline takes a local directory only and verifies no signature. `manifest.signing` parses and nothing checks it. | **3.8** |
+| Install from a git URL | The pipeline takes a local directory only. The pinned git URL is a fetch step in front of an identical pipeline. | **3.5**, outstanding |
+| Install something signed | Never. Signing was cut — nothing is signed and nothing is checked. | — |
 | Run a plugin from the app | `daemon/src/app.ts`, the composition root, wires no plugin subsystem at all. The supervisor, transport, registry, dispatcher and installer run only under their own tests. | **3.8** |
 | Have your `activate` called | No plugin-side runtime routes a `lifecycle` frame into your exports. The host sends the frame; nothing on your side receives it unless you write that yourself. | **3.4 and later** |
 | Call a `ctx` API | The dispatcher, scope gate and per-plugin budget are **built and tested**, with the eight read methods listed above behind them. No transport is attached and no grant exists, so every call would be refused with `E_SCOPE_DENIED` before it reached a method. | **3.4 built, 3.8 to reach it** |

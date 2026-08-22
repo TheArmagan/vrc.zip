@@ -1,13 +1,19 @@
 # Plugin lifecycle
 
 > [!IMPORTANT]
-> **You cannot install or run a plugin from the app yet**, and a good deal more is built than that
-> sentence suggests. The install pipeline compiles, deny-scans and content-addresses a bundle; the
-> daemon spawns, memory-caps and supervises a plugin process; a dispatcher answers scope-checked and
-> account-checked read calls against VRChat. None of it is constructed by the daemon's composition
-> root, and there is no consent screen, so nothing can be installed, granted anything, or started
-> from the app. Lifecycle dispatch to your exported functions, storage, events, outbound actions and
-> the UI renderer are not built at all.
+> **A plugin can be installed and started today, but only over the control API with the session
+> token, and nobody is asked first.** There is no plugin UI and no consent screen, so the grant is
+> written straight from what the manifest requested. Step 3.8 replaces that with a real consent
+> gesture, and grants made this way are not something to rely on.
+>
+> Built and wired: the install pipeline (compile, deny-scan, content-address, verify the hash on
+> every load), the supervisor (spawn, memory cap, heartbeat, watchdog, restart backoff), the
+> dispatcher answering scope-checked and account-checked **read** calls against VRChat, and the
+> events bridge.
+>
+> Not built: **lifecycle dispatch to your exported functions** (the host sends the frame; nothing
+> routes it to your `activate`), the `ctx` object those docs describe, storage, outbound actions,
+> the UI renderer, and nodes.
 >
 > These pages document what is **real today** and mark clearly what is not. Read
 > [status.md](./status.md) for the line-by-line breakdown before you build anything you are relying
@@ -45,9 +51,9 @@ triple has eight combinations, only four mean anything, and the two that bite in
 One plugin, one OS process. Not a `Worker` — a Worker is an isolation primitive rather than a
 security one: it gets its own `globalThis` but keeps `process`, `Bun`, `fetch` and full `node:*`
 access, cannot be memory-capped (Bun has no `resourceLimits`), and `terminate()` is not documented to
-preempt a synchronous spin loop. A process buys real memory caps, a `kill(9)` that always wins, crash
-containment, and the only granularity from which OS-level sandboxing becomes reachable later without
-changing the plugin API by one character.
+preempt a synchronous spin loop. A process buys real memory caps, a `kill(9)` that always wins, and crash
+containment. It used to buy a fourth thing on paper — the granularity OS-level sandboxing would
+attach to — but that sandbox was cut rather than deferred, so those three are the whole argument.
 
 The spawn is:
 
@@ -95,7 +101,8 @@ screen, because it spends the *user's* memory, so it is their call rather than y
 runaway.
 
 **The working directory is your data directory** (`<state>/plugin-data/<id>/`), so a plugin that
-reaches the filesystem around the scrub writes relative paths into the one place it is entitled to.
+reaches the filesystem around the scrub writes *relative* paths into the one place it is entitled to.
+That is a convenience, not a boundary: an absolute path goes wherever it says.
 
 ### Memory caps, honestly
 
@@ -203,9 +210,11 @@ can see.
 
 Do not read the install-time deny-scan as the thing that closes the gap. It catches syntax and only
 syntax, and a `constructor.constructor` chain, a computed `globalThis["pro"+"cess"]`, and a plain
-`fetch(…)` all pass it today. **What actually provides isolation is this scrub, the scrubbed
-environment, and the process boundary itself**, which is also what a future AppContainer or seccomp
-profile attaches to. [security-model.md](./security-model.md) lists exactly what gets through, and it
+`fetch(…)` all pass it today. **None of this is confinement**: the scrub blocks the easy
+reach, the environment scrub stops disclosure, and the process boundary contains crashes. There is no
+future AppContainer or seccomp profile behind them either — that was cut. What the host does
+guarantee is that the code running is the code that was scanned and hashed, and that it cannot
+outgrow its memory cap or wedge the daemon. [security-model.md](./security-model.md) lists exactly what gets through, and it
 is the page to trust over this list.
 
 ### The `__vrczHost` seam

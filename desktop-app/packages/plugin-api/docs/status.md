@@ -31,12 +31,12 @@ last mile is 3.8 rather than anything on this page.
 |---|---|---|
 | 3.1 | `@vrcz/plugin-api` types — manifest, protocol, UI, nodes | **Done.** Published surface |
 | 3.2 | `ProcessTransport` + supervisor | **Done.** Spawn, frame, heartbeat, watchdog, backoff, auto-disable, OS memory cap on Windows and Linux, a scrubbed environment |
-| 3.3 | The deliberately hostile plugin | Seven attacks and a polite control live in `daemon/src/plugins/hostile/`. The suite asserts **which layer** stopped each one, and says so plainly where nothing did |
-| 3.4 | Dispatcher, scope gate, rate budget | **Done as a subsystem.** Not constructed by `app.ts`, so nothing calls it |
-| 3.5 | Install pipeline (`Bun.build`, deny-scan, content-addressing) | **Done as a subsystem.** Local directory only; no signature check; no route or UI reaches it |
-| 3.6 | Events bridge (filters, credit windows, batching) | Not started |
+| 3.3 | The deliberately hostile plugin | **Done.** Sixteen attacks and a polite control live in `daemon/src/plugins/hostile/`. The suite asserts **which layer** stopped each one, and says so plainly where nothing did |
+| 3.4 | Dispatcher, scope gate, rate budget | **Done and wired.** `app.ts` owns it. Reads only, so the write budget is dormant |
+| 3.5 | Install pipeline (`Bun.build`, deny-scan, content-addressing) | **Done and wired**, reachable at `POST /api/plugins`. Local directory only; the pinned git URL is still outstanding. Nothing is signed — that was cut, not deferred |
+| 3.6 | Events bridge (filters, credit windows, batching) | **Done and wired.** Compiled filters, credit windows, coalescing, a `dropped` frame when the host sheds load |
 | 3.7 | Storage (one SQLite file per plugin) | Not started |
-| 3.8 | Consent and management UI, signing, outbound actions | Not started. **This is the step that makes any of the above reachable** |
+| 3.8 | Consent and management UI, outbound actions | Not started. **This is the step that puts a person in front of a grant.** Signing was going to live here and was cut |
 | 3.9 | Declarative UI renderer | Not started |
 | 3.10 | Node registration | Not started |
 | 3.11 | Scaffolder and generated docs | Not started |
@@ -74,8 +74,9 @@ backoff, auto-disable a crash loop durably, and kill it when it will not stop. S
 comes out, in five steps: parse `vrcz-plugin.json` through the published schema, compile with
 `Bun.build` under a resolver that refuses host builtins, deny-scan the *bundled output*, write it to
 `plugins/<id>/<sha256>.js`, then read it back off disk through the same loader the spawn path uses.
-Every failure is a value with a stage and a sentence, never a throw. It takes a local directory only,
-verifies no signature, decides no trust, and writes nothing to the database.
+Every failure is a value with a stage and a sentence, never a throw. It takes a local directory only
+and writes nothing to the database. It verifies no signature because nothing does — see
+[security-model.md](./security-model.md#nothing-is-signed-and-there-are-no-trust-tiers).
 
 **The dispatcher and the scope gate.** One route between a plugin and the host, in a fixed order:
 grant, in-flight cap, method lookup, deadline, scope, account, budget, charge, invoke. Default deny
@@ -118,15 +119,16 @@ yet.
 
 **There is no renderer**, so a `UINode` tree has nothing to draw it.
 
-**There is no signature verification** and no trust tier, and the install source is a local directory
-only.
+**The install source is a local directory only.** The pinned git URL is a fetch step in front of an
+otherwise identical pipeline and is genuinely unfinished. Signature verification and trust tiers, by
+contrast, are not missing — they were cut, and nothing is coming to fill that space.
 
 **A packaged build cannot run plugins.** The runtime fetcher exists, but its hash pin table ships
 empty on purpose, and an unpinned platform refuses to download rather than run an executable nobody
 vouched for. The hashes come from a packaging step that does not exist yet. From a source checkout
 the daemon is already running under a real `bun` and uses that.
 
-## Known limits of the isolation
+## Known limits, and why "isolation" is the wrong word for them
 
 Read [security-model.md](./security-model.md) in full before you assume anything about this. The
 short form, so nobody is surprised:
@@ -138,8 +140,11 @@ short form, so nobody is surprised:
   through.
 - **A prelude cannot disable the `import()` operator.** It is syntax. What closes the obvious form is
   the build-time resolver and the install-time scan, not the prelude.
-- **What actually provides isolation** is the process boundary, the prelude scrubbing globals, and
-  the scrubbed environment. Not the scan.
+- **Nothing here confines a plugin.** This line used to say isolation came from the process boundary,
+  the prelude and the scrubbed environment; that was wrong and flattering. The process boundary
+  contains crashes, the prelude blocks the easy reach, the environment scrub stops disclosure. None
+  of them stops a plugin from opening a file. What the built layers do provide is **integrity of what
+  runs** and **resource containment**.
 - The OS memory cap is now real on **both** primary platforms. On Windows, crossing it surfaces as a
   crash (`RangeError: Out of memory`, exit 1) rather than as a kill.
 - `env: {}` on Windows is a **merge**, not a replacement: Bun synthesises eleven variables and adds
@@ -147,5 +152,6 @@ short form, so nobody is surprised:
   reaching a plugin through this; what did was the account name, the home directory, the domain
   controller and a `PATH` inventorying installed tooling.
 
-Until process plus OS-level sandboxing lands, the honest description is the one `PLAN.md` insists
-on: **plugins run with your account's privileges. Only install plugins you trust.**
+OS-level sandboxing was **cut**, not scheduled, so this is the finished shape rather than an early
+one. The honest description is the one `PLAN.md` insists on, and it is permanent: **plugins run with
+your account's privileges. Only install plugins you trust.**

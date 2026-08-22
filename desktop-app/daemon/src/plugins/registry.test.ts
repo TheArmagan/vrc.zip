@@ -92,8 +92,6 @@ function install(store: Store, id: string, disabled?: { by: string; reason: stri
     bundle_hash: "a".repeat(64),
     source_kind: "path",
     source_ref: `C:/plugins/${id}`,
-    trust: "unsigned",
-    publisher_key: null,
     installed_at: NOW,
     updated_at: NOW,
   });
@@ -260,7 +258,6 @@ describe("statuses", () => {
     expect(off?.state).toBe("disabled");
     expect(off?.disabledBy).toBe("user");
     expect(off?.version).toBe("1.0.0");
-    expect(off?.trust).toBe("unsigned");
   });
 });
 

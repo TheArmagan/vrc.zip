@@ -84,7 +84,6 @@ const PLUGIN: PluginSummary = {
   version: "1.0.0",
   publisher: "acme",
   state: "running",
-  trust: "unsigned",
   installedAt: 1_700_000_000_000,
   disabledReason: null,
   disabledBy: null,

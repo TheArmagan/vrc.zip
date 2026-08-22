@@ -43,8 +43,6 @@ export interface PluginStatus extends SupervisorStatus {
   /** Null while it is allowed to run. Set by the user or by the crash-loop breaker. */
   readonly disabledReason: string | null;
   readonly disabledBy: string | null;
-  /** `unsigned` or `signed`, derived at install and never self-declared. */
-  readonly trust: string;
 }
 
 export interface PluginRegistryOptions {
@@ -257,7 +255,6 @@ export class PluginRegistry {
         version: row.version,
         disabledReason: row.disabled_reason ?? this.#unstartable.get(row.id) ?? null,
         disabledBy: row.disabled_by,
-        trust: row.trust,
       };
     });
   }
@@ -269,7 +266,6 @@ export class PluginRegistry {
       version: row?.version ?? "unknown",
       disabledReason: row?.disabled_reason ?? null,
       disabledBy: row?.disabled_by ?? null,
-      trust: row?.trust ?? "unsigned",
     };
   }
 }

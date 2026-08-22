@@ -94,17 +94,26 @@ describe("parseManifest", () => {
         nodes: [{ id: "note-added", title: "Note added", category: "Notes" }],
       },
       performance: "throughput",
-      signing: {
-        algorithm: "ed25519",
-        publisherKey: "AwoRGB8mLTQ7QklQV15lbHN6gYiPlp2kq7K5wMfO1dw=",
-        keyId: "2026-08",
-      },
     });
 
     // A dangerous scope is legal to *request* — it is the consent screen that isolates it.
     expect(manifest.permissions.scopes).toContain("moderation:write");
     expect(manifest.performance).toBe("throughput");
-    expect(manifest.signing?.algorithm).toBe("ed25519");
+  });
+
+  // Correction 5 cut signing, and a manifest written against the old schema is the likeliest way
+  // anyone meets the removal. It has to read as "this is gone" rather than as a typo.
+  test("a leftover signing block is refused, and the message says it was removed", () => {
+    const issue = expectFailure({
+      ...MINIMAL,
+      signing: {
+        algorithm: "ed25519",
+        publisherKey: "AwoRGB8mLTQ7QklQV15lbHN6gYiPlp2kq7K5wMfO1dw=",
+      },
+    });
+    expect(issue.path).toBe("signing");
+    expect(issue.message).toContain("was removed");
+    expect(issue.message).toContain("verifies no signatures");
   });
 
   test("a missing required field names the field", () => {
@@ -354,10 +363,6 @@ describe("grantHash", () => {
         panels: [{ id: "notes", title: "Notes" }],
         commands: [{ id: "export", title: "Export" }],
         nodes: [{ id: "note-added", title: "Note added" }],
-      },
-      signing: {
-        algorithm: "ed25519",
-        publisherKey: "AwoRGB8mLTQ7QklQV15lbHN6gYiPlp2kq7K5wMfO1dw=",
       },
     });
     expect(grantHash(cosmetic)).toBe(baseline);

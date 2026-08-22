@@ -517,17 +517,14 @@ export const SQL = {
   // -- plugins (Phase 3) ------------------------------------------------------
   insertPlugin: `
     INSERT INTO plugins
-      (id, version, manifest, bundle_hash, source_kind, source_ref, trust, publisher_key,
-       installed_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, version, manifest, bundle_hash, source_kind, source_ref, installed_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       version       = excluded.version,
       manifest      = excluded.manifest,
       bundle_hash   = excluded.bundle_hash,
       source_kind   = excluded.source_kind,
       source_ref    = excluded.source_ref,
-      trust         = excluded.trust,
-      publisher_key = excluded.publisher_key,
       updated_at    = excluded.updated_at`,
   getPlugin: `SELECT * FROM plugins WHERE id = ?`,
   listPlugins: `SELECT * FROM plugins ORDER BY installed_at DESC`,

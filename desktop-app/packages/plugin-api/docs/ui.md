@@ -1,13 +1,19 @@
 # UI vocabulary
 
 > [!IMPORTANT]
-> **You cannot install or run a plugin from the app yet**, and a good deal more is built than that
-> sentence suggests. The install pipeline compiles, deny-scans and content-addresses a bundle; the
-> daemon spawns, memory-caps and supervises a plugin process; a dispatcher answers scope-checked and
-> account-checked read calls against VRChat. None of it is constructed by the daemon's composition
-> root, and there is no consent screen, so nothing can be installed, granted anything, or started
-> from the app. Lifecycle dispatch to your exported functions, storage, events, outbound actions and
-> the UI renderer are not built at all.
+> **A plugin can be installed and started today, but only over the control API with the session
+> token, and nobody is asked first.** There is no plugin UI and no consent screen, so the grant is
+> written straight from what the manifest requested. Step 3.8 replaces that with a real consent
+> gesture, and grants made this way are not something to rely on.
+>
+> Built and wired: the install pipeline (compile, deny-scan, content-address, verify the hash on
+> every load), the supervisor (spawn, memory cap, heartbeat, watchdog, restart backoff), the
+> dispatcher answering scope-checked and account-checked **read** calls against VRChat, and the
+> events bridge.
+>
+> Not built: **lifecycle dispatch to your exported functions** (the host sends the frame; nothing
+> routes it to your `activate`), the `ctx` object those docs describe, storage, outbound actions,
+> the UI renderer, and nodes.
 >
 > These pages document what is **real today** and mark clearly what is not. Read
 > [status.md](./status.md) for the line-by-line breakdown before you build anything you are relying

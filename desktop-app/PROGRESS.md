@@ -4,9 +4,9 @@ Working log for anyone (human or agent) picking this up. **Read [`PLAN.md`](./PL
 the architecture and the reasoning. This file tracks only *state*: what exists, what's next, and what
 was decided along the way.
 
-**Last updated:** 2026-08-22
-**Current phase:** Phase 3 — Plugin system (3.1–3.6 done and wired; next is **3.0**, the cuts and the
-docs rewrite, then 3.7, plugin storage)
+**Last updated:** 2026-08-23
+**Current phase:** Phase 3 — Plugin system (3.1–3.6 done and wired, **3.0 done**; next is 3.7,
+plugin storage)
 **Status: Phases 1 and 2 are both built.** Phase 1 was confirmed by hand on 2026-08-22 (1.10 and the
 profile card). Phase 2 closed on the same day: every numbered step is ticked, including 2.8's last
 two pieces (per-app budget overrides and a rate gauge that reports measured numbers instead of
@@ -46,7 +46,9 @@ decision 182. **OS-level plugin sandboxing is cut permanently rather than deferr
 PLAN.md correction 6 from a temporary posture into the permanent one, and **Ed25519 signing and
 trust tiers are cut from v1** along with their remnants in the schema and the manifest. Everything
 from 3.7 to 3.11 is scoped in the checklist below, and the docs that describe the two cut features
-get rewritten *first*, as step 3.0.
+were rewritten *first*, as step 3.0 — **now done**, decision 183, which also found that the docs'
+standing banner had been false for three decisions and that both security pages claimed an
+"isolation" no built layer provides.
 
 **Two things to read before building on it.** Decision 177 lists four attacks the hostile suite
 asserts as *gaps*, the largest being that **a plugin which gets past install reaches the whole
@@ -399,11 +401,14 @@ for the life of the product.
       **Read decision 181 and the `permissions.events` Gotcha before 3.8**: backpressure needed a
       fourth mechanism in the plugin → host direction that PLAN.md does not name, and the event
       patterns shown on the consent sheet are not enforceable until the grant can carry them.
-- [ ] **3.0 The cuts, and the docs that describe them** — decision 182 removes OS-level sandboxing
-      (permanently, not deferred) and Ed25519 signing with it, along with the `signing` manifest
-      field, `plugins.trust`, `plugins.publisher_key` and the `signed` tier. `GRANT_HASH_VERSION`
-      bumps. Numbered 3.0 because it lands **before 3.7**: `packages/plugin-api/docs/` is the only
-      thing an outside author reads and its security-model page currently promises both.
+- [x] **3.0 The cuts, and the docs that describe them** — **done** (decision 183). OS-level
+      sandboxing and Ed25519 signing are out of the plan; the `signing` manifest field is gone and a
+      leftover one is refused with a message saying it was *removed* rather than mistyped; migration
+      010 drops `plugins.trust` and `plugins.publisher_key`; `trust` is off the wire. All ten docs
+      pages are corrected. **`GRANT_HASH_VERSION` did not bump** — `signing` was never hashed, so no
+      grant's meaning changed; see decision 183. Two things the sweep turned up beyond the cuts: the
+      banner on all eight pages had been false since 3.4/3.5 were wired (see §Gotchas), and both
+      `security-model.md` and `status.md` claimed an "isolation" that no built layer provides.
 - [ ] **3.7 Storage** — one SQLite file per plugin in its own data dir. Uninstall is `rm -rf`, quota
       is a `stat`, and a plugin cannot lock or corrupt the daemon's WAL.
       **Scoped by decision 182:** capabilities become a real field on `PluginGrant` and on
@@ -2449,6 +2454,48 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      third-party app to mean anything, so it stays open and honestly labelled rather than being
      ticked by a test that impersonates one.
 
+183. **3.0 landed, and `GRANT_HASH_VERSION` did *not* bump.** Decision 182 said removing `signing`
+     would invalidate every stored grant. It does not, and the reason is worth keeping: **`signing`
+     was never one of the hashed fields.** `grantHash` covers scopes, accounts, events, capabilities,
+     fetch domains and `performance`, and the version guards *the set of hashed fields*, not the
+     manifest's shape. A grant made before the removal answers exactly the same question as one made
+     after it, so bumping would have re-prompted every user to agree to something unchanged. The
+     rule this is an instance of: a hash version is about what was asked, never about what the file
+     looked like.
+
+     What actually came out. **`packages/plugin-api`**: the `signing` schema and the `PluginManifest`
+     field, replaced by a `SIGNING_NOTE` quoted at the schema in the same shape as `NETWORK_NOTE`,
+     and a dedicated `unrecognized_keys` branch so a leftover `signing` block is refused with "was
+     removed rather than mistyped" instead of the generic unknown-field sentence — an author meeting
+     this is out of date, not typo-ing. **The store**: migration `010_drop_plugin_signing` drops
+     `plugins.trust` and `plugins.publisher_key`. Every row in existence held `'unsigned'` and
+     `NULL`, because nothing ever wrote anything else — there was no verifier — so a column that
+     reads as a decision the host makes was documenting a decision it never made. Neither column was
+     in an index, which is what makes `ALTER TABLE … DROP COLUMN` legal here rather than merely
+     permitted. **The wire**: `PluginSummary.trust` and `PluginStatus.trust` are gone, so the
+     management page never has a tier to draw.
+
+     **The docs turned out to be wrong about more than signing, and in the direction that matters.**
+     The banner all eight pages open with said "you cannot install or run a plugin from the app yet
+     … nothing can be installed, granted anything, or started". That has been false since decisions
+     172–175 wired the subsystem: five session-token routes install, list, enable, disable and
+     uninstall, and `app.ts` owns the lifecycle. The banner now says what is true — a plugin can be
+     installed and started over the control API, **and nobody is asked first**, because the grant is
+     written straight from the manifest. It also names what is still missing and is easy to assume
+     from the docs' own examples: **lifecycle dispatch to your exported functions does not exist.**
+     The host sends the frame; nothing routes it to `activate`. The only thing that does is a test
+     harness (`hostile/harness-entry.js`) whose header says plainly that it is standing in for a
+     runtime step that has not shipped.
+
+     Two smaller corrections found while sweeping: `security-model.md` and `status.md` both claimed
+     "what actually provides isolation is the process boundary, the prelude scrubbing globals, and
+     the scrubbed environment" — **none of which confines anything**, and the sentence erred
+     flattering. What the built layers provide is *integrity of what runs* and *resource
+     containment*, and both pages now say that instead. And `nodes.md` claimed the install pipeline
+     checks that `contributes.nodes` matches the registered `NodeDefinition`s while `manifest.md`
+     said it does not; the pipeline never reads `contributes` at all, so `nodes.md` was the wrong
+     one.
+
 ---
 
 ## Gotchas
@@ -2457,6 +2504,17 @@ Empirical notes. Add to this as you hit things — especially where the plan tur
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
 
+- **A docs banner written to *understate* still rots, and it rots into a lie in both directions.**
+  Every page in `packages/plugin-api/docs/` opened with a warning that nothing could be installed,
+  granted anything, or started. It was scrupulously honest when written and was false by the time
+  3.4 and 3.5 were wired, three decisions later — five routes install and start plugins now. The
+  same paragraph *also* still listed events as "not built at all" after 3.6 shipped, while omitting
+  the thing an author would actually trip over: lifecycle dispatch to their exported `activate`
+  genuinely does not exist. The lesson is not "update the docs". It is that **a hand-maintained
+  claim about what is built is the single most rot-prone sentence in a repository**, because
+  nothing fails when it goes stale — no test, no typecheck, no lint. `status.md` and the layer table
+  in `security-model.md` are the two other places carrying that kind of claim, and 3.11's generated
+  reference cannot cover any of them, because they are judgement rather than code.
 - **`PluginGrant` cannot carry `permissions.events`, so the consent-approved event patterns are
   unenforceable.** The manifest has them and `grantHash` covers them, but `plugin_grants` has columns
   for `scopes`, `account_ids`, `capabilities` and `domains` and **not** events, and the protocol's

@@ -1,13 +1,19 @@
 # vrc.zip plugin documentation
 
 > [!IMPORTANT]
-> **You cannot install or run a plugin from the app yet**, and a good deal more is built than that
-> sentence suggests. The install pipeline compiles, deny-scans and content-addresses a bundle; the
-> daemon spawns, memory-caps and supervises a plugin process; a dispatcher answers scope-checked and
-> account-checked read calls against VRChat. None of it is constructed by the daemon's composition
-> root, and there is no consent screen, so nothing can be installed, granted anything, or started
-> from the app. Lifecycle dispatch to your exported functions, storage, events, outbound actions and
-> the UI renderer are not built at all.
+> **A plugin can be installed and started today, but only over the control API with the session
+> token, and nobody is asked first.** There is no plugin UI and no consent screen, so the grant is
+> written straight from what the manifest requested. Step 3.8 replaces that with a real consent
+> gesture, and grants made this way are not something to rely on.
+>
+> Built and wired: the install pipeline (compile, deny-scan, content-address, verify the hash on
+> every load), the supervisor (spawn, memory cap, heartbeat, watchdog, restart backoff), the
+> dispatcher answering scope-checked and account-checked **read** calls against VRChat, and the
+> events bridge.
+>
+> Not built: **lifecycle dispatch to your exported functions** (the host sends the frame; nothing
+> routes it to your `activate`), the `ctx` object those docs describe, storage, outbound actions,
+> the UI renderer, and nodes.
 >
 > These pages document what is **real today** and mark clearly what is not. Read
 > [status.md](./status.md) for the line-by-line breakdown before you build anything you are relying
@@ -36,8 +42,13 @@
 ## The mental model in one page
 
 A plugin is a **separate process**. It never shares memory with the daemon, never touches the DOM,
-and never holds a VRChat credential. It talks to the host over a small, explicit, newline-delimited
-JSON protocol, and everything it is allowed to do is a scope a human approved by name.
+and is never *handed* a VRChat credential. It talks to the host over a small, explicit,
+newline-delimited JSON protocol, and everything the host will do for it is a scope a human approved
+by name.
+
+Read "never handed" precisely: the daemon does not pass a plugin your session cookie, and there is no
+call that returns one. It is not a claim that a plugin cannot reach one — it runs as you, and the
+database is a file on your disk. See [security-model.md](./security-model.md).
 
 Four consequences follow from that, and they explain most of the design:
 

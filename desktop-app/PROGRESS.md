@@ -5,8 +5,8 @@ the architecture and the reasoning. This file tracks only *state*: what exists, 
 was decided along the way.
 
 **Last updated:** 2026-08-23
-**Current phase:** Phase 3 — Plugin system (3.0 through 3.8 done; next is 3.9, the declarative UI
-renderer, then 3.10 nodes and 3.11 the scaffolder)
+**Current phase:** Phase 3 is **complete** — 3.0 through 3.11. Next is Phase 4, the node graph
+(decision 182), which 3.10 leaves needing mostly the canvas.
 **Status: Phases 1 and 2 are both built.** Phase 1 was confirmed by hand on 2026-08-22 (1.10 and the
 profile card). Phase 2 closed on the same day: every numbered step is ticked, including 2.8's last
 two pieces (per-app budget overrides and a rate gauge that reports measured numbers instead of
@@ -468,7 +468,7 @@ for the life of the product.
       rejects a malformed one (including a trigger with inputs), `nodes.register` / `nodes.fire` are
       the plugin's half, `onNodeArm` / `onNodeDisarm` / `onNodeExecute` are the host's, and
       `checkEdge` is the type checker Phase 4 calls on save.
-- [~] **3.11 Scaffolder and docs** — `create-vrcz-plugin` with `bun run dev` wired to `vrcz dev`,
+- [x] **3.11 Scaffolder and docs** — `create-vrcz-plugin` with `bun run dev` wired to `vrcz dev`,
       plus the generated reference (scope table, manifest reference, event catalog, port matrix) and
       the hand-written mental model, guides, and security-model page.
       **The hand-written half landed early**, out of order, because without it nobody outside this
@@ -2855,6 +2855,88 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      fails in *their* project where they cannot tell whose bug it is. It is also the standing guard
      on decision 186: if anyone "simplifies" an example's import from `@vrcz/plugin-api/runtime` to
      the package root, zod reaches the bundle, the deny-scan refuses it, and this test says so.
+
+196. **3.11 closes Phase 3: the scaffolder, `vrcz dev`, and the generated reference.**
+
+     **Both CLI modes are sub-commands of the shipped `.exe`** (decision 182). `create-plugin`
+     writes the smallest thing that runs rather than a showcase — `examples/plugins/` is the
+     showcase, and a scaffold full of commented-out features is one an author deletes before
+     reading. It asks for **no permissions**: a template that pre-asks for `friends:read` teaches
+     that scopes are boilerplate.
+
+     **`dev` talks to a *running* daemon rather than starting one**, because an author testing
+     against a vrc.zip with none of their accounts, friends or game logs is testing against nothing
+     their plugin is for. It reads `state.json` exactly as the UI does. It **polls** rather than
+     using `fs.watch`, the same invariant as the log watcher and for a related reason: an editor
+     writing a file is precisely the case Windows handles badly.
+
+     **An identical re-install no longer asks.** The grant key is `(plugin, version, grantHash)`
+     precisely so "the same question" is recognisable: a live row under that key *is* this user's
+     answer to exactly this request, and asking again is noise rather than care. A version bump or
+     any change to what is *asked for* changes the hash and re-prompts, by construction.
+
+     **The bug that fix hid, found by hand.** `enable()` on an already-running plugin is a no-op, so
+     a reinstall returned 201 while the process kept executing the bundle from *before* the build —
+     `vrcz dev` reported success on every save and changed nothing, which is the entire point of a
+     dev loop failing silently. It is `disable` then `enable` now. Verified by changing a panel
+     title, reinstalling, and watching the title change; before the fix it did not.
+
+     **The reference is generated and committed** (`bun run codegen:plugin-docs`): scopes,
+     capabilities, the event catalog, the port matrix, limits and error codes — every one a
+     projection of a value that already exists in code. The prose is deliberately *not* generated:
+     `security-model.md` and the mental model are arguments, and a generator emitting them would be
+     a template with the reasoning removed.
+
+     **The manifest's JSON Schema is generated too**, and needed one accommodation: `Scope` and
+     `EventPattern` are `z.custom` predicates, which JSON Schema cannot express, so zod refuses to
+     emit anything without `unrepresentable: "any"`. The three lists that matter for completion are
+     written back as real enums from the same registries the validator uses. A scaffolded manifest
+     points `$schema` at that file on **raw GitHub, pinned to `main`** rather than a `vrc.zip` URL:
+     there is no web service to host one, and a schema URL that 404s is worse than none — an editor
+     silently stops offering completion and nobody learns why.
+
+     **The plugins page grew an Add button.** A path, not a file picker: a browser cannot hand a page
+     a folder *path* — `webkitdirectory` gives contents and a relative name, and a drop gives a name
+     without a location — and the daemon needs an absolute directory it can compile. The path is
+     also the honest control, because it keeps saying where a plugin comes from: a folder on this
+     machine, with no registry behind it.
+
+     **One thing left open, deliberately:** a killed `dev` client leaves its parked consent request
+     behind until the five-minute timeout, because the broker has no way to notice the socket went
+     away. Harmless — an unanswered request denies — but a request nobody can answer sitting on the
+     sheet is untidy, and aborting on client disconnect is the fix when someone wants it.
+
+197. **`@vrcz/plugin-api` is publishable, and the interesting part is what it does with
+     `@vrcz/shared`.** `workspace:*` cannot be published, so the choice was to publish a second
+     package or to inline the one. **Inlined**, because `@vrcz/shared` is deliberately an internal
+     leaf carrying the daemon's wire types — publishing it would make its release cadence a public
+     contract nobody asked for, and a plugin author should install one package whose version means
+     the protocol major and nothing else.
+
+     The JS half is a bundler flag. The **declarations** are the part that needed work: `tsc` emits
+     `.d.ts` files that still say `from "@vrcz/shared"`, which resolves to nothing on a consumer's
+     machine, so shared's declarations travel too (into `_shared/`, underscored to say it is not
+     API) and every specifier is rewritten — including the relative `./manifest.ts` ones, legal here
+     under `allowImportingTsExtensions` and nonsense in a published package.
+
+     **It builds into `dist/` and publishes from there** rather than mutating the package in place.
+     The repo's own `exports` point at TypeScript source and must keep doing so: every consumer
+     inside this workspace is Bun, and a build step between an edit and a run is the thing that
+     makes people stop running things.
+
+     Two checks run before it writes: that all four entry points produced both a `.js` and a
+     `.d.ts`, and that **no declaration still imports a workspace package** — the failure that
+     otherwise ships is a package which installs, imports, and silently types as `any`.
+
+     That second check found a real bug on its first run, in the shape it was written for: the
+     `definePlugin` docstring's own example imported from `@vrcz/plugin-api` rather than
+     `@vrcz/plugin-api/runtime`, which is precisely the mistake decision 186 exists to prevent, in
+     the published package's own documentation. It also needed refining twice — a naive `@vrcz/`
+     search matches the prose, which *should* name the package constantly, so the check looks at
+     specifiers on non-comment lines.
+
+     Verified by installing the built output into a scratch project: subpath imports resolve, `tsc
+     --noEmit` passes, and Node loads both entry points.
 
 ---
 

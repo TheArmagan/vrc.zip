@@ -637,7 +637,7 @@ class Runtime {
  * is reported as a failed activation rather than as a hang.
  *
  * ```ts
- * import { definePlugin } from "@vrcz/plugin-api";
+ * import { definePlugin } from "@vrcz/plugin-api/runtime";
  *
  * definePlugin({
  *   async activate(ctx) {

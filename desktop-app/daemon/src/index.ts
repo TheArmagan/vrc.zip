@@ -18,7 +18,46 @@ import { needsFirstRun } from "./settings.ts";
  * `--open` and `--no-open` override the default in either direction.
  */
 
+/**
+ * The executable's sub-commands.
+ *
+ * Modes of this binary rather than separate tools (decision 182): an author needs the app before
+ * they can run a plugin against it, and a separate CLI would be a third artifact to keep versioned
+ * against the protocol major. Anything that is not a known sub-command starts the daemon, so the
+ * ordinary double-click path is untouched.
+ */
+async function runSubcommand(argv: readonly string[]): Promise<number | null> {
+  const [command, ...rest] = argv;
+
+  if (command === "create-plugin") {
+    const target = rest.find((arg) => !arg.startsWith("-"));
+    if (target === undefined) {
+      console.error("usage: vrc.zip create-plugin <folder> [--publisher <name>]");
+      return 2;
+    }
+    const publisherIndex = rest.indexOf("--publisher");
+    const publisher = publisherIndex === -1 ? undefined : rest[publisherIndex + 1];
+    const { scaffoldPlugin } = await import("./cli/scaffold.ts");
+    const result = scaffoldPlugin(target, publisher === undefined ? {} : { publisher });
+    console.log(result.message);
+    return result.ok ? 0 : 1;
+  }
+
+  if (command === "dev") {
+    const target = rest.find((arg) => !arg.startsWith("-")) ?? ".";
+    const { runDev } = await import("./cli/dev.ts");
+    return await runDev(target);
+  }
+
+  return null;
+}
+
 async function main(): Promise<void> {
+  const code = await runSubcommand(process.argv.slice(2));
+  if (code !== null) {
+    process.exit(code);
+  }
+
   console.log(`${APP_NAME} ${APP_VERSION} — starting (UNOFFICIAL, not affiliated with VRChat)`);
 
   const daemon = await startDaemon();

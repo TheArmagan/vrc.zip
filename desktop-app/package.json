@@ -22,7 +22,9 @@
     "test:ui": "bun run --filter @vrcz/ui test",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
-    "format": "biome check --write ."
+    "format": "biome check --write .",
+    "codegen:plugin-docs": "bun tools/src/plugin-docs.ts",
+    "build:plugin-api": "bun tools/src/publish-plugin-api.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.9",

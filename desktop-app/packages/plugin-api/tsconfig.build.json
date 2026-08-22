@@ -1,0 +1,21 @@
+{
+  // Declarations only, for `npm publish`. The repo's own typecheck is `tsconfig.json`, which emits
+  // nothing — this file exists so that emitting is an explicit, separate act rather than a flag
+  // somebody flips on the shared config.
+  //
+  // `@vrcz/shared` is compiled in alongside deliberately: the bundler inlines its *code*, so its
+  // *declarations* have to travel too or every inlined type resolves to nothing on the consumer's
+  // machine. `build.ts` rewrites the specifiers afterwards.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "outDir": "./dist",
+    "rootDir": "..",
+    "skipLibCheck": true,
+    "types": ["bun"]
+  },
+  "include": ["src/**/*.ts", "../shared/src/**/*.ts"],
+  "exclude": ["**/*.test.ts"]
+}

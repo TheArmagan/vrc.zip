@@ -40,6 +40,7 @@ import RelativeTime from "$lib/components/RelativeTime.svelte";
 import SectionHeader from "$lib/components/SectionHeader.svelte";
 import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
+import { Input } from "$lib/components/ui/input/index.js";
 import { Skeleton } from "$lib/components/ui/skeleton/index.js";
 import { Switch } from "$lib/components/ui/switch/index.js";
 import UiNode from "$lib/components/plugin-ui/UiNode.svelte";
@@ -54,6 +55,9 @@ let loadError = $state<string | null>(null);
 let actionError = $state<string | null>(null);
 /** The plugin id a request is in flight for, so only its own row spins. */
 let busy = $state<string | null>(null);
+/** Whether the add form is open, and what is typed in it. */
+let adding = $state(false);
+let addPath = $state("");
 
 /**
  * What the user has ticked, per pending request.
@@ -188,6 +192,31 @@ async function deny(request: PendingPluginConsent): Promise<void> {
   }
 }
 
+/**
+ * Installs from a path.
+ *
+ * `busy = "*"` rather than a plugin id, because there is no plugin yet — this is the one action on
+ * this screen that is about the *page* rather than about a card. And it can take minutes: the
+ * request parks until the consent sheet is answered, which is why the button says "Installing…"
+ * rather than spinning silently.
+ */
+async function addPlugin(): Promise<void> {
+  const path = addPath.trim();
+  if (path === "") return;
+  busy = "*";
+  actionError = null;
+  try {
+    await api.plugins.install(path);
+    adding = false;
+    addPath = "";
+    await refreshList();
+  } catch (error) {
+    actionError = describeError(error);
+  } finally {
+    busy = null;
+  }
+}
+
 async function refreshList(): Promise<void> {
   try {
     plugins = await api.plugins.list();
@@ -266,12 +295,67 @@ function secondsLeft(requestedAt: number): number {
   title="Plugins"
   count={plugins.length}
   description="installed. Plugins run with your account's privileges."
-/>
+>
+  {#snippet actions()}
+    <Button size="sm" onclick={() => (adding = true)}>Add a plugin</Button>
+  {/snippet}
+</SectionHeader>
 
 <div class="flex-1 overflow-y-auto">
   <div class="mx-auto flex w-full max-w-3xl flex-col gap-6 p-4">
     {#if actionError !== null}
       <ErrorNote message={actionError} />
+    {/if}
+
+    {#if adding}
+      <!--
+        A path, not a file picker.
+
+        A browser cannot hand a page a *folder path*: `<input type="file" webkitdirectory>` gives
+        file contents and a relative name, and the daemon needs an absolute directory it can compile
+        from disk. Dropping a folder in gives its name, not its location, so that is not a shortcut
+        either. The honest control is therefore the path itself.
+
+        It also stays truthful about where a plugin comes from — a folder on this machine. There is
+        no registry, and a box that looked like a search field would imply one.
+      -->
+      <section class="rounded-lg border border-border p-4">
+        <h2 class="font-medium text-sm">Add a plugin</h2>
+        <p class="mt-1 text-muted-foreground text-xs">
+          Paste the full path to the plugin's folder, the one with <code>vrcz-plugin.json</code> in
+          it. It is compiled and scanned here before anything runs, and nothing is granted until you
+          approve it below.
+        </p>
+        <div class="mt-3 flex flex-wrap items-center gap-2">
+          <Input
+            class="min-w-64 flex-1"
+            placeholder="the full path to your plugin folder"
+            value={addPath}
+            oninput={(event) => {
+              addPath = event.currentTarget.value;
+            }}
+            onkeydown={(event) => {
+              if (event.key === "Enter") void addPlugin();
+            }}
+          />
+          <Button disabled={addPath.trim() === "" || busy === "*"} onclick={() => void addPlugin()}>
+            {busy === "*" ? "Installing…" : "Install"}
+          </Button>
+          <Button
+            variant="ghost"
+            onclick={() => {
+              adding = false;
+              addPath = "";
+            }}
+          >
+            Cancel
+          </Button>
+        </div>
+        <p class="mt-2 text-muted-foreground text-xs">
+          Building one? <code>vrc.zip create-plugin my-plugin</code> scaffolds it, and
+          <code>vrc.zip dev my-plugin</code> reinstalls it every time you save.
+        </p>
+      </section>
     {/if}
 
     {#each pending as request (request.id)}

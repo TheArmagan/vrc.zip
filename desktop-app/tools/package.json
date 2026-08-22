@@ -8,7 +8,8 @@
     "codegen": "bun src/codegen.ts",
     "icon": "bun src/icon.ts",
     "package": "bun src/package.ts",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "codegen:plugin-docs": "bun src/plugin-docs.ts"
   },
   "dependencies": {
     "@vrcz/shared": "workspace:*"

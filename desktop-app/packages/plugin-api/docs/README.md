@@ -39,6 +39,23 @@
 | [nodes.md](./nodes.md) | Graph nodes: the port lattice, config, trigger inversion, definition hashing |
 | [cheatsheet.md](./cheatsheet.md) | Every scope, capability, frame, error code and limit, in tables |
 
+## Generated reference
+
+These are written by `bun run codegen:plugin-docs` from the code they describe, so they cannot
+disagree with it. Do not edit them by hand.
+
+| Page | Generated from |
+|---|---|
+| [generated/scopes.md](./generated/scopes.md) | the shared scope registry |
+| [generated/capabilities.md](./generated/capabilities.md) | `capabilities.ts` |
+| [generated/events.md](./generated/events.md) | the typed bus registry |
+| [generated/ports.md](./generated/ports.md) | `assignable()` |
+| [generated/limits.md](./generated/limits.md) | the protocol and UI caps, and `PROTOCOL_ERRORS` |
+
+The manifest's JSON Schema is written to
+[`../schema/plugin.json`](../schema/plugin.json) by the same command. A scaffolded plugin points its
+`$schema` at that file on GitHub, so editor completion needs no build step.
+
 ## The mental model in one page
 
 A plugin is a **separate process**. It never shares memory with the daemon, never touches the DOM,

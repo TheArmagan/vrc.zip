@@ -660,6 +660,38 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
        * disk, while the grant below records that somebody agreed to it. Keeping the two separate is
        * what lets a denial leave an installed-but-ungranted plugin that starts nothing.
        */
+      /*
+       * An identical re-install does not ask again.
+       *
+       * The grant key is `(plugin, version, grantHash)` precisely so that "the same question" is a
+       * thing the host can recognise: a live row under that key *is* an answer, given by this user,
+       * to exactly this request. Asking again would not be more careful, it would be noise — and it
+       * is what makes `vrcz dev` usable, since a save that changes only code produces the same hash.
+       *
+       * Note what still re-prompts, by construction rather than by a check someone has to remember:
+       * a version bump, and any change to the scopes, accounts mode, events, capabilities, fetch
+       * domains or performance mode — every one of which changes the hash.
+       */
+      const existing = store.findPluginGrant(manifest.id, manifest.version, grantHash(manifest));
+      if (existing !== null) {
+        /*
+         * **Restarted, not merely enabled**, and this was a real bug before it was a comment.
+         *
+         * `enable()` on an already-running plugin is a no-op, so a reinstall returned 201 while the
+         * process kept executing the bundle from *before* the build — `vrcz dev` reported success
+         * on every save and changed nothing. Verified by hand: the panel kept its old title through
+         * a reinstall.
+         *
+         * `disable` is the kill path — instant and always succeeds — and `enable` clears the sticky
+         * disable it just wrote and starts again, which is what picks up the new content-addressed
+         * artifact.
+         */
+        registry.disable(manifest.id, "user", "Reinstalled.");
+        await registry.enable(manifest.id);
+        const already = registry.statuses().find((entry) => entry.pluginId === manifest.id);
+        if (already !== undefined) return { ok: true, plugin: view(already) };
+      }
+
       const previous = liveGrant(manifest.id);
       const decision = await consent.ask({
         manifest,

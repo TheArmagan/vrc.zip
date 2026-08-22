@@ -34,3 +34,7 @@ secrets.enc
 .vscode/*
 !.vscode/extensions.json
 .DS_Store
+
+# The publishable build of @vrcz/plugin-api. Produced by `bun run build:plugin-api`, published with
+# `npm publish packages/plugin-api/dist`, and never committed — it is derived from src/.
+packages/plugin-api/dist/

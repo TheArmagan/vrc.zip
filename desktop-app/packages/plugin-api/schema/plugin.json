@@ -1,0 +1,522 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "vrc.zip plugin manifest",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "maxLength": 2048
+    },
+    "id": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9-]*(?:\\.[a-z0-9][a-z0-9-]*)+$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-[0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*)?(?:\\+[0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*)?$"
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 300
+    },
+    "publisher": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "homepage": {
+      "type": "string",
+      "format": "uri"
+    },
+    "repository": {
+      "type": "string",
+      "format": "uri"
+    },
+    "license": {
+      "type": "string",
+      "maxLength": 64
+    },
+    "keywords": {
+      "default": [],
+      "maxItems": 10,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 32
+      }
+    },
+    "icon": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^(?!\\/)(?!\\.\\.?(?:\\/|$))(?:[\\w.-]+\\/)*[\\w.-]+$"
+    },
+    "main": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^(?!\\/)(?!\\.\\.?(?:\\/|$))(?:[\\w.-]+\\/)*[\\w.-]+$"
+    },
+    "engines": {
+      "type": "object",
+      "properties": {
+        "pluginApi": {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "pluginApi"
+      ],
+      "additionalProperties": false
+    },
+    "permissions": {
+      "default": {},
+      "type": "object",
+      "properties": {
+        "scopes": {
+          "default": [],
+          "maxItems": 64,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "account:credentials",
+              "account:destroy",
+              "account:read",
+              "account:write",
+              "avatars:read",
+              "avatars:write",
+              "calendar:read",
+              "calendar:write",
+              "economy:read",
+              "economy:write",
+              "favorites:group:clear",
+              "favorites:read",
+              "favorites:write",
+              "files:delete",
+              "files:read",
+              "files:write",
+              "friends:read",
+              "friends:write",
+              "groups:invite",
+              "groups:owner",
+              "groups:read",
+              "groups:write",
+              "instances:close",
+              "instances:read",
+              "instances:write",
+              "inventory:read",
+              "inventory:write",
+              "invite:read",
+              "invite:send",
+              "invite:write",
+              "jams:read",
+              "jams:write",
+              "moderation:read",
+              "moderation:write",
+              "notifications:read",
+              "notifications:write",
+              "prints:read",
+              "prints:write",
+              "props:read",
+              "props:write",
+              "sessions:read",
+              "sessions:unlinked",
+              "system:read",
+              "users:read",
+              "users:write",
+              "webhooks:write",
+              "worlds:read",
+              "worlds:write"
+            ],
+            "description": "A scope from the shared registry. See docs/generated/scopes.md."
+          }
+        },
+        "accounts": {
+          "default": {},
+          "type": "object",
+          "properties": {
+            "mode": {
+              "default": "none",
+              "type": "string",
+              "enum": [
+                "none",
+                "one",
+                "many"
+              ]
+            },
+            "optional": {
+              "default": false,
+              "type": "boolean"
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 200
+            }
+          },
+          "additionalProperties": false
+        },
+        "events": {
+          "default": [],
+          "maxItems": 64,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "*",
+              "friend.*",
+              "notification.*",
+              "gamelog.*",
+              "session.*",
+              "user.*",
+              "group.*",
+              "instance.*",
+              "account.*",
+              "pipeline.*",
+              "economy.*",
+              "content.*",
+              "consent.*",
+              "other.*",
+              "account.ready",
+              "account.removed",
+              "account.state",
+              "consent.pending",
+              "consent.resolved",
+              "content.image_updated",
+              "content.refresh",
+              "economy.update",
+              "economy.update.vrchat_plus",
+              "economy.update.wallet_balance",
+              "friend.active",
+              "friend.added",
+              "friend.list_refreshed",
+              "friend.location",
+              "friend.offline",
+              "friend.online",
+              "friend.presence",
+              "friend.removed",
+              "friend.updated",
+              "friend.updated.avatar",
+              "friend.updated.bio",
+              "friend.updated.icon",
+              "friend.updated.name",
+              "friend.updated.platform",
+              "friend.updated.status",
+              "friend.updated.status_message",
+              "friend.updated.trust",
+              "gamelog.app_quit",
+              "gamelog.authenticated",
+              "gamelog.destination_set",
+              "gamelog.join_failed",
+              "gamelog.left_room",
+              "gamelog.location_join",
+              "gamelog.player_join",
+              "gamelog.player_leave",
+              "gamelog.portal_spawn",
+              "gamelog.screenshot",
+              "gamelog.vr_mode",
+              "gamelog.world_enter",
+              "group.joined",
+              "group.left",
+              "group.member_updated",
+              "group.role_updated",
+              "instance.queue_joined",
+              "instance.queue_ready",
+              "notification.cleared",
+              "notification.deleted",
+              "notification.hidden",
+              "notification.received",
+              "notification.received_v2",
+              "notification.responded",
+              "notification.seen",
+              "notification.synced",
+              "notification.updated",
+              "pipeline.state",
+              "session.end",
+              "session.start",
+              "session.update",
+              "user.badge_assigned",
+              "user.badge_unassigned",
+              "user.location",
+              "user.updated",
+              "user.updated.avatar",
+              "user.updated.bio",
+              "user.updated.icon",
+              "user.updated.name",
+              "user.updated.platform",
+              "user.updated.status",
+              "user.updated.status_message",
+              "user.updated.trust"
+            ],
+            "description": "An event pattern. See docs/generated/events.md."
+          }
+        },
+        "capabilities": {
+          "default": [],
+          "maxItems": 16,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "fetch:allowlist",
+              "notify",
+              "storage",
+              "storage:sql",
+              "webhook"
+            ],
+            "description": "A host capability. See docs/generated/capabilities.md."
+          }
+        },
+        "fetch": {
+          "default": {},
+          "type": "object",
+          "properties": {
+            "domains": {
+              "default": [],
+              "maxItems": 20,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 253
+              }
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 200
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "contributes": {
+      "default": {},
+      "type": "object",
+      "properties": {
+        "panels": {
+          "default": [],
+          "maxItems": 32,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[a-z][a-z0-9]*(?:[-.][a-z0-9]+)*$"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "description": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "icon": {
+                "type": "string",
+                "maxLength": 64
+              },
+              "placement": {
+                "default": "sidebar",
+                "type": "string",
+                "enum": [
+                  "sidebar",
+                  "main",
+                  "settings"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "title"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "settings": {
+          "default": [],
+          "maxItems": 64,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[a-z][a-z0-9]*(?:[-.][a-z0-9]+)*$"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "string",
+                  "number",
+                  "boolean",
+                  "select",
+                  "url",
+                  "secret"
+                ]
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "description": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "default": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "boolean"
+                  }
+                ]
+              },
+              "options": {
+                "maxItems": 64,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    },
+                    "label": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    }
+                  },
+                  "required": [
+                    "value",
+                    "label"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": {
+                "default": false,
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "key",
+              "type",
+              "label"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "commands": {
+          "default": [],
+          "maxItems": 64,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[a-z][a-z0-9]*(?:[-.][a-z0-9]+)*$"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "description": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "icon": {
+                "type": "string",
+                "maxLength": 64
+              }
+            },
+            "required": [
+              "id",
+              "title"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "nodes": {
+          "default": [],
+          "maxItems": 64,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[a-z][a-z0-9]*(?:[-.][a-z0-9]+)*$"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "category": {
+                "type": "string",
+                "maxLength": 64
+              },
+              "description": {
+                "type": "string",
+                "maxLength": 200
+              }
+            },
+            "required": [
+              "id",
+              "title"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "performance": {
+      "default": "smol",
+      "type": "string",
+      "enum": [
+        "smol",
+        "throughput"
+      ]
+    }
+  },
+  "required": [
+    "id",
+    "name",
+    "version",
+    "publisher",
+    "main",
+    "engines"
+  ],
+  "additionalProperties": false
+}

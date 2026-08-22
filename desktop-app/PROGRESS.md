@@ -4,14 +4,21 @@ Working log for anyone (human or agent) picking this up. **Read [`PLAN.md`](./PL
 the architecture and the reasoning. This file tracks only *state*: what exists, what's next, and what
 was decided along the way.
 
-**Last updated:** 2026-08-21
+**Last updated:** 2026-08-22
 **Current phase:** Phase 2 — Proxy + control plane
-**Status:** Phase 1 complete on the automatable side; what remains of 1.10 needs a human with real
-VRChat accounts and a real game client. Phase 2 has started from the bottom up: the grant store,
-the proxy's own credentials, and the egress filter are built and mounted on both `:7774` and
-`:7775`. The handshake and the mirror routes are next. Alongside it, the user modal now carries the
-profile card off `GET /profile/{id}` — badges, languages, VRC+ — which is a supplement to
-`GET /users/{id}` and not, despite the rumour, a replacement for it (decisions 49–50).
+**Status:** **Phase 1 is done**, manual verification included — the user confirmed 1.10 and the
+profile card on 2026-08-22. Phase 2 is built bottom-up through 2.6 (grant store, proxy credentials,
+egress filter, identity/scope parsing, the login handshake, the consent UI); **2.7 mirror routes is
+next**, and three calls are already made for it: register every operation the route table maps minus
+the hard denials, always hit upstream rather than serving a cached body (a re-encoded body is not
+byte-faithful), and share the per-account bucket FIFO with a subordinate per-grant budget.
+
+Before resuming 2.7, a foundations pass landed: the duplicated types and constants are hoisted into
+`@vrcz/shared` and the producers are typed against them (decisions 62, 63, 65, 66), `ui/` has a test
+runner for the first time (decision 64), and CI exists (decision 67). That pass was not bookkeeping
+— it found four real defects, each recorded in §Gotchas: ten bus kinds the UI had never heard of, a
+test asserting on a kind nothing emits, an unescaped session token in the launch URL, and a
+`sessionId` round trip whose own comment admitted it was pointless.
 
 ---
 
@@ -94,7 +101,7 @@ behind each line.
 - [x] **1.9 UI** (`ui/`) — Svelte 5 + shadcn-svelte. Account switcher, login (all three 2FA paths),
       friend list, feed, game log, notifications, settings. **Command palette + command registry ship
       in Phase 1** even though plugins don't — retrofitting a registry is worse than building it empty.
-- [x] **1.10 Verification** — the automatable half is done. See `PLAN.md` §1.10.
+- [x] **1.10 Verification** — **complete.** See `PLAN.md` §1.10.
       **Covered:** cookie jar; rate limiter + backoff; the three malformed pipeline content types;
       log-parser golden files; retention rollup; fixture-server login, 401 re-auth and 429 backoff;
       feed rows carrying the right `account_id`; one session per log file; unmanaged accounts staying
@@ -103,12 +110,14 @@ behind each line.
       `CurrentUser`; **one client crashing while the other session stays live**; **a foreign `Origin`
       rejected on a live port**; **a pipeline frame end to end — socket → decode → bus → SQLite —
       with two accounts online and neither seeing the other's rows**.
-      **Not automatable — needs the user:** two *real* accounts signed in at once (only a live run
-      proves VRChat's session cap and the pipeline's IP binding); launching VRChat to confirm
-      world-join and player-join/leave rows; the Linux/Proton repeat; a real abrupt kill; idle RSS at
-      1h and at 24h.
-      **Also unverified:** `ui/` has no test runner and no tests at all — which is exactly where the
-      four silent bugs in §Gotchas escaped from.
+      **Confirmed by the user (2026-08-22): the manual half of 1.10 passes, and the profile card
+      with it.** Retained as the record of what was checked by hand rather than
+      by CI: two *real* accounts signed in at once (only a live run proves VRChat's session cap and
+      the pipeline's IP binding); launching VRChat to confirm world-join and player-join/leave rows;
+      the Linux/Proton repeat; a real abrupt kill; idle RSS at 1h and at 24h.
+      **Also:** `ui/` now has a runner (Vitest + jsdom) and 56 tests over the resolver contract,
+      the shared modal back stack, formatting, and the paged-list primitive — the gap the four
+      silent bugs in §Gotchas escaped through. Rendering is still uncovered.
 
 **Definition of done for Phase 1:** two accounts logged in simultaneously with independent pipeline
 sockets and zero cookie bleed, live presence in the UI, feed and game-log rows persisting with the
@@ -1056,14 +1065,25 @@ Unresolved; flag to the user rather than guessing.
 - Whether `local.vrc.zip` DNS + the DNS-01 cert pipeline is stood up yet, and who owns the renewal
   endpoint that has to stay up for the life of the product. Not blocking — it is opt-in and
   `127.0.0.1` is the default — but the README documents it, so it should exist before release.
-- **Type hoisting into `packages/shared` has not happened.** All three Phase-1 agents flagged the
-  same candidates and none were moved, deliberately, to avoid concurrent edits to one file. Worth
-  doing before the UI and the Phase 2 stream both grow their own copies:
-  `JsonValue` (declared twice already — `pipeline/events.ts` and `servers/control.ts`), the
-  `gamelog.*` / bus `kind` taxonomy, `ExitKind` / `VrMode` / `SessionSnapshot` / `ParsedLocation`,
-  the control-API wire types (`ControlAccount`, `FeedEvent`, `GameSession`, `FriendPresence`,
-  `StreamEvent`), the retention config/plan types the settings UI renders verbatim, and the
-  token header/query-param constants plus default ports.
+- **Type hoisting: done, except for three candidates that turned out not to be duplicates.**
+  `JsonValue`/`JsonObject`, the bus-kind taxonomy, the control-API wire types, and the token/port
+  constants are all in `@vrcz/shared` now (decisions 62, 63, 65, 66). Three items on the original
+  list were **not** moved, each for a reason worth keeping:
+  - **`ParsedLocation` is a name collision, not a duplicate.** `game-logs/parser.ts` has
+    `{location, worldId, instanceId, region, groupId}` with a non-nullable `worldId`, returning
+    `null` for `private`/`offline`. `ui/src/lib/format.ts` has
+    `{worldId, instanceId, access, region, opaque, label}`, is **total**, and never returns null.
+    Only `instanceId` and `region` are shape-compatible. One parses a log line, the other decides
+    what to draw. They want different *names*, not a shared definition.
+  - **`VrMode` should not be hoisted as-is.** The parser's `"vr" | "desktop"` is accurate at the
+    parser — only two markers produce it — but the store, the wire, and the UI all widen it to
+    `string`, and `ui`'s `isVrMode()` explicitly handles `Standalone`/`Oculus`/`OpenVR`/`None`. The
+    wire keeps `string` deliberately (it crosses a version boundary; see the note on
+    `GameSession.vrMode`), so the union is a parser-internal type and belongs where it is.
+  - **The retention types have no second copy.** The premise that "the settings UI renders them
+    verbatim" does not hold: `grep Retention ui/src` returns nothing, and the settings screen
+    renders a static alert saying no control exists. They are daemon-internal until a retention
+    route exists.
 - **No retention control on the API.** The retention job runs and is configurable in the database,
   but nothing exposes it, so the Settings screen explains it rather than offering a control.
 - **The per-user roster fallback spends real rate budget.** A room of eighty strangers nobody has
@@ -1096,6 +1116,5 @@ Unresolved; flag to the user rather than guessing.
   `ratePerSecond` / `globalRatePerSecond` / `fileRatePerSecond` are all readable off the limiter
   now, so the settings screen can show three honest numbers — but `remaining` and `queued` should
   either become real or stop being drawn as a gauge that implies precision.
-- **No CI workflow.** It belongs at the repo root in `.github/`, which is shared ground with
-  `backend/` — a separate project. Needs a decision before it is added.
+
 - Nothing else open. (Retention → per-type, decided. Node-graph storage → shared store, decided.)

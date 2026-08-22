@@ -15,6 +15,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@vrcz/shared": "workspace:*"
+    "@vrcz/shared": "workspace:*",
+    "zod": "^4.4.3"
   }
 }

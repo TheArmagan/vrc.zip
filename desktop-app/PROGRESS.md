@@ -299,11 +299,14 @@ The standing posture for the whole phase, from PLAN.md correction 6: **do not ca
 sandbox until it is one.** Until process plus OS-level sandboxing lands, the docs and the consent UI
 say "plugins run with your account's privileges; only install plugins you trust."
 
-- [ ] **3.1 `@vrcz/plugin-api` types** — the published surface, versioned on the protocol major, with
+- [x] **3.1 `@vrcz/plugin-api` types** — the published surface, versioned on the protocol major, with
       the daemon importing the same declarations so there is no drift. Four pieces: the manifest
       (a **Zod schema as the single source of truth**, with the JSON Schema, the consent UI and the
       docs reference generated from it), the RPC envelope protocol, the `UINode` vocabulary, and
-      `NodeDefinition` plus the port-type lattice.
+      `NodeDefinition` plus the port-type lattice. All four landed with 124 tests; decisions 127–130.
+      The dependency direction between them is one-way and load-bearing: `protocol.ts`, `ui.ts` and
+      `nodes.ts` do not import `manifest.ts`, so nothing on the call path can consult what an author
+      *requested* instead of what the user *approved*.
 - [ ] **3.2 `ProcessTransport` + supervisor** — `Bun.spawn` per plugin with `env: {}` behind a
       `PluginTransport` interface, spawned `--smol` unless the manifest opts out. Host-driven
       heartbeat whose echo lives in the injected prelude rather than in plugin code, RSS watchdog,
@@ -1442,6 +1445,49 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      this side. The menu items are omitted rather than greyed out when neither question can be
      answered: a disabled "Boop" with no explanation is worse than one that is not offered, and the
      fix belongs on the Accounts screen, not in a tooltip.
+
+127. **`permissions.network` does not exist, and the two replacements are enforced in both
+     directions.** PLAN.md correction 1 replaces arbitrary HTTP with `webhook` (the plugin supplies
+     only a JSON body; the *user* typed the URL) and `fetch:allowlist` (host-declared domains, shown
+     individually at consent, no wildcards). The schema rejects a `network` key with a message
+     naming both replacements, rejects a wildcard in a domain, and cross-refines the capability and
+     the domain list *each way* — a `fetch:allowlist` capability with no domains and domains without
+     the capability are both errors. Domains implying the capability was the rejected alternative,
+     because it would have kept them off the consent screen's capability list, which is the one
+     place the user sees them. The response size cap is host policy and is deliberately not a
+     manifest field: an author must not be able to declare 1GB.
+
+128. **`grantHash` covers authority and nothing else.** Grants are keyed by
+     `(pluginId, version, grantHash)`, so the hash must change when a plugin asks for more and must
+     not change otherwise. In: scopes, account mode and optionality, event patterns, capabilities,
+     allowlisted domains, and `performance` (throughput spends the *user's* memory, so it is a
+     consent question). Out, each for a reason: `id` and `version`, because they are the other two
+     components of the key and hashing them would destroy the ability to tell "wants more" from "is
+     an update"; every presentation field and every `reason` string, because a typo fix that
+     re-prompts trains people to click through; `contributes`, because a new panel is surface, not
+     authority, and still runs inside the granted scopes; and `signing`, because folding the
+     publisher key in would make a key rotation read as a permission change.
+
+129. **The envelope is twelve tags with a sender table, not a transparent proxy.** `FRAME_SENDERS`
+     maps each tag to `host | plugin | both`, so direction is *validated* rather than documented —
+     a plugin cannot forge an `event` frame or answer a `ping` it was never sent. Deadlines are
+     absolute epoch-ms because the two processes do not share a clock start, and an expired deadline
+     is deliberately **not** a parse error: under a backwards clock step every deadline looks
+     expired, and refusing the frame would mean the peer never learns its call timed out. Expiry is
+     the caller's business; the wire-level check is a 10-minute horizon cap. Validation is
+     hand-rolled rather than Zod even though Zod is in this package — it is the hot path, the
+     defences that matter are byte and depth caps rather than shape, and it has to be light enough
+     to live in the injected prelude.
+
+130. **`coalesce` needed two rules PLAN.md did not state, and both are the interesting half.** First,
+     `keyPath: "userId"` names a field that lives in the event *payload*, not on the event, so a
+     path whose first segment is not an event field resolves against `payload` — `"userId"`,
+     `"payload.userId"` and `"subjectId"` all work, and a path resolving to a non-primitive makes
+     the event uncoalescable rather than silently mis-keyed. Second, coalescing with all-distinct
+     keys degenerates into an unbounded queue, so it falls back to `drop-oldest` at the window
+     boundary. Superseded events are reported as drops with `reason: "coalesced"`, distinct from
+     `"overflow"`: the plugin did not see them, and saying so is the host's job. There is
+     deliberately no `block` policy — `EventBus.emit()` must never await anything plugin-related.
 
 ---
 

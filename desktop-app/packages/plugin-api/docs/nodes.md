@@ -1,11 +1,13 @@
 # Node model
 
 > [!IMPORTANT]
-> **You cannot install and run a plugin yet.** Phase 3 is partly built: the manifest, the wire
-> protocol, the UI vocabulary and the node model are settled and published, and the daemon can
-> spawn, supervise, restart and kill a plugin process. What is missing is everything between those
-> two halves — the installer, the `ctx` API a plugin actually calls, lifecycle dispatch to your
-> exported functions, storage, the consent screen, and the UI renderer.
+> **You cannot install or run a plugin from the app yet**, and a good deal more is built than that
+> sentence suggests. The install pipeline compiles, deny-scans and content-addresses a bundle; the
+> daemon spawns, memory-caps and supervises a plugin process; a dispatcher answers scope-checked and
+> account-checked read calls against VRChat. None of it is constructed by the daemon's composition
+> root, and there is no consent screen, so nothing can be installed, granted anything, or started
+> from the app. Lifecycle dispatch to your exported functions, storage, events, outbound actions and
+> the UI renderer are not built at all.
 >
 > These pages document what is **real today** and mark clearly what is not. Read
 > [status.md](./status.md) for the line-by-line breakdown before you build anything you are relying
@@ -134,7 +136,7 @@ Seven kinds:
 
 Every kind also carries `id`, `label` (both required) and `description?`.
 
-A configured instance's values are `NodeConfigValues` — `Record<string, string | number | boolean>`,
+A configured instance's values are `NodeConfigValues` — `Readonly<Record<string, string | number | boolean>>`,
 keyed by field id.
 
 ```ts
@@ -204,7 +206,11 @@ Beyond that there are exactly two shapes.
 ### Trigger inversion
 
 **A trigger arms, it does not execute.** And the type shape makes an executing trigger
-*unrepresentable* rather than merely discouraged:
+*unrepresentable* rather than merely discouraged.
+
+`NodeDefinitionBase` in the two snippets below is internal and **not exported**, so these are the
+shape rather than something to paste. It supplies the common fields listed above: `id`, `title`,
+`description?`, `category?`, `icon?`, `config?`, `body?` and `outputs`.
 
 ```ts
 interface TriggerNodeDefinition extends NodeDefinitionBase {
@@ -265,7 +271,8 @@ interface ExecutableRegistration {
 }
 ```
 
-`PortValues` is `Record<string, unknown>` — domain types carry the id, `json` carries anything.
+`PortValues` is `Readonly<Record<string, unknown>>` — domain types carry the id, `json` carries
+anything.
 
 `isTriggerDefinition(def)` narrows a `NodeDefinition` for consumers that switch on the kind.
 

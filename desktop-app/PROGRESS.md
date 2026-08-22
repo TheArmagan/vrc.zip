@@ -2045,6 +2045,35 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      named neither. Both are declared now. **The packaging step needs checking against this** — TS
      is roughly 10 MB and `Bun.build --compile` will pull it into the single `.exe`.
 
+171. **The plugin docs are corrected against 3.2, 3.4 and 3.5, and the security-model page now
+     understates rather than overstates.** Decision 142 shipped the docs ahead of their step and
+     named drift as the price; this is the first payment on it.
+
+     The substantive correction is that **the deny-scan is described as making cheap attacks fail
+     loudly at install, and explicitly not as a gate** — with the seven verified-passing bypasses
+     listed in the page itself, so a reader cannot form a stronger impression than the code
+     supports. Isolation is attributed where it actually lives: the process boundary, the prelude,
+     the scrubbed environment. Five overclaims were found and removed, including `lifecycle.md`
+     calling the scan one of "the real defences" and `manifest.md` using the word "sandbox" for a
+     thing PLAN.md correction 6 forbids calling one until it is one.
+
+     The Windows `env: {}` finding is documented as **disclosure, not a credential leak**, because
+     that is what it was — writing it up as the worse thing would have been its own inaccuracy. The
+     per-plugin budget is marked built-and-dormant so a green test is not misread as an exercised
+     path, and `status.md` gained the phrase **"done as a subsystem"**, defined in the page as "the
+     module exists, is tested, and would behave as documented if something called it. Nothing does."
+     Marking 3.4 and 3.5 plain "done" would have been exactly the drift worth avoiding.
+
+     **The banner is narrowed rather than dropped.** "You cannot install and run a plugin yet" was
+     becoming false in spirit while still true in fact. It now says you cannot do it *from the app*,
+     names what did land, and pins the reason to the one thing genuinely missing: no consent screen,
+     and no plugin subsystem in the composition root.
+
+     Two stale claims outside `docs/` were fixed with it. `packages/plugin-api/README.md` carried
+     the old banner. And `nodes.ts` promised that a `port` body segment "renders the port's label
+     with its type chip" — `evaluateNodeBody` returns a string and has no way to express a chip, so
+     the source comment was wrong and the docs page describing it was right.
+
 ---
 
 ## Gotchas

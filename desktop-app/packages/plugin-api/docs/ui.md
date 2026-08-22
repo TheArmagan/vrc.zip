@@ -1,11 +1,13 @@
 # UI vocabulary
 
 > [!IMPORTANT]
-> **You cannot install and run a plugin yet.** Phase 3 is partly built: the manifest, the wire
-> protocol, the UI vocabulary and the node model are settled and published, and the daemon can
-> spawn, supervise, restart and kill a plugin process. What is missing is everything between those
-> two halves — the installer, the `ctx` API a plugin actually calls, lifecycle dispatch to your
-> exported functions, storage, the consent screen, and the UI renderer.
+> **You cannot install or run a plugin from the app yet**, and a good deal more is built than that
+> sentence suggests. The install pipeline compiles, deny-scans and content-addresses a bundle; the
+> daemon spawns, memory-caps and supervises a plugin process; a dispatcher answers scope-checked and
+> account-checked read calls against VRChat. None of it is constructed by the daemon's composition
+> root, and there is no consent screen, so nothing can be installed, granted anything, or started
+> from the app. Lifecycle dispatch to your exported functions, storage, events, outbound actions and
+> the UI renderer are not built at all.
 >
 > These pages document what is **real today** and mark clearly what is not. Read
 > [status.md](./status.md) for the line-by-line breakdown before you build anything you are relying
@@ -281,7 +283,8 @@ under `ui/src/lib/components/ui/`.
 The first five format a scalar; the `*Ref` kinds take an id out of the row and get the full
 domain-reference treatment above.
 
-`TableRow` is `Record<string, JsonValue>`, but the validator is stricter than that name suggests:
+`TableRow` is `Readonly<Record<string, JsonValue>>`, but the validator is stricter than that name
+suggests:
 **cell values must be string, number, boolean, or null.** Nested structure in a row would need a
 nested renderer, which is what columns are for.
 
@@ -373,7 +376,7 @@ hostile or merely buggy plugin and a host-side denial of service.
 ```ts
 import { validateUINode, type UiValidation } from "@vrcz/plugin-api";
 
-const result = validateUINode(tree);
+const result: UiValidation = validateUINode(tree);
 if (!result.ok) {
   for (const issue of result.issues) console.error(issue.path, issue.message);
 }

@@ -1,19 +1,21 @@
 # `vrcz-plugin.json` reference
 
 > [!IMPORTANT]
-> **You cannot install and run a plugin yet.** Phase 3 is partly built: the manifest, the wire
-> protocol, the UI vocabulary and the node model are settled and published, and the daemon can
-> spawn, supervise, restart and kill a plugin process. What is missing is everything between those
-> two halves — the installer, the `ctx` API a plugin actually calls, lifecycle dispatch to your
-> exported functions, storage, the consent screen, and the UI renderer.
+> **You cannot install or run a plugin from the app yet**, and a good deal more is built than that
+> sentence suggests. The install pipeline compiles, deny-scans and content-addresses a bundle; the
+> daemon spawns, memory-caps and supervises a plugin process; a dispatcher answers scope-checked and
+> account-checked read calls against VRChat. None of it is constructed by the daemon's composition
+> root, and there is no consent screen, so nothing can be installed, granted anything, or started
+> from the app. Lifecycle dispatch to your exported functions, storage, events, outbound actions and
+> the UI renderer are not built at all.
 >
 > These pages document what is **real today** and mark clearly what is not. Read
 > [status.md](./status.md) for the line-by-line breakdown before you build anything you are relying
 > on.
 
-The manifest is the one file a plugin must have. It is what the consent screen renders, what the
-grant is keyed on, and — once the installer exists — what the install pipeline reads before it will
-touch your code.
+The manifest is the one file a plugin must have. It is what the consent screen will render, what the
+grant is keyed on, and what the install pipeline reads, through this same schema, before it will
+touch your code. The pipeline is built; the consent screen is not.
 
 Everything below is read out of `packages/plugin-api/src/manifest.ts`, which is the contract: a Zod
 schema, with the TypeScript types *inferred* from it rather than declared beside it. The schema is
@@ -305,8 +307,9 @@ storage:sql, webhook, fetch:allowlist, notify.
 `permissions.network` does not exist. Neither does a `network` capability. Both spellings are
 rejected, and both rejections point at the same two replacements.
 
-Arbitrary HTTP collapses the sandbox to nothing: `friends:read` plus network access means your
-friends list is on someone's server. The two replacements are narrow *because the host executes
+Arbitrary HTTP collapses the boundary to nothing: `friends:read` plus network access means your
+friends list is on someone's server. (Boundary, not sandbox. There is no sandbox here to collapse,
+and [security-model.md](./security-model.md) says why.) The two replacements are narrow *because the host executes
 them*, which is also what makes them loggable and rate-limitable.
 
 Writing `permissions.network` — a strict-mode unknown key that gets its own translated message:
@@ -482,8 +485,9 @@ host-evaluated body template — lives in `nodes.ts` and is registered at runtim
 grants, uninstall and "paused and marked unavailable" have something stable to key on; `nodes.ts`
 says what each one *is*. Putting the definitions here would mean the consent screen also carried the
 graph type system, and that a plugin could not add a node type without a manifest change the user has
-to re-approve. Checking that the two lists agree is the install pipeline's job — and the install
-pipeline does not exist yet.
+to re-approve. Checking that the two lists agree is the install pipeline's job, and the pipeline does
+not do it yet: node registration is step 3.10, so there is nothing to check the manifest's list
+against.
 
 ## `performance`
 
@@ -524,9 +528,11 @@ trusted. The tier is derived by the host from whether a valid signature exists a
 has seen this publisher key before, which is why the unsigned case gets a hold-to-confirm rather than
 a checkbox.
 
-> **Not implemented.** `manifest.ts` parses this block and nothing verifies it — signature checking
-> belongs to the install pipeline (step 3.5), which does not exist. The `plugins` table already has
-> `trust` and `publisher_key` columns waiting for it.
+> **Not implemented.** `manifest.ts` parses this block and nothing verifies it. The install pipeline
+> exists now and deliberately does **not** do this: signature checking and the trust tier both belong
+> to step 3.8. Verification is an install-time gate, but a tier only means anything at consent, which
+> is where the hold-to-confirm lives, and the pipeline's rule is that it decides no trust at all. The
+> `plugins` table already has `trust` and `publisher_key` columns waiting for it.
 
 ## `grantHash`
 
@@ -575,7 +581,7 @@ new hash, and the consent sheet is unavoidable.
 ## `parseManifest`
 
 ```ts
-import { parseManifest, formatManifestIssues, grantHash } from "@vrcz/plugin-api";
+import { grantHash, parseManifest } from "@vrcz/plugin-api";
 
 const result = parseManifest(JSON.parse(await Bun.file("vrcz-plugin.json").text()));
 if (!result.ok) {

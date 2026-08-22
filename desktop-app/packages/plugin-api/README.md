@@ -8,10 +8,12 @@ against this number, because the application and the plugin protocol version ind
 conflating them would force an ecosystem break on every app release.
 
 > [!IMPORTANT]
-> **You cannot install and run a plugin yet.** The types in this package are settled and tested, and
-> the daemon can spawn and supervise a plugin process, but the installer, the API a plugin calls, and
-> the consent screen are not built. See [docs/status.md](./docs/status.md) for the step-by-step
-> breakdown before building anything you are relying on.
+> **You cannot install or run a plugin from the app yet.** The types in this package are settled and
+> tested, the daemon can spawn and supervise a plugin process, and the install pipeline, the scope
+> gate and the reads-only `ctx.vrchat` surface are all built and tested. What is missing is the last
+> mile: there is no consent screen, and nothing in the daemon's composition root constructs the
+> plugin subsystem, so none of it is reachable. See [docs/status.md](./docs/status.md) for the
+> step-by-step breakdown before building anything you are relying on.
 
 ## Documentation
 

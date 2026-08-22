@@ -1,11 +1,13 @@
 # vrc.zip plugin documentation
 
 > [!IMPORTANT]
-> **You cannot install and run a plugin yet.** Phase 3 is partly built: the manifest, the wire
-> protocol, the UI vocabulary and the node model are settled and published, and the daemon can
-> spawn, supervise, restart and kill a plugin process. What is missing is everything between those
-> two halves — the installer, the `ctx` API a plugin actually calls, lifecycle dispatch to your
-> exported functions, storage, the consent screen, and the UI renderer.
+> **You cannot install or run a plugin from the app yet**, and a good deal more is built than that
+> sentence suggests. The install pipeline compiles, deny-scans and content-addresses a bundle; the
+> daemon spawns, memory-caps and supervises a plugin process; a dispatcher answers scope-checked and
+> account-checked read calls against VRChat. None of it is constructed by the daemon's composition
+> root, and there is no consent screen, so nothing can be installed, granted anything, or started
+> from the app. Lifecycle dispatch to your exported functions, storage, events, outbound actions and
+> the UI renderer are not built at all.
 >
 > These pages document what is **real today** and mark clearly what is not. Read
 > [status.md](./status.md) for the line-by-line breakdown before you build anything you are relying
@@ -52,7 +54,8 @@ limit consumption for no benefit and weld the plugin API to VRChat's response sh
 **The host is what runs anything expensive or dangerous.** Arbitrary network access does not exist as
 a permission. What exists instead are two narrow host-executed capabilities: a webhook to a URL *the
 user typed*, and a fetch allowlist of host-declared domains with no wildcards. Both are logged and
-rate-limited, because the host is the one making the call.
+rate-limited, because the host is the one making the call. Both are validated in the manifest today
+and neither is implemented.
 
 **Anything other people can see is treated as more dangerous than anything they cannot.** Invites,
 friend requests and moderation are visible to strangers and are how a plugin gets its user banned, so
@@ -62,9 +65,10 @@ they are dry-run by default and lifted only by an explicit, per-scope gesture.
 
 | Path | What |
 |---|---|
-| `<state>/plugins/<id>/<sha256>.js` | The installed artifact, named by its own hash and verified on load |
-| `<state>/plugin-data/<id>/` | The plugin's own directory. Uninstall is `rm -rf`; the quota is a `stat` |
-| `<state>/plugin-data/<id>/plugin.sqlite` | Its own database, so it cannot lock or corrupt the daemon's |
+| `<state>/plugins/<id>/<sha256>.js` | The installed artifact, named by its own hash and verified on load. Written by the install pipeline |
+| `<state>/plugin-data/<id>/` | The plugin's own directory, its working directory, and on Windows its `TEMP`. Uninstall is `rm -rf`; the quota is a `stat` |
+| `<state>/plugin-data/<id>/plugin.sqlite` | Its own database, so it cannot lock or corrupt the daemon's. **Storage is step 3.7 and this file does not exist yet** |
+| `<state>/runtime/bun-<version>/bun[.exe]` | The pinned runtime plugin processes are spawned with. The fetcher exists; its hash pins ship empty, so today this resolves only from a source checkout |
 
 `<state>` is the platform state directory, overridable in full with `VRCZIP_STATE_DIR`.
 

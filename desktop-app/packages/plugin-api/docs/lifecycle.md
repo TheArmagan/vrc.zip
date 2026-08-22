@@ -1,11 +1,13 @@
 # Plugin lifecycle
 
 > [!IMPORTANT]
-> **You cannot install and run a plugin yet.** Phase 3 is partly built: the manifest, the wire
-> protocol, the UI vocabulary and the node model are settled and published, and the daemon can
-> spawn, supervise, restart and kill a plugin process. What is missing is everything between those
-> two halves — the installer, the `ctx` API a plugin actually calls, lifecycle dispatch to your
-> exported functions, storage, the consent screen, and the UI renderer.
+> **You cannot install or run a plugin from the app yet**, and a good deal more is built than that
+> sentence suggests. The install pipeline compiles, deny-scans and content-addresses a bundle; the
+> daemon spawns, memory-caps and supervises a plugin process; a dispatcher answers scope-checked and
+> account-checked read calls against VRChat. None of it is constructed by the daemon's composition
+> root, and there is no consent screen, so nothing can be installed, granted anything, or started
+> from the app. Lifecycle dispatch to your exported functions, storage, events, outbound actions and
+> the UI renderer are not built at all.
 >
 > These pages document what is **real today** and mark clearly what is not. Read
 > [status.md](./status.md) for the line-by-line breakdown before you build anything you are relying
@@ -16,7 +18,9 @@ does, what the host expects from it while it lives, and every way it dies. The m
 built and tested today — the gap, stated in full under [Activation](#activation-and-the-gap-that-matters),
 is that nothing yet calls the `activate` and `deactivate` functions you export.
 
-Source of truth: `daemon/src/plugins/{process-transport,prelude,supervisor,limits,registry}.ts`.
+Source of truth:
+`daemon/src/plugins/{process-transport,prelude,supervisor,limits,job-object,registry}.ts`, and
+`daemon/src/plugins/install/` for the artifact the spawn path loads.
 
 ## The shape of it
 
@@ -51,15 +55,36 @@ The spawn is:
 <runtime bun> [--smol] -e <PRELUDE_SOURCE> <config JSON>
 ```
 
-with `env: {}`, `cwd` set to your plugin's own data directory, and all three stdio streams piped.
+with a scrubbed environment, `cwd` set to your plugin's own data directory, all three stdio streams
+piped, and an OS memory cap applied where the platform has one.
 
-**`env: {}`** denies every secret and path the daemon happens to be holding: `VRCZIP_STATE_DIR` and
-therefore the location of the credential store, any keychain or token variable, proxy credentials, and
-the developer's whole shell. One measured caveat, worth knowing rather than assuming: on Windows, Bun
-still synthesises a minimal environment (`PATH`, `SYSTEMROOT`, `TEMP`, `USERNAME`, `USERPROFILE` and a
-few more), because a process with a truly empty block cannot start. Nothing the daemon holds leaks
-through it, but your process does learn the user's account name. The prelude empties `process.env`
-afterwards, so reading it takes deliberate effort.
+**A scrubbed environment** denies every secret and path the daemon happens to be holding:
+`VRCZIP_STATE_DIR` and therefore the location of the credential store, any keychain or token
+variable, proxy credentials, and the developer's whole shell. Off Windows this is literally `env: {}`,
+because POSIX `execve` takes the block it is given.
+
+**On Windows `env: {}` is a merge, not a replacement**, which is worth stating because it is the
+opposite of what the API looks like it does. Bun synthesises eleven variables (`PATH`, `SYSTEMROOT`,
+`WINDIR`, `SYSTEMDRIVE`, `TEMP`, `HOMEDRIVE`, `HOMEPATH`, `LOGONSERVER`, `USERDOMAIN`, `USERNAME`,
+`USERPROFILE`) and adds them to whatever you pass. The only way to get rid of one is to supply your
+own value for it, and the empty string is that value: the variable still exists in the child and says
+nothing. Key matching is case-insensitive, so `SystemRoot` replaces the synthesised `SYSTEMROOT`
+rather than adding a second entry.
+
+Nothing the daemon holds was ever reaching a plugin through that set, and it should not be described
+as a credential leak. What it disclosed was the user's account name, home directory, domain
+controller, and an inventory of installed tooling in `PATH`. The spawn now keeps four things and
+blanks the other seven:
+
+| Kept | Why |
+|---|---|
+| `SystemRoot`, `windir` | Mandatory. The Windows loader resolves system DLLs and CNG resolves its crypto configuration relative to them; `bun` does not get far enough to run a script without them. |
+| `SystemDrive` | Consulted by parts of the CRT for a path with no drive letter. Discloses nothing. |
+| `TEMP`, `TMP` | Pointed at **your own data directory**, not the user's temp folder. It is already your working directory, so you learn nothing new, your temp files stay in the one place you may write, and the user's profile path is never spelled out. |
+
+A blank `PATH` has teeth of its own: `Bun.spawn(["git", …])` now resolves nothing. The prelude also
+empties `process.env` immediately afterwards, which closes the whole set for anything reading the
+variable rather than the OS block.
 
 **`--smol`** selects JSC's small-heap configuration and is the default for every plugin. Plugin
 processes are overwhelmingly idle event handlers, and the daemon's whole pitch against VRCX is a
@@ -74,22 +99,34 @@ reaches the filesystem around the scrub writes relative paths into the one place
 
 ### Memory caps, honestly
 
-`limits.ts` plans an OS-enforced address-space cap, and the table there is not flattering:
+Both primary platforms now have an OS-enforced cap, and the two work differently enough that the
+difference is visible to you:
 
-| Platform | Mechanism | Status |
-|---|---|---|
-| Linux | `RLIMIT_AS` via `sh -c 'ulimit -v …; exec …'` | implemented |
-| Windows | Job Object | **not implemented** |
-| macOS | `RLIMIT_AS` | not implementable — Darwin accepts it and does not enforce it |
+| Platform | Mechanism | When | What it bounds |
+|---|---|---|---|
+| Windows | Job Object (`job-object.ts`) | after the spawn, on the pid | `ProcessMemoryLimit`, which is **committed memory** |
+| Linux | `RLIMIT_AS` via `sh -c 'ulimit -v …; exec …'` | before the spawn, in the argv | virtual address space |
+| macOS | none, deliberately | — | Darwin accepts `RLIMIT_AS` and does not enforce it, and a cap that only looks applied is worse than none |
 
-**Windows is the primary platform and it is the one without a cap.** `Bun.spawn` exposes no
-job-object option, and creating one means four native calls through `bun:ffi` plus a 144-byte struct
-marshalled by hand inside the daemon process, where getting it wrong crashes the daemon rather than
-the plugin. Until it lands, a Windows plugin is bounded by the RSS watchdog only, which is a *later*
-bound rather than a *hard* one — and `warnIfUncapped` says so out loud once per process rather than
-letting anyone assume a cap they did not get. On Linux the wrapper `exec`s, so the pid the watchdog
-reads is the plugin's own, and note that `RLIMIT_AS` caps virtual address space rather than resident
-memory, which JavaScriptCore reserves generously.
+**On Windows the cap is committed memory**, which makes the number a much closer match to the one a
+human has in mind. Linux's `RLIMIT_AS` counts JavaScriptCore's large untouched virtual reservations,
+so a cap there has to be set at a generous multiple of the RSS actually intended. On Linux the
+wrapper `exec`s, so the pid the watchdog reads is still the plugin's own.
+
+**Crossing the Windows cap reads as a crash, not as a kill.** The allocation is refused inside your
+process, JSC raises `RangeError: Out of memory`, and the process exits 1 on its own. Nothing signals
+it and nothing terminates it, so it arrives as `crashed` and goes on the restart ladder like any
+other crash rather than as `rss-exceeded`.
+
+Two consequences of the ordering. A job object needs a pid and therefore cannot exist before the
+process does, so `planMemoryCap` can only name the mechanism it will *attempt* on Windows and returns
+`enforced: false`; the transport raises that once the assignment actually succeeds, corrected upward
+and never downward. There is a genuine window of microseconds after `Bun.spawn` returns during which
+the child is uncapped, before its runtime has finished starting.
+
+Every failure path falls back to the RSS watchdog rather than refusing to start the plugin, because a
+later bound is a better outcome than no plugin, and `warnIfUncapped` says so out loud once per daemon
+process rather than letting anyone assume a cap they did not get.
 
 ### Where the runtime comes from
 
@@ -97,9 +134,17 @@ memory, which JavaScriptCore reserves generously.
 (the fetched, hash-pinned runtime), then `process.execPath` — but only when the daemon is not running
 as a packaged build, since from a source checkout the daemon is already running under a real `bun`.
 There is deliberately no third candidate: a `PATH` bun is exactly the silent substitution the pinned
-runtime exists to prevent. **The installer step that fetches that runtime does not exist yet**, so
-today plugins run from a source checkout, and inside a packaged build the transport returns a
-stillborn transport whose message names the missing path rather than failing at `Bun.spawn`.
+runtime exists to prevent.
+
+**The fetcher for that runtime now exists, and it will not fetch anything.** `ensurePluginRuntime`
+downloads and hash-checks the pinned Bun release, unzipping it with a central-directory reader rather
+than by spawning whatever answers to `tar` on `PATH` in order to install the binary it is about to
+spawn. But its pin table ships empty on purpose: the hashes come from a packaging step that does not
+exist yet, and an unpinned platform **refuses**, naming the URL and the hash it wanted, rather than
+running an executable nobody vouched for. So the practical position is unchanged: today plugins run
+from a source checkout, where the daemon is already running under a real `bun`, and inside a packaged
+build the transport returns a stillborn transport whose message names the missing path rather than
+failing at `Bun.spawn`.
 
 ## The prelude
 
@@ -154,10 +199,14 @@ Three things it cannot do, and these are measured rather than assumed:
 
 The honest summary: a plugin that *wants* to escape the scrub can, in about one line. What the scrub
 buys is that a plugin doing something dangerous had to write that line, which is a thing a reviewer
-and the install-time deny-scan can both see. The real defences are elsewhere — the deny-scan over the
-*bundled output*, which rejects non-literal `import()` before the code ever runs, and the process
-boundary itself, which is what a future AppContainer or seccomp profile attaches to. See
-[security-model.md](./security-model.md) rather than trusting this list.
+can see.
+
+Do not read the install-time deny-scan as the thing that closes the gap. It catches syntax and only
+syntax, and a `constructor.constructor` chain, a computed `globalThis["pro"+"cess"]`, and a plain
+`fetch(…)` all pass it today. **What actually provides isolation is this scrub, the scrubbed
+environment, and the process boundary itself**, which is also what a future AppContainer or seccomp
+profile attaches to. [security-model.md](./security-model.md) lists exactly what gets through, and it
+is the page to trust over this list.
 
 ### The `__vrczHost` seam
 

@@ -1,11 +1,13 @@
 # The wire protocol
 
 > [!IMPORTANT]
-> **You cannot install and run a plugin yet.** Phase 3 is partly built: the manifest, the wire
-> protocol, the UI vocabulary and the node model are settled and published, and the daemon can
-> spawn, supervise, restart and kill a plugin process. What is missing is everything between those
-> two halves — the installer, the `ctx` API a plugin actually calls, lifecycle dispatch to your
-> exported functions, storage, the consent screen, and the UI renderer.
+> **You cannot install or run a plugin from the app yet**, and a good deal more is built than that
+> sentence suggests. The install pipeline compiles, deny-scans and content-addresses a bundle; the
+> daemon spawns, memory-caps and supervises a plugin process; a dispatcher answers scope-checked and
+> account-checked read calls against VRChat. None of it is constructed by the daemon's composition
+> root, and there is no consent screen, so nothing can be installed, granted anything, or started
+> from the app. Lifecycle dispatch to your exported functions, storage, events, outbound actions and
+> the UI renderer are not built at all.
 >
 > These pages document what is **real today** and mark clearly what is not. Read
 > [status.md](./status.md) for the line-by-line breakdown before you build anything you are relying
@@ -175,7 +177,7 @@ exhaustively and a new code is a protocol-major concern.
 | `E_UNKNOWN_METHOD` | no | No such method in this protocol major. |
 | `E_SCOPE_DENIED` | no | The plugin does not hold the scope this method requires. Requesting it means re-consent. |
 | `E_ACCOUNT_DENIED` | no | The scope is granted, but not for the account the call named. |
-| `E_RATE_LIMIT` | yes | The plugin's share of the shared limiter is spent. Carries `retryAfterMs`. |
+| `E_RATE_LIMIT` | yes | The plugin's hourly volume budget for that scope is spent, or it has too many calls in flight at once. Carries `retryAfterMs`. |
 | `E_TIMEOUT` | yes | The caller's deadline passed before a reply arrived. Synthesised by the caller. |
 | `E_CANCELLED` | no | The call was abandoned: subsystem shut down, plugin disabled, panel closed. |
 | `E_TOO_LARGE` | no | A frame, parameter or result exceeded a size cap. |
@@ -199,8 +201,19 @@ than you. The host tags every call with your plugin id, meters a subordinate per
 the shared limiter, and names the plugin eating it in the UI — so a hot retry loop is visible to the
 user by design. PLAN.md §Phase 3 correction 3 is where this comes from.
 
-Treat `retryAfterMs` as a floor rather than a target. It is how long until the budget *might* be
-there, not a promise that it will be.
+**`retryAfterMs` is a real number, not a stock hour.** It is how long until the *oldest call in your
+window ages out*, so waiting exactly that long is the correct response. The byte-faithful proxy
+answers an exhausted third-party app with the whole window instead, which is fine for an HTTP client
+that was going to poll anyway; a plugin is told in as many words that retrying early is a bug, and a
+flat hour quoted against a real nine-second wait is how that instruction stops being believed.
+
+Treat it as a floor rather than a promise: the window may refill later than that if your calls were
+bunched. It will not refill *earlier*.
+
+Two different things answer with this code, and only one of them is the hourly budget. Exceeding the
+in-flight cap on concurrent calls also answers `E_RATE_LIMIT`, with a short `retryAfterMs` in the
+hundreds of milliseconds, because it is the one error a well-behaved plugin already knows how to wait
+on.
 
 ## Backpressure
 
@@ -319,9 +332,30 @@ rate budget, a `parse` for its parameters, and a `handle` that receives *parsed*
 is the enforcement. A handler cannot check a scope because it is given nothing to check one with, and
 it cannot forget to validate its arguments because it never sees the raw ones.
 
-`authorizeCall` is the gate, and it is pure — it decides, it does not act. Method lookup, then
-deadline, then scope, in that order. The dispatcher that owns the transport is left with "authorize,
-invoke, charge the cost" and no room to grow a second place where a scope is checked.
+`authorizeCall` is the gate, and it is pure: it decides, it does not act. Method lookup, then
+deadline, then scope, in that order.
+
+**`authorizeCall` does not check the account**, which is worth knowing if you are reading
+`protocol.ts` to work out where that happens. `ErasedMethod` carries `scope` and `cost` and nothing
+else, so a method's account posture cannot ride on it and the membership check lives in the host's
+scope gate beside it. There, naming an account outside the grant is `E_ACCOUNT_DENIED`; naming none
+when the grant covers exactly one resolves to that one; naming none when it covers several is
+`E_BAD_REQUEST` rather than a guess.
+
+The full order the host runs, and every step is a refusal point:
+
+```
+grant → in-flight cap → method → deadline → scope → account → budget → charge → invoke
+```
+
+The charge lands **before** the work rather than after, as a reservation. Recording afterwards would
+let a hundred simultaneous calls all read the same pre-spend count and all pass, which is the exact
+shape a volume budget exists to stop.
+
+The methods behind that mechanism are real now, and there are eight of them, all reads:
+`vrchat.accounts.list`, `vrchat.friends.list`, `vrchat.users.get`, `vrchat.worlds.get`,
+`vrchat.worlds.search`, `vrchat.instances.get`, `vrchat.groups.get` and `vrchat.groups.list`. See
+[getting-started.md](./getting-started.md) for their scopes.
 
 What the dispatcher sees of you is a `PluginGrant`: `pluginId`, the `scopes` and `accountIds` the user
 actually approved, and any `dryRunScopes` still logging instead of acting. It is deliberately **not**

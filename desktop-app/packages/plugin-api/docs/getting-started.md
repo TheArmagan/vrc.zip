@@ -1,11 +1,13 @@
 # Getting started
 
 > [!IMPORTANT]
-> **You cannot install and run a plugin yet.** Phase 3 is partly built: the manifest, the wire
-> protocol, the UI vocabulary and the node model are settled and published, and the daemon can
-> spawn, supervise, restart and kill a plugin process. What is missing is everything between those
-> two halves — the installer, the `ctx` API a plugin actually calls, lifecycle dispatch to your
-> exported functions, storage, the consent screen, and the UI renderer.
+> **You cannot install or run a plugin from the app yet**, and a good deal more is built than that
+> sentence suggests. The install pipeline compiles, deny-scans and content-addresses a bundle; the
+> daemon spawns, memory-caps and supervises a plugin process; a dispatcher answers scope-checked and
+> account-checked read calls against VRChat. None of it is constructed by the daemon's composition
+> root, and there is no consent screen, so nothing can be installed, granted anything, or started
+> from the app. Lifecycle dispatch to your exported functions, storage, events, outbound actions and
+> the UI renderer are not built at all.
 >
 > These pages document what is **real today** and mark clearly what is not. Read
 > [status.md](./status.md) for the line-by-line breakdown before you build anything you are relying
@@ -38,9 +40,11 @@ Four consequences worth internalising before you design anything:
   picks at the consent screen. There is no way to spell "all accounts".
 
 **None of this is a security sandbox yet, and the docs will not call it one.** A plugin runs with
-your user account's privileges. The process boundary, the global scrubbing and the install-time
-deny-scan raise the cost of misbehaving and make it visible; they do not make it impossible. Only
-install plugins you trust. [security-model.md](./security-model.md) is the blunt version.
+your user account's privileges. The process boundary, the global scrubbing and the scrubbed
+environment are what provide such isolation as there is; the install-time deny-scan catches syntax
+and only syntax, and a determined author walks around it in one line. Together they raise the cost of
+misbehaving and make it visible. They do not make it impossible. Only install plugins you trust.
+[security-model.md](./security-model.md) is the blunt version, and it lists exactly what gets through.
 
 ## Where a plugin lives on disk
 
@@ -95,8 +99,17 @@ friend-notes/
 ```
 
 `main` may point at TypeScript. The install pipeline compiles it with `Bun.build` (`target:
-"browser"`, `external: []`, so a `node:` builtin is a hard build error), scans the *bundled output*,
-and writes the content-addressed artifact. You ship source; the host decides what runs.
+"browser"`, `external: []`), deny-scans the *bundled output*, writes the content-addressed artifact,
+and then reads it back off disk through the same loader the spawn path uses before it will call the
+install a success. You ship source; the host decides what runs.
+
+**Importing a host builtin is a hard build error, in both spellings.** `import { readFileSync } from
+"node:fs"` and `from "fs"` both fail the install, naming your own source file. Worth saying
+explicitly because it is *not* what `target: "browser"` does on its own: measured on Bun 1.4.0, that
+setting silently **stubs** node builtins, compiling the import away to `var { readFileSync } = (() =>
+({}));`. That is the worst of both worlds, since the import is gone from the output and your plugin
+gets `undefined` where it expected a function. A resolver plugin runs before the stubbing and turns
+it into the refusal it should have been.
 
 ## Writing `vrcz-plugin.json`
 
@@ -261,19 +274,49 @@ carrying exactly what the user granted.
 
 ```ts
 // src/index.ts — the intended shape. NOT dispatched by the host today.
-export async function activate(ctx) {
-  // ctx.vrchat, ctx.storage, ctx.ui, ctx.events, ctx.notify — none of these exist yet
-}
+// `ctx` is typed `unknown` here on purpose: the type does not exist yet, and nothing calls this.
+export async function activate(ctx: unknown): Promise<void> {}
 
-export async function deactivate() {}
+export async function deactivate(): Promise<void> {}
 ```
+
+Of the `ctx` members that shape implies, exactly one has a host-side implementation:
+**`ctx.vrchat`, and reads only.** Behind the dispatcher there are eight methods, and this is the whole
+list.
+
+| Method | Scope | Account |
+|---|---|---|
+| `vrchat.accounts.list` | none | none |
+| `vrchat.friends.list` | `friends:read` | required |
+| `vrchat.users.get` | `users:read` | required |
+| `vrchat.worlds.get` | `worlds:read` | required |
+| `vrchat.worlds.search` | `worlds:read` | required |
+| `vrchat.instances.get` | `instances:read` | required |
+| `vrchat.groups.get` | `groups:read` | required |
+| `vrchat.groups.list` | `groups:read` | required |
+
+`vrchat.accounts.list` costs no scope deliberately: you have to be able to discover which accounts you
+were given before you can name one, and charging a scope for that would make every plugin ask for one
+it does not need.
+
+Each of these returns a small hand-written projection rather than VRChat's own response shape, so the
+day VRChat renames `currentAvatarThumbnailImageUrl` is a day the host changes and your plugin does
+not. Outbound social actions are **not** in the surface and cannot be spelled: they arrive with 3.8,
+alongside the consent gesture that lifts their dry-run.
+
+`ctx.storage`, `ctx.ui`, `ctx.events` and `ctx.notify` have no implementation at all. And since
+nothing dispatches a lifecycle frame into `activate`, nothing hands you a `ctx` to call any of this
+with yet.
 
 ### What actually happens today
 
 When the host spawns your plugin, this is the whole of it:
 
 1. It resolves a real `bun` binary and spawns it as `bun [--smol] -e <prelude source> <config json>`,
-   with **no inherited environment** (`env: {}`) and your data directory as the working directory.
+   with **no inherited environment** and your data directory as the working directory, under an OS
+   memory cap on Windows and Linux. (On Windows "no inherited environment" takes work: `env: {}`
+   there is a merge rather than a replacement, so eleven variables have to be explicitly blanked. See
+   [lifecycle.md](./lifecycle.md).)
 2. The **prelude** — host code, injected as a string rather than read from a file, so no other local
    process can rewrite it between the write and the spawn — runs first. It captures its own
    references to `stdout`, `JSON`, `TextEncoder` and the rest before any of your code exists, sends
@@ -330,9 +373,13 @@ signing your users up for.
 **Rate budget is the other sharp edge.** Every call you make goes through the shared limiter tagged
 with your plugin id, with a subordinate per-plugin budget, and a UI that names whoever is eating it.
 A plugin polling `friends` every second, times six accounts, gets *the user* rate-limited or
-moderated — and the user will blame vrc.zip, not you. `E_RATE_LIMIT` carries `retryAfterMs`, and
-retrying before it elapses is a bug in your plugin, not a host quirk to work around. Subscribe to
-events instead of polling wherever the event exists.
+moderated, and the user will blame vrc.zip, not you. Subscribe to events instead of polling wherever
+the event exists.
+
+`E_RATE_LIMIT` carries `retryAfterMs`, and **it is a real number rather than a stock hour**: it is how
+long until the oldest call in your window ages out. Waiting exactly that long is the correct
+behaviour. Retrying before it elapses is a bug in your plugin, not a host quirk to work around, and it
+is a bannable-behaviour bug: not in vrc.zip's opinion, in VRChat's.
 
 **Ask for the narrowest account mode you can live with.** `one` renders a single-account picker;
 `many` renders a multi-select. If your plugin is genuinely useful with nothing bound, set
@@ -347,25 +394,34 @@ front of every existing user.
 
 Checklist steps are from `PROGRESS.md` §Phase 3.
 
+Several of these are now "built, but nothing calls it", which is a different state from "not written"
+and is marked where it applies.
+
 | You cannot | Because | Step |
 |---|---|---|
-| Install a plugin | There is no installer: no `Bun.build` pass, no AST deny-scan, no content-addressing, no signature verification. The `plugins` table exists and nothing writes to it. | **3.5** |
-| Run a plugin from the app | The daemon does not construct a plugin registry. `daemon/src/app.ts`, the composition root, wires no plugin subsystem at all — the supervisor and transport run only under their own tests. | **3.2** |
-| Have your `activate` called | No plugin-side runtime routes a `lifecycle` frame into your exports. The host sends the frame; nothing on your side receives it unless you write that yourself. | **3.2 / 3.4** |
-| Call a `ctx` API | The dispatcher, scope gate and per-plugin rate budget do not exist. There is a method-definition mechanism in `protocol.ts` and no methods behind it. | **3.4** |
-| Receive events | The events bridge — compiled filters, credit windows, per-tick batching, the `dropped` frame — is not built. `permissions.events` is validated and then unused. | **3.6** |
+| Install a plugin from the app | The pipeline is **built**: it parses the manifest, compiles, deny-scans the output, content-addresses the artifact and verifies it back off disk. Nothing calls it. There is no route and no UI, and it deliberately writes no `plugins` row, because recording that you agreed to run something is consent's job rather than the compiler's. | **3.5 built, 3.8 to reach it** |
+| Install from a git URL, or install anything signed | The pipeline takes a local directory only and verifies no signature. `manifest.signing` parses and nothing checks it. | **3.8** |
+| Run a plugin from the app | `daemon/src/app.ts`, the composition root, wires no plugin subsystem at all. The supervisor, transport, registry, dispatcher and installer run only under their own tests. | **3.8** |
+| Have your `activate` called | No plugin-side runtime routes a `lifecycle` frame into your exports. The host sends the frame; nothing on your side receives it unless you write that yourself. | **3.4 and later** |
+| Call a `ctx` API | The dispatcher, scope gate and per-plugin budget are **built and tested**, with the eight read methods listed above behind them. No transport is attached and no grant exists, so every call would be refused with `E_SCOPE_DENIED` before it reached a method. | **3.4 built, 3.8 to reach it** |
+| Send an invite, moderate, or add a friend | Deliberately absent from the surface rather than merely unimplemented. They ship with the dry-run lift gesture that ungates them. | **3.8** |
+| Receive events | The events bridge, meaning compiled filters, credit windows, per-tick batching and the `dropped` frame, is not built. `permissions.events` is validated and then unused. | **3.6** |
+| Use `webhook` or `fetch:allowlist` | Both are validated in the manifest and neither is implemented. | later |
 | Store anything | No per-plugin SQLite file, no KV, no `records`, no quota. `plugin-data/<id>/` is created as your working directory and is otherwise empty. | **3.7** |
 | Be granted anything | There is no consent screen and no management page. The `plugin_grants`, `plugin_dry_run_lifted` and `plugin_crashes` tables exist; nothing populates them. | **3.8** |
 | Render UI | The `UINode` vocabulary is published and validated (`validateUINode`); no renderer consumes it. | **3.9** |
 | Register a node type | `NodeDefinition` and the port lattice are published; registration into the graph editor and runtime is not built. | **3.10** |
 | Scaffold a project | `create-vrcz-plugin` does not exist. Neither does the `vrcz` CLI, so neither does `vrcz dev`. | **3.11** |
-| Run plugins from a packaged build | The plugin host needs a real `bun`, fetched and hash-pinned into `<state>/runtime/bun-<version>/` on first install. That fetch step is not written, so inside the compiled `.exe` there is no runtime to spawn. From a source checkout the daemon is already running under a real `bun` and uses that. | packaging |
+| Run plugins from a packaged build | The plugin host needs a real `bun` from `<state>/runtime/bun-<version>/`. The fetcher is written, but its hash pin table ships empty and an unpinned platform refuses to download rather than run an executable nobody vouched for. From a source checkout the daemon is already running under a real `bun` and uses that. | packaging |
 
-What *is* real and usable today: the manifest schema and `parseManifest`, `grantHash`, the wire
-protocol types and codecs, the `UINode` vocabulary and `validateUINode`, `NodeDefinition` with
-`assignable()` and `nodeDefinitionHash()`, and — on the host side, under test — the prelude, the
-process transport, the supervisor with its heartbeat, backoff and crash-loop breaker, and the
-registry.
+What *is* real today, on your side: the manifest schema and `parseManifest`, `grantHash`, the wire
+protocol types and codecs, the `UINode` vocabulary and `validateUINode`, and `NodeDefinition` with
+`assignable()` and `nodeDefinitionHash()`.
+
+And on the host side, under test rather than under a user: the install pipeline, the prelude, the
+process transport with its OS memory cap and scrubbed environment, the supervisor with its heartbeat,
+backoff and crash-loop breaker, the registry, and the dispatcher with its scope gate, account
+resolution, rate budget and eight read methods.
 
 ## The honest next step
 
@@ -381,9 +437,11 @@ knowing that up front rather than after a weekend:
    are real, so the port typing you design now is the port typing the editor and runtime will
    enforce.
 
-What you cannot usefully do yet is write the body of `activate`, because the `ctx` it receives is not
-designed down to signatures and nothing would call it. Anything you write against `__vrczHost`
-directly is written against a host internal that the plugin-side runtime is going to sit on top of.
+You can also now design against a real `ctx.vrchat`: the eight read methods above are settled, with
+their scopes, their account posture and their projections. What you cannot usefully do is write the
+body of `activate`, because nothing calls it and nothing would hand you a `ctx` if it did. Anything
+you write against `__vrczHost` directly is written against a host internal that the plugin-side
+runtime is going to sit on top of.
 
 Read [status.md](./status.md) before you rely on any of this, and
 [security-model.md](./security-model.md) before you ask for a dangerous scope.

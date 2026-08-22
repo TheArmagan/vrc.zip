@@ -182,9 +182,13 @@ export type NodeConfigValues = Readonly<Record<string, string | number | boolean
  * would leave blank nodes on the canvas. Evaluating a template means a saved graph draws correctly
  * with every plugin process dead.
  *
- * Segments are concatenated. `config` substitutes the instance's value for a field; `port` renders
- * the port's label with its type chip. Everything renders as text — same rule as the UI vocabulary,
- * no markup anywhere.
+ * Segments are concatenated. `config` substitutes the instance's value for a field; `port`
+ * substitutes the port's label, falling back to its id when no port matches. Everything renders as
+ * text — same rule as the UI vocabulary, no markup anywhere.
+ *
+ * This once said `port` renders the label "with its type chip". It does not: `evaluateNodeBody`
+ * returns a string and has no way to express a chip. Whether the editor draws one beside the body
+ * is the editor's business, not this template's.
  */
 export type NodeBodySegment =
   | { readonly kind: "literal"; readonly text: string }

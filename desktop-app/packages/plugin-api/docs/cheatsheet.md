@@ -1,11 +1,13 @@
 # Cheatsheet
 
 > [!IMPORTANT]
-> **You cannot install and run a plugin yet.** Phase 3 is partly built: the manifest, the wire
-> protocol, the UI vocabulary and the node model are settled and published, and the daemon can
-> spawn, supervise, restart and kill a plugin process. What is missing is everything between those
-> two halves — the installer, the `ctx` API a plugin actually calls, lifecycle dispatch to your
-> exported functions, storage, the consent screen, and the UI renderer.
+> **You cannot install or run a plugin from the app yet**, and a good deal more is built than that
+> sentence suggests. The install pipeline compiles, deny-scans and content-addresses a bundle; the
+> daemon spawns, memory-caps and supervises a plugin process; a dispatcher answers scope-checked and
+> account-checked read calls against VRChat. None of it is constructed by the daemon's composition
+> root, and there is no consent screen, so nothing can be installed, granted anything, or started
+> from the app. Lifecycle dispatch to your exported functions, storage, events, outbound actions and
+> the UI renderer are not built at all.
 >
 > These pages document what is **real today** and mark clearly what is not. Read
 > [status.md](./status.md) for the line-by-line breakdown before you build anything you are relying
@@ -46,7 +48,7 @@ Direction from `FRAME_SENDERS`, and it is validated on arrival, not merely docum
 | `E_UNKNOWN_METHOD` | no |
 | `E_SCOPE_DENIED` | no |
 | `E_ACCOUNT_DENIED` | no |
-| `E_RATE_LIMIT` | yes — **wait `retryAfterMs`; a hot retry is a bannable-behaviour bug** |
+| `E_RATE_LIMIT` | yes — **wait `retryAfterMs`; a hot retry is a bannable-behaviour bug.** It is time until the oldest call in the window ages out, not a stock hour |
 | `E_TIMEOUT` | yes |
 | `E_CANCELLED` | no |
 | `E_TOO_LARGE` | no |
@@ -92,6 +94,38 @@ Direction from `FRAME_SENDERS`, and it is validated on arrival, not merely docum
 | `LOG_REFILL_PER_SECOND` | 20 | `process-transport.ts` |
 | `MAX_PRELUDE_SOURCE_BYTES` | 16384 | `prelude.ts` |
 | `RLIMIT_SETUP_FAILED_EXIT` | 71 | `limits.ts` |
+| `MAX_BUNDLE_BYTES` | 8388608 (8 MiB) | `install/pipeline.ts` |
+| `SMOL_MEMORY_LIMIT_BYTES` | 536870912 (512 MiB) | `install/spawn-resolver.ts` |
+| `THROUGHPUT_MEMORY_LIMIT_BYTES` | 1073741824 (1 GiB) | `install/spawn-resolver.ts` |
+
+The OS memory cap sits deliberately above the supervisor's 256 MiB RSS watchdog. The watchdog is the
+policy, and it kills with a sentence a user can read; the OS cap is the backstop for an allocation
+between two watchdog ticks. Setting them to the same number would turn every watchdog kill into an
+opaque out-of-memory crash.
+
+## Host-side plugin API
+
+Eight methods, all reads. Outbound social actions land with 3.8.
+
+| Method | Scope | Account | Cached |
+|---|---|---|---|
+| `vrchat.accounts.list` | none | none | — |
+| `vrchat.friends.list` | `friends:read` | required | no |
+| `vrchat.users.get` | `users:read` | required | 30s |
+| `vrchat.worlds.get` | `worlds:read` | required | 30s |
+| `vrchat.worlds.search` | `worlds:read` | required | 30s |
+| `vrchat.instances.get` | `instances:read` | required | no |
+| `vrchat.groups.get` | `groups:read` | required | 30s |
+| `vrchat.groups.list` | `groups:read` | required | 30s |
+
+The cache key is `(accountId, path)` and never the path alone, because `GET /users/{id}` returns
+different fields to a friend than to a stranger. Volatile reads (friends, instances) opt out entirely.
+
+| Dispatcher default | Value |
+|---|---|
+| Calls in flight per plugin | 32, then `E_RATE_LIMIT` with `retryAfterMs: 250` |
+| Host → plugin call timeout | 5000 |
+| Hourly volume budget | The proxy's, on `invite:send`, `friends:write`, `groups:invite`. Every one is a write, so it is dormant on a reads-only surface |
 
 ## Supervisor thresholds
 
@@ -265,9 +299,9 @@ Root is `VRCZIP_STATE_DIR` when set; otherwise `%LOCALAPPDATA%\vrc.zip` on Windo
 |---|---|
 | `plugins/<id>/` | Installed artifacts for one plugin. |
 | `plugins/<id>/<sha256>.js` | The content-addressed bundle. The name *is* the hash, verified on every load. |
-| `plugin-data/<id>/` | The plugin's own data directory. Also its process working directory. |
-| `plugin-data/<id>/plugin.sqlite` | The plugin's own database. It cannot lock or corrupt the daemon's WAL. |
-| `runtime/bun-<version>/bun[.exe]` | The pinned plugin runtime. **The installer that fetches this does not exist yet.** |
+| `plugin-data/<id>/` | The plugin's own data directory, its process working directory, and on Windows its `TEMP`/`TMP`. |
+| `plugin-data/<id>/plugin.sqlite` | The plugin's own database. It cannot lock or corrupt the daemon's WAL. **Storage is step 3.7; this file does not exist yet.** |
+| `runtime/bun-<version>/bun[.exe]` | The pinned plugin runtime. The fetcher exists; its hash pins ship empty, so an unpinned platform refuses to download and this resolves only from a source checkout. |
 
 Code and data are separate trees on purpose: uninstall is `rm -rf` on the code, so keeping data across
 an uninstall-reinstall is a decision someone makes rather than an accident of layout, and the quota is

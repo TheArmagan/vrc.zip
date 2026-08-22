@@ -247,23 +247,6 @@ async function askForNotifications(): Promise<void> {
             aria-label="Open the browser at startup"
           />
         </div>
-
-        <div class="flex items-start gap-4 px-4 py-3">
-          <div class="min-w-0 flex-1">
-            <p class="text-sm">Serve on local.vrc.zip</p>
-            <p class="text-sm text-muted-foreground">
-              Uses the hostname local.vrc.zip instead of 127.0.0.1. It resolves to loopback and
-              nothing leaves the machine either way, so this is cosmetic. Takes effect on the next
-              daemon restart.
-            </p>
-          </div>
-          <Switch
-            checked={app.settings?.useLocalDomain ?? false}
-            disabled={app.settings === null}
-            onCheckedChange={(checked) => void save({ useLocalDomain: checked })}
-            aria-label="Serve on local.vrc.zip"
-          />
-        </div>
         </div>
       </Card.Root>
 

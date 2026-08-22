@@ -224,13 +224,14 @@ handshake, because the alternative is a login flow that mints credentials with n
       socket per account. Frames are re-emitted **verbatim** and scanned before forwarding; a dead
       token gets VRChat's own `err` frame with the `authToken` and `ip` it echoes stripped. The token
       is read from `?authToken=`, `?auth=` (VRCX's spelling), or the `auth` cookie. Decisions 81–82.
-- [ ] **Housekeeping, before Phase 2 closes** — three items the 2026-08-22 planning pass created or
-      confirmed, none of which belong to a numbered step: **remove `local.vrc.zip`** from
-      `security/guards.ts`, `servers/bind.ts`, `settings.ts`, `os/open-url.ts`, `ui/src/lib/api.ts`,
-      `ui/src/lib/user-actions.ts`, `SettingsScreen.svelte` and their tests (decision 101 — the Host
-      allowlist narrows to `127.0.0.1`/`localhost`, which is a security-relevant narrowing, not just
-      a deletion); **fix the flaky control-deps test** (decision 103); and **cap + budget the roster
-      fallback** (decision 102).
+- [~] **Housekeeping, before Phase 2 closes** — three items the 2026-08-22 planning pass created or
+      confirmed, none of which belong to a numbered step. **`local.vrc.zip` is removed** —
+      `ALLOWED_HOSTNAMES` is now `127.0.0.1` and `localhost`, and the hostname is asserted *rejected*
+      by `hostGuard`, `originGuard` and `isLoopbackHttpUrl` rather than merely unused, since the
+      launch URL carries the session token. The `useLocalDomain` setting, its wire fields and its
+      Settings toggle go with it; see §Gotchas for what that removal turned up. Still outstanding:
+      **fix the flaky control-deps test** (decision 103) and **cap + budget the roster fallback**
+      (decision 102).
 - [ ] **2.10 Control API** (`:7775`) — consent status, grant list/revoke, the enriched event stream
       with `sessionId`/`accountId`/`displayName` on every `gamelog.*`, and webhook registration.
       **Scoped by the 2026-08-22 planning pass (decisions 97, 98, 99, 104):** webhooks ship *with*
@@ -1149,6 +1150,16 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **`useLocalDomain` was a toggle wired to nothing.** Removing `local.vrc.zip` (decision 101) turned
+  up that the setting was persisted, merged field-by-field on load, accepted by `PUT /api/settings`,
+  round-tripped to the UI and rendered as a Switch — and *never read by anything that chooses a
+  hostname*. `DEFAULT_HOSTNAME` was unconditional in `bind.ts`, `app.ts` and the forward proxy, so
+  flipping the toggle changed a byte in `settings.json` and nothing else. The comment in `bind.ts`
+  said "opt-in and resolved by the caller"; no caller resolved it. Worth remembering as a shape: a
+  setting that is plumbed end to end *looks* implemented from every layer, because each layer is
+  correct on its own — the missing piece is the one place that would consume it, and nothing fails
+  when it is absent. `grep` for the reads, not the writes.
 
 - **Inside a compiled binary there is no filesystem to be relative to.** `import.meta.dir` is
   `B:\~BUN\root`, a path that exists nowhere, so every `resolve(import.meta.dir, "..", …)` silently

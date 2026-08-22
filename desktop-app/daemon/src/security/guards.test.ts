@@ -25,7 +25,7 @@ const AUTHORIZED = { host: `127.0.0.1:${PORT}`, authorization: `Bearer ${TOKEN}`
 
 describe("hostGuard", () => {
   test("accepts every allowed loopback name at the bound port", async () => {
-    for (const host of [`127.0.0.1:${PORT}`, `localhost:${PORT}`, `local.vrc.zip:${PORT}`]) {
+    for (const host of [`127.0.0.1:${PORT}`, `localhost:${PORT}`]) {
       const res = await call({ host, authorization: `Bearer ${TOKEN}` });
       expect(res.status).toBe(200);
     }
@@ -39,6 +39,9 @@ describe("hostGuard", () => {
       `127.0.0.1:${PORT + 1}`,
       `attacker.local.vrc.zip:${PORT}`,
       `local.vrc.zip.evil.example:${PORT}`,
+      // `local.vrc.zip` was allowed while that opt-in was planned. It is cut (PROGRESS.md decision
+      // 101), and a hostname nobody here controls any more must be rejected, not merely unused.
+      `local.vrc.zip:${PORT}`,
     ]) {
       const res = await call({ host, authorization: `Bearer ${TOKEN}` });
       expect(res.status).toBe(403);
@@ -69,8 +72,8 @@ describe("originGuard", () => {
     for (const origin of [
       `http://127.0.0.1:${PORT}`,
       `http://localhost:${PORT}`,
-      `http://local.vrc.zip:${PORT}`,
-      `https://local.vrc.zip:${PORT}`,
+      `https://127.0.0.1:${PORT}`,
+      `https://localhost:${PORT}`,
     ]) {
       const res = await call({ ...AUTHORIZED, origin });
       expect(res.status).toBe(200);
@@ -82,6 +85,7 @@ describe("originGuard", () => {
       "http://evil.example",
       `http://evil.example:${PORT}`,
       `http://127.0.0.1:${PORT + 1}`,
+      `http://local.vrc.zip:${PORT}`,
       "null",
     ]) {
       const res = await call({ ...AUTHORIZED, origin });

@@ -2057,9 +2057,6 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       const next: Settings = {
         ...settings,
         ...(typeof patch.contact === "string" ? { contact: patch.contact } : {}),
-        ...(typeof patch.useLocalDomain === "boolean"
-          ? { useLocalDomain: patch.useLocalDomain }
-          : {}),
         ...(typeof patch.openBrowserOnStart === "boolean"
           ? { openBrowserOnStart: patch.openBrowserOnStart }
           : {}),

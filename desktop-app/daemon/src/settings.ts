@@ -22,11 +22,6 @@ export interface Settings {
   contact: string;
   ports: { ui: number; proxy: number; control: number; forward: number };
   forwardProxy: ForwardProxySettings;
-  /**
-   * `local.vrc.zip` is opt-in. `127.0.0.1` is the runtime default because it has no external
-   * dependency, no cert to renew, and nothing that can fail. See PLAN.md §1.8.
-   */
-  useLocalDomain: boolean;
   /** Overrides log discovery. Empty means "use what discovery found", which is shown in settings. */
   logDirectories: string[];
   openBrowserOnStart: boolean;
@@ -59,7 +54,6 @@ export const DEFAULT_SETTINGS: Settings = {
     forward: DEFAULT_FORWARD_PROXY_PORT,
   },
   forwardProxy: { enabled: true, interceptHosts: [...DEFAULT_INTERCEPT_HOSTS] },
-  useLocalDomain: false,
   logDirectories: [],
   openBrowserOnStart: true,
 };
@@ -86,7 +80,6 @@ export async function loadSettings(env?: NodeJS.ProcessEnv): Promise<Settings> {
           ? parsed.forwardProxy.interceptHosts
           : [...DEFAULT_SETTINGS.forwardProxy.interceptHosts],
       },
-      useLocalDomain: parsed.useLocalDomain ?? DEFAULT_SETTINGS.useLocalDomain,
       logDirectories: Array.isArray(parsed.logDirectories) ? parsed.logDirectories : [],
       openBrowserOnStart: parsed.openBrowserOnStart ?? DEFAULT_SETTINGS.openBrowserOnStart,
     };

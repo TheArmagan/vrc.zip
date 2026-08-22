@@ -10,8 +10,14 @@ import { sessionTokensMatch } from "./session-token.ts";
  * actual requirement: a route added later must not be able to opt out by forgetting a line.
  */
 
-/** Hostnames a loopback request may legitimately arrive under. */
-export const ALLOWED_HOSTNAMES = ["127.0.0.1", "localhost", "local.vrc.zip"] as const;
+/**
+ * Hostnames a loopback request may legitimately arrive under.
+ *
+ * Deliberately only the two that resolve to loopback without asking anyone. A `local.vrc.zip` entry
+ * lived here while that opt-in was planned; it is cut (PROGRESS.md decision 101), and the allowlist
+ * narrows with it — a name we no longer control must not stay trusted here.
+ */
+export const ALLOWED_HOSTNAMES = ["127.0.0.1", "localhost"] as const;
 
 // The token's transport names are defined in `@vrcz/shared` because the UI has to spell them the
 // same way, and re-exported here so the daemon's existing importers keep their import path.

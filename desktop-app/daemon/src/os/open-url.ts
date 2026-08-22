@@ -70,9 +70,8 @@ export function openerArgv(url: string, platform: NodeJS.Platform): string[] | n
 /**
  * True for a URL on loopback over plain HTTP — the only thing this module will open.
  *
- * `local.vrc.zip` resolves to 127.0.0.1 and is one of the hostnames the daemon serves under, so it
- * belongs here too; it is an allowlist rather than a "does it resolve" check, because a DNS lookup
- * that has to succeed before a browser can be opened is a new way for the launch to fail.
+ * An allowlist rather than a "does it resolve" check: a DNS lookup that has to succeed before a
+ * browser can be opened is a new way for the launch to fail.
  */
 export function isLoopbackHttpUrl(url: string): boolean {
   let parsed: URL;
@@ -82,5 +81,5 @@ export function isLoopbackHttpUrl(url: string): boolean {
     return false;
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
-  return ["127.0.0.1", "localhost", "local.vrc.zip", "[::1]"].includes(parsed.hostname);
+  return ["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname);
 }

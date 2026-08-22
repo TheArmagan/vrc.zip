@@ -79,7 +79,6 @@ describe("daemon end to end", () => {
       JSON.stringify({
         contact,
         ports,
-        useLocalDomain: false,
         logDirectories: [join(dir, "no-logs-here")],
         openBrowserOnStart: false,
       }),

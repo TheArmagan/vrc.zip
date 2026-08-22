@@ -33,10 +33,9 @@ export function vrchatProfileUrl(userId: string): string {
 /**
  * Copies text and says so.
  *
- * `navigator.clipboard` needs a secure context. `127.0.0.1` is one and so is `local.vrc.zip` over
- * https, which covers both supported ways of reaching this UI — but a browser can still refuse
- * (permissions policy, a non-focused document), and a copy that silently does nothing is worse
- * than one that admits it, so the failure is reported rather than swallowed.
+ * `navigator.clipboard` needs a secure context, which `127.0.0.1` is — but a browser can still
+ * refuse (permissions policy, a non-focused document), and a copy that silently does nothing is
+ * worse than one that admits it, so the failure is reported rather than swallowed.
  */
 export async function copyText(label: string, text: string): Promise<void> {
   try {

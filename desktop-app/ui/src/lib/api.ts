@@ -520,8 +520,6 @@ export interface Settings {
    */
   readonly contact: string;
   readonly ports: SettingsPorts;
-  /** `local.vrc.zip` instead of `127.0.0.1`. Opt-in; needs a daemon restart to take effect. */
-  readonly useLocalDomain: boolean;
   /** Overrides log discovery. Empty means "whatever discovery found". */
   readonly logDirectories: readonly string[];
   readonly openBrowserOnStart: boolean;
@@ -530,7 +528,6 @@ export interface Settings {
 /** The subset of `Settings` that `PUT /api/settings` accepts. Ports are read-only over the wire. */
 export interface SettingsPatch {
   readonly contact?: string;
-  readonly useLocalDomain?: boolean;
   readonly logDirectories?: readonly string[];
   readonly openBrowserOnStart?: boolean;
 }

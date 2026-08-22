@@ -20,9 +20,8 @@ import { createUiApp } from "./ui.ts";
  * Three `Bun.serve` calls over three separate `Hono` instances, never one app with path prefixes:
  * the mirror must be structurally unable to serve a control route.
  *
- * `http://127.0.0.1:PORT` is the runtime default — no external dependency, no cert, nothing to
- * fail. `local.vrc.zip` is opt-in and resolved by the caller; both hostnames are already in the
- * `Host` allowlist, so switching is a matter of which URL gets printed.
+ * `http://127.0.0.1:PORT` is the only URL — no external dependency, no cert, nothing to fail. A
+ * `local.vrc.zip` opt-in was planned and is cut; see PROGRESS.md decision 101.
  *
  * Ports fall back to an ephemeral one when the preferred port is taken. A second daemon, or an
  * unrelated process squatting on 7773, must not be a startup failure — the URLs are discovered from

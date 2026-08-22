@@ -148,9 +148,7 @@ describe("CONNECT interception", () => {
   test("a host outside the intercept set is refused rather than decrypted by accident", async () => {
     // Reaching the TLS listener with an unlisted `Host` is only possible by coalescing, which the
     // SAN list prevents; forging it here proves the second line of defense answers 421.
-    const response = await pipelineOverTls([
-      "GET /api/1/x HTTP/1.1\r\nHost: evil.example\r\n\r\n",
-    ]);
+    const response = await pipelineOverTls(["GET /api/1/x HTTP/1.1\r\nHost: evil.example\r\n\r\n"]);
     expect(response).toContain("421 Misdirected Request");
   });
 });
@@ -254,7 +252,9 @@ function pipelineOverTls(requests: readonly string[]): Promise<string> {
       port,
       socket: {
         open: (socket) => {
-          void socket.write("CONNECT api.vrchat.cloud:443 HTTP/1.1\r\nHost: api.vrchat.cloud:443\r\n\r\n");
+          void socket.write(
+            "CONNECT api.vrchat.cloud:443 HTTP/1.1\r\nHost: api.vrchat.cloud:443\r\n\r\n",
+          );
         },
         data: (socket, bytes) => {
           const text = Buffer.from(bytes).toString("latin1");

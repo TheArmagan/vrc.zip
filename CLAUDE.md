@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **vrc.zip** — a Bun daemon that manages multiple VRChat accounts, keeps live presence, persists a
 feed, tails VRChat's game logs, mirrors the VRChat REST API for other local apps, and is extensible
-through sandboxed plugins and a node-graph editor. It is the anti-VRCX: cross-platform, 50–80MB
+through permissioned plugins and a node-graph editor. (Not *sandboxed* — PLAN.md §Phase 3
+correction 6 is permanent: a plugin runs with the user's own privileges, and saying otherwise in
+docs or UI copy is a bug.) It is the anti-VRCX: cross-platform, 50–80MB
 idle, multi-account as the default posture, extensible.
 
 Two top-level directories, and they are **separate projects**:

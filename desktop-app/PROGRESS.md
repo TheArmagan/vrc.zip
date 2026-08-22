@@ -5,7 +5,8 @@ the architecture and the reasoning. This file tracks only *state*: what exists, 
 was decided along the way.
 
 **Last updated:** 2026-08-22
-**Current phase:** Phase 3 — Plugin system (3.1–3.6 done and wired; next is 3.7, plugin storage)
+**Current phase:** Phase 3 — Plugin system (3.1–3.6 done and wired; next is **3.0**, the cuts and the
+docs rewrite, then 3.7, plugin storage)
 **Status: Phases 1 and 2 are both built.** Phase 1 was confirmed by hand on 2026-08-22 (1.10 and the
 profile card). Phase 2 closed on the same day: every numbered step is ticked, including 2.8's last
 two pieces (per-app budget overrides and a rate gauge that reports measured numbers instead of
@@ -38,6 +39,14 @@ every start, spawns into a memory-capped process with a scrubbed environment, an
 manage it, and it can subscribe to the bus through a credit-windowed, scope-filtered events bridge
 that coalesces rather than backlogs. Verified against a running daemon, not only by tests. Remaining:
 3.7 storage, 3.8 consent UI, 3.9 renderer, 3.10 nodes, and the scaffolder half of 3.11.
+
+**A third planning pass on 2026-08-22 scoped the whole back half of Phase 3 and cut two things the
+plan had carried since it was written.** Twenty-eight questions, four at a time; the answers are
+decision 182. **OS-level plugin sandboxing is cut permanently rather than deferred**, which turns
+PLAN.md correction 6 from a temporary posture into the permanent one, and **Ed25519 signing and
+trust tiers are cut from v1** along with their remnants in the schema and the manifest. Everything
+from 3.7 to 3.11 is scoped in the checklist below, and the docs that describe the two cut features
+get rewritten *first*, as step 3.0.
 
 **Two things to read before building on it.** Decision 177 lists four attacks the hostile suite
 asserts as *gaps*, the largest being that **a plugin which gets past install reaches the whole
@@ -311,9 +320,11 @@ supervisor.** Written later it would only validate a design already committed to
 every claim after it — the deny-scan, the RSS watchdog, event-flood backpressure — is tested against
 a live adversary as it is made. Decision 108.
 
-The standing posture for the whole phase, from PLAN.md correction 6: **do not call it a security
-sandbox until it is one.** Until process plus OS-level sandboxing lands, the docs and the consent UI
-say "plugins run with your account's privileges; only install plugins you trust."
+The standing posture for the whole phase, from PLAN.md correction 6: **it is not a security sandbox,
+and it is not going to become one.** Decision 182 cut OS-level sandboxing permanently rather than
+deferring it, so "until it is one" is no longer the caveat — the docs and the consent UI say
+"plugins run with your account's privileges; only install plugins you trust", and that stays true
+for the life of the product.
 
 - [x] **3.1 `@vrcz/plugin-api` types** — the published surface, versioned on the protocol major, with
       the daemon importing the same declarations so there is no drift. Four pieces: the manifest
@@ -388,26 +399,61 @@ say "plugins run with your account's privileges; only install plugins you trust.
       **Read decision 181 and the `permissions.events` Gotcha before 3.8**: backpressure needed a
       fourth mechanism in the plugin → host direction that PLAN.md does not name, and the event
       patterns shown on the consent sheet are not enforceable until the grant can carry them.
+- [ ] **3.0 The cuts, and the docs that describe them** — decision 182 removes OS-level sandboxing
+      (permanently, not deferred) and Ed25519 signing with it, along with the `signing` manifest
+      field, `plugins.trust`, `plugins.publisher_key` and the `signed` tier. `GRANT_HASH_VERSION`
+      bumps. Numbered 3.0 because it lands **before 3.7**: `packages/plugin-api/docs/` is the only
+      thing an outside author reads and its security-model page currently promises both.
 - [ ] **3.7 Storage** — one SQLite file per plugin in its own data dir. Uninstall is `rm -rf`, quota
       is a `stat`, and a plugin cannot lock or corrupt the daemon's WAL.
+      **Scoped by decision 182:** capabilities become a real field on `PluginGrant` and on
+      `GatedMethod` beside `scope` (the 006 column has been silently dropped by `liveGrant` all
+      along); quota is a `stat` on `plugin-data/<id>/` checked **pre-write**, refusing `E_QUOTA`;
+      the per-plugin DB gets its own minimal opener, not `Store`; `records` is key-prefix + time
+      window + limit and the plugin does all its own pruning; a value is arbitrary JSON to 256KB;
+      uninstall `rm -rf`s by default with a keep checkbox in 3.8. **Also here, and larger than the
+      step's name suggests:** the prelude grows the *whole* `ctx` surface (`ctx.vrchat`,
+      `ctx.storage`, `ctx.events`), which does not exist today in any form, plus 3.4's outstanding
+      per-plugin budget readout.
 - [ ] **3.8 Consent and management UI** — the account picker, the dangerous block behind a second
-      toggle, hold-to-confirm on the unsigned tier, grants keyed immutably by
+      toggle, hold-to-confirm, grants keyed immutably by
       `(pluginId, version, grantHash)`, and the dry-run lift as an explicit per-plugin per-scope
       gesture with the dry-run log beside it as evidence (decision 109).
-- [ ] **3.9 Declarative UI renderer** — forms, virtualized tables, dialogs, context menus and
+      **Scoped by decision 182:** install **blocks** — `POST /api/plugins` parks until the sheet
+      resolves — rather than queueing a pending row; migration 007 adds `events` to `plugin_grants`
+      and `PluginGrant` so `permissions.events` finally means something (the Gotcha below);
+      hold-to-confirm applies to **every** install now that signing is cut and no tier distinguishes
+      anything, so `ui/` owes a press-and-hold primitive with a keyboard path; and the UI installs
+      from a local path only, leaving the pinned git URL as 3.5's outstanding item.
+- [ ] **3.9 Declarative UI renderer** — forms, tables, dialogs, context menus and
       per-node click handlers. Charts follow rather than ship with it (decision 110).
+      **Scoped by decision 182:** the tree rides `/api/stream` as a new frame type carrying a
+      **keyed patch**, not a whole-tree replace; `table` **pages** through `PagedSection` /
+      `ScrollSentinel` rather than virtualizing, so no windowing dependency and `MAX_TABLE_ROWS` is
+      a ceiling and not a rendering promise; sort and filter are host-side over the rows the host
+      holds; an intent marks its own node `busy` and leaves the rest of the tree live, with an
+      inline error on `E_TIMEOUT` or a crash.
 - [ ] **3.10 Nodes** — plugin-contributed node types, registered from the same `NodeDefinition` the
-      editor, the runtime and the type checker all read.
+      editor, the runtime and the type checker all read. **Scoped by decision 182: no editor here.**
+      Registration, the runtime that arms triggers and executes actions, and `assignable()` enforced
+      on save. `@xyflow/svelte` is not installed and the canvas is Phase 4's.
 - [~] **3.11 Scaffolder and docs** — `create-vrcz-plugin` with `bun run dev` wired to `vrcz dev`,
       plus the generated reference (scope table, manifest reference, event catalog, port matrix) and
       the hand-written mental model, guides, and security-model page.
       **The hand-written half landed early**, out of order, because without it nobody outside this
-      repository can write a plugin at all: `packages/plugin-api/docs/` carries the mental model, a
+      repository can write a plugin at all — but see 3.0: its security-model page describes signing
+      and a sandbox roadmap that decision 182 cut, so it is wrong now and gets rewritten first.
+      `packages/plugin-api/docs/` carries the mental model, a
       getting-started walkthrough, the manifest, lifecycle, protocol, UI and node references, a
       cheatsheet, and the blunt security-model page PLAN.md asks for. Every page opens with the same
       banner saying plainly that a plugin cannot be installed or run yet, and `status.md` is the
       step-by-step account of what is real. Decision 142. **Still outstanding:** the scaffolder,
       `vrcz dev`, and replacing the reference pages with generated output so they cannot drift.
+      **Scoped by decision 182:** `create-vrcz-plugin` and `vrcz dev` are both **modes of the
+      shipped `.exe`** rather than an npm package, so there is no third artifact to version against
+      the protocol major; and the reference pages are generated and committed **without** a CI drift
+      check — the `packages/api` posture was declined because these are docs, not a client whose
+      staleness ships wrong requests.
 
 ---
 
@@ -2286,6 +2332,123 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      of a floor, which is decision 177's promise being kept: the test that documented the gap is the
      test that now proves it closed.
 
+182. **A third planning pass (2026-08-22) scoped the whole back half of Phase 3, and cut two things
+     the plan had been carrying since it was written.** Twenty-eight questions, four at a time, over
+     3.7 through 3.11 plus what follows. Grouped by what they settle:
+
+     **Two cuts, and they are the load-bearing part of this pass.**
+
+     - **OS-level plugin sandboxing is cut, permanently, not deferred.** Decision 177 measured the
+       gap — a plugin that gets past install reaches the whole filesystem — and PLAN.md's Phase 3
+       carried AppContainer/seccomp as future work. It is now *not* future work. What remains is the
+       install-time pipeline (bundle, deny-scan, content-addressing, hash-verify-on-load), the
+       resource limits that already exist (Job Object, RSS watchdog, frame budgets), and honest
+       wording. **PLAN.md correction 6 stops being a temporary posture and becomes the permanent
+       one:** it is not a security sandbox, it will not become one, and the docs and consent UI say
+       plainly that a plugin runs with the user's own privileges.
+     - **Ed25519 signing and trust tiers are cut from v1** (reversing the half of correction 5 that
+       survived decision 165's deferral to 3.8). With no registry, install is a local path or a
+       pinned git commit, and the commit pin is the provenance. Signing without a key-distribution
+       story is ceremony, and a hold-to-confirm on "unsigned" is meaningless when *every* plugin is
+       unsigned. **The remnants come out with it**: the `signing` field in the manifest Zod schema,
+       `plugins.trust` and `plugins.publisher_key`, and the `signed` tier in the docs. That bumps
+       `GRANT_HASH_VERSION` and re-prompts every existing grant, of which there are approximately
+       none — which is exactly why now is the moment to do it and not later.
+     - **The docs are rewritten before 3.7, not with 3.11.** `packages/plugin-api/docs/` is the only
+       thing an author outside this repository reads, and its security-model page currently promises
+       signature verification and a sandbox roadmap that will never arrive. A doc that overclaims a
+       protection is worse than no doc.
+
+     **3.7 storage.**
+
+     - **Capabilities become real machinery, not a synthetic scope.** `PluginGrant` grows
+       `capabilities`, `GatedMethod` grows a `capability` field beside `scope`, and the gate checks
+       both. The grant row has carried a `capabilities` column since migration 006 and
+       `liveGrant` has been silently dropping it. Synthetic scopes were the cheap alternative and
+       were declined: `storage` is not a VRChat scope, the consent sheet has to explain the
+       difference regardless, and `webhook` and `fetch:allowlist` need the same field next.
+     - **Quota is a `stat` on `plugin-data/<id>/`, checked before the write**, refusing with
+       `E_QUOTA`. PLAN.md already said "quota is a `stat`"; the reason to keep it over
+       `page_count × page_size` is that the stat sees the WAL and every stray file, which is the
+       number that actually fills the user's disk. It lags checkpointing and can refuse against
+       space already reclaimed; that is the accepted cost of never overshooting.
+     - **The per-plugin database gets its own minimal opener, not `Store`.** `Store` carries nine
+       migrations, `prepareAll`, and a retention engine, none of which a two-table plugin file wants,
+       and coupling them means a daemon migration has to reason about files the daemon does not own.
+     - **Uninstall is `rm -rf` over the data dir by default, with a keep checkbox** in 3.8's UI. The
+       TODO at `wiring/plugin-host.ts` naming 3.7 is answered.
+     - **`records` is key-prefix + time-window + limit, and nothing more.** No tag index, no
+       `json_extract` filtering. One index covers it and it cannot become a table scan a plugin
+       blames the host for. **Pruning is entirely the plugin's**, which is what `E_QUOTA`'s own doc
+       comment already says: deleting records is the fix, not waiting.
+     - **A stored value is arbitrary JSON up to 256KB**, comfortably inside the 1MiB frame cap with
+       room for the envelope, and already subject to `MAX_JSON_DEPTH`.
+     - **The prelude grows the whole `ctx` surface here** — `ctx.vrchat`, `ctx.storage`, `ctx.events`
+       and the request/response correlation behind them — not just `ctx.storage`. Today the prelude
+       has *no* client surface at all and a plugin author writes raw envelope frames, which every
+       page in `packages/plugin-api/docs/` already contradicts. Two ways to call the host inside one
+       prelude would be the worse outcome of doing this by halves.
+     - **3.4's outstanding budget readout lands here too**, which means a first slice of the plugin
+       management screen arrives with 3.7 rather than waiting for 3.8.
+
+     **3.8 consent and management UI.**
+
+     - **Install blocks.** `POST /api/plugins` parks until the consent sheet resolves and then
+       returns 201 or a denial. One request, one outcome, no pending table and no second poll. The
+       pending-queue shape that third-party apps use exists because *VRChat's own login flow* is what
+       drives it; a plugin install has a human on the other end of the same session.
+     - **`permissions.events` becomes enforceable.** Migration 007 adds an `events` column to
+       `plugin_grants`, `PluginGrant` carries it, and the events bridge filters on it. `grantHash`
+       has covered `events` since 3.1, so the column is additive and no hash bump is needed *for this*
+       (the signing removal bumps it anyway). This closes the Gotcha where a plugin that declared
+       `friend.*` at consent could subscribe to `gamelog.*` on the strength of `sessions:read`.
+     - **Hold-to-confirm stays, on every install.** With signing cut there is no tier to distinguish,
+       and the sentence being confirmed — this plugin can do anything your computer can do — is now
+       unconditionally true. The friction is the honest part of the design, so it does not get
+       downgraded to the two-click arm the Connected apps page uses. `ui/` has no press-and-hold
+       primitive; building one, keyboard path included, is part of 3.8.
+     - **The UI installs from a local path only.** The pinned git URL stays an outstanding 3.5 item;
+       a git fetch has its own failure vocabulary the sheet would have to speak.
+
+     **3.9 renderer.**
+
+     - **The panel tree rides `/api/stream` as a new frame type, as a keyed patch.** Reusing the
+       socket gets its backoff, auth, and tab-hidden pause for free. Patching rather than whole-tree
+       replacement is what keeps a table from re-sending on every intent against a 1MiB frame cap —
+       and it owes a stated rule for identity when a plugin omits `key`.
+     - **`table` pages; it does not virtualize.** `PagedSection` and `ScrollSentinel` already exist
+       and are how every other long list in this app behaves. No windowing dependency, no
+       hand-rolled fixed-row-height machinery, and `MAX_TABLE_ROWS` becomes a ceiling rather than a
+       promise to render ten thousand rows at once.
+     - **Sort and filter are host-side over the rows the host holds.** No round trip per click. The
+       consequence a plugin author must be told: what you did not send cannot be filtered.
+     - **An intent shows optimistic `busy` on the node it came from and leaves the rest of the tree
+       live.** On `E_TIMEOUT` or a crash mid-intent, an inline error replaces the busy and the tree
+       stays as it was. Freezing the panel was the alternative and would let a slow plugin lock its
+       own UI.
+
+     **3.10 and 3.11.**
+
+     - **3.10 ships registration, runtime and the type checker, with no editor.** A plugin registers
+       `NodeDefinition`s, the daemon holds them, arms triggers and executes actions, and
+       `assignable()` is enforced on save. `@xyflow/svelte` is not installed and the canvas is Phase
+       4's; pulling it forward would start Phase 4 inside Phase 3. This is testable end to end
+       without a pixel.
+     - **`create-vrcz-plugin` and `vrcz dev` are both modes of the shipped `.exe`**, the way the
+       plugin host already is. No npm publish for the template and no third artifact to version
+       against the protocol major. An author needs the app before they can write a plugin, which
+       they need anyway.
+     - **Reference docs are generated and committed, without a CI drift check.** Scope table,
+       manifest reference, event catalog, port matrix. The `packages/api` posture (regenerate in CI,
+       fail on a dirty tree) was declined here because these are docs, not a client whose staleness
+       ships wrong requests.
+
+     **What follows Phase 3 is Phase 4**, the node graph, because 3.10 leaves it needing mostly the
+     canvas and the gap between them will never be smaller. **Phase 2's last item — an end-to-end
+     pass against `/app` with a real third-party client — is not scheduled**: it needs a genuine
+     third-party app to mean anything, so it stays open and honestly labelled rather than being
+     ticked by a test that impersonates one.
+
 ---
 
 ## Gotchas
@@ -3013,6 +3176,12 @@ the per-plugin budget, how much of `ctx.vrchat` ships first, the two Windows lim
 hostile suite runs in CI, and what counts as verification. It also **dropped the `EAGER_FILL_LIMIT`
 measurement** outright rather than leaving it open (decision 164).
 
+**A third pass the same day scoped the back half of Phase 3** — twenty-eight questions, four at a
+time, all of them answered in decision 182 and listed at the bottom of this section. Two of them are
+**cuts rather than answers**, which is why this pass closed more work than it opened: OS-level
+plugin sandboxing and Ed25519 signing are both out of the plan entirely, and the docs that describe
+them are wrong until step 3.0 rewrites them.
+
 - **~~Can JSC's small-heap mode be selected any way other than at process launch?~~ Closed by
   decision 111**, which removes the need to know: the plugin host is a real `bun` fetched on demand,
   so `--smol` is ordinary argv again. What replaced it is smaller and concrete — **verify the Bun
@@ -3067,3 +3236,39 @@ measurement** outright rather than leaving it open (decision 164).
 - What lifts dry-run on outbound social actions → an explicit per-scope gesture, never a timer (109).
 - How much declarative UI vocabulary ships first → forms, tables, dialogs, menus, handlers; charts
   when a plugin is genuinely blocked on one (110).
+
+### Closed by the third 2026-08-22 planning pass
+
+All of these are decision 182; one line each so a closed question leaves a trace.
+
+- Whether OS-level plugin sandboxing gets built → **cut permanently**, not deferred; correction 6
+  becomes the standing posture rather than a temporary one.
+- Whether Ed25519 signing and trust tiers ship in v1 → **cut**, and their remnants (`signing` in the
+  manifest, `plugins.trust`, `plugins.publisher_key`, the `signed` tier) come out with them.
+- When the docs describing those two get rewritten → **before 3.7**, as step 3.0.
+- What is built next → 3.7 storage, in the plan's own order.
+- How a capability is enforced → a real `capability` field on `GatedMethod` and `capabilities` on
+  `PluginGrant`, not a synthetic scope.
+- How quota is measured → a `stat` on the data dir, checked pre-write, refusing `E_QUOTA`.
+- Whether the per-plugin DB reuses `Store` → no, its own minimal opener.
+- What uninstall does with plugin data → `rm -rf` by default, with a keep checkbox in 3.8.
+- How rich the `records` query is → key prefix + time window + limit, nothing more.
+- Who prunes `records` → the plugin, entirely.
+- Whether the prelude grows a client surface → yes, the whole `ctx`, with 3.7.
+- How big a stored value may be → arbitrary JSON to 256KB.
+- Where the plugin consent gesture lives → a **blocking** install, no pending table.
+- Whether `permissions.events` becomes enforceable → yes, migration 007 adds the column and the
+  grant field.
+- What hold-to-confirm guards now that every plugin is unsigned → every install.
+- Whether 3.8's UI installs from git → local path only; git stays 3.5's outstanding item.
+- How a plugin UI tree reaches the browser → a new `/api/stream` frame type carrying a keyed patch.
+- How `table` handles ten thousand rows → it pages, reusing `PagedSection`/`ScrollSentinel`.
+- Who sorts and filters a table → the host, over the rows it holds.
+- What a panel does mid-intent → optimistic `busy` on the node, the rest of the tree stays live.
+- What 3.10 delivers → registration, runtime and the type checker; no editor, that is Phase 4.
+- What `create-vrcz-plugin` and `vrcz dev` are → modes of the shipped `.exe`.
+- How hard the generated-docs gate is → generated and committed, no CI drift check.
+- Where 3.4's budget readout lands → with 3.7.
+- When Phase 2's end-to-end pass happens → **not scheduled**; it needs a real third-party client to
+  mean anything, so it stays open rather than being ticked by a test impersonating one.
+- What follows Phase 3 → Phase 4, the node graph.

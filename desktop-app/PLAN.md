@@ -11,7 +11,9 @@ VRCX is the incumbent VRChat companion app, and it has four structural problems 
 
 Additionally, every VRChat tool on a user's machine logs in independently, each burning one of the undisclosed number of concurrent sessions VRChat allows and each hammering the API on its own schedule.
 
-**vrc.zip** is a Bun daemon that: runs on Windows and Linux equally; idles at 50–80MB; treats multiple accounts as the normal case; exposes a scoped, byte-faithful mirror of the VRChat REST API so other local apps stop logging in separately; and is extensible through a sandboxed plugin system and a node-graph automation editor.
+**vrc.zip** is a Bun daemon that: runs on Windows and Linux equally; idles at 50–80MB; treats multiple accounts as the normal case; exposes a scoped, byte-faithful mirror of the VRChat REST API so other local apps stop logging in separately; and is extensible through a permissioned plugin system and a node-graph automation editor. (This
+said *sandboxed*. It is not — see §Phase 3 correction 6, which is a permanent statement, not a
+staging note.)
 
 ### Guardrails (non-negotiable, they shape the design)
 
@@ -684,10 +686,15 @@ Design pass complete. Headline correction to the original assumption:
 
 `Bun.spawn` per plugin with `env: {}`, behind a `PluginTransport` interface so `Worker` stays available
 for dev and first-party. A process buys real memory caps (Job Object on Windows, `RLIMIT_AS` on Linux),
-a `kill(9)` that always wins, crash containment, and — the part that matters most — it is the only
-granularity from which OS-level sandboxing (AppContainer, seccomp) is reachable later **without changing
-the plugin API by one character**. Pool verified plugins into one shared process; one dedicated process
-per unverified plugin.
+a `kill(9)` that always wins, and crash containment. Pool verified plugins into one shared process; one
+dedicated process per unverified plugin.
+
+**This sentence used to continue "and it is the only granularity from which OS-level sandboxing
+(AppContainer, seccomp) is reachable later". That is still true and it is no longer a plan.**
+Decision 182 cut OS-level sandboxing permanently rather than deferring it. What confines a plugin is
+the install-time pipeline plus resource limits, and neither of those stops a plugin that gets past
+install from reading the filesystem — see correction 6, which is now a permanent statement about
+what this is rather than a caution about what it is not yet.
 
 **Spawn with `--smol`.** Plugin processes are overwhelmingly idle event handlers, so JSC's small-heap
 configuration is the right trade: less resident memory, more frequent GC. That matters directly here —
@@ -785,8 +792,14 @@ Input
   `userPicker`, `worldPicker`, `form` (grouped submit with per-field validation messages)
 
 Data display
-: `table` (sortable, filterable, **virtualized** — friend lists get long), `list`, `tree`,
-  `descriptionList`, `timeline`
+: `table` (sortable, filterable, **paged** — friend lists get long), `list`, `tree`,
+  `descriptionList`, `timeline`. This said *virtualized*; decision 182 makes it paged, over the
+  `PagedSection` / `ScrollSentinel` primitives every other long list in the app already uses, so
+  there is no windowing dependency and no hand-rolled fixed-row-height machinery. `MAX_TABLE_ROWS`
+  is a ceiling on what a plugin may send, not a promise to draw ten thousand rows at once.
+  **Sorting and filtering are host-side over the rows the host holds** — no round trip per click,
+  and the consequence an author must be told plainly is that what you did not send cannot be
+  filtered.
 
 Charts — first-class, because this was the reason people would have wanted an iframe
 : `chart` with `line`, `area`, `bar`, `stackedBar`, `pie`, `donut`, `scatter`, `heatmap`, `sparkline`.
@@ -824,6 +837,17 @@ diffing on an optional `key` field keeps input focus and scroll position stable 
 `ui.patchPanel(panelId, path, node)` exists for the common case of updating one subtree without
 resending the whole thing.
 
+**The tree reaches the browser as a new frame type on the existing `/api/stream` socket, carrying a
+keyed patch** (decision 182). Reusing that socket inherits its backoff, its auth, and its pause while
+the tab is hidden. Patching rather than replacing is what keeps a table off the wire on every intent,
+against a 1MiB frame cap — and it owes a stated rule for how identity is decided when a plugin omits
+`key`, since most will.
+
+**Between dispatching an intent and the next tree arriving, the host marks the originating node
+`busy` and leaves the rest of the tree live.** On `E_TIMEOUT` or a plugin crash mid-intent, an inline
+error replaces the busy and the tree stays as it was. Freezing the whole panel was the alternative,
+and it lets a slow plugin lock its own UI for no property gained.
+
 Plugins can also push without a user action: `ui.toast`, `ui.dialog`, `ui.notify` (the OS/VR
 notification path), and `ui.setBadge(panelId, count)` for the sidebar.
 
@@ -856,14 +880,35 @@ that replacement; the other half is the `webhook` capability.
 
 Consent shows plain-English scope descriptions from the shared registry, `dangerous` scopes in a
 separate block behind a second toggle, an **account picker** (a plugin with `friends:read` must not
-implicitly get it for all six of your accounts), event subscriptions in plain language, and the trust
-tier — including a hold-to-confirm on *"Unsigned — this plugin can do anything your computer can do."*
+implicitly get it for all six of your accounts), event subscriptions in plain language, and a
+**hold-to-confirm on every install** — *"this plugin can do anything your computer can do"* — which
+is unconditional now that correction 5 cut the trust tier that used to qualify it.
 Grants are stored immutably keyed by `(pluginId, version, grantHash)`, so an update that adds a scope
-provably re-prompts and a downgrade can't silently reuse a broader grant.
+provably re-prompts and a downgrade can't silently reuse a broader grant. **Install blocks**: the
+request that starts it parks until the sheet resolves and returns the grant or the denial, rather
+than queueing a pending row the way a third-party app's login does — a plugin install has a human on
+the other end of the same session, so there is nothing to poll for.
 
-**One SQLite file per plugin** in its own data dir. Uninstall is `rm -rf`; quota is a `stat`; a plugin
-can't lock or corrupt the daemon's WAL. Exposed as a `StorageApi` capability (KV + append-only
-`records` with a filter query), 50MB default quota. Raw SQL is a later opt-in capability.
+`permissions.events` is part of the grant, not a declaration beside it: the grant row and the
+in-memory grant both carry the event patterns, and the events bridge filters on them. Anything shown
+on the consent sheet that the host does not enforce is a lie told with a checkbox.
+
+**One SQLite file per plugin** in its own data dir, opened by its own minimal opener rather than the
+daemon's `Store` — a two-table plugin file wants none of nine migrations, `prepareAll`, or a
+retention engine, and coupling them would make a daemon migration reason about files the daemon does
+not own. Uninstall is `rm -rf` (with a keep checkbox for the reinstall case); **quota is a `stat` on
+the data dir, checked before the write** and refused with `E_QUOTA`, because the stat sees the WAL
+and every stray file, which is the number that fills the user's disk. A plugin can't lock or corrupt
+the daemon's WAL. Exposed as a `StorageApi` **capability** — and a capability is now a real field on
+the grant and on the method definition beside `scope`, not a synthetic scope string. KV plus an
+append-only `records` table queried by **key prefix, time window and limit, and nothing else**: one
+index covers that and it cannot degrade into a table scan the plugin blames the host for. A value is
+arbitrary JSON up to 256KB. 50MB default quota, and **the plugin does all its own pruning** — the
+fix for a full quota is deleting records, not waiting. Raw SQL is a later opt-in capability.
+
+The plugin-side `ctx` — `ctx.vrchat`, `ctx.storage`, `ctx.events` and the request/response
+correlation behind them — lives in the injected prelude, so a plugin author never writes an envelope
+frame by hand.
 
 Disable must be instant and always succeed — the kill path is not optional. Automation graphs
 referencing a disabled plugin's node types are **paused and marked unavailable, never deleted**.
@@ -871,7 +916,11 @@ referencing a disabled plugin's node types are **paused and marked unavailable, 
 ### Node type registration
 
 One declarative `NodeDefinition` feeds three consumers — the Svelte Flow editor, the graph runtime, and
-the type checker — so they cannot drift. A small closed port-type lattice with exactly two widening
+the type checker — so they cannot drift. **Only two of those three exist in Phase 3.** Decision 182
+scopes 3.10 to registration, the runtime that arms triggers and executes actions, and `assignable()`
+enforced on save; `@xyflow/svelte` is not a dependency yet and the canvas is Phase 4's, which is also
+what Phase 4 is then mostly *made of*. The point of the single definition is unaffected — the third
+consumer reads the same object when it arrives. A small closed port-type lattice with exactly two widening
 rules (`friend <: user`, `X <: json`); every additional rule is an explanation you owe a user whose
 edge just got refused.
 
@@ -887,7 +936,7 @@ saved graphs; an incompatible plugin update prompts for migration rather than si
 
 ### Corrections to the original plugin requirements
 
-1. **`permissions.network` should not exist in v1.** Arbitrary HTTP collapses the sandbox to nothing —
+1. **`permissions.network` should not exist in v1.** Arbitrary HTTP collapses every scope to nothing —
    `friends:read` + network means your friends list is on someone's server. Replace it with two narrow,
    *host-executed* capabilities: `webhook` (POST to a URL the user typed into settings; the plugin
    supplies only the JSON body) and `fetch:allowlist` (host-declared domains shown individually at
@@ -911,32 +960,54 @@ saved graphs; an incompatible plugin update prompts for migration rather than si
    the eighth, and a timed prompt only teaches people to dismiss it. Per-action confirmation is worse
    still — a stream of dialogs whose only rational answer is "always allow" is consent theatre.
    Decision 109.
-5. **Signing + trust tiers.** Ed25519 detached signature with a publisher key registered once. Without
-   it, "install this plugin" is "run this exe." **v1 has no registry**: a plugin is installed from a
-   local path or from a git URL pinned to a commit. A registry is a service to host, moderate and
-   take down from, and `backend/` is out of scope; a pinned git URL gives authors distribution
-   without asking permission while keeping what ran auditable afterwards, which is the property the
-   registry would have been providing. Signing is what makes the *local* case safe — it is not
-   waiting on a registry to be worth having. Decision 107.
-6. **Don't call it a security sandbox until it is one.** Until process + OS sandboxing lands, the docs
-   and the consent UI say "plugins run with your account's privileges; only install plugins you trust."
-   Overclaiming here is how you get a supply-chain incident with your name on it.
+5. **Signing + trust tiers — cut from v1 by decision 182.** The original text argued for an Ed25519
+   detached signature with a publisher key registered once, on the grounds that without it "install
+   this plugin" is "run this exe". That last sentence is still true; signing was simply not the thing
+   that fixed it. **v1 has no registry**: a plugin is installed from a local path or from a git URL
+   pinned to a commit (decision 107). A registry is a service to host, moderate and take down from,
+   and `backend/` is out of scope. **The commit pin is the provenance story**, and it is the whole of
+   it — a signature with no key-distribution mechanism verifies that a key we were handed signed a
+   thing that key signed, which is ceremony. A trust *tier* is likewise meaningless when every plugin
+   sits in the same one. The manifest's `signing` field, the `plugins.trust` and
+   `plugins.publisher_key` columns, and the `signed` tier in the docs all come out; what survives is
+   the hold-to-confirm, applied to **every** install rather than to an "unsigned" one.
+6. **It is not a security sandbox, and it is not going to be one.** This read "don't call it a
+   security sandbox *until* it is one", which made it a caution about wording during a build-out.
+   Decision 182 cut OS-level sandboxing permanently, and decision 177 measured what that leaves: a
+   plugin that gets past install reaches the whole filesystem, including the DB holding VRChat auth
+   cookies. So the docs and the consent UI say "plugins run with your account's privileges; only
+   install plugins you trust", and they go on saying it. Overclaiming here is how you get a
+   supply-chain incident with your name on it; the defence is the install-time pipeline, the resource
+   limits, and a user who was told the truth before they clicked.
 
 ### Docs (`@vrcz/plugin-api`)
 
 Published on npm, versioned on the **protocol major**. `PortType`, `Scope`, `Envelope`, `UINode`, and
 the manifest type live here and the daemon imports the same definitions — one source, no drift.
 `create-vrcz-plugin` with `bun run dev` wired to `vrcz dev` (hot restart, relaxed deny-scan, streamed
-logs) is the highest-leverage docs artifact, because most people never read prose. Generate: TypeDoc
+logs) is the highest-leverage docs artifact, because most people never read prose. **Both are modes
+of the shipped `.exe`**, not an npm package (decision 182): an author needs the app before they can
+write a plugin against it anyway, and a separate CLI is a third artifact to version against the
+protocol major. Generate: TypeDoc
 reference, the scope table from the shared registry, the manifest reference from the Zod schema, the
-event catalog from the typed bus registry, the port compatibility matrix from `assignable()`.
-Hand-write: the mental model, five end-to-end guides, and a blunt security-model page.
+event catalog from the typed bus registry, the port compatibility matrix from `assignable()` —
+generated and committed, without a CI drift check, because these are docs rather than a client whose
+staleness ships wrong requests.
+Hand-write: the mental model, five end-to-end guides, and a blunt security-model page. That last one
+is now **blunter**: correction 6 is permanent, so it describes what will always be true rather than
+a roadmap.
 
 ### Plugin build order
 
 `@vrcz/plugin-api` types → `ProcessTransport` + supervisor → **the hostile plugin** → dispatcher /
-scope gate / rate budget → install pipeline → events bridge → storage → consent and management UI →
-declarative UI renderer → nodes → scaffolder and docs.
+scope gate / rate budget → install pipeline → events bridge → **the corrections 5 and 6 cuts, and
+the docs rewrite that goes with them** → storage → consent and management UI → declarative UI
+renderer → nodes → scaffolder and docs.
+
+The cuts land *before* storage rather than whenever it is convenient, because
+`packages/plugin-api/docs/` is the only thing an author outside this repository reads and it
+currently promises signature verification and a sandbox roadmap that no longer exist. Removing a
+feature is cheap; removing a documented promise after someone has built against it is not.
 
 **The deliberately hostile plugin comes third, immediately after the supervisor** — spin loop, memory
 bomb, `import("node:"+"fs")`, event flood, and a lifecycle hook that never returns. Written later it
@@ -944,7 +1015,7 @@ would only validate a design already committed to; written here, every claim aft
 deny-scan, the RSS watchdog, event-flood backpressure — is tested against a live adversary as it is
 made. It is the regression suite for everything above. Decision 108.
 
-The **declarative UI renderer's first cut is forms, virtualized tables, dialogs, context menus and
+The **declarative UI renderer's first cut is forms, paged tables, dialogs, context menus and
 per-node click handlers** — what a settings-and-list plugin needs, which is most of them. Charts
 follow rather than ship with it: they were the one legitimate argument for the iframe escape hatch
 that §UI cut, so shipping them badly reopens a closed decision. The first plugin genuinely blocked on
@@ -1046,8 +1117,8 @@ replaces it). Update checker. Optional Windows webview shell (webview-bun / Bunt
 | VRChat changes/breaks API endpoints | Pin the spec; codegen is a deliberate step, not automatic; version the proxy's advertised spec version |
 | Session limit exhaustion | Reuse cookies, never logout on exit, one session per account regardless of how many third-party apps are connected — this is the proxy's whole point |
 | 429 / moderation action | Mandatory backoff, jittered non-clock-aligned polling, honest UA, audit log, kill switch |
-| Bun Worker is not a security boundary (`import()` cannot be disabled) | Resolved: child process per plugin + install-time bundling with an AST deny-scan; OS sandboxing reachable later without an API change |
+| Bun Worker is not a security boundary (`import()` cannot be disabled) | **Mitigated, not resolved.** Child process per plugin + install-time bundling with an AST deny-scan + resource limits. Decision 182 cut OS sandboxing permanently, and decision 177 measured what remains: a plugin past install reaches the whole filesystem. The residual risk is *accepted and disclosed* — see correction 6 — not scheduled away |
 | Plugin UI code stealing the session token | Resolved: declarative `UINode` schema rendered by host components; the plugin never gets a DOM node, and there is **no escape hatch** — a bypass would mean the property only holds for plugins that declined to use it |
-| Declarative UI too limited, authors feel boxed in | The vocabulary is deliberately broad (charts, virtualized tables, dialogs, context menus, forms — see §Phase 3 UI). A genuine wall is answered with a new host node type contributed upstream, not a hole for one plugin. Watch for this in early plugin feedback |
+| Declarative UI too limited, authors feel boxed in | The vocabulary is deliberately broad (paged tables, dialogs, context menus, forms — see §Phase 3 UI; charts follow, per decision 110). A genuine wall is answered with a new host node type contributed upstream, not a hole for one plugin. Watch for this in early plugin feedback |
 | Linux path detection misses a setup | Every detected path is shown and overridable; never fail silently |
 | libsecret absent | File-backed key at `0600` with a loud UI warning, not a crash |

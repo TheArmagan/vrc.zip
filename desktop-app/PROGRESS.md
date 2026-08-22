@@ -2730,6 +2730,39 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      this: it narrowed by excluding the two non-event types, so adding a fourth member meant
      updating it or every screen reading `payload.accountId` would treat a panel frame as an event.
 
+192. **The renderer draws, and two defects only the browser could show.** `UiNode.svelte` is one
+     recursive component with a `{#if}` chain over `node.type` rather than a component per type:
+     twenty-odd two-line wrappers would be twenty-odd files whose only content is a wrapper, and the
+     recursion passes the panel, the form scope and the node path down through every one of them,
+     which is where drift starts. Node identity is the **path** (`notes.0.2`), or the plugin's own
+     `key` when it has one — that identity is what `busy` and per-node errors are keyed on, so
+     pressing one button marks that button and not the panel.
+
+     **Defect one: the runtime never handled inbound `req` frames.** `req` is bidirectional in the
+     protocol and `ui.intent` is the host calling the *plugin*, but `Runtime#handle` only knew
+     `res`/`err`/`event`/`dropped`/`lifecycle`. Every intent would have sat unanswered until its
+     deadline, which the host reads as a plugin that has stopped responding rather than one that
+     never learned to listen. `PluginHooks.onIntent` and a `#hostCall` branch close it; an unknown
+     method and a missing hook are both answered as errors, because silence and refusal are the same
+     observation to a caller with a deadline and only one of them is diagnosable.
+
+     **Defect two, and it is the same trap twice.** `parseFrame` in `ui/src/lib/stream.ts` handled
+     `ready` and `rate` and funnelled *everything else* into `asPayload`, which shapes a value into a
+     `StreamEnvelope`. A panel frame survived that with its `type` intact and its payload replaced by
+     an envelope of nulls — so the state module saw a frame it recognised carrying nothing it could
+     use, and the panel silently never updated. **`isEventFrame` on the daemon side carries a comment
+     warning about exactly this fourth-member problem**, and the client's parser had it too. One
+     warning, two implementations, and only one of them had been fixed.
+
+     Verified in a browser, which is the only place either defect was visible: the panel renders,
+     clicking a button dispatches an intent, the plugin answers with a keyed patch, and the text node
+     updates live while the table beside it keeps its rows and its sort.
+
+     One process note worth keeping: navigating to a URL that differs only in its hash does **not**
+     reload the page, so the first "the fix did not work" reading was a stale bundle running against
+     a fixed daemon. A cache-busting query is the difference between testing the build and testing
+     what the browser happened to still have.
+
 ---
 
 ## Gotchas

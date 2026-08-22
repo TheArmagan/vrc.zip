@@ -42,7 +42,9 @@ import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
 import { Skeleton } from "$lib/components/ui/skeleton/index.js";
 import { Switch } from "$lib/components/ui/switch/index.js";
+import UiNode from "$lib/components/plugin-ui/UiNode.svelte";
 import { app } from "$lib/state/app.svelte.ts";
+import { pluginPanels } from "$lib/state/plugin-panels.svelte.ts";
 import { clock } from "$lib/state/clock.svelte.ts";
 
 let plugins = $state<InstalledPlugin[]>([]);
@@ -95,6 +97,9 @@ async function load(): Promise<void> {
     plugins = await api.plugins.list();
     loadError = null;
     void refreshPending();
+    // Panels are seeded per plugin from REST, then kept live by `plugin.panel` frames. A plugin
+    // that draws nothing simply has none.
+    for (const plugin of plugins) void pluginPanels.load(plugin.id);
   } catch (error) {
     loadError = describeError(error);
   } finally {
@@ -505,6 +510,22 @@ function secondsLeft(requestedAt: number): number {
               {/each}
             </div>
           {/if}
+
+          {#each pluginPanels.panelsFor(plugin.id) as panel (panel.panelId)}
+            <!--
+              The plugin's own surface, drawn by this app's components. `path` seeds node identity;
+              `form` is null until a `form` node opens a scope.
+            -->
+            <section class="mt-3 rounded border border-border p-3">
+              <UiNode
+                node={panel.tree}
+                pluginId={panel.pluginId}
+                panelId={panel.panelId}
+                path={panel.panelId}
+                form={null}
+              />
+            </section>
+          {/each}
 
           <footer class="mt-3 flex flex-wrap items-center gap-2">
             <Button

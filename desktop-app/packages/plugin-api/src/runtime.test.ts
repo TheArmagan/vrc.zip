@@ -110,6 +110,76 @@ describe("definePlugin", () => {
   });
 });
 
+describe("host calls", () => {
+  /**
+   * Without this, every `ui.intent` sits unanswered until its deadline — which the host reads as a
+   * plugin that has stopped responding rather than one that never learned to listen. Found by
+   * running a real panel, not by a test.
+   */
+  test("ui.intent reaches onIntent and is answered on the same id", async () => {
+    installHost();
+    const seen: string[] = [];
+    definePlugin({
+      onIntent(dispatch) {
+        seen.push(dispatch.intent.name);
+        return { handled: true };
+      },
+    });
+
+    deliver({
+      t: "req",
+      id: "h1",
+      method: "ui.intent",
+      deadline: Date.now() + 1000,
+      params: { panelId: "notes", intent: { name: "clicked" }, formState: {} },
+    });
+    await Bun.sleep(1);
+
+    expect(seen).toEqual(["clicked"]);
+    expect(sent.at(-1)).toEqual({ t: "res", id: "h1", result: { handled: true } });
+  });
+
+  test("a plugin with no onIntent answers an error rather than leaving the button spinning", async () => {
+    installHost();
+    definePlugin({});
+    deliver({
+      t: "req",
+      id: "h2",
+      method: "ui.intent",
+      deadline: Date.now() + 1000,
+      params: { panelId: "notes", intent: { name: "clicked" }, formState: {} },
+    });
+    await Bun.sleep(1);
+    expect(sent.at(-1)).toMatchObject({ t: "err", id: "h2", error: { code: "E_UNKNOWN_METHOD" } });
+  });
+
+  test("a method this plugin does not speak is refused, not ignored", async () => {
+    installHost();
+    definePlugin({ onIntent: () => null });
+    deliver({ t: "req", id: "h3", method: "ui.somethingNew", deadline: Date.now() + 1000 });
+    await Bun.sleep(1);
+    expect(sent.at(-1)).toMatchObject({ t: "err", id: "h3", error: { code: "E_UNKNOWN_METHOD" } });
+  });
+
+  test("an onIntent that throws answers err", async () => {
+    installHost();
+    definePlugin({
+      onIntent() {
+        throw new Error("bad handler");
+      },
+    });
+    deliver({
+      t: "req",
+      id: "h4",
+      method: "ui.intent",
+      deadline: Date.now() + 1000,
+      params: { panelId: "notes", intent: { name: "x" }, formState: {} },
+    });
+    await Bun.sleep(1);
+    expect(sent.at(-1)).toMatchObject({ t: "err", id: "h4", error: { code: "E_INTERNAL" } });
+  });
+});
+
 describe("calls", () => {
   test("a response resolves the matching promise", async () => {
     installHost();

@@ -44,6 +44,7 @@ import {
   type PluginEvent,
 } from "./protocol.ts";
 import type { StorageRecord, StorageUsage } from "./storage.ts";
+import type { UiIntentDispatch } from "./ui.ts";
 
 /** What the prelude installs. Declared structurally so this file imports nothing from the host. */
 interface HostSeam {
@@ -161,6 +162,14 @@ export interface EventsApi {
 export interface PluginHooks {
   activate?(ctx: PluginContext): unknown | Promise<unknown>;
   deactivate?(): unknown | Promise<unknown>;
+  /**
+   * A user acted on one of your panels.
+   *
+   * The host is *waiting on this frame* with a deadline, so answer promptly and push the resulting
+   * tree separately with `ctx.call("ui.setPanel", …)`. Returning only when the redraw is done would
+   * make every slow update look like a plugin that stopped responding.
+   */
+  onIntent?(dispatch: UiIntentDispatch, ctx: PluginContext): unknown | Promise<unknown>;
 }
 
 /** The one `onFrame` slot means one runtime. Tracked so a second `definePlugin` can say so. */
@@ -257,6 +266,12 @@ class Runtime {
       case "lifecycle":
         void this.#lifecycle(frame);
         return;
+      case "req":
+        // The host calling *us*. `req` is bidirectional in the protocol, and without this branch
+        // every `ui.intent` would sit unanswered until its deadline — which reads to the host as a
+        // plugin that has stopped responding rather than one that never learned to listen.
+        void this.#hostCall(frame);
+        return;
       default:
         // A frame this protocol major does not know is ignored rather than fatal: the host is
         // entitled to grow tags, and a plugin that dies on an unfamiliar one would make every such
@@ -290,6 +305,53 @@ class Runtime {
       }
     }
     this.#host.send({ t: "credit", sub, credits: Math.min(events.length, MAX_CREDITS) });
+  }
+
+  /**
+   * Answers a call the host made on this plugin.
+   *
+   * One method today. An unknown one is answered `E_UNKNOWN_METHOD` rather than ignored, because
+   * silence and refusal are the same observation to a caller with a deadline, and only one of them
+   * tells the host that this plugin is a version that does not speak it.
+   */
+  async #hostCall(frame: Record<string, unknown>): Promise<void> {
+    const id = String(frame.id);
+    if (frame.method !== "ui.intent") {
+      this.#host.send({
+        t: "err",
+        id,
+        error: { code: "E_UNKNOWN_METHOD", message: `This plugin does not answer ${String(frame.method)}.` },
+      });
+      return;
+    }
+    const hook = this.#hooks.onIntent;
+    if (hook === undefined) {
+      // A panel with handlers but no `onIntent` is a plugin that drew a button it cannot answer.
+      // Answered as an error, so the host can show it rather than leaving the button spinning.
+      this.#host.send({
+        t: "err",
+        id,
+        error: {
+          code: "E_UNKNOWN_METHOD",
+          message: "This plugin drew a handler but defines no onIntent hook.",
+        },
+      });
+      return;
+    }
+    try {
+      const result = await hook.call(
+        this.#hooks,
+        frame.params as unknown as UiIntentDispatch,
+        this.ctx,
+      );
+      this.#host.send({ t: "res", id, result: result === undefined ? null : result });
+    } catch (error) {
+      this.#host.send({
+        t: "err",
+        id,
+        error: { code: "E_INTERNAL", message: String((error as Error)?.message ?? error) },
+      });
+    }
   }
 
   async #lifecycle(frame: Record<string, unknown>): Promise<void> {

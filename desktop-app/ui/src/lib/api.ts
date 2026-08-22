@@ -631,6 +631,19 @@ export interface InstalledPlugin {
   readonly budgets: readonly PluginBudget[];
 }
 
+/**
+ * One panel a plugin is drawing.
+ *
+ * `tree` is typed loosely on the wire and cast to `UINode` by the renderer, which imports the real
+ * type from `@vrcz/plugin-api/ui`. It has already been validated by the daemon.
+ */
+export interface PluginPanel {
+  readonly pluginId: string;
+  readonly panelId: string;
+  readonly tree: unknown;
+  readonly updatedAt: number;
+}
+
 /** One risky scope on a plugin's card: what it has spent this hour, and whether it is shadowed. */
 export interface PluginBudget {
   readonly scope: string;
@@ -1369,6 +1382,31 @@ export const api = {
       request<InstalledPlugin>(
         `/plugins/${encodeURIComponent(pluginId)}/dry-run/${encodeURIComponent(scope)}`,
         { method: "PUT", body: { lifted } },
+      ),
+
+    /** Every panel this plugin is drawing right now, as the daemon currently holds them. */
+    panels: (pluginId: string, signal?: AbortSignal): Promise<PluginPanel[]> =>
+      request<PluginPanel[]>(
+        `/plugins/${encodeURIComponent(pluginId)}/panels`,
+        withSignal(signal),
+      ),
+
+    /**
+     * Sends one user action to a plugin.
+     *
+     * Resolves when the plugin has *received* it, not when it has redrawn — the new tree arrives on
+     * the event socket. That split is what lets the renderer mark one node busy rather than
+     * blocking a panel on a redraw that may never come.
+     */
+    intent: (
+      pluginId: string,
+      panelId: string,
+      intent: { name: string; payload?: Record<string, string | number | boolean> },
+      formState: Record<string, string | number | boolean>,
+    ): Promise<void> =>
+      request<void>(
+        `/plugins/${encodeURIComponent(pluginId)}/panels/${encodeURIComponent(panelId)}/intent`,
+        { method: "POST", body: { intent, formState } },
       ),
 
     pending: (signal?: AbortSignal): Promise<PendingPluginConsent[]> =>

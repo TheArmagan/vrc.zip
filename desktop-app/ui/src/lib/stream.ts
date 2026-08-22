@@ -19,6 +19,8 @@
 import {
   type EventKind,
   type RateFrame,
+  type PluginPanelFrame,
+  STREAM_PLUGIN_PANEL,
   STREAM_RATE,
   STREAM_READY,
   type StreamEnvelope,
@@ -101,6 +103,27 @@ function asCounts(value: unknown): Record<string, number> {
   return out;
 }
 
+/**
+ * A plugin panel frame's payload, or null if it is not one.
+ *
+ * Validated rather than cast: this is the one frame whose payload the renderer walks, and a
+ * malformed one would surface as a broken panel rather than a dropped frame.
+ */
+function asPanelFrame(value: unknown): PluginPanelFrame | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.pluginId !== "string" || typeof record.panelId !== "string") return null;
+  const op = record.op;
+  if (op !== "set" && op !== "patch" && op !== "close") return null;
+  return {
+    pluginId: record.pluginId,
+    panelId: record.panelId,
+    op,
+    ...(typeof record.key === "string" ? { key: record.key } : {}),
+    tree: (record.tree ?? null) as PluginPanelFrame["tree"],
+  };
+}
+
 /** Narrows an arbitrary parsed frame, dropping anything without a usable `type`. */
 export function parseFrame(raw: string): StreamFrame | null {
   let parsed: unknown;
@@ -123,6 +146,23 @@ export function parseFrame(raw: string): StreamFrame | null {
     // sample leaves the last value on screen for a second, and inventing a zero would draw a dip
     // that never happened.
     return payload === null ? null : { type: STREAM_RATE, ts, payload };
+  }
+
+  if (record.type === STREAM_PLUGIN_PANEL) {
+    /*
+     * Passed through, not coerced.
+     *
+     * This branch is the bug this parser had for exactly one build: everything that was not `ready`
+     * or `rate` fell through to `asPayload`, which shapes a value into a `StreamEnvelope`. A panel
+     * frame survived that with its `type` intact and its payload replaced by an envelope of nulls,
+     * so the state module saw a frame it recognised carrying nothing it could use — and a panel that
+     * never updated, with no error anywhere.
+     *
+     * It is the same trap `isEventFrame` carries a warning about on the daemon side, one layer up:
+     * a three-case parser silently absorbs a fourth case rather than refusing it.
+     */
+    const payload = asPanelFrame(record.payload);
+    return payload === null ? null : { type: STREAM_PLUGIN_PANEL, ts, payload };
   }
 
   return {

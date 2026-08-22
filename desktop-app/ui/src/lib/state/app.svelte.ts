@@ -1,4 +1,4 @@
-import { isEventFrame, isRateFrame } from "@vrcz/shared";
+import { isEventFrame, isPluginPanelFrame, isRateFrame } from "@vrcz/shared";
 /**
  * The shell's shared state: daemon status, accounts, live sessions, settings, and the live event
  * tail. Screens own their own queries; anything the sidebar, the palette, or two screens all need
@@ -33,6 +33,7 @@ import {
 import { consent } from "./consent.svelte.ts";
 import { liveSessions } from "./live-sessions.svelte.ts";
 import { prefs } from "./prefs.svelte.ts";
+import { pluginPanels } from "./plugin-panels.svelte.ts";
 import { rates } from "./rates.svelte.ts";
 
 /** How many live events the shell keeps in memory for the feed's "new since you looked" tail. */
@@ -249,6 +250,11 @@ class AppState {
     // A rate sample is not an event: it must not reach the feed, the notifier, or the live tail.
     if (isRateFrame(frame)) {
       rates.apply(frame.payload);
+      return;
+    }
+    // Nor is a plugin redrawing its own panel. Same reasoning, one union member later.
+    if (isPluginPanelFrame(frame)) {
+      pluginPanels.apply(frame);
       return;
     }
     if (!isEventFrame(frame)) return;

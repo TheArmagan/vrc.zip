@@ -5,7 +5,9 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./runtime": "./src/runtime.ts"
+    "./runtime": "./src/runtime.ts",
+    "./ui": "./src/ui.ts",
+    "./nodes": "./src/nodes.ts"
   },
   "license": "MIT",
   "files": [

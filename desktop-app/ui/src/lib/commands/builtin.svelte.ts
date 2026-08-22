@@ -37,6 +37,7 @@ const NAV_TITLES: Record<RouteId, string> = {
   notifications: "Go to Notifications",
   groups: "Go to a group",
   consent: "Go to App access",
+  apps: "Go to Connected apps",
   settings: "Go to Settings",
 };
 
@@ -50,6 +51,7 @@ const NAV_SUBTITLES: Record<RouteId, string> = {
   notifications: "Invites, friend requests, and messages",
   groups: "Reached from a group badge or a profile, never on its own",
   consent: "Apps asking to use your VRChat accounts through vrc.zip",
+  apps: "Standing app access, and the switch that cuts it off",
   settings: "Contact address, log directories, ports",
 };
 

@@ -46,6 +46,7 @@ const loaders = {
   notifications: () => import("./NotificationsScreen.svelte"),
   groups: () => import("./GroupScreen.svelte"),
   consent: () => import("./ConsentScreen.svelte"),
+  apps: () => import("./ConnectedAppsScreen.svelte"),
   settings: () => import("./SettingsScreen.svelte"),
 } satisfies Record<RouteId, () => Promise<{ default: unknown }>>;
 

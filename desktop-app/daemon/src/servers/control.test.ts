@@ -360,6 +360,9 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
       throw new Error("unused");
     },
     denyConsent: async () => {},
+    listConnectedApps: async () => [],
+    revokeConnectedApp: async () => {},
+    revokeAllConnectedApps: async () => 0,
     streamClientCount: () => 0,
     login: async ({ username }) =>
       username === "needs2fa"

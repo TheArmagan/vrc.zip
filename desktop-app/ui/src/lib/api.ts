@@ -479,6 +479,27 @@ export interface ConsentScope {
   readonly isNew: boolean;
 }
 
+/**
+ * One app holding a live grant, as the Connected apps page renders it.
+ *
+ * **Carries no token and no code.** The grant's token is stored hashed and cannot be handed back
+ * even by the daemon; this page answers "who has access to what, and since when", which needs none
+ * of it. `PendingConsent` above is the one shape in this file that holds a secret, and it is
+ * transient by design.
+ */
+export interface ConnectedApp {
+  readonly id: string;
+  readonly accountId: string;
+  readonly accountName: string;
+  readonly app: { readonly name: string; readonly version: string; readonly contact: string };
+  readonly scopes: readonly ConsentScope[];
+  readonly createdAt: number;
+  /** When the app last called through the mirror. Null if it never has. */
+  readonly lastUsedAt: number | null;
+  /** Live pipeline sockets this grant holds right now. */
+  readonly liveSockets: number;
+}
+
 export interface SettingsPorts {
   readonly ui: number;
   readonly proxy: number;
@@ -995,6 +1016,25 @@ export const api = {
     /** Idempotent: denying something already gone is the outcome the user wanted anyway. */
     deny: (pairingId: string): Promise<void> =>
       request<void>(`/consent/${encodeURIComponent(pairingId)}/deny`, { method: "POST" }),
+  },
+
+  /**
+   * Standing app access, and the way out of it.
+   *
+   * The counterpart to `consent`: that one is about a single moment, this is about access that is
+   * already granted and still live. Revocation is a plain POST rather than a DELETE because it is
+   * idempotent and returns nothing — and because `revokeAll` is a different decision that deserves
+   * its own URL rather than a flag someone can forget to send.
+   */
+  apps: {
+    list: (signal?: AbortSignal): Promise<ConnectedApp[]> =>
+      request<ConnectedApp[]>("/apps", withSignal(signal)),
+
+    revoke: (grantId: string): Promise<void> =>
+      request<void>(`/apps/${encodeURIComponent(grantId)}/revoke`, { method: "POST" }),
+
+    revokeAll: (): Promise<{ revoked: number }> =>
+      request<{ revoked: number }>("/apps/revoke-all", { method: "POST" }),
   },
 
   sessions: (signal?: AbortSignal): Promise<GameSession[]> =>

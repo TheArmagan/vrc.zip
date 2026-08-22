@@ -74,6 +74,12 @@ export interface PipelineSink {
 interface Subscription {
   readonly scopes: ReadonlySet<Scope>;
   readonly sink: PipelineSink;
+  /**
+   * Which grant opened this socket. Revocation is per grant rather than per account, because
+   * PLAN.md is specific: revoking an app's access to one account must not touch the others, and an
+   * account can legitimately have several apps attached to it at once.
+   */
+  readonly grantId: string | null;
 }
 
 export interface PipelineMirrorOptions {
@@ -100,8 +106,13 @@ export class PipelineMirror {
   }
 
   /** Attaches a client to one account's stream. The returned function detaches it. */
-  subscribe(accountId: string, scopes: readonly Scope[], sink: PipelineSink): () => void {
-    const subscription: Subscription = { scopes: new Set(scopes), sink };
+  subscribe(
+    accountId: string,
+    scopes: readonly Scope[],
+    sink: PipelineSink,
+    grantId: string | null = null,
+  ): () => void {
+    const subscription: Subscription = { scopes: new Set(scopes), sink, grantId };
     const existing = this.#byAccount.get(accountId);
     if (existing === undefined) this.#byAccount.set(accountId, new Set([subscription]));
     else existing.add(subscription);
@@ -140,18 +151,53 @@ export class PipelineMirror {
     }
   }
 
-  /** Closes every client of one account. The kill switch, and what revoking a grant reaches for. */
+  /** How many live sockets one grant holds. The Connected apps page shows it per app. */
+  socketsForGrant(grantId: string): number {
+    let count = 0;
+    for (const subscriptions of this.#byAccount.values()) {
+      for (const subscription of subscriptions) {
+        if (subscription.grantId === grantId) count += 1;
+      }
+    }
+    return count;
+  }
+
+  /** Closes every client of one account. The kill switch, per account. */
   disconnectAccount(accountId: string): void {
     const subscriptions = this.#byAccount.get(accountId);
     if (subscriptions === undefined) return;
-    for (const subscription of subscriptions) {
-      try {
-        subscription.sink.close();
-      } catch {
-        // Already gone, which is the outcome we wanted.
-      }
-    }
+    for (const subscription of subscriptions) close(subscription);
     this.#byAccount.delete(accountId);
+  }
+
+  /**
+   * Closes the sockets one grant opened, and nothing else.
+   *
+   * What revoking an app in the UI reaches for. Cutting the whole account would take down every
+   * other app attached to it, which is the opposite of what "revoke this one" means — and the
+   * socket has to be closed at all, because a grant checked once at the handshake would otherwise
+   * keep streaming a revoked app events for as long as it stayed connected.
+   */
+  disconnectGrant(grantId: string): number {
+    let closed = 0;
+    for (const [accountId, subscriptions] of this.#byAccount) {
+      for (const subscription of subscriptions) {
+        if (subscription.grantId !== grantId) continue;
+        close(subscription);
+        subscriptions.delete(subscription);
+        closed += 1;
+      }
+      if (subscriptions.size === 0) this.#byAccount.delete(accountId);
+    }
+    return closed;
+  }
+}
+
+function close(subscription: Subscription): void {
+  try {
+    subscription.sink.close();
+  } catch {
+    // Already gone, which is the outcome we wanted.
   }
 }
 

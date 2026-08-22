@@ -24,6 +24,9 @@ export const ROUTE_IDS = [
   "groups",
   // `#/consent/<pairingId>` — where the daemon's browser-open lands when an app asks for access.
   "consent",
+  // `#/apps` — standing app access, and the kill switch. The consent route above is one moment;
+  // this is what is still connected afterwards.
+  "apps",
   "settings",
 ] as const;
 

@@ -264,3 +264,47 @@ describe("what a default grant actually sees", () => {
     expect(everything.has(PIPELINE_EVENT_SCOPES["group-joined"])).toBe(true);
   });
 });
+
+describe("revocation is per grant", () => {
+  test("closes one app's sockets and leaves the others alone", () => {
+    // PLAN.md is specific: revoking an app's access to one account must not touch the others, and
+    // one account can legitimately have several apps attached at once.
+    const mirror = new PipelineMirror();
+    const revoked = sink();
+    const kept = sink();
+    mirror.subscribe("usr_a", ["friends:read"], revoked, "grant_1");
+    mirror.subscribe("usr_a", ["friends:read"], kept, "grant_2");
+
+    expect(mirror.disconnectGrant("grant_1")).toBe(1);
+    expect(revoked.closed).toBe(true);
+    expect(kept.closed).toBe(false);
+    expect(mirror.subscriberCount).toBe(1);
+  });
+
+  test("a revoked socket stops receiving, not merely stops being counted", () => {
+    // The reason closing matters at all: a grant is checked once at the handshake, so a socket left
+    // open would keep streaming a revoked app events until it happened to reconnect.
+    const mirror = new PipelineMirror();
+    const client = sink();
+    mirror.subscribe("usr_a", ["friends:read"], client, "grant_1");
+
+    mirror.disconnectGrant("grant_1");
+    mirror.publish("usr_a", decoded(FRIEND_ONLINE));
+    expect(client.sent).toEqual([]);
+  });
+
+  test("socketsForGrant counts only that grant's sockets", () => {
+    const mirror = new PipelineMirror();
+    mirror.subscribe("usr_a", ["friends:read"], sink(), "grant_1");
+    mirror.subscribe("usr_a", ["friends:read"], sink(), "grant_1");
+    mirror.subscribe("usr_b", ["friends:read"], sink(), "grant_2");
+
+    expect(mirror.socketsForGrant("grant_1")).toBe(2);
+    expect(mirror.socketsForGrant("grant_2")).toBe(1);
+    expect(mirror.socketsForGrant("grant_nope")).toBe(0);
+  });
+
+  test("revoking a grant with no live socket is not an error", () => {
+    expect(new PipelineMirror().disconnectGrant("grant_1")).toBe(0);
+  });
+});

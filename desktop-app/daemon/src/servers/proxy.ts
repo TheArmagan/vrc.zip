@@ -205,7 +205,7 @@ function resolvePipelineClient(
   }
 
   const mirror = deps.pipeline;
-  return { subscribe: (sink) => mirror.subscribe(grant.account_id, scopes, sink) };
+  return { subscribe: (sink) => mirror.subscribe(grant.account_id, scopes, sink, grant.id) };
 }
 
 /** `fetch` refuses a body on these, and VRChat defines none for them either. */

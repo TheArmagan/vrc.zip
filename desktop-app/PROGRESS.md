@@ -189,8 +189,12 @@ handshake, because the alternative is a login flow that mints credentials with n
       onto `:7774`; every other host is a blind byte pipe. Numbered out of order because it is a
       delivery mechanism for the mirror rather than a step toward it. Decisions 70–73.
 
-- [ ] **2.8 Rate budgets + audit + kill switch** — per-grant budgets on the abuse-adjacent scopes,
-      an audit row per mutating call, revoke per grant and globally, and the "Connected apps" page.
+- [~] **2.8 Rate budgets + audit + kill switch** — the **kill switch and the Connected apps page are
+      done**: `GET /api/apps`, `POST /api/apps/:id/revoke`, `POST /api/apps/revoke-all`, and
+      `ui/src/screens/ConnectedAppsScreen.svelte` behind `#/apps`. Revocation is per grant and closes
+      the pipeline sockets that grant holds, since a socket authenticated once at its handshake would
+      otherwise keep streaming a revoked app events. Per-grant rate budgets and the audit row per
+      mutating call are still outstanding. Decisions 86–87.
 - [x] **2.9 Pipeline mirror** (`proxy/pipeline-mirror.ts`) — `wss://…:7774/` speaking VRChat's
       protocol, filtered per event type by the grant's scopes, fed from the daemon's single real
       socket per account. Frames are re-emitted **verbatim** and scanned before forwarding; a dead
@@ -859,6 +863,22 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     A toast is cheap and does not steal focus, so a duplicate of a visible sheet is a far better
     failure than silence. Opening a tab on top of an app the user already has open stays conditional,
     because *that* is the intrusive half.
+
+86. **Revocation is per grant, and it closes sockets as well as rows.** The database half alone is
+    not enough: a pipeline socket is authenticated once at its handshake, so an app whose grant was
+    revoked would keep receiving events until it happened to reconnect. `PipelineMirror` therefore
+    tracks which grant opened each subscription and `disconnectGrant` closes exactly those — not
+    `disconnectAccount`, which would take down every other app attached to the same account and is
+    the opposite of what "revoke this one" means. PLAN.md says it plainly: revoking an app's access
+    to one account must not touch the others.
+
+87. **The Connected apps page shows live grants only; `store.listGrants` deliberately returns revoked
+    ones too.** The store method is the audit view and history is the point of keeping those rows, so
+    the filter belongs in `listConnectedApps` rather than in the SQL. Two smaller calls fell out of
+    building it, both found by running it rather than by reading it: the account name has to fall
+    back to the `accounts` **table** before the raw id, because a grant outlives a signed-out session
+    and `AccountManager` only knows loaded accounts; and an unrecognised scope renders as *dangerous*,
+    which is the safe direction to be wrong in and is visible rather than silent.
 
 ---
 

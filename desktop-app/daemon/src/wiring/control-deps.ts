@@ -25,8 +25,10 @@ import type { RateLimiter } from "../net/rate-limiter.ts";
 import { vrcFetch } from "../net/request.ts";
 import { pickUserImageUrl, pickUserImageUrlFull } from "../net/user-image.ts";
 import type { ConsentRegistry, PendingConsent } from "../proxy/consent.ts";
+import type { PipelineMirror } from "../proxy/pipeline-mirror.ts";
 import type { SecretsStore } from "../security/secrets.ts";
 import {
+  type ConnectedApp,
   type ControlAccount,
   type ControlDeps,
   ControlError,
@@ -70,6 +72,7 @@ import {
 } from "../servers/control.ts";
 import type { Settings } from "../settings.ts";
 import type { Store } from "../store/index.ts";
+import type { GrantRow } from "../store/types.ts";
 
 /**
  * Implements the control API's `ControlDeps` against the live daemon.
@@ -92,6 +95,12 @@ export interface ControlDepsOptions {
    * pending, which is exactly true.
    */
   readonly consent?: ConsentRegistry | undefined;
+  /**
+   * The pipeline mirror, so revoking an app can close the sockets it holds. Optional for the same
+   * reason `consent` is; without it revocation still lands in the database, and a socket opened
+   * before it survives until the app reconnects — which is the wrong half to lose, hence the wiring.
+   */
+  readonly pipelineMirror?: PipelineMirror | undefined;
   readonly settings: Settings;
   readonly env?: NodeJS.ProcessEnv;
   readonly connectPipeline: (accountId: string) => void;
@@ -1437,6 +1446,38 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       return toConsentRequest(pending, accounts);
     },
 
+    async listConnectedApps(): Promise<ConnectedApp[]> {
+      // Newest first: the app someone just paired is the one they are most likely looking for, and
+      // it is also the one they might want to undo.
+      return (
+        store
+          .listGrants()
+          // `listGrants` deliberately returns revoked rows — it is the audit view, and history is the
+          // point of keeping them. This page is not that: a revoked app has no access to show and no
+          // button to offer, and listing it greyed out would make "is this thing still connected?"
+          // harder to answer rather than easier.
+          .filter((grant) => grant.revoked_at === null)
+          .map((grant) => toConnectedApp(grant, accounts, store, options.pipelineMirror ?? null))
+          .sort((a, b) => b.createdAt - a.createdAt)
+      );
+    },
+
+    async revokeConnectedApp(grantId): Promise<void> {
+      // Idempotent, like `denyConsent`: revoking something already gone is the outcome asked for.
+      store.revokeGrant(grantId, Date.now());
+      // The database half alone is not enough. A pipeline socket authenticated once at its
+      // handshake and would otherwise keep streaming a revoked app events until it reconnected.
+      options.pipelineMirror?.disconnectGrant(grantId);
+    },
+
+    async revokeAllConnectedApps(): Promise<number> {
+      const now = Date.now();
+      const live = store.listGrants();
+      const revoked = store.revokeGrants(now);
+      for (const grant of live) options.pipelineMirror?.disconnectGrant(grant.id);
+      return revoked;
+    },
+
     async denyConsent(pairingId): Promise<void> {
       // Idempotent on purpose. A user who clicks Deny twice, or denies a request that has just
       // expired, has got the outcome they wanted either way.
@@ -2010,6 +2051,55 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
  * A scope described one way in the docs and another on the screen that actually grants it is a
  * documentation bug with security consequences.
  */
+/**
+ * A grant as the Connected apps page reads it.
+ *
+ * Every field of `GrantRow` that is a credential — `token_hash`, `two_factor_hash` — is absent by
+ * construction rather than by omission: this builds a new object out of the four things the page
+ * needs, so a field added to the row later cannot arrive here by accident.
+ */
+function toConnectedApp(
+  grant: GrantRow,
+  accounts: AccountManager,
+  store: Store,
+  mirror: PipelineMirror | null,
+): ConnectedApp {
+  let scopes: string[] = [];
+  try {
+    const parsed: unknown = JSON.parse(grant.scopes);
+    if (Array.isArray(parsed)) scopes = parsed.filter((scope) => typeof scope === "string");
+  } catch {
+    // A row we cannot read still describes an app the user may want to revoke, so it is listed
+    // with no scopes rather than hidden. Hiding it would make the one grant nobody can explain
+    // also the one grant nobody can remove.
+  }
+
+  // The manager only knows accounts that are *loaded*, and a grant outlives a session — a user who
+  // signed an account out still needs to see what it granted, and under a name they recognise. The
+  // `accounts` table is the durable record of that name, so it is the fallback before the raw id.
+  const account = accounts.get(grant.account_id);
+  const stored = store.getAccount(grant.account_id);
+  return {
+    id: grant.id,
+    accountId: grant.account_id,
+    accountName:
+      account?.user?.displayName ?? account?.username ?? stored?.display_name ?? grant.account_id,
+    app: { name: grant.app_name, version: grant.app_version, contact: grant.app_contact },
+    scopes: scopes.map((scope) => ({
+      scope,
+      description: isScope(scope) ? SCOPES[scope].description : scope,
+      // An unrecognised scope is shown as dangerous. It is the safe direction to be wrong in, and
+      // it is visible rather than silent.
+      dangerous: isScope(scope) ? SCOPES[scope].dangerous : true,
+      // Nothing here is "new" — the sheet's escalation highlight has no meaning on a standing grant.
+      isNew: false,
+    })),
+    createdAt: grant.created_at,
+    lastUsedAt: grant.last_used_at,
+    liveSockets: mirror?.socketsForGrant(grant.id) ?? 0,
+  };
+}
+
 function toConsentRequest(
   pending: PendingConsent,
   accounts: AccountManager,

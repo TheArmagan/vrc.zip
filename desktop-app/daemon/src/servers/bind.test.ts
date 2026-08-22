@@ -22,6 +22,9 @@ const deps: ControlDeps = {
     throw new Error("unused");
   },
   denyConsent: async () => {},
+  listConnectedApps: async () => [],
+  revokeConnectedApp: async () => {},
+  revokeAllConnectedApps: async () => 0,
   streamClientCount: () => 0,
   login: async () => ({ status: "requires-2fa", accountId: "usr_1", methods: ["totp"] }),
   verifyTwoFactor: async () => {

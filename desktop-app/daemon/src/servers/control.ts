@@ -655,6 +655,28 @@ export interface PendingConsentRequest {
   expiresAt: number;
 }
 
+/**
+ * One app that holds a live grant, as the Connected apps page renders it.
+ *
+ * **No token, no hash, and no pairing code.** The grant's token is what an app authenticates with,
+ * and it is stored hashed precisely so that nothing — including this — can hand it back. The page
+ * needs to answer "who has access to what, and since when", and none of that requires the
+ * credential.
+ */
+export interface ConnectedApp {
+  readonly id: string;
+  readonly accountId: string;
+  /** The account's display name, resolved for the page. Falls back to the id if unknown. */
+  readonly accountName: string;
+  readonly app: { readonly name: string; readonly version: string; readonly contact: string };
+  readonly scopes: readonly ConsentScope[];
+  readonly createdAt: number;
+  /** When this app last made a request through the mirror. Null if it never has. */
+  readonly lastUsedAt: number | null;
+  /** Live pipeline sockets this grant currently holds. */
+  readonly liveSockets: number;
+}
+
 /** One requested scope, as the consent sheet renders it. */
 export interface ConsentScope {
   scope: string;
@@ -737,6 +759,21 @@ export interface ControlDeps {
 
   /** The user said no. Idempotent; a request that is already gone is not an error. */
   denyConsent(pairingId: string): Promise<void>;
+
+  /** Every app holding a live grant, newest first. Revoked ones are gone, not greyed. */
+  listConnectedApps(): Promise<ConnectedApp[]>;
+
+  /**
+   * Revokes one grant and closes the sockets it holds.
+   *
+   * Idempotent: revoking something already revoked is the outcome the user asked for. Per grant
+   * rather than per account, because an account can have several apps attached and "revoke this
+   * one" must not take the others down with it.
+   */
+  revokeConnectedApp(grantId: string): Promise<void>;
+
+  /** The global kill switch. Returns how many live grants it closed. */
+  revokeAllConnectedApps(): Promise<number>;
 
   /**
    * How many UI clients currently hold an event-stream socket.
@@ -1610,6 +1647,29 @@ export function createControlApp({ port, deps, token }: ControlAppOptions) {
       await deps.denyConsent(c.req.param("id"));
       return c.body(null, 204);
     })
+
+    /*
+     * Connected apps — the durable half of the same question the consent sheet asks. The sheet is
+     * about one moment ("should this app get in"); this is about standing access ("what is still
+     * in, and cut it off"). PLAN.md §Enforcement names the kill switch as a requirement rather than
+     * a nicety: scopes alone do not stop an app misbehaving, and the user needs a way out that does
+     * not involve deleting a database file.
+     */
+    .get("/api/apps", async (c) => c.json(await deps.listConnectedApps()))
+
+    .post("/api/apps/:id/revoke", async (c) => {
+      await deps.revokeConnectedApp(c.req.param("id"));
+      return c.body(null, 204);
+    })
+
+    /*
+     * Deliberately its own route rather than a flag on the one above. "Revoke everything" is a
+     * different decision from "revoke this", and a client that meant one and sent the other because
+     * a parameter was missing is a failure mode worth designing out.
+     */
+    .post("/api/apps/revoke-all", async (c) =>
+      c.json({ revoked: await deps.revokeAllConnectedApps() }),
+    )
 
     .get("/api/settings", async (c) => c.json(await deps.getSettings()))
 

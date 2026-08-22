@@ -187,6 +187,14 @@ export const SQL = {
   getUserCache: `
     SELECT user_id AS id, fetched_at, data FROM user_cache
     WHERE account_id = ? AND user_id = ?`,
+  /*
+   * Dropped rather than patched, for the one case where vrc.zip itself moved a field VRChat owns.
+   * Selecting an avatar changes `currentAvatarImageUrl` on the acting account's own record, and a
+   * cached row would keep serving the old picture until its TTL ran out. Deleting is correct
+   * whatever the body looked like; editing JSON in place to match what we think VRChat now says
+   * would be this app inventing an answer.
+   */
+  deleteUserCache: `DELETE FROM user_cache WHERE account_id = ? AND user_id = ?`,
   putWorldCache: `
     INSERT INTO world_cache (world_id, fetched_at, data) VALUES (?, ?, ?)
     ON CONFLICT(world_id) DO UPDATE SET fetched_at = excluded.fetched_at, data = excluded.data`,

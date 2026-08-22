@@ -1833,6 +1833,29 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      account and none could see it, so re-asking costs a request per account per profile to hear the
      same answer. `no-account` does not latch, for the mirror-image reason: nobody was asked.
 
+163. **`POST /api/avatars/:id/select` is the first control route that changes *you* on VRChat.**
+     Everything before it asked VRChat a question or sent somebody a message; this dresses one of
+     your own accounts. Three decisions follow from that being new ground.
+
+     **`accountId` is required, and a missing one is a 400 rather than a default.** With two
+     accounts signed in, "wear this" means nothing until it says who, and picking the first online
+     account would silently dress the wrong person. The UI names the account on the button whenever
+     more than one is signed in, for the same reason.
+
+     **No confirmation step.** Wearing an avatar is undone by wearing another, so a dialog in front
+     of a one-click, one-click-back action is friction rather than safety. What it has instead is an
+     honest result: a 403 comes back as its own sentence, because it means the account is not
+     entitled to that avatar and that is worth reading rather than flattening into "it failed".
+
+     **It is not a monetization end-run** (PLAN.md §Guardrails). VRChat decides entitlement and
+     answers 403 when the account may not wear it; vrc.zip neither checks that itself nor works
+     around it. The route is a POST where upstream is a PUT, and the mapping stops at the daemon.
+
+     Selecting also drops the acting account's own `user_cache` row, because the one field the
+     action exists to move lives on it. Dropped rather than patched: editing the cached JSON to say
+     what we *think* VRChat now returns would be the app inventing an answer, and a deletion is
+     correct whatever the body looked like.
+
 ---
 
 ## Gotchas

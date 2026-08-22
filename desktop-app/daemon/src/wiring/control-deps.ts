@@ -1648,6 +1648,69 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       );
     },
 
+    /**
+     * Puts one of your accounts into an avatar.
+     *
+     * The first thing in this file that changes something on VRChat's side about *you* rather than
+     * asking a question or messaging somebody, so two properties are deliberate. **The account is
+     * a required path parameter, never inferred**: with two accounts signed in, "wear this" has no
+     * meaning until it says who, and picking the first online account would silently dress the
+     * wrong person. And the failures keep their own codes, because they mean different things to
+     * whoever pressed the button: 404 is an avatar that is gone, 403 is one this account is not
+     * entitled to wear, and those are not the same disappointment.
+     *
+     * It is not a monetization end-run (PLAN.md §Guardrails): VRChat decides entitlement and
+     * answers 403 when the account may not wear it. vrc.zip neither checks nor bypasses that.
+     */
+    async selectAvatar(avatarId, accountId): Promise<void> {
+      const account = accounts.get(accountId);
+      if (!account) throw new ControlError(404, "unknown_account");
+
+      if (account.snapshot().state !== "online") {
+        throw new ControlError(
+          409,
+          "account_offline",
+          "That account is not signed in, so VRChat has nobody to change the avatar for.",
+        );
+      }
+
+      // `PUT`, matching upstream. The control API exposes it as a POST because a POST is what a
+      // browser form and the app's own fetch wrapper do; the mapping stops here.
+      const response = await vrcFetch(account.context(), `/avatars/${avatarId}/select`, {
+        method: "PUT",
+      });
+
+      // Drained either way: an undrained body holds the connection open, and the caller wants the
+      // outcome rather than VRChat's copy of the user record back.
+      const body = await response.text().catch(() => "");
+      if (response.ok) {
+        // The worn avatar just changed, so the cached user record is stale in the one field this
+        // action exists to move. Dropping it is cheaper than patching it and cannot go stale wrong.
+        store.deleteUserCache(account.id, account.id);
+        return;
+      }
+
+      if (response.status === 404) {
+        throw new ControlError(
+          404,
+          "unknown_avatar",
+          "VRChat has no such avatar, or this account cannot see it.",
+        );
+      }
+      if (response.status === 403) {
+        throw new ControlError(
+          403,
+          "avatar_forbidden",
+          "VRChat will not let this account wear that avatar.",
+        );
+      }
+      throw new ControlError(
+        502,
+        "avatar_select_failed",
+        `VRChat returned ${String(response.status)}${body === "" ? "" : `: ${body.slice(0, 200)}`}`,
+      );
+    },
+
     async inviteUserTo(accountId, userId, target, messageSlot): Promise<void> {
       const account = actingAccount(accountId, "send the invite");
       await sendAsUser(

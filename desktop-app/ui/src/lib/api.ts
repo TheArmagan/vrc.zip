@@ -1482,6 +1482,22 @@ export const api = {
         query: { accountId },
         ...withSignal(signal),
       }),
+
+    /**
+     * Puts one of your accounts into this avatar. **A write, and the only one in this client that
+     * changes something about you on VRChat's side rather than asking a question.**
+     *
+     * `accountId` is required rather than optional, and that is the point: with two accounts signed
+     * in, "wear this" means nothing until it says who, and letting the daemon pick would silently
+     * dress the wrong person. A 403 is VRChat refusing the entitlement, which is VRChat's decision
+     * to make and not something vrc.zip checks or works around.
+     */
+    select: (avatarId: string, accountId: string, signal?: AbortSignal): Promise<void> =>
+      request<{ status: "ok" }>(`/avatars/${encodeURIComponent(avatarId)}/select`, {
+        method: "POST",
+        query: { accountId },
+        ...withSignal(signal),
+      }).then(() => undefined),
   },
 
   worlds: {

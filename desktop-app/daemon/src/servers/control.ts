@@ -1133,6 +1133,18 @@ export interface ControlDeps {
   listWorldInstances(worldId: string, accountId: string | null): Promise<WorldInstanceList>;
 
   /**
+   * Puts one signed-in account into an avatar.
+   *
+   * `accountId` is required and never inferred: with two accounts signed in, "wear this" means
+   * nothing until it says who, and choosing one silently would dress the wrong person.
+   *
+   * Throws `ControlError(409, "account_offline")`, `(404, "unknown_avatar")` for an avatar that is
+   * gone or invisible, and `(403, "avatar_forbidden")` when VRChat refuses the entitlement — which
+   * VRChat decides, not vrc.zip. See PLAN.md §Guardrails.
+   */
+  selectAvatar(avatarId: string, accountId: string): Promise<void>;
+
+  /**
    * Many worlds at once, for a page of rows that each name one.
    *
    * **Never throws for an unresolvable world, and never throws `no_account`.** Cache hits are
@@ -1964,6 +1976,27 @@ export function createControlApp({ port, deps, appApi, token }: ControlAppOption
      * is derived from in-memory presence and the open sessions, both of which are bounded by the
      * friend list, so a page boundary would be a slice of a list that is already whole.
      */
+    /*
+     * The one write in the avatar routes, and a POST where upstream is a PUT.
+     *
+     * The account is in the query rather than assumed, matching `/api/accounts/:id/*`: which
+     * account acts is the whole question when two are signed in. It carries no body, because the
+     * two ids in the path and query are the entire request.
+     */
+    .post("/api/avatars/:id/select", async (c) => {
+      const avatarId = parseAvatarId(c.req.param("id"));
+      const accountId = nonEmpty(c.req.query("accountId")) ?? null;
+      if (accountId === null) {
+        throw new ControlError(
+          400,
+          "invalid_query",
+          "accountId is required: wearing an avatar has to say which account wears it.",
+        );
+      }
+      await deps.selectAvatar(avatarId, accountId);
+      return c.json({ status: "ok" as const });
+    })
+
     .get("/api/worlds/:id/instances", async (c) => {
       const worldId = parseWorldId(c.req.param("id"));
       const accountId = nonEmpty(c.req.query("accountId")) ?? null;

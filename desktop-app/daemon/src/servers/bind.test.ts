@@ -69,6 +69,7 @@ const deps: ControlDeps = {
   getAvatar: async () => {
     throw new Error("unused");
   },
+  selectAvatar: async () => {},
   getInstance: async () => {
     throw new Error("unused");
   },

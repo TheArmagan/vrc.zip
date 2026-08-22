@@ -19,7 +19,9 @@
 -->
 <script lang="ts">
 import CalendarIcon from "@lucide/svelte/icons/calendar";
-import { imageUrl } from "$lib/api.ts";
+import ShirtIcon from "@lucide/svelte/icons/shirt";
+import { toast } from "svelte-sonner";
+import { api, describeError } from "$lib/api.ts";
 import DetailGrid from "$lib/components/DetailGrid.svelte";
 import EntityFooter from "$lib/components/EntityFooter.svelte";
 import EntityModal, { type ModalTab } from "$lib/components/EntityModal.svelte";
@@ -28,6 +30,7 @@ import RawJsonPanel from "$lib/components/RawJsonPanel.svelte";
 import RelativeTime from "$lib/components/RelativeTime.svelte";
 import UserName from "$lib/components/UserName.svelte";
 import { Badge } from "$lib/components/ui/badge/index.js";
+import { Button } from "$lib/components/ui/button/index.js";
 import { Separator } from "$lib/components/ui/separator/index.js";
 import { Skeleton } from "$lib/components/ui/skeleton/index.js";
 import * as Tabs from "$lib/components/ui/tabs/index.js";
@@ -55,6 +58,53 @@ const seenBy = $derived.by(() => {
   if (id === null || app.accounts.length < 2) return null;
   return app.accountById(id)?.displayName ?? null;
 });
+
+/*
+ * Wearing it.
+ *
+ * The only control in any of the entity modals that changes something on VRChat's side about *you*,
+ * so it is deliberately explicit rather than a quiet icon: it names the account it will dress
+ * whenever more than one is signed in, because with two accounts "wear this" is ambiguous and
+ * guessing would put the wrong person in it.
+ *
+ * There is no confirmation step. Wearing an avatar is instantly reversible by wearing another, and
+ * a dialog in front of a one-click, one-click-back action is friction rather than safety. What it
+ * does have is an honest result: VRChat's own refusal comes back as its own sentence, because a 403
+ * here means the account is not entitled to this avatar and that is worth reading rather than
+ * flattening into "something went wrong".
+ */
+let wearing = $state(false);
+
+/** The account that would wear it: the one this modal was opened through, or the one that saw it. */
+const wearingAccountId = $derived(avatarModal.accountId ?? avatar?.seenByAccountId ?? null);
+const wearingAccount = $derived(
+  wearingAccountId === null ? null : (app.accountById(wearingAccountId) ?? null),
+);
+/** Named on the button only when there is another account it could have been. */
+const wearLabel = $derived(
+  app.accounts.length > 1 && wearingAccount !== null
+    ? `Wear as ${wearingAccount.displayName}`
+    : "Wear this avatar",
+);
+
+async function wear(): Promise<void> {
+  const avatarId = avatarModal.avatarId;
+  if (avatarId === null || wearingAccountId === null) return;
+  wearing = true;
+  try {
+    await api.avatars.select(avatarId, wearingAccountId);
+    toast.success(`Now wearing ${avatarModal.title}`, {
+      description:
+        wearingAccount === null
+          ? "VRChat has switched the avatar."
+          : `${wearingAccount.displayName} is wearing it. A running client picks it up on its own.`,
+    });
+  } catch (cause) {
+    toast.error("Could not wear this avatar", { description: describeError(cause) });
+  } finally {
+    wearing = false;
+  }
+}
 
 const tabs = $derived<ModalTab[]>(
   AVATAR_MODAL_TABS.map((tab) => ({ value: tab, label: AVATAR_MODAL_TAB_LABELS[tab] })),
@@ -130,6 +180,15 @@ const FAILURE_BODIES: Record<string, string> = {
   }}
   tabsLabel="What to show about this avatar"
 >
+  {#snippet actions()}
+    {#if avatar !== null && wearingAccountId !== null}
+      <Button variant="outline" size="sm" class="shrink-0" disabled={wearing} onclick={() => void wear()}>
+        <ShirtIcon />
+        {wearing ? "Switching" : wearLabel}
+      </Button>
+    {/if}
+  {/snippet}
+
   {#snippet subtitle()}
     {#if avatar !== null && avatar.authorName}
       <span>
@@ -213,26 +272,6 @@ const FAILURE_BODIES: Record<string, string> = {
     {/if}
 
     {#if avatar !== null}
-      {#if heroUrl !== null}
-        <!--
-          The picture again, and at its own shape this time.
-          
-          The banner above is a 160px band that centre-crops whatever it is given, which suits a
-          world's letterbox hero and does not suit an avatar: VRChat's avatar images are portrait,
-          so the band shows a horizontal slice of one and the thing the reader came to look at is
-          mostly off-screen. This is the whole image, and it is the reason the tab exists.
-
-          `alt=""` because the words beside it — the name, the author, the tags — are everything
-          about this image that can be said in words, and the heading has already said them.
-        -->
-        <img
-          src={imageUrl(heroUrl)}
-          alt=""
-          loading="lazy"
-          class="max-h-72 w-full border border-border bg-muted/40 object-contain"
-        />
-      {/if}
-
       {#if avatar.description}
         <!-- Author-written, and it carries its own line breaks. -->
         <p class="text-sm whitespace-pre-wrap">{avatar.description}</p>

@@ -395,6 +395,11 @@ export class Store {
     return this.stmts.getUserCache.get(accountId, userId);
   }
 
+  /** Forgets one cached profile, so the next read is live. See `SQL.deleteUserCache`. */
+  deleteUserCache(accountId: string, userId: string): void {
+    this.stmts.deleteUserCache.run(accountId, userId);
+  }
+
   putWorldCache(worldId: string, fetchedAt: number, data: string): void {
     this.stmts.putWorldCache.run(worldId, fetchedAt, data);
   }
@@ -1050,6 +1055,7 @@ function prepareAll(db: Database) {
 
     putUserCache: q<void, [string, string, number, string]>(SQL.putUserCache),
     getUserCache: q<CacheRow, [string, string]>(SQL.getUserCache),
+    deleteUserCache: q<void, [string, string]>(SQL.deleteUserCache),
     putWorldCache: q<void, [string, number, string]>(SQL.putWorldCache),
     getWorldCache: q<CacheRow, [string]>(SQL.getWorldCache),
     putAvatarCache: q<void, [string, number, string]>(SQL.putAvatarCache),

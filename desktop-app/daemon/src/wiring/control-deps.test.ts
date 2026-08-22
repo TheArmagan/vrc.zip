@@ -2478,6 +2478,55 @@ describe("control deps: avatars", () => {
     h.stop();
   });
 
+  test("wears the avatar through the named account and forgets its cached profile", async () => {
+    const h = harness({ avatar: () => Response.json(avatarBody(AVATAR_ID)) });
+    await resumeAll(h);
+
+    // A cached profile for the acting account, holding the avatar it is about to stop wearing.
+    h.store.putUserCache(VIEWER, VIEWER, T0, JSON.stringify({ id: VIEWER }));
+    expect(h.store.getUserCache(VIEWER, VIEWER)).not.toBeNull();
+
+    await h.deps.selectAvatar(AVATAR_ID, VIEWER);
+
+    expect(h.requests).toContain(`/api/1/avatars/${AVATAR_ID}/select`);
+    // The one field this action exists to move lives on that record, so the row goes rather than
+    // serving a picture that is now wrong until its TTL runs out.
+    expect(h.store.getUserCache(VIEWER, VIEWER)).toBeNull();
+    h.stop();
+  });
+
+  test("maps VRChat's refusal and its 404 to different answers", async () => {
+    // Different disappointments: one avatar is gone, the other is one this account may not wear.
+    // VRChat decides entitlement; vrc.zip neither checks nor bypasses it.
+    const forbidden = harness({ avatar: () => new Response("", { status: 403 }) });
+    await resumeAll(forbidden);
+    await expect(forbidden.deps.selectAvatar(AVATAR_ID, VIEWER)).rejects.toMatchObject({
+      status: 403,
+      code: "avatar_forbidden",
+    });
+    forbidden.stop();
+
+    const gone = harness({ avatar: () => new Response("", { status: 404 }) });
+    await resumeAll(gone);
+    await expect(gone.deps.selectAvatar(AVATAR_ID, VIEWER)).rejects.toMatchObject({
+      status: 404,
+      code: "unknown_avatar",
+    });
+    gone.stop();
+  });
+
+  test("refuses for an account that is not signed in", async () => {
+    // Saying so beats letting `vrcFetch` find it as a 401 and re-auth into a 2FA challenge that
+    // nobody is watching.
+    const h = harness();
+    await expect(h.deps.selectAvatar(AVATAR_ID, VIEWER)).rejects.toMatchObject({
+      status: 409,
+      code: "account_offline",
+    });
+    expect(h.requests.filter((path) => path.includes("/select"))).toEqual([]);
+    h.stop();
+  });
+
   test("asks each signed-in account until one can see the avatar, and says which", async () => {
     /*
      * A 404 on an avatar is a statement about the asker, not the avatar: VRChat serves the record

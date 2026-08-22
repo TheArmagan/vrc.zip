@@ -413,6 +413,7 @@ interface Recorder {
   groupPostPages: { groupId: string; accountId: string | null; page: PageQuery }[];
   groupInstanceFetches: { groupId: string; accountId: string | null }[];
   worldInstanceFetches: { worldId: string; accountId: string | null }[];
+  avatarSelects: { avatarId: string; accountId: string }[];
   galleryPages: {
     groupId: string;
     galleryId: string;
@@ -459,6 +460,7 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     groupPostPages: [],
     groupInstanceFetches: [],
     worldInstanceFetches: [],
+    avatarSelects: [],
     galleryPages: [],
     userBatches: [],
     mutualLookups: [],
@@ -687,6 +689,10 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
       seen.groupInstanceFetches.push({ groupId, accountId });
       groupGate(groupId);
       return { instances: [GROUP_INSTANCE] };
+    },
+    selectAvatar: async (avatarId, accountId) => {
+      seen.avatarSelects.push({ avatarId, accountId });
+      if (avatarId === AVATAR_MISSING) throw new ControlError(404, "unknown_avatar");
     },
     listWorldInstances: async (worldId, accountId) => {
       seen.worldInstanceFetches.push({ worldId, accountId });
@@ -1655,6 +1661,59 @@ describe("parseAvatarId / parseImageFileId", () => {
     for (const bad of [undefined, "", "file_a/b", "file_a#x", "avtr_a"]) {
       expect(() => parseImageFileId(bad)).toThrow();
     }
+  });
+});
+
+describe("POST /api/avatars/:id/select", () => {
+  test("wears the avatar as the named account", async () => {
+    const { deps, seen } = fakeDeps();
+    const res = await call(deps, `/api/avatars/${AVATAR_ID}/select?accountId=${ACCOUNT.id}`, {
+      method: "POST",
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: "ok" });
+    expect(seen.avatarSelects).toEqual([{ avatarId: AVATAR_ID, accountId: ACCOUNT.id }]);
+  });
+
+  test("refuses to guess which account wears it", async () => {
+    /*
+     * The whole point of the parameter. With two accounts signed in, "wear this" means nothing
+     * until it says who, and defaulting to whichever is online first would silently dress the
+     * wrong person. A 400 is the honest answer to an under-specified request.
+     */
+    const { deps, seen } = fakeDeps();
+    const res = await call(deps, `/api/avatars/${AVATAR_ID}/select`, { method: "POST" });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "invalid_query" });
+    expect(seen.avatarSelects).toEqual([]);
+  });
+
+  test("validates the avatar id and surfaces a 404", async () => {
+    const { deps, seen } = fakeDeps();
+    for (const id of ["usr_1", "avtr_1%2fselect", "..%2fauth%2fuser"]) {
+      const res = await call(deps, `/api/avatars/${id}/select?accountId=${ACCOUNT.id}`, {
+        method: "POST",
+      });
+      expect(res.status, id).toBe(400);
+      expect(await res.json()).toMatchObject({ error: "invalid_avatar_id" });
+    }
+    expect(seen.avatarSelects).toEqual([]);
+
+    const missing = await call(
+      deps,
+      `/api/avatars/${AVATAR_MISSING}/select?accountId=${ACCOUNT.id}`,
+      { method: "POST" },
+    );
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toMatchObject({ error: "unknown_avatar" });
+  });
+
+  test("is not reachable with GET", async () => {
+    // A state change must not be something a link or a prefetch can trigger.
+    const { deps, seen } = fakeDeps();
+    const res = await call(deps, `/api/avatars/${AVATAR_ID}/select?accountId=${ACCOUNT.id}`);
+    expect(res.status).toBe(404);
+    expect(seen.avatarSelects).toEqual([]);
   });
 });
 

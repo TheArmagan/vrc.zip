@@ -6,7 +6,9 @@ was decided along the way.
 
 **Last updated:** 2026-08-23
 **Current phase:** Phase 3 is **complete** — 3.0 through 3.11. Next is Phase 4, the node graph
-(decision 182), which 3.10 leaves needing mostly the canvas.
+(decision 182), which 3.10 leaves needing mostly the canvas. Shipping is wired up ahead of it:
+`desktop-app-release.yml` packages the executable and publishes it to a GitHub Release on a manual
+trigger (decision 200).
 **Status: Phases 1 and 2 are both built.** Phase 1 was confirmed by hand on 2026-08-22 (1.10 and the
 profile card). Phase 2 closed on the same day: every numbered step is ticked, including 2.8's last
 two pieces (per-app budget overrides and a rate gauge that reports measured numbers instead of
@@ -3044,6 +3046,33 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      This is the same lesson as decision 199's, in a different costume: a green suite says nothing
      about the values a *build* is shipped with. Anything that is a build input needs a test that
      reads the build input.
+
+201. **Releases are cut by hand, and the tag follows the binary rather than the other way round.**
+     `.github/workflows/desktop-app-release.yml` is `workflow_dispatch` only. It is deliberately a
+     second workflow rather than a branch inside `desktop-app.yml`: that one is the *gate* — it runs
+     on every push, it is allowed to be noisy, and it needs no permissions. This one *publishes*, so
+     it writes to releases, moves a tag, and hands strangers an executable. Those wanted different
+     triggers and different grants (`contents: write`, and nothing else).
+
+     Three calls in it are worth keeping:
+
+     - **It runs on `windows-latest`.** Bun can cross-compile a Windows executable from Linux, and
+       the icon and version metadata are exactly the part that would quietly not survive it —
+       decision 199 was spent on that resource being right. Building on the platform we ship means
+       CI produces what a user runs.
+     - **Overwrite deletes the tag too, then recreates it against `github.sha`.** `gh release create`
+       makes the tag at `--target`, so re-pointing is what deleting the old ref buys. Without it a
+       re-cut release would publish against whatever commit the tag was originally made at: the
+       download works, the source looks right, and they are not the same code. That mismatch is
+       invisible, which is why it is worse than refusing. `overwrite: false` refuses instead, for
+       when clobbering a published version is the accident rather than the intent.
+     - **The existence check runs *before* the build**, not after. A twenty-minute Windows build
+       ending in "there is already a release here" has wasted the time it took to find that out.
+
+     Every input reaches its script through `env:` rather than `${{ }}` interpolation. A workflow
+     that can write releases is one where a tag containing a quote and a semicolon would otherwise
+     be *code* — the standard Actions script-injection hole. Same reason `--prerelease` is pushed
+     onto a bash array instead of being spliced in by an expression.
 
 ---
 

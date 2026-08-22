@@ -1,0 +1,225 @@
+# Packages `desktop-app/` and publishes it to a GitHub Release. Manual trigger only.
+#
+# Separate from `desktop-app.yml` on purpose. That one is the gate: it runs on every push and pull
+# request and is allowed to be noisy. This one *publishes* — it writes to the repository's releases,
+# moves a tag, and hands strangers an executable — so it never fires on its own.
+#
+# ## Overwriting
+#
+# A release for the tag is replaced rather than added to: the old release is deleted, the tag is
+# re-pointed at the commit being built, and both are recreated. That ordering is deliberate. A
+# release whose tag points somewhere other than the code that produced the binary is worse than no
+# release at all, because the mismatch is invisible — the download works, the source looks right,
+# and they are not the same thing.
+#
+# `overwrite: false` refuses instead, for the case where clobbering a published version would be the
+# accident rather than the intent.
+name: desktop-app release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish (default: v<version from package.json>)'
+        required: false
+        type: string
+      overwrite:
+        description: 'Replace the release and re-point the tag if they already exist'
+        required: false
+        type: boolean
+        default: true
+      prerelease:
+        description: 'Mark the release as a pre-release'
+        required: false
+        type: boolean
+        default: false
+      skip_checks:
+        description: 'Skip typecheck, lint and tests (for re-cutting a build that already passed)'
+        required: false
+        type: boolean
+        default: false
+
+# Writing releases and moving tags both need this. Nothing else here does, so nothing else is
+# granted — a workflow that can publish should not also be able to open issues or read secrets.
+permissions:
+  contents: write
+
+# Two releases racing for one tag would have them deleting and recreating each other's work, so
+# these queue. Not cancelled in flight: a half-published release is the state this avoids.
+concurrency:
+  group: desktop-app-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    working-directory: desktop-app
+    # Git Bash on the Windows runner. One shell for every step means the scripting below reads the
+    # same as what a developer runs locally, rather than switching to PowerShell quoting halfway.
+    shell: bash
+
+jobs:
+  release:
+    # Windows, because the artifact is a Windows executable and Bun can cross-compile one from Linux
+    # but the icon and version metadata are the part that would quietly not survive it. The runner
+    # is the platform we ship, so what CI produces is what a user runs.
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The tag is moved below, which needs the history the push is measured against.
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # The same pin the gate reads. The runtime is a build input here — it is bundled into the
+          # executable and is what executes third-party plugin code — so a release built with a
+          # different Bun is a different product. See PLAN.md §Phase 5.
+          bun-version-file: desktop-app/.bun-version
+
+      - run: bun install --frozen-lockfile
+
+      # The same five gates as `desktop-app.yml`, because a release is the one build where "it
+      # compiled" is not enough. Skippable by input for re-cutting a commit that already passed.
+      - name: typecheck
+        if: ${{ !inputs.skip_checks }}
+        run: bun run typecheck
+
+      - name: lint
+        if: ${{ !inputs.skip_checks }}
+        run: bun run lint
+
+      - name: svelte-check
+        if: ${{ !inputs.skip_checks }}
+        run: bun run check
+        working-directory: desktop-app/ui
+
+      - name: test (daemon, packages, tools)
+        if: ${{ !inputs.skip_checks }}
+        run: bun run test
+
+      - name: test (ui)
+        if: ${{ !inputs.skip_checks }}
+        run: bun run test:ui
+
+      # Inputs reach these scripts as environment variables, never as `${{ }}` interpolated into
+      # the script text. A tag containing a quote and a semicolon would otherwise be *code* here —
+      # the standard Actions script-injection hole, and this workflow can write releases.
+      - name: resolve the tag
+        id: meta
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          version=$(bun -e 'console.log(JSON.parse(await Bun.file("package.json").text()).version)')
+          tag="$INPUT_TAG"
+          if [ -z "$tag" ]; then
+            tag="v$version"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Publishing $tag from version $version"
+
+      # Refuse *before* building rather than after: a twenty-minute Windows build that ends in
+      # "there is already a release here" has wasted the time it took to find out.
+      - name: check whether the release already exists
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          OVERWRITE: ${{ inputs.overwrite }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            if [ "$OVERWRITE" != "true" ]; then
+              echo "::error::A release for $TAG already exists. Re-run with overwrite enabled to replace it."
+              exit 1
+            fi
+            echo "It will be replaced."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Builds the UI bundle and compiles it, the icon and the Bun runtime into one file. The script
+      # fails loudly if `ui/dist` is missing rather than shipping the placeholder page.
+      - name: package
+        run: bun run package
+
+      - name: checksum
+        id: checksum
+        run: |
+          cd dist
+          sha256sum "vrc.zip.exe" | awk '{print $1}' > "vrc.zip.exe.sha256"
+          digest=$(cat "vrc.zip.exe.sha256")
+          echo "sha256=$digest" >> "$GITHUB_OUTPUT"
+          echo "sha256 $digest"
+
+      # Delete, then recreate. `gh release create` makes the tag at `--target`, so re-pointing is
+      # what deleting the old ref buys — without it the new release would be published against
+      # whatever commit the tag was made at, which may not be the code in this build.
+      - name: replace the existing release and tag
+        if: ${{ steps.existing.outputs.exists == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          gh release delete "$TAG" --yes
+          git push --delete origin "refs/tags/$TAG" || true
+
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          SHA256: ${{ steps.checksum.outputs.sha256 }}
+          COMMIT: ${{ github.sha }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          notes=$(cat <<'NOTES'
+          **UNOFFICIAL.** Not affiliated with, endorsed by, or operated by VRChat Inc. You sign in
+          with your own VRChat credentials, and everything runs on your machine.
+
+          ### Install
+
+          Download `vrc.zip.exe` and run it. There is no installer: it is one file carrying the
+          daemon, the UI and its own Bun runtime. It opens a console window and prints a link — open
+          that link, or press <kbd>O</kbd>.
+
+          Windows will warn about an unrecognised publisher the first time. The executable is not
+          code-signed; verify the checksum below if that matters to you.
+
+          ### Verify
+
+          ```
+          certutil -hashfile vrc.zip.exe SHA256
+          ```
+          NOTES
+          )
+          notes="$notes
+
+          \`\`\`
+          SHA256  $SHA256
+          commit  $COMMIT
+          \`\`\`"
+
+          # An array, so the pre-release flag is an *argument* rather than a fragment of script
+          # spliced in by an expression — and so an empty one contributes nothing at all rather than
+          # an empty word the shell still has to be told to ignore.
+          args=(--target "$COMMIT" --title "vrc.zip $VERSION" --notes "$notes")
+          if [ "$PRERELEASE" = "true" ]; then args+=(--prerelease); fi
+
+          gh release create "$TAG" "${args[@]}" "dist/vrc.zip.exe" "dist/vrc.zip.exe.sha256"
+
+      - name: summary
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          REPLACED: ${{ steps.existing.outputs.exists }}
+          SHA256: ${{ steps.checksum.outputs.sha256 }}
+        run: |
+          {
+            echo "### vrc.zip $VERSION"
+            echo
+            echo "- tag: \`$TAG\`"
+            echo "- replaced an existing release: \`$REPLACED\`"
+            echo "- sha256: \`$SHA256\`"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1642,6 +1642,23 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      known-to-be-empty, because treating an omitted `bio` as `""` reports a cleared bio on every
      partial frame, which is most of them.
 
+150. **Occupancy is read without being asked for, and a queue is what pays for it.** The count
+     beside an instance used to appear only after a hover, so a list of forty locations showed a
+     number on the two rows somebody had pointed at — which reads as missing data rather than as an
+     unasked question. `LocationLine` now starts the lookup itself. The resolver's old refusal to
+     fetch on render was answered directly rather than kept: `ensure()` joins a queue that drains
+     `MAX_CONCURRENT` (3) at a time, so a hundred rows are a hundred queued lookups and three in
+     flight. A person's hover jumps the queue, because waiting behind the background sweep for the
+     tooltip you just opened is the same bug in a new place.
+
+     `observedAt` is the one guard, and it is not a nicety: `GET /api/instances` is one upstream
+     call per location with no batch endpoint, and instances close. Sweeping a thousand rows of feed
+     scrollback would spend a thousand requests to be told a thousand times that the instance is
+     gone. Live surfaces (friends, sessions, the user modal) pass nothing and always ask; the feed
+     and the inbox pass the row's timestamp and stop asking past `LIVE_MS`. Measured on a seeded
+     daemon: the game log's three-hour-old rows fired zero instance requests, and the feed's one
+     recent location fired exactly one, with no hover.
+
 ---
 
 ## Gotchas

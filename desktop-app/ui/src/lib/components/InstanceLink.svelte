@@ -9,9 +9,11 @@
   is therefore never wrong about the access level — and *adds* live counts only when something else
   has already paid for them.
 
-  **It never fetches on render.** A feed page of a hundred rows must not become a hundred instance
-  lookups. The lookup runs when the tooltip is actually opened, which is a person asking, and its
-  answer is cached and shared with the world modal.
+  **This component still never fetches.** It renders whatever the resolver holds and nothing else.
+  What changed is who asks: `LocationLine` now starts the lookup for a location that is live, so a
+  list arrives with its counts already filling in rather than showing a number only on the rows
+  somebody happened to point at. Opening the tooltip still asks too, and asks *urgently*, because a
+  person waiting on the thing they just hovered must not sit behind a queue of background rows.
 
   An opaque location (`private`, `traveling`, `offline`, empty) has no instance to link to and
   renders as the prose `parseLocation` chose. That is `LocationLine`'s job in practice — this guard
@@ -71,8 +73,9 @@ function open(event: MouseEvent): void {
   <Tooltip.Provider delayDuration={250}>
     <Tooltip.Root
       onOpenChange={(isOpen) => {
-        // The only place this component starts a request, and only on a person's hover or focus.
-        if (isOpen) instanceInfo.ensure(location, accountId);
+        // A person's own gesture, so it goes to the front of the queue. Already-answered and
+        // already-queued locations are both cheap no-ops inside `ensure`.
+        if (isOpen) instanceInfo.ensure(location, accountId, { urgent: true });
       }}
     >
       <Tooltip.Trigger>

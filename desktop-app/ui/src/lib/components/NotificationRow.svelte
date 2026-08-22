@@ -115,6 +115,7 @@ const expandable = $derived(raw !== null || details.facts.length > 0);
         location={details.location}
         worldName={details.worldName}
         accountId={item.accountId}
+        observedAt={item.ts}
       />
     {/if}
 

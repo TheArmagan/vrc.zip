@@ -326,9 +326,17 @@ say "plugins run with your account's privileges; only install plugins you trust.
       control), and the transport's own suite already covers framing, byte caps, forged tags and
       kill-vs-stop. What is left is driving the hostile set as a suite against the supervisor, which
       needs the loader from 3.5 to place a bundle where a plugin is loaded from.
-- [ ] **3.4 Dispatcher, scope gate, rate budget** — one dispatcher doing arg parsing and the scope
+- [~] **3.4 Dispatcher, scope gate, rate budget** — one dispatcher doing arg parsing and the scope
       check, never the handlers. Every plugin call goes through the shared limiter tagged with the
       plugin id, with a subordinate per-plugin budget and a UI naming who is eating it.
+      **Built** (decision 167): `scope-gate.ts` is the pure decision layer over the existing
+      `authorizeCall`, `budget.ts` reuses the app-grant hourly window keyed by plugin id,
+      `dispatcher.ts` owns arg parsing, deadlines, in-flight caps and an `onCall` audit hook, and
+      `plugin-vrchat.ts` is the reads-only semantic surface — accounts, friends, users, worlds,
+      instances, groups — at `"low"` priority with a `(accountId, path)` cache.
+      **Not yet done:** wiring into `app.ts`, which needs a `send` seam the supervisor does not
+      expose (see Gotchas), and the UI naming who is eating the budget. The budget itself is dormant
+      until writes land, since all three budgeted scopes are writes.
 - [ ] **3.5 Install pipeline** — `Bun.build` with `target: "browser"` and `external: []`, then an AST
       deny-scan over the *bundled output*, then content-addressing at `plugins/<id>/<sha256>.js` with
       the hash verified on every load.
@@ -1954,6 +1962,37 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      to unset one at all (see Gotchas). A blank `PATH` has teeth of its own — a plugin reaching for
      `Bun.spawn(["git", …])` now resolves nothing.
 
+167. **The plugin dispatcher reuses the app-grant machinery wholesale rather than growing a
+     plugin-shaped copy of it.** Scopes are the shared registry's strings, unprefixed — one
+     registry, one set of consent descriptions — and the rate budget is decision 95's rolling hourly
+     window on the same three risky scopes, keyed by plugin id instead of grant id, with
+     `BUDGET_WINDOW_MS` and `DEFAULT_GRANT_BUDGETS` *imported* from `proxy/passthrough.ts` rather
+     than restated. A `plugin:` scope namespace and a second budget were both considered and
+     dropped: each would have been a second thing to keep in agreement with the first. The one place
+     `plugin:` does appear is as a `RequestMeter` key prefix, so a plugin id can never collide with
+     a grant id in the meter — a namespace for accounting, not for authorization.
+
+     **The scope gate needed an account posture the protocol type cannot carry.** `ErasedMethod`
+     holds `scope` and `cost` only, so `GatedMethod` pairs it with `account: "required" | "none"`
+     and the gate resolves `params.accountId` generically: named-but-not-granted is
+     `E_ACCOUNT_DENIED`, absent with exactly one granted account resolves to it, absent with several
+     is `E_BAD_REQUEST` rather than a guess. A handler is still handed nothing it *could* check a
+     scope or an account with, which is the property PLAN.md asks for.
+
+     **`retryAfterMs` is time-until-the-oldest-call-ages-out, not the remaining window.** The proxy
+     answers an exhausted app with a flat hour, which is fine for an HTTP client that will poll
+     regardless. The plugin docs promise an author that waiting `retryAfterMs` is the correct
+     response and that retrying early is a bannable-behaviour bug in their plugin — and a flat hour
+     quoted against a real nine-second wait is exactly how that promise stops being believed. It
+     cost one optional ledger method.
+
+     **Plugin traffic is `"low"` priority and its cache is keyed `(accountId, path)`.** Low because
+     plugin reads are bulk and speculative and must never starve presence, a re-auth, or something
+     the user just clicked (decision 102's reasoning). The compound key because `GET /users/{id}`
+     returns different fields to a friend than to a stranger, so a URL-keyed cache would leak one of
+     the user's *own* accounts' view into another's — the standing invariant, which applies just as
+     much between two accounts the same person owns.
+
 ---
 
 ## Gotchas
@@ -1962,6 +2001,21 @@ Empirical notes. Add to this as you hit things — especially where the plan tur
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
 
+- **`authorizeCall` does not check the account, though its neighbouring doc comment implies someone
+  does.** `DispatchContext.accountId` is documented as "already checked against
+  `PluginGrant.accountIds`", and nothing in `protocol.ts` performs that check — it validates method,
+  deadline and scope only. The daemon has to do it, and now does, in `scope-gate.ts`. A comment
+  asserting a check that lives in nobody's code is the shape of bug worth naming.
+- **`ErasedMethod` cannot carry "which account does this speak for".** `MethodDefinition` has
+  `scope` and `cost` and nothing else, and `defineMethod` erases anything extra, so the account
+  posture has to travel beside the method rather than on it. Putting it in the handler was the
+  alternative, and it would have made a handler decide an authorization question.
+- **`PluginSupervisor` has no public `send`.** It forwards unowned frames outward through
+  `onPluginFrame` but keeps the transport private, so a dispatcher cannot be attached from the
+  supervisor's public surface as it stands. Wiring 3.4 into `app.ts` needs that seam opened.
+- **On a reads-only surface the per-plugin budget has nothing to bite.** All three budgeted scopes
+  are writes, so the machinery is wired, tested and entirely dormant until outbound actions land
+  with 3.8. Worth knowing before reading a green budget test as evidence the path is exercised.
 - **`env: {}` on Windows is a merge, not a replacement.** Bun synthesises eleven system variables —
   `PATH`, `SYSTEMROOT`, `WINDIR`, `SYSTEMDRIVE`, `TEMP`, `HOMEDRIVE`, `HOMEPATH`, `LOGONSERVER`,
   `USERDOMAIN`, `USERNAME`, `USERPROFILE` — and adds them to whatever you pass. Passing an explicit

@@ -34,6 +34,7 @@ import ScrollTextIcon from "@lucide/svelte/icons/scroll-text";
 import EmptyState from "$lib/components/EmptyState.svelte";
 import ErrorNote from "$lib/components/ErrorNote.svelte";
 import EventRow from "$lib/components/EventRow.svelte";
+import KindPicker from "$lib/components/KindPicker.svelte";
 import ScrollSentinel from "$lib/components/ScrollSentinel.svelte";
 import SearchField from "$lib/components/SearchField.svelte";
 import SectionHeader from "$lib/components/SectionHeader.svelte";
@@ -119,14 +120,6 @@ const triggerLabel = $derived(
   selectedSession === null ? "All clients" : app.sessionLabel(selectedSession),
 );
 
-const kindsLabel = $derived(
-  picked.length === 0
-    ? "All line kinds"
-    : picked.length === 1
-      ? eventLabel(picked[0] ?? "")
-      : `${String(picked.length)} line kinds`,
-);
-
 const filtered = $derived(
   picked.length > 0 || search.trim() !== "" || selectedSessionId !== null,
 );
@@ -197,19 +190,17 @@ function clearFilters(): void {
     people actually have about a log, and a single-choice control cannot express it. The counts are
     over the whole store, so a kind with rows is always offered even when none are on screen.
   -->
-  <Select.Root type="multiple" bind:value={picked}>
-    <Select.Trigger size="sm" class="w-48" aria-label="Filter by line kind">
-      {kindsLabel}
-    </Select.Trigger>
-    <Select.Content>
-      {#each availableKinds as entry (entry.kind)}
-        <Select.Item
-          value={entry.kind}
-          label={`${eventLabel(entry.kind)} (${String(entry.count)})`}
-        />
-      {/each}
-    </Select.Content>
-  </Select.Root>
+  <KindPicker
+    kinds={availableKinds}
+    selected={picked}
+    onChange={(next) => {
+      picked = next;
+    }}
+    multiple
+    allLabel="All line kinds"
+    ariaLabel="Filter by line kind"
+    class="w-48"
+  />
 
   {#if picked.length > 0}
     <!--

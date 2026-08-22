@@ -1688,6 +1688,14 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      instance list still renders, because the two halves no longer share a phase. That is visible in
      the smoke test, and it is the shape the old single column could not express.
 
+153. **The feed can filter to one kind, not just one family.** The family tabs answered "show me
+     friend things"; nothing answered "show me avatar changes". Now that `friend.updated` has been
+     split into `friend.updated.avatar` and its siblings (see 149) that gap was the difference
+     between the refinement being visible and being theoretical. The picker is scoped to the
+     selected family and clears itself when the family moves, because `kinds` and `families`
+     intersect in the daemon — leaving a stale kind selected would silently produce an empty feed
+     that reads as a bug.
+
 154. **Avatar identity comes from a third party, and that is a real change of posture.** VRChat
      exposes no avatar id on a public user — only `currentAvatarImageUrl` and friends — so
      `friend.updated.avatar` could say "switched avatar" and nothing else. `avtr.zip` maps an image
@@ -1705,6 +1713,23 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      mapping, because the two are genuinely different shapes: the mapping's key is a *file* id, its
      value is an id rather than a document, and "no avatar is known for this file" has to be
      storable — which in `avatar_cache` would be an avatar row with no avatar in it.
+
+155. **A menu with `overflow-y-auto` and no height cap does not scroll, it grows.** The vendored
+     `Select.Content` had the overflow rule and had lost upstream's
+     `max-h-(--bits-select-content-available-height)`, so a long list ran off the bottom of the
+     window with its last options unreachable. Restored with a literal fallback
+     (`var(--bits-select-content-available-height,24rem)`) rather than the bare variable, because
+     if bits-ui ever stops publishing it an uncapped list silently returns to being unscrollable,
+     where a fixed 24rem is merely shorter than ideal. Fixed in the vendored component, so every
+     menu in the app benefits rather than the two that happened to be reported.
+
+     The kind pickers went further and became a `Command` combobox (`KindPicker`), because the list
+     is long enough that scrolling it is not the answer — the event vocabulary grew eight
+     `friend.updated.*` sub-kinds, and finding one by eye in a menu of near-identical labels is the
+     actual complaint. It searches on both the human label and the dotted kind, since people arrive
+     with either in mind. One component serves both screens: it always speaks in arrays, where an
+     empty array means "all" in both single and multiple modes, and each screen maps that onto its
+     own state.
 
 ---
 

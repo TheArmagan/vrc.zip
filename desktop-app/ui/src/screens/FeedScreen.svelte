@@ -24,10 +24,12 @@
 -->
 <script lang="ts">
 import ActivityIcon from "@lucide/svelte/icons/activity";
+import { familyOf } from "$lib/api.ts";
 import AccountFilter from "$lib/components/AccountFilter.svelte";
 import EmptyState from "$lib/components/EmptyState.svelte";
 import ErrorNote from "$lib/components/ErrorNote.svelte";
 import EventRow from "$lib/components/EventRow.svelte";
+import KindPicker from "$lib/components/KindPicker.svelte";
 import ScrollSentinel from "$lib/components/ScrollSentinel.svelte";
 import SearchField from "$lib/components/SearchField.svelte";
 import SectionHeader from "$lib/components/SectionHeader.svelte";
@@ -37,7 +39,7 @@ import { Label } from "$lib/components/ui/label/index.js";
 import { Skeleton } from "$lib/components/ui/skeleton/index.js";
 import { Switch } from "$lib/components/ui/switch/index.js";
 import * as Tabs from "$lib/components/ui/tabs/index.js";
-import { dateHeading, familyLabel } from "$lib/format.ts";
+import { dateHeading, eventLabel, familyLabel } from "$lib/format.ts";
 import { app } from "$lib/state/app.svelte.ts";
 import { EventFeed } from "$lib/state/event-feed.svelte.ts";
 import { eventKinds } from "$lib/state/event-kinds.svelte.ts";
@@ -45,10 +47,14 @@ import { prefs } from "$lib/state/prefs.svelte.ts";
 
 /** bits-ui reads the empty string as "nothing selected", so the "everything" tab needs a name. */
 const ALL = "all";
+/** Same reason, for the kind picker. No real kind is a bare word, so the two can never collide. */
+const ALL_KINDS = "all-kinds";
 
 let tab = $state(ALL);
 let accountFilter = $state("");
 let search = $state("");
+/** `ALL_KINDS`, or one exact kind. Single-select: the tabs already cover "several of these". */
+let kind = $state(ALL_KINDS);
 
 const feed = new EventFeed({ live: () => app.liveEvents });
 
@@ -62,8 +68,20 @@ $effect(() => {
   feed.apply({
     ...(accountFilter === "" ? {} : { accountId: accountFilter }),
     ...(tab === ALL ? {} : { families: [tab] }),
+    ...(kind === ALL_KINDS ? {} : { kinds: [kind] }),
     ...(search.trim() === "" ? {} : { search: search.trim() }),
   });
+});
+
+/*
+ * A kind outlives the tab it belongs to unless something clears it, and the daemon ANDs the two
+ * clauses: leave `friend.updated.avatar` selected while switching to Notifications and the query
+ * intersects to nothing, which reads as a broken screen rather than as a filter. Comparing the
+ * kind's own prefix rather than membership of the offered list keeps this correct while the
+ * catalogue is still loading, when that list is legitimately empty.
+ */
+$effect(() => {
+  if (kind !== ALL_KINDS && tab !== ALL && familyOf(kind) !== tab) kind = ALL_KINDS;
 });
 
 $effect(() => {
@@ -100,7 +118,21 @@ const days = $derived.by(() => {
   return out;
 });
 
-const filtered = $derived(tab !== ALL || search.trim() !== "" || accountFilter !== "");
+/**
+ * The kinds the picker offers: everything the store holds on the "All" tab, and only the selected
+ * family's kinds otherwise. Scoping matters because the daemon intersects `kinds` with `families`,
+ * so an out-of-family option would be an option that can only ever return nothing.
+ */
+const availableKinds = $derived(
+  tab === ALL
+    ? eventKinds.kinds
+    : (families.find((entry) => entry.name === tab)?.kinds ?? []),
+);
+
+
+const filtered = $derived(
+  tab !== ALL || kind !== ALL_KINDS || search.trim() !== "" || accountFilter !== "",
+);
 
 /** The selected tab *is* a family name, not a kind — no parsing, just the "everything" case. */
 const selectedFamily = $derived(tab === ALL ? null : tab);
@@ -157,6 +189,27 @@ const selectedFamily = $derived(tab === ALL ? null : tab);
     is the difference between a filter and a highlighter, and it is why this sits beside the tabs
     rather than inside the list.
   -->
+  <!--
+    Single-select, unlike the game log's multi-select: this one narrows *within* the family tab
+    already chosen, and "friends, but only avatar changes" is the whole question it answers. The
+    counts come from the store rather than the loaded page, so a kind offered here always has rows.
+  -->
+  <!--
+    `KindPicker` speaks in arrays in both selection modes, where this screen holds a sentinel
+    string; empty means "all" on its side, `ALL_KINDS` on this one. The mapping lives here rather
+    than in the picker, because which of the two shapes a screen wants is the screen's business.
+  -->
+  <KindPicker
+    kinds={availableKinds}
+    selected={kind === ALL_KINDS ? [] : [kind]}
+    onChange={(next) => {
+      kind = next[0] ?? ALL_KINDS;
+    }}
+    allLabel="All kinds"
+    ariaLabel="Filter by event kind"
+    class="w-48"
+  />
+
   <div class="w-full sm:w-64">
     <SearchField
       bind:value={search}
@@ -187,15 +240,18 @@ const selectedFamily = $derived(tab === ALL ? null : tab);
     <EmptyState
       icon={ActivityIcon}
       title="Nothing matches this filter"
-      description={selectedFamily === null
-        ? "No stored event matches that search, across the whole history vrc.zip holds."
-        : `No ${familyLabel(selectedFamily).toLowerCase()} event matches, across the whole history vrc.zip holds.`}
+      description={kind !== ALL_KINDS
+        ? `No "${eventLabel(kind)}" event matches, across the whole history vrc.zip holds.`
+        : selectedFamily === null
+          ? "No stored event matches that search, across the whole history vrc.zip holds."
+          : `No ${familyLabel(selectedFamily).toLowerCase()} event matches, across the whole history vrc.zip holds.`}
     >
       {#snippet action()}
         <Button
           variant="outline"
           onclick={() => {
             tab = ALL;
+            kind = ALL_KINDS;
             search = "";
             accountFilter = "";
           }}

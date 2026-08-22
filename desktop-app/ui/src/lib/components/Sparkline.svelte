@@ -37,7 +37,14 @@ let {
    * to fit, so sub-pixel columns cost nothing but a slightly longer path string.
    */
   density = 3,
-  class: className = "",
+  /**
+   * The width, as a utility class.
+   *
+   * The wrapper carries **only** this — it used to be `w-full {className}`, and Tailwind resolves
+   * conflicting widths by stylesheet order rather than attribute order, so `w-full` beat the `w-24`
+   * every caller passed and each chart stretched the entire card.
+   */
+  class: className = "w-24",
   label = "Requests per second",
 }: {
   values: readonly number[];
@@ -110,7 +117,7 @@ const geometry = $derived.by(() => {
 });
 </script>
 
-<div class="w-full {className}" bind:clientWidth={boxWidth}>
+<div class="shrink-0 {className}" bind:clientWidth={boxWidth}>
   <svg
     class="block w-full"
     style="height: {height}px"

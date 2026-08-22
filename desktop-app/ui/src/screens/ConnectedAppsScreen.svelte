@@ -260,7 +260,7 @@ function ordinary(app: ConnectedApp): readonly { scope: string; description: str
                   class="w-24"
                   label="{entry.app.name} requests per second over the last minute"
                 />
-                <span class="tabular text-xs text-muted-foreground">
+                <span class="tabular whitespace-nowrap text-xs text-muted-foreground">
                   {latest(history)}/s now · {windowTotal(history)} in the last minute
                 </span>
               </div>

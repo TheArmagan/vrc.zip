@@ -263,7 +263,7 @@ handshake, because the alternative is a login flow that mints credentials with n
       control land here, and the retention types move to `@vrcz/shared` with them; and the
       `invite-request` / `boop` palette stubs get their routes.
       **2.10 is now built.** The grant-authenticated surface is `/app/…` on the same port
-      (decisions 122–124): `GET /app/sessions` behind `sessions:read` with unlinked sessions gated
+      (decisions 134–136): `GET /app/sessions` behind `sessions:read` with unlinked sessions gated
       on `sessions:unlinked`, `GET /app/stream` carrying the enriched envelope through a
       default-deny per-event scope filter and closing when the grant is revoked, and
       `POST`/`GET`/`DELETE /app/webhooks`. The webhook subsystem is wired: the bus feeds it through
@@ -307,12 +307,21 @@ say "plugins run with your account's privileges; only install plugins you trust.
       The dependency direction between them is one-way and load-bearing: `protocol.ts`, `ui.ts` and
       `nodes.ts` do not import `manifest.ts`, so nothing on the call path can consult what an author
       *requested* instead of what the user *approved*.
-- [ ] **3.2 `ProcessTransport` + supervisor** — `Bun.spawn` per plugin with `env: {}` behind a
+- [x] **3.2 `ProcessTransport` + supervisor** — `Bun.spawn` per plugin with `env: {}` behind a
       `PluginTransport` interface, spawned `--smol` unless the manifest opts out. Host-driven
       heartbeat whose echo lives in the injected prelude rather than in plugin code, RSS watchdog,
       activation and call deadlines, exponential restart backoff, crash-loop auto-disable.
-- [ ] **3.3 The hostile plugin** — spin loop, memory bomb, `import("node:"+"fs")`, event flood, and a
+      **Done**, plus the pieces it needed: migration 006 (installed plugins, immutable grants,
+      dry-run lifts, crash history), `PluginRegistry` over the set, and a `PluginDisableStore` so an
+      auto-disable survives a restart. Decisions 139–141. Two limitations are load-bearing and are
+      written down rather than papered over: **the OS memory cap is not implemented on Windows**,
+      which is the primary platform, and `env: {}` is not honoured there either.
+- [~] **3.3 The hostile plugin** — spin loop, memory bomb, `import("node:"+"fs")`, event flood, and a
       lifecycle hook that never returns. The regression suite for everything above it.
+      **The attacks are written** (`daemon/src/plugins/hostile/`, one file per attack plus a polite
+      control), and the transport's own suite already covers framing, byte caps, forged tags and
+      kill-vs-stop. What is left is driving the hostile set as a suite against the supervisor, which
+      needs the loader from 3.5 to place a bundle where a plugin is loaded from.
 - [ ] **3.4 Dispatcher, scope gate, rate budget** — one dispatcher doing arg parsing and the scope
       check, never the handlers. Every plugin call goes through the shared limiter tagged with the
       plugin id, with a subordinate per-plugin budget and a UI naming who is eating it.
@@ -332,9 +341,16 @@ say "plugins run with your account's privileges; only install plugins you trust.
       per-node click handlers. Charts follow rather than ship with it (decision 110).
 - [ ] **3.10 Nodes** — plugin-contributed node types, registered from the same `NodeDefinition` the
       editor, the runtime and the type checker all read.
-- [ ] **3.11 Scaffolder and docs** — `create-vrcz-plugin` with `bun run dev` wired to `vrcz dev`,
+- [~] **3.11 Scaffolder and docs** — `create-vrcz-plugin` with `bun run dev` wired to `vrcz dev`,
       plus the generated reference (scope table, manifest reference, event catalog, port matrix) and
       the hand-written mental model, guides, and security-model page.
+      **The hand-written half landed early**, out of order, because without it nobody outside this
+      repository can write a plugin at all: `packages/plugin-api/docs/` carries the mental model, a
+      getting-started walkthrough, the manifest, lifecycle, protocol, UI and node references, a
+      cheatsheet, and the blunt security-model page PLAN.md asks for. Every page opens with the same
+      banner saying plainly that a plugin cannot be installed or run yet, and `status.md` is the
+      step-by-step account of what is real. Decision 142. **Still outstanding:** the scaffolder,
+      `vrcz dev`, and replacing the reference pages with generated output so they cannot drift.
 
 ---
 
@@ -1400,7 +1416,7 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      confirmation is. "Run the retention pass now" *does* act, because a pass that deletes only what
      is already past its window is the schedule running early, not a new decision.
 
-122. **The third-party surface is a separate path prefix, not a flag on the existing routes.**
+134. **The third-party surface is a separate path prefix, not a flag on the existing routes.**
      `:7775` now serves two audiences with two credentials: `/api/…` takes the session token and is
      the user's own UI, `/app/…` takes a proxy grant and is a third-party app. They are separate
      Hono instances mounted in a deliberate order — `hostGuard`, `originGuard`, then `/app`, then
@@ -1411,21 +1427,21 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      There is a test asserting the ordering, because it is a property of registration order that
      every other test would keep passing without.
 
-123. **The stream's per-event scope filter is default-deny and keyed on event family.** `canSeeEvent`
+135. **The stream's per-event scope filter is default-deny and keyed on event family.** `canSeeEvent`
      applies three independent gates — the event's account must be the grant's, an event with no
      account at all needs `sessions:unlinked`, and the kind must map to a scope the grant holds — and
      an unmapped family is dropped rather than passed. Family rather than exact kind because that is
      the granularity the consent sentences already speak in, so what the user read is what the
      filter enforces. `sessions:unlinked` is deliberately *not* a bypass of the kind gate.
 
-124. **A `/app` webhook is pinned to its grant's account twice, and deleting another grant's is a
+136. **A `/app` webhook is pinned to its grant's account twice, and deleting another grant's is a
      404.** The route 403s a registration naming a different account rather than silently rewriting
      it, and the wiring then forces the account anyway — the route refuses the lie, the wiring makes
      it unactionable even if the route ever forgets. Delete reports another grant's webhook as
      *absent* rather than forbidden, because a 403 confirms the id exists, and that is enough to
      enumerate what other apps on the machine are listening to.
 
-125. **The palette's three action stubs are real routes now** (decision 104's slot):
+137. **The palette's three action stubs are real routes now** (decision 104's slot):
      `POST /api/accounts/:id/{invite,request-invite,boop}`. They sit beside `invite-self` because
      they are the same shape — the account is in the path, since *which* account acts is the whole
      question when two are signed in, and every argument is validated before it is interpolated into
@@ -1434,7 +1450,7 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      name. 403 and 404 from VRChat keep their own codes, because "they do not accept invites from
      you" and "they are gone" are answers, not faults.
 
-126. **The three social actions live in one module and refuse rather than guess.** Invite, ask for an
+138. **The three social actions live in one module and refuse rather than guess.** Invite, ask for an
      invite, and boop are reached from the palette, the right-click menu on any display name, and
      the user modal's overflow menu, so `ui/src/lib/social-actions.ts` owns the two awkward
      questions all three share. *Which account is asking* has no safe default: these arrive in a
@@ -1517,6 +1533,47 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      `notification.synced`, `account.state`, `session.update`, `pipeline.state`, the two `consent.*`)
      that older builds wrote before that set grew.
 
+139. **The plugin transport is an interface even though only one implementation is wanted.** A child
+     process is the design (a `Worker` keeps `process`, `Bun`, `fetch` and `node:*`, and no prelude
+     can disable the `import()` operator), so `PluginTransport` could have been skipped entirely. It
+     is kept for three concrete returns rather than as hedging: the supervisor's timing logic —
+     heartbeat timeouts, backoff ladders, crash-loop windows — is testable against a fake in
+     milliseconds instead of by spawning processes and sleeping; a `WorkerTransport` stays available
+     for development and first-party plugins where isolation is not load-bearing; and when OS-level
+     sandboxing lands it lands behind an interface every caller already goes through, which is what
+     makes it a change of zero characters in the plugin API.
+
+140. **Two limitations in the process isolation are documented rather than fixed, and both are on
+     the primary platform.** The OS memory cap is real on Linux (`ulimit -v` through an `exec` that
+     preserves the pid the watchdog needs) and **absent on Windows**, because a Job Object needs
+     `CreateJobObject`/`OpenProcess`/`SetInformationJobObject` through `bun:ffi` with a
+     hand-marshalled 144-byte struct, where a mistake crashes the daemon rather than the plugin. It
+     warns once and degrades to the RSS watchdog, which notices rather than prevents. macOS is
+     skipped deliberately: Darwin accepts `RLIMIT_AS` and ignores it, and a cap that only looks
+     enforced is worse than none. Separately, **`env: {}` is not honoured on Windows** — Bun
+     synthesises a minimal block, so the account name leaks even though nothing the daemon holds
+     does; the prelude empties `process.env` immediately afterwards. Neither is a reason to stop,
+     but both are reasons not to use the word "sandbox".
+
+141. **Graceful stop is stdin EOF, not a signal.** Every signal Bun accepts on Windows is a
+     terminate, so a signal-based `stop(graceMs)` would make the grace period a fiction on the
+     platform most people run. Closing stdin is a request the plugin can notice and act on, and the
+     escalation to `kill(9)` still reports `reason: "shutdown"` — the host asked, so no restart is
+     wanted regardless of how it ended.
+
+142. **The plugin docs shipped ahead of their step, with a banner saying nothing runs yet.**
+     PLAN.md's build order puts docs last (3.11), and the generated half still belongs there. The
+     hand-written half moved to now for one reason: without it nobody outside this repository can
+     write a plugin at all, and a settled contract that only its authors can read is not a published
+     API. The risk this creates is documentation drift against code that is still moving, and it is
+     managed by two rules rather than by hoping. Every page opens with the same banner stating
+     plainly that a plugin cannot be installed or run, and `status.md` is a step-by-step account of
+     what is real — so the failure mode is a reader who knows less than they could, never one who
+     builds against something that does not exist. Every example in the reference pages was executed
+     rather than eyeballed: the manifests parse, the UI trees pass `validateUINode`, the node
+     definitions typecheck and hash, and the counts (48 scopes, 52 event kinds, 28 UI node types, 12
+     frames, 14 error codes) were read out of the modules rather than transcribed.
+
 ---
 
 ## Gotchas
@@ -1524,6 +1581,20 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **Reading source through the shell collapsed doubled backslashes, and produced a confident,
+  wrong bug report.** `queries.ts` briefly did contain a real escaping bug (`` `\${char}` `` emits
+  the literal text `${char}`, and `ESCAPE '\'` in a double-quoted JS string is an empty escape
+  character). It was fixed, and every subsequent read of the *fixed* file through `sed`/`grep` still
+  rendered `\\` as `\`, so the fix looked like the bug and got reported as still broken. The tell
+  that settled it was `tsc`: TS6133 `'char' is declared but its value is never read` is only possible
+  with the broken form, and its disappearance proved the file had changed rather than the display.
+  Two rules fall out. **Never judge escaping from shell-rendered output** — read the bytes
+  (`JSON.stringify` on the file text, or `Read`), or better, *run the code and assert on what it
+  produces*. And a compiler diagnostic is a more trustworthy witness than any amount of eyeballing,
+  because it does not go through the display layer at all. This is the same class as the NUL-byte
+  entry below, in the reading direction rather than the writing one, and it is why CLAUDE.md now has
+  a Tooling section saying to use `Read`/`Grep`/`Write`/`Edit` rather than shell equivalents.
 
 - **Six identical "Client quit" rows for one VRChat shutdown was six daemon starts, not six quits.**
   The log watcher had no persisted read position, so every start replayed every log file it could

@@ -1,7 +1,7 @@
 {
   "name": "@vrcz/plugin-api",
   "version": "0.1.0",
-  "description": "Public plugin API: types and worker-side runtime. Versioned on the protocol major.",
+  "description": "Public plugin API: manifest schema, wire protocol, UI vocabulary and node model. Versioned on the protocol major.",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
@@ -9,6 +9,7 @@
   "license": "MIT",
   "files": [
     "src",
+    "docs",
     "README.md"
   ],
   "scripts": {

@@ -845,9 +845,14 @@ upstream and available to everyone, not a hole in the boundary for one plugin.
 ### Manifest, lifecycle, storage
 
 VS Code-flavored `vrcz-plugin.json` with `engines.pluginApi` (protocol major, not app version),
-`permissions {scopes, capabilities, accounts, events, network}`, and `contributes {panels, settings,
+`permissions {scopes, capabilities, accounts, events, fetch}`, and `contributes {panels, settings,
 commands, nodes}`. A **Zod schema is the single source of truth** — the published JSON Schema, the
 consent UI, and the docs reference are all generated from it.
+
+Note that this list once read `…, network}`, which contradicted correction 1 below in the same
+section. Correction 1 is the architecture: there is no `network` permission, and the schema rejects
+one with a message pointing at its two replacements. `fetch` here is the allowlisted-domain half of
+that replacement; the other half is the `webhook` capability.
 
 Consent shows plain-English scope descriptions from the shared registry, `dangerous` scopes in a
 separate block behind a second toggle, an **account picker** (a plugin with `friends:read` must not

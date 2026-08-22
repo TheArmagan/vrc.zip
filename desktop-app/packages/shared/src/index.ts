@@ -5,6 +5,7 @@
  * Nothing here may import from `@vrcz/daemon`, `@vrcz/api`, or `@vrcz/ui`. This package is a leaf.
  */
 
+export { isJsonObject, type JsonObject, type JsonValue } from "./json.ts";
 export {
   ALL_SCOPES,
   DEFAULT_SCOPES,

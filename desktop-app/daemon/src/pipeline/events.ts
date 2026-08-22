@@ -12,17 +12,7 @@
  * optional. A payload that fails its shape check is reported as `malformed`, never thrown.
  */
 
-/** A JSON value exactly as `JSON.parse` produces it. */
-export type JsonValue =
-  | string
-  | number
-  | boolean
-  | null
-  | JsonValue[]
-  | { [key: string]: JsonValue };
-
-/** A JSON object exactly as `JSON.parse` produces it. */
-export type JsonObject = { [key: string]: JsonValue };
+import type { JsonObject, JsonValue } from "@vrcz/shared";
 
 /**
  * A VRChat "location" string.

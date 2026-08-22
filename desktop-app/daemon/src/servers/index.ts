@@ -31,7 +31,6 @@ export {
   type FeedEvent,
   type FriendPresence,
   type GameSession,
-  type JsonValue,
   type LoginInput,
   type LoginResult,
   MAX_NOTE_LENGTH,

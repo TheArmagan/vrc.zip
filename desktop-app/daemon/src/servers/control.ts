@@ -1,4 +1,4 @@
-import { APP_VERSION } from "@vrcz/shared";
+import { APP_VERSION, type JsonValue } from "@vrcz/shared";
 import type { ServerWebSocket } from "bun";
 import { Hono } from "hono";
 import { createBunWebSocket } from "hono/bun";
@@ -15,15 +15,6 @@ import { hostGuard, originGuard, sessionAuth, type TokenSource } from "../securi
  * the account manager, or the event bus — the handlers stay a thin translation between HTTP and a
  * set of async methods, which is also what makes them testable with a fake in a few lines.
  */
-
-/** JSON as it crosses the wire. Local to this module so the control API owns no foreign types. */
-export type JsonValue =
-  | string
-  | number
-  | boolean
-  | null
-  | JsonValue[]
-  | { [key: string]: JsonValue };
 
 /** The 2FA challenges VRChat issues. `otp` is a one-time recovery code. */
 export type TwoFactorMethod = "totp" | "emailOtp" | "otp";

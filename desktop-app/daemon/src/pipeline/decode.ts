@@ -19,10 +19,9 @@
  * missing its id — produces a typed result the caller can branch on and log.
  */
 
+import { isJsonObject, type JsonObject, type JsonValue } from "@vrcz/shared";
 import {
   isPipelineEventType,
-  type JsonObject,
-  type JsonValue,
   PIPELINE_CONTENT_KIND,
   type PipelineEventMap,
   type PipelineEventType,
@@ -287,10 +286,6 @@ const SHAPE_SPECS: { readonly [K in PipelineEventType]: ShapeSpec } = {
   "group-member-updated": { required: { member: "object" } },
   "group-role-updated": { required: { role: "object" } },
 };
-
-function isJsonObject(value: JsonValue | undefined): value is JsonObject {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function matchesFieldType(value: JsonValue, type: FieldType): boolean {
   switch (type) {

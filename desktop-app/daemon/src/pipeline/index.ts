@@ -35,8 +35,6 @@ export {
 export {
   isEmptyWorld,
   isPipelineEventType,
-  type JsonObject,
-  type JsonValue,
   PIPELINE_CONTENT_KIND,
   PIPELINE_EVENT_TYPES,
   type PipelineContentKind,

@@ -575,6 +575,17 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     the group is fetched unconditionally, exactly as before — a missing supplement never costs a
     field the modal already had.
 
+62. **`JsonValue` is shared, and "the control API owns no foreign types" was the right rule aimed at
+    the wrong type.** Both copies — `pipeline/events.ts` and `servers/control.ts` — carried a comment
+    explaining why they were local, and the control API's read was a real principle: a wire module
+    should not borrow a shape from another subsystem. JSON is not that kind of shape. It is not
+    another subsystem's type, it is the shape of the wire itself, and every module that touches the
+    wire needs the same one. The two declarations were structurally identical, so they type-checked
+    against each other silently and the duplication cost nothing right up until one of them would
+    have grown a branch the other lacked. `decode.ts` also held a private `isJsonObject` identical to
+    the one now in `@vrcz/shared`, so this was a genuine dedupe rather than a move — the `null` case
+    that guard exists for is the kind of thing you want written down once.
+
 ---
 
 ## Gotchas

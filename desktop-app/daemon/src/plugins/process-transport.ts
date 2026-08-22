@@ -53,6 +53,7 @@ import type { Envelope } from "@vrcz/plugin-api";
 import { decodeEnvelope, encodeEnvelope, MAX_FRAME_BYTES } from "@vrcz/plugin-api";
 import { pluginDataDir, stateDir } from "../paths.ts";
 import { isPackaged } from "../servers/embedded-ui.ts";
+import { assignMemoryCap, type JobHandle } from "./job-object.ts";
 import { planMemoryCap, warnIfUncapped } from "./limits.ts";
 import { encodePreludeConfig, PRELUDE_SOURCE } from "./prelude.ts";
 import type {
@@ -150,6 +151,82 @@ export function resolvePluginRuntime(env?: NodeJS.ProcessEnv): RuntimeResolution
     ok: false,
     detail: `The plugin runtime is not installed. Expected a pinned Bun ${Bun.version} at ${pinned}.`,
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// The child's environment
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Variables Bun synthesises on Windows that are pure disclosure, blanked rather than inherited.
+ *
+ * Measured, not assumed: spawning with `env: {}` on Windows 11 / Bun 1.4.0 delivers eleven
+ * variables to the child — `PATH`, `SYSTEMROOT`, `WINDIR`, `SYSTEMDRIVE`, `TEMP`, `HOMEDRIVE`,
+ * `HOMEPATH`, `LOGONSERVER`, `USERDOMAIN`, `USERNAME`, `USERPROFILE`. **An explicit `env` does not
+ * replace that set, it merges into it**, so the only way to get rid of one is to hand it a value of
+ * your own. An empty string is that value: the variable still exists, and says nothing.
+ *
+ * None of these carried a secret — `VRCZIP_STATE_DIR`, the daemon's session token and the
+ * developer's shell were all absent — but each of them tells a plugin something about the person
+ * running it that a plugin has no claim on: their account name, their home directory, their domain
+ * controller, and in `PATH` an inventory of every tool installed on the machine. `PATH` is also the
+ * one with teeth: blank, a plugin that tries `Bun.spawn(["git", …])` resolves nothing.
+ */
+const WINDOWS_BLANKED_VARS = [
+  "PATH",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "LOGONSERVER",
+  "USERDOMAIN",
+  "USERNAME",
+  "USERPROFILE",
+] as const;
+
+/**
+ * The environment a plugin process is started with.
+ *
+ * Empty everywhere except Windows, where empty is not achievable and the next best thing is an
+ * explicit minimum. What survives, and why each one earns it:
+ *
+ * - **`SystemRoot` and `windir`** — mandatory. The Windows loader resolves system DLLs, and CNG
+ *   resolves its crypto configuration, relative to them. A `bun` started without them does not get
+ *   far enough to run a script.
+ * - **`SystemDrive`** — `"C:"` on essentially every machine and consulted by parts of the CRT when
+ *   a path has no drive letter. It discloses nothing.
+ * - **`TEMP` and `TMP`** — anything that writes a temporary file needs them, and with no value the
+ *   CRT falls back to the current directory in some paths and fails in others. They are pointed at
+ *   the plugin's **own data directory** rather than the user's temp folder: the plugin is already
+ *   running with that directory as its cwd, so it learns nothing new, its temp files stay inside
+ *   the one place it is entitled to write, and the user's profile path is not spelled out for it.
+ *
+ * Everything in {@link WINDOWS_BLANKED_VARS} is present-but-empty for the reason given there.
+ * Exported so the set can be asserted from a test on any platform.
+ */
+export function pluginProcessEnv(
+  tempDir: string,
+  platform: NodeJS.Platform = process.platform,
+): Record<string, string> {
+  // Elsewhere `{}` is honest: POSIX `execve` takes the environment block it is given, so the child
+  // really does start with nothing. Adding blanked variables there would be adding variables.
+  if (platform !== "win32") return {};
+
+  const env: Record<string, string> = {
+    SystemRoot: "C:\\Windows",
+    windir: "C:\\Windows",
+    SystemDrive: "C:",
+    TEMP: tempDir,
+    TMP: tempDir,
+  };
+  // The real `SystemRoot` when it is somewhere other than `C:\Windows`, which is rare and legal.
+  // Read from the daemon's own environment because the daemon is itself a Windows process that
+  // could not have started without it; nothing else about the daemon's environment is consulted.
+  const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT;
+  if (systemRoot !== undefined && systemRoot.length > 0) {
+    env.SystemRoot = systemRoot;
+    env.windir = systemRoot;
+  }
+  for (const name of WINDOWS_BLANKED_VARS) env[name] = "";
+  return env;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -284,6 +361,12 @@ class ProcessTransport implements PluginTransport {
 
   readonly #child: Bun.Subprocess<"pipe", "pipe", "pipe">;
   readonly #handlers: TransportHandlers;
+  /**
+   * The Windows job object holding this process, or `null` on every other platform and whenever
+   * one could not be installed. Released in {@link #finalizeIfDone} — never sooner, because
+   * `KILL_ON_JOB_CLOSE` means releasing it *is* a kill.
+   */
+  #job: JobHandle | null;
   readonly #settled: Promise<ExitInfo>;
   #resolveSettled!: (info: ExitInfo) => void;
 
@@ -304,11 +387,13 @@ class ProcessTransport implements PluginTransport {
     child: Bun.Subprocess<"pipe", "pipe", "pipe">,
     options: TransportSpawnOptions,
     handlers: TransportHandlers,
+    job: JobHandle | null = null,
   ) {
     this.pluginId = options.pluginId;
     this.pid = child.pid;
     this.#child = child;
     this.#handlers = handlers;
+    this.#job = job;
     this.#settled = new Promise<ExitInfo>((resolve) => {
       this.#resolveSettled = resolve;
     });
@@ -563,6 +648,12 @@ class ProcessTransport implements PluginTransport {
       this.#helloTimer = null;
     }
 
+    // Safe here and nowhere earlier: the process is gone, so `KILL_ON_JOB_CLOSE` has nothing left
+    // to kill and this is purely a handle release. Holding it past this point would leak one kernel
+    // handle per plugin restart, which a crash loop turns into a real number.
+    this.#job?.close();
+    this.#job = null;
+
     const code = this.#child.exitCode;
     const signal = this.#child.signalCode;
     const reason: ExitReason = this.#intent ?? "crashed";
@@ -664,7 +755,6 @@ function spawnTransport(
   ];
 
   const plan = planMemoryCap(argv, options.memoryLimitBytes);
-  warnIfUncapped(plan);
 
   // The plugin's own data directory is its working directory, so a plugin that reaches the
   // filesystem around the scrub writes relative paths into the one place it is entitled to.
@@ -678,16 +768,10 @@ function spawnTransport(
   let child: Bun.Subprocess<"pipe", "pipe", "pipe">;
   try {
     child = Bun.spawn([...plan.argv], {
-      // No inherited environment at all. What that denies is every secret and path the daemon
-      // happens to be holding: VRCZIP_STATE_DIR and therefore the location of the credential store,
-      // any keychain or token variable, proxy credentials, and the developer's whole shell.
-      //
-      // Measured caveat, worth knowing rather than assuming: on Windows Bun still synthesises a
-      // minimal environment (PATH, SYSTEMROOT, TEMP, USERNAME, USERPROFILE and a few more) because
-      // a process with a truly empty block cannot start. Nothing the daemon holds leaks through it,
-      // but a plugin does learn the user's account name, and the prelude empties `process.env`
-      // afterwards so it has to work for it.
-      env: {},
+      // Nothing the daemon holds is inherited: not VRCZIP_STATE_DIR and therefore not the location
+      // of the credential store, not a keychain or token variable, not proxy credentials, not the
+      // developer's shell. See `pluginProcessEnv` for what Windows insists on keeping and why.
+      env: pluginProcessEnv(cwd),
       cwd,
       stdin: "pipe",
       stdout: "pipe",
@@ -701,7 +785,20 @@ function spawnTransport(
     );
   }
 
-  return new ProcessTransport(child, options, handlers);
+  // The Windows cap is installed *after* the spawn, because a job object needs a pid. That is a
+  // window — microseconds during which the child is uncapped — and it is unavoidable without a
+  // spawn API that takes a job. It is also uninteresting: a plugin cannot allocate meaningfully
+  // before its runtime has finished starting.
+  let job: JobHandle | null = null;
+  if (plan.mechanism === "job-object") {
+    job = assignMemoryCap(child.pid, options.memoryLimitBytes);
+  }
+  // `enforced` is a fact, not an intention, so a job object that failed to install reports as the
+  // uncapped state it actually is and gets the same one-per-process warning every other platform
+  // without a cap gets.
+  warnIfUncapped(job === null ? { ...plan, enforced: false } : { ...plan, enforced: true });
+
+  return new ProcessTransport(child, options, handlers, job);
 }
 
 // ---------------------------------------------------------------------------------------------

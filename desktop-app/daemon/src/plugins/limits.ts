@@ -10,19 +10,17 @@
  *
  * | Platform | Mechanism | Status |
  * |---|---|---|
- * | Linux    | `RLIMIT_AS` via `sh -c 'ulimit -v …; exec …'` | **implemented** |
- * | Windows  | Job Object (`SetInformationJobObject`)        | **not implemented** |
+ * | Linux    | `RLIMIT_AS` via `sh -c 'ulimit -v …; exec …'` | **implemented, before the spawn** |
+ * | Windows  | Job Object, see `job-object.ts`               | **implemented, after the spawn** |
  * | macOS    | `RLIMIT_AS`                                   | **not implementable** |
  *
- * **Windows is the primary platform and it is the one without a cap. That is the headline, not a
- * footnote.** `Bun.spawn` exposes no job-object option, and creating one means `CreateJobObject`,
- * `OpenProcess`, `SetInformationJobObject` and `AssignProcessToJobObject` through `bun:ffi`,
- * marshalling a 144-byte `JOBOBJECT_EXTENDED_LIMIT_INFORMATION` by hand — which is reachable, but it
- * is a native-memory struct written by hand inside the daemon process, and getting it wrong crashes
- * the daemon rather than the plugin. It is deliberately left for a step that can be tested on its
- * own rather than smuggled into the transport. Until then a Windows plugin is bounded by the RSS
- * watchdog only, which is a *later* bound, not a *hard* one, and {@link warnIfUncapped} says so out
- * loud once per process instead of letting the caller assume a cap it did not get.
+ * **The two implemented mechanisms apply at different moments, and that is why this file cannot
+ * answer "is it capped" on Windows.** `RLIMIT_AS` is a property of the argv, so `planMemoryCap`
+ * settles it before anything is spawned. A job object needs a pid, so on Windows the plan can only
+ * say which mechanism *will be tried*; the transport spawns, calls `assignMemoryCap`, and decides
+ * {@link MemoryCapPlan.enforced} from what actually happened. A `job-object` plan therefore comes
+ * back with `enforced: false` and is corrected upward, never the other way round — a cap is never
+ * claimed before it exists.
  *
  * **macOS is not an oversight.** Darwin's kernel accepts `RLIMIT_AS` and does not enforce it, so a
  * `ulimit -v` there would be a cap in name only, which is worse than no cap: it reads as enforced in
@@ -41,6 +39,13 @@
 export type MemoryCapMechanism =
   /** `sh -c 'ulimit -v …; exec …'` wrapping the real argv. Linux only. */
   | "rlimit-as"
+  /**
+   * A Windows job object, assigned to the pid after the spawn. See `job-object.ts`.
+   *
+   * Naming it in the plan is a *request*, not a result: only the transport knows whether the
+   * assignment succeeded, so it is the transport that sets {@link MemoryCapPlan.enforced}.
+   */
+  | "job-object"
   /** No cap. The RSS watchdog is the only bound. */
   | "none";
 
@@ -51,7 +56,12 @@ export interface MemoryCapPlan {
    * **preserves the pid**. That matters: the transport hands that pid to the RSS watchdog.
    */
   readonly argv: readonly string[];
-  /** True only when the OS will refuse the allocation. Never true "in spirit". */
+  /**
+   * True only when the OS will refuse the allocation. Never true "in spirit".
+   *
+   * For a `job-object` plan this is always `false` as returned from {@link planMemoryCap} and is
+   * raised by the transport once the assignment has actually succeeded. See the file header.
+   */
   readonly enforced: boolean;
   readonly mechanism: MemoryCapMechanism;
   /**
@@ -117,11 +127,12 @@ export function planMemoryCap(
   if (platform === "win32") {
     return {
       argv,
+      // Not yet. A job object cannot exist before the pid does; the transport raises this.
       enforced: false,
-      mechanism: "none",
+      mechanism: "job-object",
       requested: true,
       detail:
-        "Windows memory caps need a Job Object, which Bun cannot create without native calls, so this plugin runs uncapped and only the RSS watchdog will stop it.",
+        "A Windows Job Object could not be assigned to this plugin, so it runs uncapped and only the RSS watchdog will stop it.",
     };
   }
 

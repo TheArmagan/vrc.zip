@@ -314,9 +314,12 @@ say "plugins run with your account's privileges; only install plugins you trust.
       activation and call deadlines, exponential restart backoff, crash-loop auto-disable.
       **Done**, plus the pieces it needed: migration 006 (installed plugins, immutable grants,
       dry-run lifts, crash history), `PluginRegistry` over the set, and a `PluginDisableStore` so an
-      auto-disable survives a restart. Decisions 139–141. Two limitations are load-bearing and are
-      written down rather than papered over: **the OS memory cap is not implemented on Windows**,
-      which is the primary platform, and `env: {}` is not honoured there either.
+      auto-disable survives a restart. Decisions 139–141.
+      **The two Windows limitations are now closed** (decision 166): the OS memory cap is a Job
+      Object assigned per plugin process through `bun:ffi`, verified to actually stop an
+      over-allocating child, and the environment is an explicit four-name minimum with everything
+      else blanked. `env: {}` turned out to be a *merge* on Windows rather than a replacement, which
+      is why it never worked — see Gotchas.
 - [~] **3.3 The hostile plugin** — spin loop, memory bomb, `import("node:"+"fs")`, event flood, and a
       lifecycle hook that never returns. The regression suite for everything above it.
       **The attacks are written** (`daemon/src/plugins/hostile/`, one file per attack plus a polite
@@ -1920,6 +1923,37 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      **Verification is the five-command gate plus a real daemon run** under `VRCZIP_STATE_DIR`,
      because PLAN.md's own warning is that typechecking has already let silent bugs through.
 
+166. **Both Windows gaps in 3.2 are closed, and the memory cap is a Job Object with a byte-level
+     test.** Decision 140 wrote them down as limitations on the primary platform; decision 165 said
+     fix them before building the adversary that exists to test them.
+
+     The cap is created per plugin process through `bun:ffi` into kernel32 and lives in its own
+     `job-object.ts`: CreateJobObjectW, SetInformationJobObject, OpenProcess on the pid Bun returns,
+     AssignProcessToJobObject. **The 144-byte `JOBOBJECT_EXTENDED_LIMIT_INFORMATION` struct is
+     asserted byte by byte, by offset**, because the struct is the part that fails *silently* rather
+     than loudly — a wrong offset is a call that returns success and caps nothing, inside the
+     daemon's own address space. Those assertions are pure and run on any platform, so a Linux CI
+     runner still catches a bad edit to them.
+
+     **Every failure path returns null and falls back to the RSS watchdog** rather than refusing to
+     start the plugin. Trading a later bound for no plugin at all is the worse outcome; the failure
+     is said out loud once per daemon process so it is not silent either. `KILL_ON_JOB_CLOSE` is
+     set, so a daemon crash cannot leave orphaned plugin processes on the user's machine — which
+     also means releasing the handle *is* a kill, and the transport releases it only after the
+     process is already gone.
+
+     For `env: {}`, the fix was smaller than the finding. Nothing secret was leaking: a marker
+     variable set in the daemon's own environment did not reach the child, and neither did
+     `VRCZIP_STATE_DIR` or the session token. What leaked was **disclosure** — the account name, the
+     home directory, the domain controller, and a `PATH` amounting to an inventory of every tool
+     installed on the machine. The spawn now passes an explicit environment keeping only
+     `SystemRoot`, `windir`, `SystemDrive` and `TEMP`/`TMP`, with temp pointed at **the plugin's own
+     data directory** rather than the user's temp folder: that is already its cwd so it learns
+     nothing new, its temp files stay inside the one directory it may write, and the user's profile
+     path is never spelled out. The other seven are set to the empty string, which is the only way
+     to unset one at all (see Gotchas). A blank `PATH` has teeth of its own — a plugin reaching for
+     `Bun.spawn(["git", …])` now resolves nothing.
+
 ---
 
 ## Gotchas
@@ -1927,6 +1961,35 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **`env: {}` on Windows is a merge, not a replacement.** Bun synthesises eleven system variables —
+  `PATH`, `SYSTEMROOT`, `WINDIR`, `SYSTEMDRIVE`, `TEMP`, `HOMEDRIVE`, `HOMEPATH`, `LOGONSERVER`,
+  `USERDOMAIN`, `USERNAME`, `USERPROFILE` — and adds them to whatever you pass. Passing an explicit
+  minimal dictionary does **not** remove them. The only way to get rid of a synthesised variable is
+  to supply your own value for it, and the empty string is that value: the variable still exists in
+  the child and says nothing. Key matching is case-insensitive, so passing `SystemRoot` replaces the
+  synthesised `SYSTEMROOT` rather than adding a second entry. A child starts fine with a blank
+  `PATH`. Note also there is no `TMP` in the eleven, only `TEMP`.
+- **The Windows memory cap is `ProcessMemoryLimit` — committed memory, not RSS and not reserved
+  address space.** This makes it a far closer match to the number a human has in mind than Linux's
+  `RLIMIT_AS`, which counts JavaScriptCore's huge *untouched* virtual reservations and therefore has
+  to be set at a generous multiple of the intended RSS. On Windows the figure can be roughly the
+  figure.
+- **Crossing that cap reads as a crash, not a kill.** The allocation is refused inside the plugin,
+  JSC raises `RangeError: Out of memory`, and the process exits 1 on its own. Nothing signals it and
+  nothing terminates it, so `ExitInfo.reason` is `"crashed"`. Conversely, a `KILL_ON_JOB_CLOSE`
+  termination reports **exit code 0** through Bun — not a signal, not a non-zero code. That does not
+  matter today because the job is only closed after the process is already gone, but a future caller
+  that closes a job *to stop* a plugin would read the kill as a clean voluntary exit.
+- **`planMemoryCap` can no longer answer "is it capped" on Windows, and that asymmetry is real.**
+  `RLIMIT_AS` is a property of the argv and is settled *before* the spawn; a Job Object needs a pid
+  and is therefore settled *after* it. The plan now names the mechanism it will attempt and returns
+  `enforced: false`, which the transport raises once the assignment actually succeeds — corrected
+  upward, never downward. There is a genuine if uninteresting window between `Bun.spawn` returning
+  and the assignment during which the child is uncapped.
+- **`bun:ffi` types a pointer return as `Pointer | bigint | null`**, so a handle has to be narrowed
+  at the boundary; and its pointer *parameters* reject a plain `number`, so handles must be carried
+  as the branded `Pointer` type rather than as numbers.
 
 - **`imageUrl()` is not idempotent, and double-applying it fails silently as a blank grey plate.**
   `HeroBanner` proxies its `url` itself, so a caller that proxies first produces

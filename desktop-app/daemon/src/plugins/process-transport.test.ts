@@ -8,6 +8,7 @@ import {
   LineSplitter,
   MAX_LOG_LINE_BYTES,
   makeProcessTransportFactory,
+  pluginProcessEnv,
   pluginRuntimePath,
   resolvePluginRuntime,
 } from "./process-transport.ts";
@@ -126,6 +127,62 @@ describe("runtime resolution", () => {
     expect(path.startsWith(stateRoot)).toBe(true);
     expect(path).toContain(`bun-${Bun.version}`);
   });
+});
+
+// -----------------------------------------------------------------------------------------------
+// The child's environment
+// -----------------------------------------------------------------------------------------------
+
+describe("the child's environment", () => {
+  test("is genuinely empty away from Windows, where an empty block is honoured", () => {
+    expect(pluginProcessEnv("/tmp/plugin", "linux")).toEqual({});
+    expect(pluginProcessEnv("/tmp/plugin", "darwin")).toEqual({});
+  });
+
+  test("keeps only the Windows minimum, and blanks what Bun insists on adding", () => {
+    const env = pluginProcessEnv("C:\\data\\plugin", "win32");
+    expect(env.TEMP).toBe("C:\\data\\plugin");
+    expect(env.TMP).toBe("C:\\data\\plugin");
+    expect(env.SystemRoot?.length).toBeGreaterThan(0);
+    expect(env.windir).toBe(env.SystemRoot);
+    // Present, so they override Bun's synthesised values, and empty, so they say nothing. Absent
+    // would mean inherited — the merge is the whole reason this function exists.
+    for (const name of ["PATH", "USERNAME", "USERPROFILE", "HOMEPATH", "LOGONSERVER"]) {
+      expect(env[name]).toBe("");
+    }
+  });
+
+  test.skipIf(process.platform !== "win32")(
+    "leaks nothing about the user or the daemon to a real child process",
+    async () => {
+      // Asserted against a spawned process rather than against the returned object, because the
+      // thing being tested is Bun's merge behaviour on Windows, not our own dictionary.
+      const child = Bun.spawn(
+        [process.execPath, "-e", "process.stdout.write(JSON.stringify(process.env))"],
+        {
+          env: pluginProcessEnv(stateRoot),
+          cwd: stateRoot,
+          stdout: "pipe",
+          stderr: "ignore",
+        },
+      );
+      const seen: Record<string, string> = JSON.parse(await new Response(child.stdout).text());
+      await child.exited;
+      expect(child.exitCode).toBe(0);
+
+      for (const [name, value] of Object.entries(seen)) {
+        if (value.length === 0) continue;
+        // Whatever is left with a value must be one of the four the header justifies, and TEMP/TMP
+        // must point inside the plugin's own directory rather than at the user's profile.
+        expect(["SystemRoot", "windir", "SystemDrive", "TEMP", "TMP"]).toContain(name);
+      }
+      expect(seen.PATH).toBe("");
+      expect(seen.USERNAME).toBe("");
+      expect(seen.TEMP).toBe(stateRoot);
+      expect(Object.keys(seen).some((name) => name.startsWith("VRCZIP_"))).toBe(false);
+    },
+    20_000,
+  );
 });
 
 // -----------------------------------------------------------------------------------------------
@@ -330,6 +387,33 @@ describe("a plugin that misbehaves", () => {
     expect(run.transport.running).toBe(false);
     expect(run.exits).toHaveLength(1);
   }, 20_000);
+});
+
+// -----------------------------------------------------------------------------------------------
+// The OS memory cap
+// -----------------------------------------------------------------------------------------------
+
+describe("the OS memory cap", () => {
+  test.skipIf(process.platform !== "win32")(
+    "stops a memory bomb at the ceiling instead of waiting for the watchdog",
+    async () => {
+      // `hostile/memory-bomb.js` allocates a gigabyte of *touched* pages at module load, before
+      // `activate` is ever called. Under a 192 MiB job object the allocation is refused and the
+      // process dies of its own out-of-memory — which is why this reads as a crash rather than as a
+      // kill, and why nothing here waits on a watchdog tick.
+      const run = await start({
+        bundlePath: join(import.meta.dir, "hostile", "memory-bomb.js"),
+        memoryLimitBytes: 192 * 1024 * 1024,
+        helloTimeoutMs: 20_000,
+      });
+
+      const info = await run.exited;
+      expect(info.reason).toBe("crashed");
+      expect(info.code).not.toBe(0);
+      expect(run.logs.some((entry) => /out of memory/i.test(entry.line))).toBe(true);
+    },
+    40_000,
+  );
 });
 
 // -----------------------------------------------------------------------------------------------

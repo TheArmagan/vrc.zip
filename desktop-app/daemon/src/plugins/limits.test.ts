@@ -28,12 +28,15 @@ describe("planMemoryCap", () => {
     expect(plan.argv[4]).toBe("2");
   });
 
-  test("does not pretend to cap on Windows, and says why", () => {
+  test("names the job object on Windows but leaves the argv and the verdict alone", () => {
     const plan = planMemoryCap(ARGV, 64 * 1024 * 1024, "win32");
-    expect(plan.enforced).toBe(false);
+    expect(plan.mechanism).toBe("job-object");
     expect(plan.requested).toBe(true);
+    // The cap is installed against a pid after the spawn, so nothing wraps the argv here, and
+    // `enforced` stays false until the transport has seen the assignment succeed. Claiming it
+    // early is the one failure mode this file exists to prevent.
     expect(plan.argv).toEqual(ARGV);
-    expect(plan.detail).toContain("Job Object");
+    expect(plan.enforced).toBe(false);
     expect(plan.detail).toContain("RSS watchdog");
   });
 

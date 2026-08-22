@@ -5,29 +5,35 @@ the architecture and the reasoning. This file tracks only *state*: what exists, 
 was decided along the way.
 
 **Last updated:** 2026-08-22
-**Current phase:** Phase 2 — Proxy + control plane
-**Status:** **Phase 1 is done**, manual verification included — the user confirmed 1.10 and the
-profile card on 2026-08-22. Phase 2 is built bottom-up through 2.6 (grant store, proxy credentials,
-egress filter, identity/scope parsing, the login handshake, the consent UI); **2.7 mirror routes is
-next**, and three calls are already made for it: register every operation the route table maps minus
-the hard denials, always hit upstream rather than serving a cached body (a re-encoded body is not
-byte-faithful), and share the per-account bucket FIFO with a subordinate per-grant budget.
+**Current phase:** Phase 3 — Plugin system
+**Status: Phases 1 and 2 are both built.** Phase 1 was confirmed by hand on 2026-08-22 (1.10 and the
+profile card). Phase 2 closed on the same day: every numbered step is ticked, including 2.8's last
+two pieces (per-app budget overrides and a rate gauge that reports measured numbers instead of
+invented ones) and 2.10 in full — retention's API and screen, the enriched stream, the
+grant-authenticated `/app` surface, outbound webhooks end to end, and the three social actions.
 
-**2.7 and 2.11 both landed on 2026-08-22, and together they make the mirror usable by a real
-client.** 2.11 is the forward proxy on `:7776`, for apps that can only be *configured* with a proxy
-rather than pointed at a base URL — VRCX above all, since it drives its HTTP through Chromium. 2.7 is
-the pass-through behind it: an operation is authorised against its grant and re-originated through
-the bound account's pipeline, with the upstream response returned untouched. Verified end to end
-against VRCX, which now gets past `GET /config` and into the consent handshake.
+**What Phase 2 amounts to, in one paragraph.** A third-party app configures the forward proxy on
+`:7776` (or points at `:7774` directly), logs in as it would to VRChat, and gets the real pre-2FA
+response; a consent sheet opens in vrc.zip and the user types the six-digit code *into the app*,
+which is the approval gesture. From then on the app holds a grant: it calls the byte-faithful mirror
+on `:7774`, streams the pipeline over the same port, and reaches vrc.zip's own enriched stream,
+sessions and webhooks at `/app` on `:7775`. Every call is scope-checked, the three risky scopes are
+budgeted per app per hour with a per-app override, every mutating call and every dangerous-scope
+read is audited, and the real `auth` cookie mechanically cannot leave the daemon. Verified end to
+end against VRCX through the handshake.
 
 **The app is distributable now, ahead of Phase 5:** `bun run package` produces one self-contained
 `dist/vrc.zip.exe` — daemon, UI bundle and Bun runtime in a single file, with the VZ icon and the
 version metadata on it, opening a browser on launch. It supersedes the `bun.exe` + `app/` layout in
 PLAN.md §Phase 5 only until the plugin host needs a real runtime to spawn; decisions 91–94.
 
-**2.9 landed too**, so `pipeline.vrchat.cloud` in the intercept set now has something to answer it:
-one real socket per account, fanned out to every connected app, filtered by scope. What remains for
-Phase 2 is 2.8 (rate budgets, audit rows, the kill switch and the Connected apps page) and 2.10.
+**Next: Phase 3 — the plugin system.** Decision 105 put it ahead of Phase 4 because it is the largest
+remaining risk and the thing everything else was shaped around. `PLAN.md` §Phase 3 is the spec;
+decision 106 settles the host process (the same `.exe` re-invoked in a plugin-host mode).
+
+**The one thing Phase 2 has left is verification, not construction:** an end-to-end pass with a real
+third-party client against `/app` — grant auth, the scope-filtered stream, and a webhook actually
+delivering to a receiver.
 
 **A planning pass on 2026-08-22 settled sixteen open questions** — decisions 95–110, and the
 §Open questions section is now one live item rather than eight. It scopes the rest of Phase 2 (what a
@@ -234,7 +240,7 @@ handshake, because the alternative is a login flow that mints credentials with n
       socket per account. Frames are re-emitted **verbatim** and scanned before forwarding; a dead
       token gets VRChat's own `err` frame with the `authToken` and `ip` it echoes stripped. The token
       is read from `?authToken=`, `?auth=` (VRCX's spelling), or the `auth` cookie. Decisions 81–82.
-- [~] **Housekeeping, before Phase 2 closes** — three items the 2026-08-22 planning pass created or
+- [x] **Housekeeping, before Phase 2 closes** — three items the 2026-08-22 planning pass created or
       confirmed, none of which belong to a numbered step. **`local.vrc.zip` is removed** —
       `ALLOWED_HOSTNAMES` is now `127.0.0.1` and `localhost`, and the hostname is asserted *rejected*
       by `hostGuard`, `originGuard` and `isLoopbackHttpUrl` rather than merely unused, since the

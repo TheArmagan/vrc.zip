@@ -14,7 +14,7 @@
  *    two precedence rules and an app that works against one build and not another.
  */
 
-import { DEFAULT_SCOPES, expandWildcard, isScope, type Scope } from "@vrcz/shared";
+import { ALL_SCOPES, DEFAULT_SCOPES, expandWildcard, isScope, type Scope } from "@vrcz/shared";
 
 /** An app, as the consent sheet names it. */
 export interface AppIdentity {
@@ -129,6 +129,18 @@ export function parseScopeRequest(raw: string): ScopeRequest {
   if (parts.length === 0) return { ok: true, scopes: DEFAULT_SCOPES };
   if (parts.length === 1 && parts[0] === "*") return { ok: true, scopes: expandWildcard() };
 
+  // A field that is not a scope request at all gets the same minimal default set as an empty one.
+  //
+  // PLAN.md claims a stock VRChat client library works unmodified, and that claim and the hard
+  // failure below were in direct contradiction: an unmodified client puts a **real password** here,
+  // because it has never heard of vrc.zip. Reading `hunter2` as a typo'd scope and answering 400
+  // makes the login impossible for exactly the clients the mechanism exists to support — VRCX among
+  // them. The password is neither stored nor forwarded; it is parsed here and discarded.
+  //
+  // The typo case below keeps its hard failure, because the two are distinguishable: `friends:reed`
+  // names a resource the registry knows and a verb it does not, while a password names nothing.
+  if (!looksLikeScopeRequest(parts)) return { ok: true, scopes: DEFAULT_SCOPES };
+
   const scopes: Scope[] = [];
   const unknown: string[] = [];
   for (const part of parts) {
@@ -140,6 +152,23 @@ export function parseScopeRequest(raw: string): ScopeRequest {
   }
 
   return unknown.length > 0 ? { ok: false, unknown } : { ok: true, scopes };
+}
+
+/** The resource half of every scope: `friends`, `users`, `files`, and so on. */
+const SCOPE_RESOURCES = new Set(ALL_SCOPES.map((scope) => scope.slice(0, scope.indexOf(":"))));
+
+/**
+ * True when the field was plausibly *meant* as a scope list.
+ *
+ * One part naming a resource the registry knows is enough. That is deliberately a low bar: the
+ * question is not "is this valid" — the loop above answers that, and answers it strictly — but "was
+ * this an attempt at scopes, or a password from a client that does not know about us".
+ */
+function looksLikeScopeRequest(parts: readonly string[]): boolean {
+  return parts.some((part) => {
+    const colon = part.indexOf(":");
+    return colon > 0 && SCOPE_RESOURCES.has(part.slice(0, colon));
+  });
 }
 
 /** Scopes in `wanted` that `granted` does not cover. The consent sheet shows only this delta. */

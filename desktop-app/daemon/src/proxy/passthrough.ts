@@ -131,7 +131,7 @@ export async function passthrough(
 
   if (authorized.grant !== null) deps.grants.touchGrant(authorized.grant.id, now());
 
-  return vrcFetch(context, request.path, {
+  const upstream = await vrcFetch(context, request.path, {
     method: request.method,
     headers: forwardedHeaders(request.headers),
     // Files have their own far larger per-IP ceiling. Charging an avatar to the API bucket queues
@@ -140,6 +140,42 @@ export async function passthrough(
     ...(BODILESS.has(request.method.toUpperCase()) || request.body === null
       ? {}
       : { body: request.body }),
+  });
+
+  return withDecodedBodyHeaders(upstream);
+}
+
+/**
+ * Drops `Content-Encoding` and `Content-Length` when the body underneath them has already been
+ * decoded, which on this path it always has been.
+ *
+ * **`fetch` decompresses transparently and then keeps the headers describing the compressed form.**
+ * VRChat gzips nearly everything, so a passed-through response arrives at the app announcing
+ * `Content-Encoding: gzip` over plain JSON, with a `Content-Length` counting the *compressed* bytes.
+ * A client that believes either one is broken twice over: its decompressor fails on data that was
+ * never compressed, and its reader truncates the body at the shorter length. This is what VRCX
+ * reports as an unsupported compression method.
+ *
+ * Stripping is the right repair rather than re-compressing, and asking VRChat for `identity` would
+ * be worse than both: the egress filter has to *scan* every response body for a leaked credential,
+ * and it cannot see inside a gzip stream. Decoded bodies are what make that check meaningful, so the
+ * decode is a feature and only the headers were ever wrong.
+ *
+ * Untouched when there is no `Content-Encoding`, so an uncompressed response really is passed
+ * through as the same object.
+ */
+function withDecodedBodyHeaders(response: Response): Response {
+  if (!response.headers.has("content-encoding")) return response;
+
+  const headers = new Headers(response.headers);
+  headers.delete("content-encoding");
+  // Now wrong by the same act, and the server recomputes it from the body it actually sends.
+  headers.delete("content-length");
+  // `response.body` by reference: the bytes are handed on, never re-encoded.
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
   });
 }
 

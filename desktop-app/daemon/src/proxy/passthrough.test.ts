@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { gzipSync } from "node:zlib";
 import { ROUTES, type Route } from "@vrcz/api";
 import { CookieJar } from "../accounts/cookie-jar.ts";
 import { RateLimiter } from "../net/rate-limiter.ts";
@@ -11,6 +12,7 @@ import {
   type PassthroughRequest,
   passthrough,
 } from "./passthrough.ts";
+import { matchRoute } from "./route-table.ts";
 
 /**
  * The pass-through's four rules, one describe block each.
@@ -398,5 +400,111 @@ describe("the spec's security list is not a safety judgement", () => {
     } finally {
       h.close();
     }
+  });
+});
+
+describe("responses whose body fetch already decoded", () => {
+  /** An upstream that behaves like VRChat: gzipped JSON, announced as such. */
+  function gzipHarness(): Harness {
+    const seen: Seen | null = null;
+    const payload = JSON.stringify({ clientApiKey: "JlE5Jldo", pad: "x".repeat(400) });
+    const upstream = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        const body = gzipSync(Buffer.from(payload));
+        return new Response(body, {
+          headers: {
+            "Content-Type": "application/json",
+            "Content-Encoding": "gzip",
+            "Content-Length": String(body.length),
+          },
+        });
+      },
+    });
+
+    const limiter = new RateLimiter();
+    const context = (accountId: string): RequestContext => ({
+      accountId,
+      jar: new CookieJar(),
+      userAgent: "vrc.zip/0.1.0 (me@example.com)",
+      limiter,
+      baseUrl: `http://127.0.0.1:${String(upstream.port)}`,
+    });
+
+    return {
+      deps: {
+        grants: { grantByTokenHash: () => null, touchGrant: () => {} },
+        context: () => context("usr_a"),
+        anonymousContext: () => context("vrczip:anonymous"),
+      },
+      seen: () => seen,
+      touched: [],
+      close: () => upstream.stop(true),
+    };
+  }
+
+  test("does not announce a Content-Encoding over a body that is no longer encoded", async () => {
+    // What VRCX reported as an unsupported compression method: `fetch` decompresses transparently
+    // and keeps the headers describing the compressed form, so the client gunzips plain JSON.
+    const h = gzipHarness();
+    try {
+      const response = await passthrough(route("getConfig"), request(), h.deps);
+      expect(response.headers.get("content-encoding")).toBeNull();
+      // The compressed length would truncate the body a client reads by it.
+      expect(response.headers.get("content-length")).toBeNull();
+      expect(response.headers.get("content-type")).toBe("application/json");
+      expect(await response.json()).toMatchObject({ clientApiKey: "JlE5Jldo" });
+    } finally {
+      h.close();
+    }
+  });
+
+  test("an uncompressed response is passed through as the very same object", async () => {
+    const h = harness();
+    try {
+      const response = await passthrough(route("getConfig"), request(), h.deps);
+      // Nothing was decoded, so nothing needed rebuilding.
+      expect(response.headers.get("x-upstream")).toBe("yes");
+      expect(response.status).toBe(203);
+    } finally {
+      h.close();
+    }
+  });
+});
+
+describe("the image and file routes the spec omits", () => {
+  test("an avatar image URL routes to files:read rather than a 404", async () => {
+    // `currentAvatarImageUrl` in a real User payload. Absent from openapi.json v1.20.8.
+    const matched = matchRoute("GET", "/image/file_abc/3/1024");
+    expect(matched?.route.operationId).toBe("downloadImageVersion");
+    expect(matched?.route.scope).toBe("files:read");
+    expect(matched?.params).toMatchObject({
+      fileId: "file_abc",
+      versionId: "3",
+      resolution: "1024",
+    });
+  });
+
+  test("a user icon URL routes too, in both of its overloaded forms", () => {
+    expect(matchRoute("GET", "/file/file_icon/1/256")?.route.operationId).toBe(
+      "downloadFileVersion",
+    );
+    expect(matchRoute("GET", "/file/file_pfp/2/file")?.route.operationId).toBe(
+      "downloadFileVersion",
+    );
+  });
+
+  test("the generated five-segment status route still wins its own shape", () => {
+    // The supplement is four segments; adding it must not shadow what the spec does describe.
+    expect(matchRoute("GET", "/file/file_x/1/file/status")?.route.operationId).toBe(
+      "getFileDataUploadStatus",
+    );
+  });
+
+  test("they are charged to the file rate bucket, not the API one", () => {
+    // `tag: "files"` is what `passthrough` reads to pick the rate class. A screen full of avatars
+    // charged to the API bucket queues presence and friend polling behind pictures.
+    expect(matchRoute("GET", "/image/file_a/1/256")?.route.tag).toBe("files");
   });
 });

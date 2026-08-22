@@ -751,6 +751,21 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
     being harmless the moment the spec is regenerated. Requiring a grant for anything that is not a
     read closes it once, including for operations added later.
 
+77. **A password in the scope field falls back to the default scopes; a typo among real scopes is
+    still a hard 400.** `PLAN.md` claims a stock VRChat client library works unmodified *and* that an
+    unknown scope string is a hard failure, and those two were in direct contradiction: an unmodified
+    client puts a **real password** in that field, because it has never heard of vrc.zip. Reading
+    `hunter2` as a typo'd scope made login impossible for exactly the clients the mechanism exists to
+    support. The two cases are distinguishable — `friends:reed` names a resource the registry knows
+    and a verb it does not, a password names nothing — so the typo case keeps its hard failure and
+    only the "this was never a scope list" case falls back. Safe because nothing is granted without
+    the consent sheet and the pairing code either way, the fallback set is minimal and read-only, and
+    the password is parsed and discarded, never stored or forwarded.
+
+78. **`files:read` is in `DEFAULT_SCOPES`.** Every avatar, icon, and banner in a VRChat client is a
+    `/file/` or `/image/` fetch, so without it the default grant produces an app whose every picture
+    is a 403 — technically a correct minimal grant and practically a broken client.
+
 ---
 
 ## Gotchas
@@ -758,6 +773,27 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **`fetch` decompresses the body and keeps the headers describing the compressed form.** VRChat
+  gzips nearly everything, so a passed-through response reached the app announcing
+  `Content-Encoding: gzip` over plain JSON, with a `Content-Length` counting the *compressed* bytes.
+  A client is broken twice by that: its decompressor fails on data that was never compressed, and its
+  reader truncates the body at the shorter length. VRCX reports it as "the archive entry was
+  compressed an unsupported compression method", which names neither HTTP nor gzip and sends you
+  looking in the wrong place entirely. Both headers are now dropped whenever one is present, in
+  `proxy/passthrough.ts`. Re-compressing would be the wrong repair and asking VRChat for `identity`
+  worse than both — the egress filter has to *scan* every body for a leaked credential and cannot see
+  inside a gzip stream, so decoded bodies are what make that check mean anything.
+
+- **The pinned spec does not describe the URLs VRChat puts in its own responses.** Every image a
+  client shows is `/file/{fileId}/{versionId}/{variant}` or `/image/{fileId}/{versionId}/{resolution}`
+  — four segments — and `openapi.json` v1.20.8 has neither. It documents the five-segment
+  `/file/{id}/{version}/{type}/status` and stops one short of the route that actually serves bytes.
+  So the mirror answered VRChat's real 404 for every avatar and icon: correct behaviour applied to an
+  incomplete table. They live in `SUPPLEMENTAL_ROUTES` in `proxy/route-table.ts` rather than in
+  `packages/api/src/generated`, which is codegen output — a supplement a regeneration silently
+  discards is worse than no supplement. **Assume the spec is incomplete rather than authoritative
+  about what VRChat serves.**
 
 - **`sessionId` was the same identifier in two shapes, and the seam between them was a round trip.**
   The bus and the store both call it an integer `sessions` row id, and `event-bus.ts` has a comment

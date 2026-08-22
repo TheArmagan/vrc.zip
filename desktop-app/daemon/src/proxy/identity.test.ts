@@ -117,3 +117,35 @@ test("missingScopes is the delta a re-consent sheet shows", () => {
   expect(missingScopes(["friends:read"], ["friends:read", "invite:send"])).toEqual(["invite:send"]);
   expect(missingScopes(["friends:read", "invite:send"], ["friends:read"])).toEqual([]);
 });
+
+describe("a password is not a typo'd scope list", () => {
+  test("a real password gets the minimal default set, not a 400", () => {
+    // PLAN.md claims a stock VRChat client works unmodified. An unmodified client puts a real
+    // password here, because it has never heard of vrc.zip. VRCX is exactly this case.
+    expect(parseScopeRequest("hunter2")).toEqual({ ok: true, scopes: DEFAULT_SCOPES });
+    expect(parseScopeRequest("P@ssw0rd!, with a comma")).toEqual({
+      ok: true,
+      scopes: DEFAULT_SCOPES,
+    });
+    // Even one containing a colon, as long as it names no resource the registry knows.
+    expect(parseScopeRequest("correct:horse:battery")).toEqual({
+      ok: true,
+      scopes: DEFAULT_SCOPES,
+    });
+  });
+
+  test("a typo among real scopes is still a hard failure", () => {
+    // The distinction that makes the fallback safe: `friends` is a resource the registry knows, so
+    // this was plainly meant as scopes and `reed` is a mistake worth naming.
+    expect(parseScopeRequest("friends:reed")).toEqual({ ok: false, unknown: ["friends:reed"] });
+    expect(parseScopeRequest("users:read,friends:reed")).toEqual({
+      ok: false,
+      unknown: ["friends:reed"],
+    });
+  });
+
+  test("the default set can draw every picture a client shows", () => {
+    // Without files:read the default grant produces an app whose every avatar is a 403.
+    expect(DEFAULT_SCOPES).toContain("files:read");
+  });
+});

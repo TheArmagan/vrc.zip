@@ -41,9 +41,52 @@ interface CompiledRoute {
   readonly literals: number;
 }
 
+/**
+ * Routes VRChat serves that the pinned spec does not describe.
+ *
+ * Every image URL VRChat hands out is one of these, and none of them is in `openapi.json` v1.20.8:
+ * `userIcon` and `profilePicOverride` are `/file/{fileId}/{versionId}/{variant}`, and
+ * `currentAvatarImageUrl` is `/image/{fileId}/{versionId}/{resolution}`. The spec documents
+ * `/file/{fileId}/{versionId}/{fileType}/status` — five segments — and stops one short of the four
+ * that actually serve the bytes. An app pointed at the mirror therefore got VRChat's real 404 for
+ * every avatar and every icon, which is correct behaviour applied to a table that is simply
+ * incomplete.
+ *
+ * They live **here rather than in `packages/api/src/generated`**, which is codegen output and is
+ * never hand-edited: a supplement that a regeneration silently discards is worse than no supplement.
+ * The shapes are taken from the URLs in real `User` payloads, which is why the fixtures across the
+ * daemon's own tests spell them the same way.
+ *
+ * Additions are held to the same bar as the generated table: exactly one scope, an honest `tag`
+ * (`files`, so the pass-through charges them to the file rate bucket rather than the API one), and
+ * `security` describing what VRChat really requires — these need the auth cookie, which is the whole
+ * reason `net/image-cache.ts` exists.
+ */
+export const SUPPLEMENTAL_ROUTES: readonly Route[] = [
+  {
+    method: "GET",
+    // `{variant}` is `file`, `signature`, or a pixel size: VRChat overloads the segment.
+    pathTemplate: "/file/{fileId}/{versionId}/{variant}",
+    operationId: "downloadFileVersion",
+    tag: "files",
+    security: ["authCookie"],
+    scope: "files:read",
+    hardDenied: false,
+  },
+  {
+    method: "GET",
+    pathTemplate: "/image/{fileId}/{versionId}/{resolution}",
+    operationId: "downloadImageVersion",
+    tag: "files",
+    security: ["authCookie"],
+    scope: "files:read",
+    hardDenied: false,
+  },
+];
+
 const BY_METHOD = new Map<string, CompiledRoute[]>();
 
-for (const route of ROUTES) {
+for (const route of [...ROUTES, ...SUPPLEMENTAL_ROUTES]) {
   const segments = splitPath(route.pathTemplate).map(compileSegment);
   const compiled: CompiledRoute = {
     route,

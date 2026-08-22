@@ -192,6 +192,10 @@ export const DEFAULT_SCOPES: readonly Scope[] = [
   "worlds:read",
   "instances:read",
   "system:read",
+  // Every avatar, icon, and banner in a VRChat client is a `/file/` or `/image/` fetch, so without
+  // this the default grant produces an app whose every picture is a 403. It reads what the account
+  // can already see and nothing else, which is what "minimal read-only" has to mean here.
+  "files:read",
 ] as const;
 
 /** Expands a wildcard grant. Dangerous scopes are excluded by construction — see `SCOPES`. */

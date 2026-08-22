@@ -7,13 +7,12 @@
     "module": "Preserve",
     "moduleResolution": "bundler",
     "moduleDetection": "force",
-    "types": ["bun"],
+    "types": ["bun", "node"],
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
-
     // Strictness — see PROGRESS.md §Conventions. These are not negotiable per-package.
     "strict": true,
     "noUncheckedIndexedAccess": true,
@@ -23,7 +22,6 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "useUnknownInCatchVariables": true,
-
     "skipLibCheck": true
   }
 }

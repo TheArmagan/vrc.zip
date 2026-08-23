@@ -3985,6 +3985,21 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      stale row from the list that was there two keystrokes ago; hovering moves it, so the pointer and
      the keyboard do not disagree about what Enter would do.
 
+227. **Ctrl+S saves the canvas, and claims the shortcut whether or not there is anything to save.**
+     The second half is the point. The browser's own Ctrl+S offers to write the page to disk, which
+     is never what somebody in a node editor meant — so `preventDefault` runs before the dirty check,
+     and a press on a clean canvas is a no-op rather than a Save Page dialog. Claiming a shortcut
+     only when it happens to be useful is how a control ends up doing two unrelated things depending
+     on state nobody can see.
+
+     **No input guard**, deliberately, and it is the opposite call from `Delete`. Ctrl+S while the
+     caret is in a config field is exactly when people reach for it, and the daemon takes whole
+     documents, so a field being mid-edit changes nothing about what gets written. Delete is guarded
+     because a stray one destroys a node; Ctrl+S is not because a stray one writes what is already on
+     screen. Verified both ways: with the caret in a number field, the edit reached the daemon.
+
+     Save's tooltip says `Ctrl+S`, since a shortcut nobody is told about is a shortcut nobody uses.
+
 ---
 
 ## Gotchas

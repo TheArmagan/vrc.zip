@@ -591,6 +591,26 @@ async function save(): Promise<void> {
   }
 }
 
+/**
+ * Ctrl+S, or Cmd+S.
+ *
+ * **`preventDefault` runs whether or not there is anything to save**, and that is the point of
+ * handling it at all. The browser's own Ctrl+S offers to write the page to disk, which is never what
+ * somebody in a node editor meant — so the shortcut is claimed for as long as this component is
+ * mounted, and a press with nothing dirty is simply a no-op rather than a Save Page dialog.
+ *
+ * No input guard. Ctrl+S while the caret is in a config field is exactly when people reach for it,
+ * and the daemon takes whole documents, so the field being mid-edit changes nothing about what gets
+ * written.
+ */
+function onWindowKey(event: KeyboardEvent): void {
+  if (event.key !== "s" && event.key !== "S") return;
+  if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+  event.preventDefault();
+  if (saving || !dirty) return;
+  void save();
+}
+
 async function saveSecret(fieldId: string): Promise<void> {
   if (selectedId === null) return;
   const value = secretDraft[`${selectedId}:${fieldId}`] ?? "";
@@ -603,6 +623,8 @@ async function saveSecret(fieldId: string): Promise<void> {
   }
 }
 </script>
+
+<svelte:window onkeydown={onWindowKey} />
 
 <header class="flex shrink-0 items-center gap-3 border-b border-border px-4 py-3">
   <Button variant="ghost" size="sm" href={hrefFor("graphs")}>
@@ -643,7 +665,12 @@ async function saveSecret(fieldId: string): Promise<void> {
       <PlayIcon class="size-4" />
       Run now
     </Button>
-    <Button size="sm" disabled={saving || !dirty} onclick={() => void save()}>
+    <Button
+      size="sm"
+      disabled={saving || !dirty}
+      title="Ctrl+S"
+      onclick={() => void save()}
+    >
       <SaveIcon class="size-4" />
       Save
     </Button>

@@ -35,6 +35,8 @@
 import { AFTER_PORT, assignable, ERROR_PORT, isPortType } from "@vrcz/plugin-api/nodes";
 import type { NodeDefinition, PortDefinition } from "@vrcz/plugin-api/nodes";
 import { Input } from "$lib/components/ui/input/index.js";
+import { iconFor } from "$lib/graphs/icons.ts";
+import { familyColor, familyOf, portColor } from "$lib/graphs/visuals.ts";
 import { graphs, type NodeType } from "$lib/state/graphs.svelte.ts";
 
 /** Which end a wire was dragged from, and what it carries. Null when nothing is attached. */
@@ -51,6 +53,8 @@ export interface PickerChoice {
   /** Null when the picker was opened with no wire attached — there is nothing to connect. */
   readonly portId: string | null;
   readonly portLabel: string;
+  /** Who contributed the node type, so the row can be drawn the way the card will be. */
+  readonly owner: string;
 }
 
 let {
@@ -152,15 +156,33 @@ function match(type: NodeType, source: PickerSource): PickerChoice | null {
     if (definition.kind === "trigger") return null;
     const port = definition.inputs.find((entry) => accepts(source.portType, entry));
     if (port !== undefined) {
-      return { qualifiedId: type.qualifiedId, definition, portId: port.id, portLabel: port.label };
+      return {
+        qualifiedId: type.qualifiedId,
+        definition,
+        portId: port.id,
+        portLabel: port.label,
+        owner: type.owner,
+      };
     }
     // `after` carries no value and sequences a node, so it is a real answer when nothing else fits —
     // last, because "run this next" is rarely what somebody dragging a value port meant.
-    return { qualifiedId: type.qualifiedId, definition, portId: AFTER_PORT, portLabel: "after" };
+    return {
+      qualifiedId: type.qualifiedId,
+      definition,
+      portId: AFTER_PORT,
+      portLabel: "run after",
+      owner: type.owner,
+    };
   }
   const port = definition.outputs.find((entry) => produces(entry, source.portType));
   if (port !== undefined) {
-    return { qualifiedId: type.qualifiedId, definition, portId: port.id, portLabel: port.label };
+    return {
+      qualifiedId: type.qualifiedId,
+      definition,
+      portId: port.id,
+      portLabel: port.label,
+      owner: type.owner,
+    };
   }
   // Every executable node has the implicit error port, which carries a string.
   if (
@@ -168,7 +190,13 @@ function match(type: NodeType, source: PickerSource): PickerChoice | null {
     isPortType(source.portType) &&
     assignable("string", source.portType)
   ) {
-    return { qualifiedId: type.qualifiedId, definition, portId: ERROR_PORT, portLabel: "error" };
+    return {
+      qualifiedId: type.qualifiedId,
+      definition,
+      portId: ERROR_PORT,
+      portLabel: "on error",
+      owner: type.owner,
+    };
   }
   return null;
 }
@@ -190,7 +218,13 @@ const choices = $derived.by(() => {
     for (const type of group.types) {
       const choice =
         from === null
-          ? { qualifiedId: type.qualifiedId, definition: type.definition, portId: null, portLabel: "" }
+          ? {
+              qualifiedId: type.qualifiedId,
+              definition: type.definition,
+              portId: null,
+              portLabel: "",
+              owner: type.owner,
+            }
           : match(type, from);
       if (choice === null) continue;
       if (terms.length > 0) {
@@ -231,7 +265,13 @@ const choices = $derived.by(() => {
       onkeydown={onSearchKey}
     />
     {#if from !== null}
-      <p class="mt-1 text-xs text-muted-foreground">
+      <!-- The dot is the same one on the handle the wire came from, so the two read as one thing. -->
+      <p class="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+        <span
+          class="size-2 rounded-full"
+          style="background: {portColor(from.portType)}"
+          aria-hidden="true"
+        ></span>
         {from.side === "source" ? "Takes" : "Gives"}
         <span class="font-mono">{from.portType}</span>
       </p>
@@ -239,19 +279,27 @@ const choices = $derived.by(() => {
   </div>
   <div class="flex-1 overflow-y-auto p-1">
     {#each choices.slice(0, LIMIT) as row, index (row.choice.qualifiedId)}
+      {@const Icon = iconFor(row.choice.definition.category, row.choice.owner)}
       <button
         bind:this={rows[index]}
-        class="w-full rounded px-2 py-1.5 text-left text-sm hover:bg-accent {index === active
+        class="flex w-full items-start gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-accent {index ===
+        active
           ? 'bg-accent'
           : ''}"
         onclick={() => onpick(row.choice)}
         onmouseenter={() => (active = index)}
       >
-        <span>{row.choice.definition.title}</span>
-        {#if row.choice.portId !== null}
-          <span class="ml-1 text-xs text-muted-foreground">· {row.choice.portLabel}</span>
-        {/if}
-        <span class="block text-xs text-muted-foreground">{row.group}</span>
+        <Icon
+          class="mt-0.5 size-3.5 shrink-0"
+          style="color: {familyColor(familyOf(row.choice.definition.category, row.choice.owner))}"
+        />
+        <span class="min-w-0 flex-1">
+          <span class="truncate">{row.choice.definition.title}</span>
+          {#if row.choice.portId !== null}
+            <span class="ml-1 text-xs text-muted-foreground">into {row.choice.portLabel}</span>
+          {/if}
+          <span class="block truncate text-xs text-muted-foreground">{row.group}</span>
+        </span>
       </button>
     {:else}
       <p class="px-2 py-4 text-xs text-muted-foreground">

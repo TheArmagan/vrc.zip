@@ -30,6 +30,17 @@ export interface GraphLimits {
    * body executes no nodes, so a list of a million would spin without the run ever growing.
    */
   readonly maxForeachItems: number;
+  /**
+   * How long one `foreach` may spend waiting between its items, in total.
+   *
+   * A **total**, not a per-item cap, because per-item says nothing about the thing worth bounding: a
+   * run holds a concurrency slot for as long as it lives, and a `drop` or `queue` graph sleeping its
+   * way through a thousand items is a graph that ignores every fire until it is done. Two seconds
+   * between items is reasonable and so is a list of forty; two seconds and a list of ten thousand is
+   * a graph nobody meant to write, and it is refused before it starts rather than discovered a day
+   * later.
+   */
+  readonly maxForeachDelayMs: number;
   /** Runs one graph may start per hour before it is switched off. */
   readonly maxRunsPerHour: number;
   /** Live runs one `parallel` graph may hold at once. */
@@ -42,6 +53,7 @@ export const DEFAULT_GRAPH_LIMITS: GraphLimits = {
   defaultFiresPerMinute: 120,
   maxNodesPerRun: 500,
   maxForeachItems: 1_000,
+  maxForeachDelayMs: 1_800_000,
   maxRunsPerHour: 200,
   maxParallelRuns: 4,
   maxQueuedRuns: 32,

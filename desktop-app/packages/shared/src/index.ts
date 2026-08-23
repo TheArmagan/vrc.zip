@@ -49,6 +49,9 @@ export {
   type UserEventKind,
 } from "./events.ts";
 export {
+  FOREACH_AFTER_PORTS,
+  FOREACH_BODY_PORTS,
+  foreachBodies,
   GRAPH_CONCURRENCY_MODES,
   GRAPH_RUN_STATUSES,
   type Graph,
@@ -73,6 +76,7 @@ export {
   type GraphUpdate,
   type GraphValidation,
   graphRoots,
+  innermostLoop,
   isGraphConcurrency,
   MAX_GRAPH_DESCRIPTION,
   MAX_GRAPH_EDGES,

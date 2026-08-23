@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { assignable, isTriggerDefinition, type NodeDefinition } from "@vrcz/plugin-api/nodes";
+import {
+  AFTER_PORT,
+  assignable,
+  isTriggerDefinition,
+  type NodeDefinition,
+} from "@vrcz/plugin-api/nodes";
 import { graphRoots, reachableFrom, validateGraphDocument } from "@vrcz/shared";
 import { EventBus } from "../bus/event-bus.ts";
 import { createBuiltinNodes } from "./builtins/index.ts";
@@ -48,7 +53,14 @@ describe("the shipped templates", () => {
           const output = source.outputs.find((port) => port.id === edge.from.port);
           const input = isTriggerDefinition(target)
             ? undefined
-            : target.inputs.find((port) => port.id === edge.to.port);
+            : // `after` is the input every node has and no definition declares. It carries no value
+              // and accepts anything, which is exactly what `json` means in this lattice — so it is
+              // resolved here rather than being a hole the check silently fails on. Without this a
+              // template could not express a sequencing edge at all.
+              (target.inputs.find((port) => port.id === edge.to.port) ??
+              (edge.to.port === AFTER_PORT
+                ? ({ id: AFTER_PORT, label: "run after", type: "json" } as const)
+                : undefined));
           expect(output, `${edge.id}: no output ${edge.from.port}`).toBeDefined();
           expect(input, `${edge.id}: no input ${edge.to.port}`).toBeDefined();
           if (output === undefined || input === undefined) continue;

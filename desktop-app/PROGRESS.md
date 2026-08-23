@@ -4,7 +4,7 @@ Working log for anyone (human or agent) picking this up. **Read [`PLAN.md`](./PL
 the architecture and the reasoning. This file tracks only *state*: what exists, what's next, and what
 was decided along the way.
 
-**Last updated:** 2026-08-23
+**Last updated:** 2026-08-24
 **Phase 4 landed in one pass:** decisions 207–215. A durable run engine, thirty-two built-in node
 types, a Svelte Flow canvas, and graphs that export to a file. Read decision 206 first for why it is shaped
 the way it is; 208 is the engine's one load-bearing rule.
@@ -14,6 +14,10 @@ config-field kind, and a `vrchat://` opener that attaches to a running client in
 second one. Decision 241 adds twenty-eight **named triggers** over the pipeline and the game log, so
 a graph starts on "my status changed" or "a portal appeared" with typed ports, rather than on a
 pattern with a `json` blob.
+**The loop grew up on 2026-08-24** (decisions 242 and 243): `Collect` and `Stop when` as
+intrinsics, a `results` port, a pace between items, the body drawn as a tinted region on the canvas,
+a live position readout while a run is in flight, and every node card redesigned around its palette
+category. A fourth template ships the loop's shape so it can be read rather than guessed.
 **Current phase:** Phase 4 is **complete** — 4.1 through 4.6, built on 2026-08-23 from the spec the
 planning pass of the same day produced (decision 206). Graphs are stored, run, edited on a canvas,
 armed behind a hold, and shared as files. What remains in the plan is Phase 5, packaging and polish,
@@ -4375,6 +4379,96 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
        account id would have been the same field rendered two ways in one editor. Same stored value,
        same behaviour, and the same one-re-save badge as above.
 
+242. **The loop grew a way to produce something, a way to stop, and a body you can see.** `foreach`
+     shipped in decision 206 with three outputs and no visual identity at all, and the three
+     complaints about it were the same complaint: a loop is the one construct on the canvas whose
+     meaning is *positional* — which nodes are inside it — and the canvas drew nothing positional.
+     The card was the same 208px grey box as every other node, the body was invisible, and the port
+     that means "after the loop" was called `After` on a screen where every node also has an
+     implicit input called `after`.
+
+     What landed, and why each call went the way it did:
+
+     - **`Collect`, an intrinsic in the body, rather than a "collect from" picker on the loop.** A
+       loop that could only cause things and never produce one was the real gap: the next iteration
+       clears the body, so whatever an iteration worked out died with it. The alternatives were a
+       config field naming a body node's port — a second way to say what a wire already says — or
+       implicitly collecting the body's terminal node, which is silently wrong the moment the body
+       branches. A node that takes a wire is the only one of the three that cannot be ambiguous.
+       Its counterpart is a fourth output, `results`, always produced: gating the after-the-loop
+       branch on whether anything was collected would make "nobody was online" look identical to
+       "the loop never ran".
+     - **`results` joins `done` in the after-the-loop set, which changes what the body *is*.** The
+       body was "what `item` reaches minus what `done` reaches". A node reading `results` is plainly
+       after the loop, so it had to join that subtraction or it would have been walked once per item
+       — collecting into the thing it was reading.
+     - **`Stop when` takes a boolean, and the current item still finishes.** A `Stop` behind a
+       `Branch` would have been one node fewer to define and one more to wire, every time. Finishing
+       the item is the part worth stating: stopping mid-body would mean abandoning a scope halfway,
+       which the walk has never had to do — it runs a scope until nothing in it is ready, and that
+       is the same loop that drains the outer run. It is also the honest behaviour for a body that
+       has already sent an invite. `done` counts the items that *ran*, not the length of the list,
+       because a count that says four when two happened is a lie in the one case somebody is
+       counting.
+     - **Innermost loop owns a `Collect` or a `Stop when`, structurally.** The same scoping every
+       language gives a `break`, and the rule is not a size comparison: a candidate is innermost
+       when no other candidate loop sits inside its body. An outer loop still collects an inner
+       loop's `results`, which is what makes a list of lists expressible.
+     - **`foreachBodies` moved to `@vrcz/shared`.** The canvas has to draw the boundary the engine
+       walks. Two implementations of that subtraction is two answers to "is this node in the loop",
+       and the one on screen would be the one nobody tested.
+     - **The body region is decoration, not a container.** Svelte Flow can parent nodes into a real
+       group, and it was refused: membership would then have two sources, the box you dragged and
+       the edges you drew, and the engine honours only one. The region is a *reading* of the wiring,
+       `pointer-events: none`, recomputed when the wiring changes — so a double-click on empty
+       canvas inside the tint still opens the node picker.
+     - **Progress is polled, not emitted.** The run row already carries the position; the editor
+       asks for it twice a second while it is open and not at all when it is not. A control-stream
+       message per node — or per iteration — would put traffic on the bus for every run of every
+       enabled graph whether or not a canvas existed to read it. Progress is not an event; it is the
+       answer to a question, and it is only a question while somebody is asking. `GraphRunSummary`
+       grew `currentNode` and `loops` rather than a `/runs/live` route beside `/runs`: same table,
+       same poll, one route.
+     - **The rules the canvas can check, it checks.** A `Wait` inside a `For each` has always failed
+       the run with a sentence; the editor now says that sentence while the graph is being drawn.
+       The engine keeps refusing it — a client is a client — but the difference is finding out at
+       edit time instead of at 3 AM.
+     - **A refused wire offers the conversion.** Dragging a `json` into a `For each`'s List is the
+       commonest edit in the editor and the lattice refuses it on purpose. Doing nothing was the
+       wrong answer to that: the wire vanished and the canvas looked unchanged. The offer is
+       searched rather than hardcoded to `As list`, ranked by fewest total ports so the node that
+       leaves nothing dangling is the first row.
+     - **The loop paces itself, because a `Wait` in the body cannot.** "Why can I not put a Wait in
+       here" is almost always "I am sending forty invites and VRChat is counting", and the durable
+       answer is genuinely unavailable: parking mid-iteration would mean persisting which item the
+       loop was on and everything it had accumulated, and a resume would have to reconstruct a scope
+       rather than a node. So `delayMs` on the loop waits **in process** — nothing persisted, nothing
+       to survive a restart, and a daemon that stops mid-loop loses that run exactly as it loses any
+       other running one. Bounded by a *total*, not a per-item cap: a run holds a concurrency slot
+       for as long as it lives, so two seconds across forty items is fine and two seconds across ten
+       thousand is a graph nobody meant to write, refused before it starts. It is a real ceiling and
+       it sits in `GraphLimits` with the other three. Adding the field moves the `foreach`
+       definition hash, so a saved graph with a loop in it shows the "node changed" badge until it
+       is re-saved — the same one decision 240 caused, and marked rather than blocking.
+     - **Every card was redesigned, not just the loop's.** The loop looked scuffed partly because
+       nothing looked like anything: one grey box per node, with `json` and `list<friend>` as raw
+       text beside every label. Cards now carry their palette category's hue and Lucide icon — the
+       same axis the sidebar groups by, so the two teach one taxonomy — and the type moved from text
+       to the handle's colour, five families rather than one per type, with a filled dot for one of
+       something and a hollow ring for several. The graph canvas is now the only screen in this app
+       that is not greyscale, which is deliberate: a node editor cannot say what a card is before
+       you read it without colour.
+
+243. **A fourth template, and it exists to be read rather than run.** `templates.ts` said in its own
+     header that nothing shipped used `foreach`, on the grounds that a starting point should not
+     need explaining. That was right about templates and wrong about the loop: `For each` → body →
+     `Collect` → `results` → afterwards is a shape nobody guesses from a palette, and "Collect"
+     explains nothing standing on its own in a list. `friends-online-roundup` is that shape with
+     built-ins only, laid out in two rows so the afterwards is visibly after. It also forced a real
+     gap in `templates.test.ts`: the edge check had no idea the implicit `after` port existed, so a
+     template could not express a sequencing edge at all — which is what a source node like
+     `Friends` needs to be reachable from its trigger.
+
 ---
 
 ## Gotchas
@@ -5188,6 +5282,30 @@ Carried in from research, not yet verified against running code:
 - Fake only `Date` (`vi.useFakeTimers({ toFake: ["Date"] })`) when testing the resolvers: their
   flush is a `queueMicrotask`, which no timer mock intercepts, and faking `setTimeout` deadlocks any
   helper that awaits one.
+
+- **`overflow-hidden` on a node card deletes every port on it.** The redesigned card wanted it, to
+  round the top off the category strip, and every `Handle` is absolutely positioned *outside* the
+  card's edge — so all forty-nine of them vanished at once while the DOM kept reporting the right
+  size, the right colour and `visibility: visible`. The card looked plausible and was unusable. The
+  strip rounds its own corners now. Found by looking at the running app, not by any of the five
+  checks: nothing in this project renders a component.
+
+- **Svelte Flow children are drawn in screen space, not flow space.** A region drawn behind the
+  nodes has to pan and zoom with them, and a plain child of `<SvelteFlow>` does neither.
+  `ViewportPortal` is the way into the transformed layer — but its own wrapper is a statically
+  positioned `<div>`, so anything `absolute` inside it resolves against whatever the flow positions
+  next. Pinning that wrapper at the origin is what makes "flow coordinates" mean flow coordinates.
+
+- **An effect that writes what it reads has to compare before it writes.** The presentation pass
+  (loop warnings on nodes, colour on edges) recomputes from `nodes` and `edges` and writes back into
+  them, because both are bound to Svelte Flow and a `$derived` copy would be an array the flow does
+  not know about — drag a node and the wrong one moves. It settles on the first equal comparison; an
+  unguarded version rewrites the node array on every frame and fights every drag.
+
+- **A stale bundle looks exactly like a bug that is not there.** Two rounds of "the handles are not
+  rendering" were a cached `dist` served by the daemon on `:7773`; the DOM was reporting the
+  *previous* build's class list. `location.reload(true)` after every `bun run build`, and check a
+  class name you just changed before believing what you are looking at.
 
 ---
 

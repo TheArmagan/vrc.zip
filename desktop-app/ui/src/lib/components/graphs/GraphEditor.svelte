@@ -30,10 +30,12 @@ import {
   ERROR_PORT,
   isPortType,
   type NodeDefinition,
+  type PortType,
 } from "@vrcz/plugin-api/nodes";
 import type { GraphDocument, GraphEdge as WireEdge, GraphNode as WireNode } from "@vrcz/shared";
 import {
   Background,
+  BackgroundVariant,
   Controls,
   type Connection,
   type Edge,
@@ -43,16 +45,11 @@ import {
   type Viewport,
 } from "@xyflow/svelte";
 import "@xyflow/svelte/dist/style.css";
-import {
-  api,
-  describeError,
-  type Graph,
-  type GraphMemoryEntry,
-  type GraphRunSummary,
-} from "$lib/api.ts";
+import { api, describeError, type Graph, type GraphMemoryEntry } from "$lib/api.ts";
 import ErrorNote from "$lib/components/ErrorNote.svelte";
 import CanvasMenu, { type MenuItem } from "$lib/components/graphs/CanvasMenu.svelte";
 import GraphNodeCard from "$lib/components/graphs/GraphNodeCard.svelte";
+import LoopRegions from "$lib/components/graphs/LoopRegions.svelte";
 import NodePicker, {
   type PickerChoice,
   type PickerSource,
@@ -61,8 +58,12 @@ import RelativeTime from "$lib/components/RelativeTime.svelte";
 import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
 import { Input } from "$lib/components/ui/input/index.js";
+import { iconFor } from "$lib/graphs/icons.ts";
+import { loopProblems } from "$lib/graphs/loops.ts";
+import { familyColor, familyOf, portColor } from "$lib/graphs/visuals.ts";
 import { hrefFor } from "$lib/router.ts";
 import { app } from "$lib/state/app.svelte.ts";
+import { graphRun } from "$lib/state/graph-run.svelte.ts";
 import { graphs } from "$lib/state/graphs.svelte.ts";
 import { theme } from "$lib/state/theme.svelte.ts";
 
@@ -71,7 +72,6 @@ let { graphId }: { graphId: string } = $props();
 let graph = $state<Graph | null>(null);
 let nodes = $state.raw<Node[]>([]);
 let edges = $state.raw<Edge[]>([]);
-let runs = $state<GraphRunSummary[]>([]);
 let loadError = $state<string | null>(null);
 let saveError = $state<string | null>(null);
 let saving = $state(false);
@@ -153,6 +153,80 @@ $effect(() => {
 $effect(() => {
   void load(graphId);
 });
+
+/**
+ * The live readout, for as long as this canvas is open and no longer.
+ *
+ * Returning the teardown from the effect is the whole contract: navigate away, and the polling
+ * stops with the component. Nothing about a run costs anything when nobody is looking at it.
+ */
+$effect(() => {
+  graphRun.watch(graphId);
+  return () => graphRun.stop();
+});
+
+/* ---------------------------------------------------------------------------------------------- */
+/* The presentation pass                                                                            */
+/* ---------------------------------------------------------------------------------------------- */
+
+/**
+ * Everything drawn *about* the graph rather than stored in it: the loop warnings on cards, and the
+ * colour of each wire.
+ *
+ * It is one effect rather than being computed inline because both `nodes` and `edges` are bound to
+ * Svelte Flow, which owns them — a `$derived` copy would be a second array the flow does not know
+ * about, and dragging a node would move the wrong one. So the pass writes back into the same arrays,
+ * and it writes **only when something actually changed**: an effect that reads what it writes
+ * settles on the first equal comparison instead of looping, and a canvas that rewrote its own node
+ * array sixty times a second would fight every drag.
+ *
+ * It also depends on the catalogue, which arrives on its own schedule. A wire drawn before the
+ * definitions load is grey and recolours itself the moment they land, rather than staying wrong.
+ */
+$effect(() => {
+  // Read the catalogue explicitly: the styling below goes through helpers, and an effect only
+  // re-runs for state it touched itself.
+  void graphs.nodeTypes.size;
+  applyProblems();
+  applyEdgeStyles();
+});
+
+/** Marks each node that breaks a loop rule, in the words the daemon would use at run time. */
+function applyProblems(): void {
+  const problems = new Map(
+    loopProblems(canvasNodes, canvasEdges).map((problem) => [problem.nodeId, problem.message]),
+  );
+  const changed = nodes.some(
+    (node) => (node.data as { problem?: string }).problem !== problems.get(node.id),
+  );
+  if (!changed) return;
+  nodes = nodes.map((node) => {
+    // `problem` is set to undefined rather than left off, so a warning that no longer applies
+    // actually clears: spreading the old data would carry the stale key straight through.
+    return { ...node, data: { ...node.data, problem: problems.get(node.id) } };
+  });
+}
+
+/**
+ * Colours each wire by what it carries, so a canvas of forty edges is readable without tracing one.
+ *
+ * The error port is the exception and it is drawn as one: dashed, in the destructive colour, because
+ * "this is the path when it breaks" is not a kind of data, it is a different kind of edge.
+ */
+function applyEdgeStyles(): void {
+  let changed = false;
+  const next = edges.map((edge) => {
+    const source = portType(edge.source, edge.sourceHandle ?? "", "source");
+    const isError = edge.sourceHandle === ERROR_PORT;
+    const style = isError
+      ? "stroke: var(--destructive); stroke-width: 1.5; stroke-dasharray: 4 3;"
+      : `stroke: ${source === null ? "var(--port-json)" : portColor(source)}; stroke-width: 1.75;`;
+    if (edge.style === style) return edge;
+    changed = true;
+    return { ...edge, style };
+  });
+  if (changed) edges = next;
+}
 
 /**
  * The palette, narrowed by what is typed.
@@ -238,8 +312,45 @@ function onPaletteKey(event: KeyboardEvent): void {
   }
 }
 
+/**
+ * The canvas as the loop helpers want it: the node's *vrc.zip* type rather than Svelte Flow's.
+ *
+ * Every node on this canvas has the flow type `vrcz` — one component draws them all — so `node.type`
+ * is the same string for a trigger and a loop, and anything asking "which of these is a For each"
+ * has to reach into `data`. Doing that reach once, here, is what keeps it out of the three modules
+ * that ask.
+ *
+ * `measured` is what Svelte Flow filled in after the card rendered. It is absent on the first frame,
+ * which the region maths treats as "assume the standard card" rather than as zero — a region that
+ * collapsed to a point for one frame flickers on every load.
+ */
+const canvasNodes = $derived(
+  nodes.map((node) => ({
+    id: node.id,
+    type: (node.data as { qualifiedId: string }).qualifiedId,
+    position: node.position,
+    width: node.measured?.width,
+    height: node.measured?.height,
+  })),
+);
+
+const canvasEdges = $derived(
+  edges.map((edge) => ({
+    source: edge.source,
+    sourceHandle: edge.sourceHandle ?? null,
+    target: edge.target,
+    targetHandle: edge.targetHandle ?? null,
+  })),
+);
+
 const selected = $derived(nodes.find((node) => node.id === selectedId) ?? null);
 const selectedDefinition = $derived(definitionOf(selected));
+const selectedQualifiedId = $derived(
+  selected === null ? null : (selected.data as { qualifiedId: string }).qualifiedId,
+);
+const selectedProblem = $derived(
+  selected === null ? null : ((selected.data as { problem?: string }).problem ?? null),
+);
 const selectedMemory = $derived(
   selectedId === null ? null : (memory.find((entry) => entry.nodeId === selectedId) ?? null),
 );
@@ -253,7 +364,6 @@ async function load(id: string): Promise<void> {
     nodes = loaded.definition.nodes.map((node) => toFlowNode(node, stale.has(node.id)));
     edges = loaded.definition.edges.map(toFlowEdge);
     dirty = false;
-    runs = await api.graphs.runs(id);
     memory = await api.graphs.memory(id);
   } catch (cause) {
     loadError = describeError(cause);
@@ -270,6 +380,18 @@ function toFlowNode(node: WireNode, stale = false): Node {
     // No definition in here on purpose — the card resolves it live. See `GraphNodeCard.svelte`.
     data: { qualifiedId: node.type, config: { ...node.config }, stale },
   };
+}
+
+/**
+ * What to call a node in a sentence.
+ *
+ * Its type's title, falling back to the node id — which is what a run reports and is never nothing,
+ * so a readout about a node whose plugin has stopped still says *which* node rather than blanking.
+ */
+function titleOf(nodeId: string): string {
+  const node = nodes.find((entry) => entry.id === nodeId);
+  if (node === undefined) return nodeId;
+  return definitionOf(node)?.title ?? nodeId;
 }
 
 /** The definition for a node on the canvas, or null while the catalogue is still loading. */
@@ -363,7 +485,11 @@ function onconnect(connection: Connection): void {
  * that *is* exported keeps this correct across a version bump either way.
  */
 const onconnectend: OnConnectEnd = (event, state) => {
-  if (!("fromHandle" in state) || state.fromHandle === null || state.toHandle !== null) return;
+  if (!("fromHandle" in state) || state.fromHandle === null) return;
+  if (state.toHandle !== null) {
+    offerConversion(event, state.fromHandle, state.toHandle);
+    return;
+  }
   const from = state.fromHandle;
   const side = from.type === "source" ? "source" : "target";
   const nodeId = from.nodeId;
@@ -379,6 +505,129 @@ const onconnectend: OnConnectEnd = (event, state) => {
     wire: { nodeId, portId, portType: type, side },
   };
 };
+
+/** One end of a wire, as Svelte Flow reports it when the drag ends over a handle. */
+interface DroppedHandle {
+  readonly nodeId: string;
+  /** Optional rather than nullable, which is how Svelte Flow reports an unnamed handle. */
+  readonly id?: string | null | undefined;
+  readonly type: string;
+}
+
+/**
+ * A wire let go over a handle it is not allowed to connect to.
+ *
+ * Until now this did nothing at all, and doing nothing was the wrong answer to the commonest edit
+ * in the whole editor: dragging a `json` value into a `For each`'s List. The lattice refuses it on
+ * purpose — `json` into a typed port is the unchecked cast that makes a type system decorative — and
+ * the honest fix has always been an `As list` node in between. But "you must insert a node whose
+ * name you do not know" is not something a refused wire can say, so the wire simply vanished and
+ * the canvas looked exactly as it had.
+ *
+ * So the refusal now offers the conversion. The rule stays strict, the step stays visible on the
+ * canvas afterwards, and the two gestures it used to take become one.
+ */
+function offerConversion(event: MouseEvent | TouchEvent, from: DroppedHandle, to: DroppedHandle): void {
+  const source = from.type === "source" ? from : to;
+  const target = from.type === "source" ? to : from;
+  if (source.type === target.type) return;
+  const fromType = portType(source.nodeId, source.id ?? "", "source");
+  const toType = portType(target.nodeId, target.id ?? "", "target");
+  if (fromType === null || toType === null) return;
+  if (!isPortType(fromType) || !isPortType(toType)) return;
+  // A legal wire has already been made by `onconnect`; there is nothing to convert.
+  if (assignable(fromType, toType)) return;
+
+  const bridges = conversionsBetween(fromType, toType);
+  if (bridges.length === 0) return;
+  const pointer = "clientX" in event ? event : event.changedTouches[0];
+  if (pointer === undefined) return;
+
+  menu = {
+    x: pointer.clientX,
+    y: pointer.clientY,
+    items: bridges.map((bridge) => ({
+      label: `Insert "${bridge.definition.title}" and wire it`,
+      onSelect: () => {
+        const id = addNode(bridge.qualifiedId, bridge.definition, between(source.nodeId, target.nodeId));
+        onconnect({
+          source: source.nodeId,
+          sourceHandle: source.id ?? null,
+          target: id,
+          targetHandle: bridge.inputId,
+        });
+        onconnect({
+          source: id,
+          sourceHandle: bridge.outputId,
+          target: target.nodeId,
+          targetHandle: target.id ?? null,
+        });
+      },
+    })),
+  };
+}
+
+/** How many node types to offer as a conversion. More than a few is a palette, not a suggestion. */
+const MAX_CONVERSIONS = 3;
+
+/**
+ * Node types that would turn a `from` into a `to` in one step.
+ *
+ * Searched rather than hardcoded to `As list`, because the same shape of dead end exists elsewhere
+ * in the lattice and a table of special cases would go stale the first time a built-in is added.
+ *
+ * Ranked by **how few other ports it leaves dangling**, which is what makes the first row the right
+ * one: `As list` takes one value and returns it as a list, while `Make a list` takes several and
+ * would satisfy the wire just as well while leaving two empty inputs behind. Total ports first,
+ * required ones second — a node with no required inputs is not simpler than one that needs the
+ * single value you are already holding.
+ */
+function conversionsBetween(
+  fromType: PortType,
+  toType: PortType,
+): { qualifiedId: string; definition: NodeDefinition; inputId: string; outputId: string }[] {
+  const found = [];
+  for (const type of graphs.nodeTypes.values()) {
+    const definition = type.definition;
+    if (definition.kind === "trigger") continue;
+    const input = definition.inputs.find(
+      (port) => isPortType(port.type) && assignable(fromType, port.type),
+    );
+    const output = definition.outputs.find(
+      (port) => isPortType(port.type) && assignable(port.type, toType),
+    );
+    if (input === undefined || output === undefined) continue;
+    found.push({
+      qualifiedId: type.qualifiedId,
+      definition,
+      inputId: input.id,
+      outputId: output.id,
+      ports: definition.inputs.length,
+      required: definition.inputs.filter((port) => port.required === true).length,
+    });
+  }
+  return found
+    .sort(
+      (a, b) =>
+        a.ports - b.ports ||
+        a.required - b.required ||
+        a.definition.title.localeCompare(b.definition.title),
+    )
+    .slice(0, MAX_CONVERSIONS);
+}
+
+/**
+ * Roughly halfway between two nodes, which is where a step inserted between them belongs.
+ *
+ * Dropped a card's height below the midpoint rather than on it: a wire drawn right to left puts the
+ * midpoint on top of one of the two nodes, and a new card landing under the cursor looks like it
+ * replaced something.
+ */
+function between(sourceId: string, targetId: string): { x: number; y: number } {
+  const a = nodes.find((node) => node.id === sourceId)?.position ?? { x: 0, y: 0 };
+  const b = nodes.find((node) => node.id === targetId)?.position ?? { x: 0, y: 0 };
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 + 150 };
+}
 
 /**
  * Double-clicking empty canvas offers the palette there.
@@ -538,7 +787,8 @@ async function runNow(): Promise<void> {
   saveError = null;
   try {
     await api.graphs.runNow(graphId);
-    runs = await api.graphs.runs(graphId);
+    // The readout polls on its own; this is only so the panel updates on the same tick as the click.
+    await graphRun.refresh();
   } catch (cause) {
     saveError = describeError(cause);
   } finally {
@@ -716,9 +966,14 @@ async function saveSecret(fieldId: string): Promise<void> {
           {#if !shut}
             {#each group.types as type, index (type.qualifiedId)}
               {@const position = offset + index}
+              {@const Icon = iconFor(type.definition.category, type.owner)}
+              <!--
+                The same icon and the same hue the card will have once it is on the canvas, so the
+                sidebar is a preview of the thing rather than a list of names that happen to match.
+              -->
               <button
                 bind:this={paletteRows[position]}
-                class="w-full rounded px-2 py-1 pl-6 text-left text-sm hover:bg-accent {position ===
+                class="flex w-full items-center gap-2 rounded px-2 py-1 pl-3 text-left text-sm hover:bg-accent {position ===
                 paletteActive
                   ? 'bg-accent'
                   : ''}"
@@ -726,7 +981,11 @@ async function saveSecret(fieldId: string): Promise<void> {
                 onclick={() => void addNode(type.qualifiedId, type.definition)}
                 onmouseenter={() => (paletteActive = position)}
               >
-                {type.definition.title}
+                <Icon
+                  class="size-3.5 shrink-0"
+                  style="color: {familyColor(familyOf(type.definition.category, type.owner))}"
+                />
+                <span class="truncate">{type.definition.title}</span>
               </button>
             {/each}
           {/if}
@@ -779,8 +1038,14 @@ async function saveSecret(fieldId: string): Promise<void> {
         deleteKey={["Delete"]}
         {ondelete}
       >
-        <Background />
-        <Controls />
+        <!--
+          Dots rather than the default lines, at a gap that matches the card's own rhythm: a ruled
+          grid behind a canvas of rectangles reads as a second set of rectangles, and every wire
+          crossing it picked up a stripe.
+        -->
+        <Background variant={BackgroundVariant.Dots} gap={18} size={1} />
+        <Controls position="bottom-left" showLock={false} />
+        <LoopRegions nodes={canvasNodes} edges={canvasEdges} />
       </SvelteFlow>
       {#if menu !== null}
         <CanvasMenu x={menu.x} y={menu.y} items={menu.items} onclose={() => (menu = null)} />
@@ -802,9 +1067,44 @@ async function saveSecret(fieldId: string): Promise<void> {
       {/if}
 
       {#if selected !== null && selectedDefinition !== null}
-        <div class="mb-2 text-sm font-medium">{selectedDefinition.title}</div>
+        {@const owner = graphs.nodeTypes.get(selectedQualifiedId ?? "")?.owner ?? "vrcz"}
+        {@const Icon = iconFor(selectedDefinition.category, owner)}
+        <!--
+          The inspector's header, matching the card it is describing. A panel that names a node in
+          plain text while the canvas draws it with a colour and an icon makes you check twice that
+          you are editing the one you clicked.
+        -->
+        <div class="mb-3 flex items-start gap-2 border-b border-border pb-3">
+          <Icon
+            class="mt-0.5 size-4 shrink-0"
+            style="color: {familyColor(familyOf(selectedDefinition.category, owner))}"
+          />
+          <div class="min-w-0 flex-1">
+            <div class="text-sm font-medium">{selectedDefinition.title}</div>
+            {#if selectedDefinition.category !== undefined}
+              <div class="text-[11px] text-muted-foreground">{selectedDefinition.category}</div>
+            {/if}
+          </div>
+        </div>
         {#if selectedDefinition.description !== undefined}
           <p class="mb-3 text-xs text-muted-foreground">{selectedDefinition.description}</p>
+        {/if}
+        {#if selectedProblem !== null}
+          <!--
+            The loop rules, said here as well as on the card: the card has room for one line, and
+            this is where somebody who has selected the node is already looking.
+          -->
+          <div
+            class="mb-3 rounded border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive"
+          >
+            {selectedProblem}
+          </div>
+        {/if}
+
+        {#if (selectedDefinition.config ?? []).length > 0}
+          <div class="mb-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            Settings
+          </div>
         {/if}
 
         {#each selectedDefinition.config ?? [] as field (field.id)}
@@ -934,11 +1234,13 @@ async function saveSecret(fieldId: string): Promise<void> {
         is an event in the feed, which is where its history belongs.
       -->
       <div class="mt-6">
-        <div class="mb-2 text-xs font-medium text-muted-foreground">In flight</div>
-        {#if runs.length === 0}
+        <div class="mb-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          In flight
+        </div>
+        {#if graphRun.runs.length === 0}
           <p class="text-xs text-muted-foreground">Nothing running.</p>
         {:else}
-          {#each runs as run (run.id)}
+          {#each graphRun.runs as run (run.id)}
             <div class="mb-2 rounded border border-border p-2 text-xs">
               <div class="flex items-center gap-2">
                 <Badge variant="secondary">{run.status}</Badge>
@@ -947,9 +1249,23 @@ async function saveSecret(fieldId: string): Promise<void> {
               <div class="mt-1 text-muted-foreground">
                 started <RelativeTime ts={run.startedAt} />
                 {#if run.resumeAt !== null}
-                  · resumes <RelativeTime ts={run.resumeAt} />
+                  , resumes <RelativeTime ts={run.resumeAt} />
                 {/if}
               </div>
+              {#if run.currentNode !== null}
+                <div class="mt-1 truncate text-muted-foreground">
+                  at {titleOf(run.currentNode)}
+                </div>
+              {/if}
+              {#each run.loops as loop (loop.nodeId)}
+                <!--
+                  The same number the card shows, in words, for somebody reading the panel rather
+                  than looking at the canvas.
+                -->
+                <div class="mt-1 tabular-nums text-muted-foreground">
+                  {titleOf(loop.nodeId)}: item {loop.at} of {loop.of}
+                </div>
+              {/each}
             </div>
           {/each}
         {/if}

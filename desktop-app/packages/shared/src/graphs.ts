@@ -196,6 +196,16 @@ export interface GraphRunSummary {
   readonly resumeAt: number | null;
   readonly startedAt: number;
   readonly updatedAt: number;
+  /**
+   * The last node this run executed, so the editor can show where it is. Null before the first one.
+   *
+   * The *last executed* rather than the *currently executing*, and the difference is one node: the
+   * row is rewritten at each node boundary, so a node that is mid-await is not in here yet. Naming
+   * it "current" would promise a precision the persistence model does not have.
+   */
+  readonly currentNode: string | null;
+  /** Where each loop currently is. Empty unless a `For each` is iterating right now. */
+  readonly loops: readonly { readonly nodeId: string; readonly at: number; readonly of: number }[];
 }
 
 /**
@@ -525,4 +535,77 @@ export function reachableFrom(document: GraphDocument, start: string): Set<strin
     for (const next of out.get(node) ?? []) if (!seen.has(next)) queue.push(next);
   }
   return seen;
+}
+
+/**
+ * The `foreach` output ports that lead **into** the body, and the ones that lead **past** it.
+ *
+ * Named here rather than in the daemon's intrinsics because the canvas has to draw the same
+ * boundary the engine walks. Two copies of this split is two answers to "is this node in the loop",
+ * and the one on screen would be the one nobody tested.
+ */
+export const FOREACH_BODY_PORTS: readonly string[] = ["item", "index"];
+export const FOREACH_AFTER_PORTS: readonly string[] = ["done", "results"];
+
+/**
+ * Which nodes belong to each loop's body.
+ *
+ * The body is what `item` and `index` reach, minus what `done` and `results` reach. That
+ * subtraction is what lets one node sit after the loop *and* read the body — it is excluded from
+ * the body, runs once in the outer scope, and sees the last iteration. Anything else would need a
+ * second kind of edge to say "this one is after the loop", which is a concept the canvas does not
+ * have and would have to explain.
+ *
+ * `loopIds` rather than a type check, because the type id lives in the daemon's reserved namespace
+ * and this module is a leaf that may not import it.
+ */
+export function foreachBodies(
+  document: GraphDocument,
+  loopIds: Iterable<string>,
+): Map<string, Set<string>> {
+  const bodies = new Map<string, Set<string>>();
+  for (const id of loopIds) {
+    const after = reachableFromPorts(document, id, FOREACH_AFTER_PORTS);
+    const body = reachableFromPorts(document, id, FOREACH_BODY_PORTS);
+    for (const node of after) body.delete(node);
+    body.delete(id);
+    bodies.set(id, body);
+  }
+  return bodies;
+}
+
+/** Everything downstream of one node's named output ports, excluding the node itself. */
+function reachableFromPorts(
+  document: GraphDocument,
+  nodeId: string,
+  ports: readonly string[],
+): Set<string> {
+  const out = new Set<string>();
+  for (const edge of document.edges) {
+    if (edge.from.node !== nodeId || !ports.includes(edge.from.port)) continue;
+    for (const id of reachableFrom(document, edge.to.node)) out.add(id);
+  }
+  out.delete(nodeId);
+  return out;
+}
+
+/**
+ * The loop a node belongs to, when loops are nested.
+ *
+ * The innermost one, always — the same scoping every language gives a `break`, so a `Collect` drawn
+ * inside two loops appends to the one it is drawn in. The rule is structural rather than a size
+ * comparison: a candidate is innermost when no other candidate loop node sits inside its body.
+ * Returns null for a node that is in no body at all.
+ */
+export function innermostLoop(
+  bodies: ReadonlyMap<string, ReadonlySet<string>>,
+  nodeId: string,
+): string | null {
+  const candidates = [...bodies.entries()].filter(([, body]) => body.has(nodeId)).map(([id]) => id);
+  for (const id of candidates) {
+    const body = bodies.get(id);
+    if (body === undefined) continue;
+    if (!candidates.some((other) => other !== id && body.has(other))) return id;
+  }
+  return candidates[0] ?? null;
 }

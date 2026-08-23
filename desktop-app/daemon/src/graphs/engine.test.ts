@@ -5,7 +5,14 @@ import type { BusEvent } from "../bus/event-bus.ts";
 import { EventBus } from "../bus/event-bus.ts";
 import { MEMORY, Store } from "../store/store.ts";
 import { GraphEngine } from "./engine.ts";
-import { BRANCH_TYPE, ERROR_PORT, FOREACH_TYPE, WAIT_TYPE } from "./intrinsics.ts";
+import {
+  BRANCH_TYPE,
+  COLLECT_TYPE,
+  ERROR_PORT,
+  FOREACH_TYPE,
+  STOP_WHEN_TYPE,
+  WAIT_TYPE,
+} from "./intrinsics.ts";
 import type { ArmRequest, ExecuteContext, NodeProvider } from "./types.ts";
 
 const T0 = 1_700_000_000_000;
@@ -121,6 +128,8 @@ interface Harness {
   readonly engine: GraphEngine;
   readonly events: BusEvent[];
   readonly errors: string[];
+  /** Every pause the engine asked for, in order. Recorded rather than taken. */
+  readonly slept: number[];
   now: number;
   graph(document: GraphDocument, overrides?: Partial<GraphOverrides>): string;
   /** Builds a second engine over the same database, which is what a restart looks like. */
@@ -147,12 +156,13 @@ function harness(limits?: Parameters<typeof makeEngine>[3]): Harness {
   const provider = new FakeProvider();
   const events: BusEvent[] = [];
   const errors: string[] = [];
+  const slept: number[] = [];
   bus.subscribe((event) => {
     events.push(event);
   });
 
   const state = { now: T0 };
-  const engine = makeEngine(store, bus, provider, limits, () => state.now, errors);
+  const engine = makeEngine(store, bus, provider, limits, () => state.now, errors, slept);
 
   return {
     store,
@@ -161,6 +171,7 @@ function harness(limits?: Parameters<typeof makeEngine>[3]): Harness {
     engine,
     events,
     errors,
+    slept,
     get now() {
       return state.now;
     },
@@ -186,7 +197,7 @@ function harness(limits?: Parameters<typeof makeEngine>[3]): Harness {
       return id;
     },
     restart() {
-      return makeEngine(store, bus, provider, limits, () => state.now, errors);
+      return makeEngine(store, bus, provider, limits, () => state.now, errors, slept);
     },
   };
 }
@@ -198,12 +209,19 @@ function makeEngine(
   limits: Record<string, number> | undefined,
   now: () => number,
   errors: string[],
+  slept: number[],
 ): GraphEngine {
   return new GraphEngine({
     store,
     bus,
     provider,
     now,
+    // Recorded, not taken. A test that asserts a two-second pause happened must not take two
+    // seconds; what matters is that the engine asked, and for how long.
+    sleep: async (ms) => {
+      slept.push(ms);
+      await Promise.resolve();
+    },
     // No sweep timer: the tests call `resumeDue()` themselves, so nothing depends on wall-clock.
     sweepMs: 0,
     ...(limits === undefined ? {} : { limits }),
@@ -493,6 +511,74 @@ describe("foreach", () => {
     expect(h.store.listGraphRuns(id)).toHaveLength(0);
   });
 
+  test("a delay paces the loop, between items and not after the last", async () => {
+    const h = harness();
+    h.provider.trigger("t").node("body", "action", () => ({ out: 1 }));
+    const id = h.graph({
+      nodes: [node("n1", "t"), node("n2", FOREACH_TYPE, { delayMs: 2000 }), node("n3", "body")],
+      edges: [edge("e1", "n1", "n2", "out", "list"), edge("e2", "n2", "n3", "item")],
+    });
+
+    await h.engine.fire(id, "n1", { out: ["a", "b", "c"] });
+
+    // Three items, two gaps. A pause after the last one would delay everything downstream of the
+    // loop for no reason anybody drawing it intended.
+    expect(h.slept).toEqual([2000, 2000]);
+    expect(h.provider.order).toEqual(["body", "body", "body"]);
+  });
+
+  test("no delay configured means the engine never pauses at all", async () => {
+    const h = harness();
+    h.provider.trigger("t").node("body", "action", () => ({ out: 1 }));
+    const id = h.graph({
+      nodes: [node("n1", "t"), node("n2", FOREACH_TYPE), node("n3", "body")],
+      edges: [edge("e1", "n1", "n2", "out", "list"), edge("e2", "n2", "n3", "item")],
+    });
+
+    await h.engine.fire(id, "n1", { out: ["a", "b", "c"] });
+
+    expect(h.slept).toEqual([]);
+  });
+
+  test("a delay that would hold the run for too long is refused before it starts", async () => {
+    // The bound is the total, because a run holds a concurrency slot for as long as it lives.
+    const h = harness({ maxForeachDelayMs: 60_000 });
+    h.provider.trigger("t").node("body", "action", () => ({ out: 1 }));
+    const id = h.graph({
+      nodes: [node("n1", "t"), node("n2", FOREACH_TYPE, { delayMs: 30_000 }), node("n3", "body")],
+      edges: [edge("e1", "n1", "n2", "out", "list"), edge("e2", "n2", "n3", "item")],
+    });
+
+    await h.engine.fire(id, "n1", { out: ["a", "b", "c", "d", "e"] });
+
+    expect(h.provider.order).toEqual([]);
+    expect(h.slept).toEqual([]);
+    expect(payloadOf(h.events, "graph.run.failed").message).toContain("in total between items");
+  });
+
+  test("a stop when ends the pacing too", async () => {
+    const h = harness();
+    h.provider.trigger("t").node("body", "action", (inputs) => ({ out: inputs.in === "a" }));
+    const id = h.graph({
+      nodes: [
+        node("n1", "t"),
+        node("n2", FOREACH_TYPE, { delayMs: 500 }),
+        node("n3", "body"),
+        node("n4", STOP_WHEN_TYPE),
+      ],
+      edges: [
+        edge("e1", "n1", "n2", "out", "list"),
+        edge("e2", "n2", "n3", "item"),
+        edge("e3", "n3", "n4", "out", "when"),
+      ],
+    });
+
+    await h.engine.fire(id, "n1", { out: ["a", "b", "c"] });
+
+    // One item ran and the loop was called off, so there is no gap to pace at all.
+    expect(h.slept).toEqual([]);
+  });
+
   test("a nested loop runs the inner body once per pair", async () => {
     const h = harness();
     h.provider.trigger("t").node("inner", "action", (inputs) => ({ out: inputs.in }));
@@ -518,6 +604,223 @@ describe("foreach", () => {
     });
 
     expect(h.provider.executed.map((entry) => entry.inputs.in)).toEqual(["a", "b", "c", "d", "e"]);
+  });
+});
+
+/* -------------------------------------------------------------------------------------------- */
+/* Collect and stop                                                                               */
+/* -------------------------------------------------------------------------------------------- */
+
+describe("collect and stop", () => {
+  /** trigger -> foreach -> body -> collect, with `results` read by a node after the loop. */
+  function collecting(h: Harness): string {
+    return h.graph({
+      nodes: [
+        node("n1", "t"),
+        node("n2", FOREACH_TYPE),
+        node("n3", "body"),
+        node("n4", COLLECT_TYPE),
+        node("n5", "after"),
+      ],
+      edges: [
+        edge("e1", "n1", "n2", "out", "list"),
+        edge("e2", "n2", "n3", "item"),
+        edge("e3", "n3", "n4", "out", "value"),
+        edge("e4", "n2", "n5", "results"),
+      ],
+    });
+  }
+
+  test("results carries what each iteration collected, in order", async () => {
+    const h = harness();
+    h.provider
+      .trigger("t")
+      .node("body", "action", (inputs) => ({ out: `saw ${String(inputs.in)}` }))
+      .node("after", "action", () => ({ out: 1 }));
+    const id = collecting(h);
+
+    await h.engine.fire(id, "n1", { out: ["a", "b"] });
+
+    expect(h.provider.order).toEqual(["body", "body", "after"]);
+    expect(h.provider.executed[2]?.inputs.in).toEqual(["saw a", "saw b"]);
+  });
+
+  test("a loop that ran zero times still produces an empty results", async () => {
+    // Gating the after-the-loop branch on whether anything was collected would make "nobody was
+    // online" indistinguishable from "the loop never ran".
+    const h = harness();
+    h.provider
+      .trigger("t")
+      .node("body", "action", () => ({ out: 1 }))
+      .node("after", "action", () => ({ out: 1 }));
+    const id = collecting(h);
+
+    await h.engine.fire(id, "n1", { out: [] });
+
+    expect(h.provider.order).toEqual(["after"]);
+    expect(h.provider.executed[0]?.inputs.in).toEqual([]);
+  });
+
+  test("a node wired to results is after the loop, not in its body", async () => {
+    // The body is what `item` reaches minus what `done` **and** `results` reach. Without `results`
+    // in that subtraction the reader would be walked once per item, collecting into itself.
+    const h = harness();
+    h.provider
+      .trigger("t")
+      .node("body", "action", () => ({ out: 1 }))
+      .node("after", "action", () => ({ out: 1 }));
+    const id = collecting(h);
+
+    await h.engine.fire(id, "n1", { out: ["a", "b", "c"] });
+
+    expect(h.provider.order.filter((type) => type === "after")).toHaveLength(1);
+  });
+
+  test("stop when ends the loop after the current item finishes", async () => {
+    const h = harness();
+    const seen: unknown[] = [];
+    h.provider
+      .trigger("t")
+      .node("body", "action", (inputs) => {
+        seen.push(inputs.in);
+        return { out: inputs.in === "b" };
+      })
+      // Drawn after the Stop, so its running on the stopping item is the assertion.
+      .node("tail", "action", (inputs) => ({ out: inputs.in }));
+    const id = h.graph({
+      nodes: [
+        node("n1", "t"),
+        node("n2", FOREACH_TYPE),
+        node("n3", "body"),
+        node("n4", STOP_WHEN_TYPE),
+        node("n5", "tail"),
+      ],
+      edges: [
+        edge("e1", "n1", "n2", "out", "list"),
+        edge("e2", "n2", "n3", "item"),
+        edge("e3", "n3", "n4", "out", "when"),
+        edge("e4", "n4", "n5", "out"),
+      ],
+    });
+
+    await h.engine.fire(id, "n1", { out: ["a", "b", "c", "d"] });
+
+    expect(seen).toEqual(["a", "b"]);
+    // Two items ran, and the stopping one ran all the way to the end of its body.
+    expect(h.provider.order).toEqual(["body", "tail", "body", "tail"]);
+  });
+
+  test("done counts the items that ran, not the length of the list", async () => {
+    const h = harness();
+    h.provider
+      .trigger("t")
+      .node("body", "action", (inputs) => ({ out: inputs.in === "b" }))
+      .node("after", "action", () => ({ out: 1 }));
+    const id = h.graph({
+      nodes: [
+        node("n1", "t"),
+        node("n2", FOREACH_TYPE),
+        node("n3", "body"),
+        node("n4", STOP_WHEN_TYPE),
+        node("n5", "after"),
+      ],
+      edges: [
+        edge("e1", "n1", "n2", "out", "list"),
+        edge("e2", "n2", "n3", "item"),
+        edge("e3", "n3", "n4", "out", "when"),
+        edge("e4", "n2", "n5", "done"),
+      ],
+    });
+
+    await h.engine.fire(id, "n1", { out: ["a", "b", "c", "d"] });
+
+    expect(h.provider.executed.at(-1)?.inputs.in).toBe(2);
+  });
+
+  test("a collect two loops deep belongs to the inner one", async () => {
+    // The scoping every language gives a `break`. The outer loop still collects the inner one's
+    // results, which is what makes a list of lists expressible at all.
+    const h = harness();
+    h.provider
+      .trigger("t")
+      .node("inner", "action", (inputs) => ({ out: inputs.in }))
+      .node("after", "action", () => ({ out: 1 }));
+    const id = h.graph({
+      nodes: [
+        node("n1", "t"),
+        node("n2", FOREACH_TYPE),
+        node("n3", FOREACH_TYPE),
+        node("n4", "inner"),
+        node("n5", COLLECT_TYPE),
+        node("n6", COLLECT_TYPE),
+        node("n7", "after"),
+      ],
+      edges: [
+        edge("e1", "n1", "n2", "out", "list"),
+        edge("e2", "n2", "n3", "item", "list"),
+        edge("e3", "n3", "n4", "item"),
+        // Inside the inner body: collects one item.
+        edge("e4", "n4", "n5", "out", "value"),
+        // Inside the outer body only: collects the inner loop's whole results.
+        edge("e5", "n3", "n6", "results", "value"),
+        edge("e6", "n2", "n7", "results"),
+      ],
+    });
+
+    await h.engine.fire(id, "n1", {
+      out: [
+        ["a", "b"],
+        ["c", "d", "e"],
+      ],
+    });
+
+    expect(h.provider.executed.at(-1)?.inputs.in).toEqual([
+      ["a", "b"],
+      ["c", "d", "e"],
+    ]);
+  });
+
+  test("a collect outside every loop fails the run and says so", async () => {
+    const h = harness();
+    h.provider.trigger("t");
+    const id = h.graph({
+      nodes: [node("n1", "t"), node("n2", COLLECT_TYPE)],
+      edges: [edge("e1", "n1", "n2", "out", "value")],
+    });
+
+    await h.engine.fire(id, "n1", { out: 1 });
+
+    expect(payloadOf(h.events, "graph.run.failed").message).toBe(
+      "Collect has to be inside a For each.",
+    );
+  });
+
+  test("the run row says which item the loop is on", async () => {
+    // What the editor's readout polls. Asserted on the row rather than on a bus event, because the
+    // row is what the API re-reads and an emit nobody wrote down is the bug this style prevents.
+    const h = harness();
+    const positions: unknown[] = [];
+    let id = "";
+    h.provider.trigger("t").node("body", "action", () => {
+      positions.push(
+        JSON.parse(h.store.listGraphRuns(id)[0]?.state ?? "{}").loops as Record<string, unknown>,
+      );
+      return { out: 1 };
+    });
+    id = h.graph({
+      nodes: [node("n1", "t"), node("n2", FOREACH_TYPE), node("n3", "body")],
+      edges: [edge("e1", "n1", "n2", "out", "list"), edge("e2", "n2", "n3", "item")],
+    });
+
+    await h.engine.fire(id, "n1", { out: ["a", "b", "c"] });
+
+    expect(positions).toEqual([
+      { n2: { at: 1, of: 3 } },
+      { n2: { at: 2, of: 3 } },
+      { n2: { at: 3, of: 3 } },
+    ]);
+    // And it is gone once the loop is over, so a finished run never claims to be mid-anything.
+    expect(h.store.listGraphRuns(id)).toHaveLength(0);
   });
 });
 

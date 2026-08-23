@@ -1159,6 +1159,7 @@ async function stampHashes(
 }
 
 function graphRunSummary(row: GraphRunRow): GraphRunSummary {
+  const progress = runProgress(row);
   return {
     id: row.id,
     graphId: row.graph_id,
@@ -1169,7 +1170,37 @@ function graphRunSummary(row: GraphRunRow): GraphRunSummary {
     resumeAt: row.resume_at,
     startedAt: row.started_at,
     updatedAt: row.updated_at,
+    currentNode: progress.currentNode,
+    loops: progress.loops,
   };
+}
+
+/**
+ * The live position inside a run, read out of `graph_runs.state`.
+ *
+ * Parsed here rather than stored in columns of its own: the state blob is rewritten at every node
+ * boundary regardless, so this costs one `JSON.parse` on a request nobody makes unless a canvas is
+ * open, and it cannot disagree with the walk the way a denormalised column can. A blob this build
+ * cannot read is not an error — it answers "nowhere in particular", which is what an editor drawing
+ * a progress badge should do with a run it does not understand.
+ */
+function runProgress(row: GraphRunRow): Pick<GraphRunSummary, "currentNode" | "loops"> {
+  try {
+    const parsed = JSON.parse(row.state) as {
+      executed?: unknown;
+      loops?: Record<string, { at?: unknown; of?: unknown }>;
+    };
+    const executed = Array.isArray(parsed.executed) ? parsed.executed : [];
+    const last = executed.at(-1);
+    const loops = Object.entries(parsed.loops ?? {}).flatMap(([nodeId, at]) =>
+      typeof at.at === "number" && typeof at.of === "number"
+        ? [{ nodeId, at: at.at, of: at.of }]
+        : [],
+    );
+    return { currentNode: typeof last === "string" ? last : null, loops };
+  } catch {
+    return { currentNode: null, loops: [] };
+  }
 }
 
 /**

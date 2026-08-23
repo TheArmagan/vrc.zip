@@ -9,10 +9,33 @@
 
   A node whose type is not registered right now is drawn **greyed and named**, not hidden. Hiding it
   would remove the one fact that explains why the graph stopped working.
+
+  ## What the card says before you read it
+
+  Three things, and each replaced a line of text that used to be here:
+
+  **A colour and an icon for the category**, taken from the same axis the palette groups by, so the
+  sidebar and the canvas teach one taxonomy rather than two. See `lib/graphs/visuals.ts`.
+
+  **A coloured dot per port**, hued by what the port carries and drawn hollow when it carries
+  several of them. The type name used to sit beside every label as raw text — `json`, `list<friend>`
+  — which made a nine-port node a wall of words in the one place a wall of words is least readable.
+  It is a title attribute now: quiet until you hover the dot, which is when you are asking.
+
+  **A dashed rule before the ports that fire afterwards.** `on error` is one; a `For each`'s `Done`
+  and `Results` are the others. Those two mean "when the loop has finished", and drawing them flush
+  against `Item` — which means "once per element" — was the single most confusing thing about the
+  loop node. A rule between them says they are a different kind of answer.
 -->
 <script lang="ts">
+import CircleAlertIcon from "@lucide/svelte/icons/circle-alert";
 import { Handle, type NodeProps, Position } from "@xyflow/svelte";
 import { AFTER_PORT, ERROR_PORT, evaluateNodeBody } from "@vrcz/plugin-api/nodes";
+import { FOREACH_AFTER_PORTS } from "@vrcz/shared";
+import { iconFor } from "$lib/graphs/icons.ts";
+import { familyColor, familyOf, isListPort, portColor } from "$lib/graphs/visuals.ts";
+import { FOREACH_TYPE } from "$lib/graphs/loops.ts";
+import { graphRun } from "$lib/state/graph-run.svelte.ts";
 import { graphs } from "$lib/state/graphs.svelte.ts";
 
 /**
@@ -21,19 +44,29 @@ import { graphs } from "$lib/state/graphs.svelte.ts";
  * The definition is looked up here, live, because the catalogue arrives on its own schedule: a card
  * handed a definition at load time drew every node as "Unavailable" whenever the graph loaded first,
  * and stayed that way. Resolving on render also means a plugin starting later fixes its own nodes.
+ *
+ * `problem` is the one thing the editor knows and the definition cannot: a rule about where this
+ * node sits relative to the others, which is a property of the graph rather than of the node type.
  */
 interface GraphNodeData {
   readonly qualifiedId: string;
   readonly config: Readonly<Record<string, string | number | boolean>>;
   /** True when the saved definition hash no longer matches the registered one. */
   readonly stale: boolean;
+  /** Set when this node breaks a loop rule, in the words the daemon would use. */
+  readonly problem?: string | undefined;
   [key: string]: unknown;
 }
 
-let { data, selected }: NodeProps = $props();
+let { id, data, selected }: NodeProps = $props();
 
 const node = $derived(data as unknown as GraphNodeData);
-const definition = $derived(graphs.definition(node.qualifiedId));
+const type = $derived(graphs.nodeTypes.get(node.qualifiedId) ?? null);
+const definition = $derived(type?.definition ?? null);
+const owner = $derived(type?.owner ?? "vrcz");
+const family = $derived(familyOf(definition?.category, owner));
+const Icon = $derived(iconFor(definition?.category, owner));
+
 const inputs = $derived(
   definition === null || definition.kind === "trigger" ? [] : definition.inputs,
 );
@@ -41,6 +74,35 @@ const outputs = $derived(definition?.outputs ?? []);
 const body = $derived(
   definition?.body === undefined ? "" : evaluateNodeBody(definition.body, node.config, outputs),
 );
+
+/**
+ * The outputs split into "what this produced" and "what happens afterwards".
+ *
+ * Only the loop has any in the second group today, and it is the reason the split exists at all.
+ * Keyed on the type id rather than on a flag in `NodeDefinition`, because adding a field to the
+ * definition would change the hash of every node that has one and mark every saved graph using them
+ * stale — a redraw is not worth a migration.
+ */
+const afterPorts = $derived(
+  node.qualifiedId === FOREACH_TYPE
+    ? outputs.filter((port) => FOREACH_AFTER_PORTS.includes(port.id))
+    : [],
+);
+const mainPorts = $derived(outputs.filter((port) => !afterPorts.includes(port)));
+
+/** Where the loop this card draws is up to, or null when it is not running. */
+const position = $derived(graphRun.loops.get(id) ?? null);
+const active = $derived(graphRun.active.has(id));
+
+const executable = $derived(definition !== null && definition.kind !== "trigger");
+
+/** A port dot: filled for one of something, hollow for several. */
+function dotStyle(portType: string): string {
+  const color = portColor(portType);
+  return isListPort(portType)
+    ? `width:10px;height:10px;border:2px solid ${color};background:var(--card);`
+    : `width:10px;height:10px;border:1px solid ${color};background:${color};`;
+}
 </script>
 
 <!--
@@ -49,85 +111,147 @@ const body = $derived(
   every node overlapped its neighbour.
 -->
 <div
-  class="w-52 rounded-md border bg-card text-xs text-card-foreground shadow-sm"
+  class="w-56 rounded-md border bg-card text-xs text-card-foreground shadow-sm transition-shadow"
   class:border-primary={selected}
+  class:shadow-md={selected || active}
   class:border-border={!selected}
   class:opacity-60={definition === null}
 >
-  <div class="border-b border-border px-3 py-2">
-    <div class="text-xs font-medium">
-      {definition?.title ?? node.qualifiedId}
+  <!--
+    The category strip. Three pixels, and it is the first thing you see at any zoom.
+
+    The card is deliberately **not** `overflow-hidden`, which is what a strip like this usually asks
+    for: every port handle is positioned outside the card's edge, and clipping the card clipped all
+    of them. So the strip rounds its own two corners instead.
+  -->
+  <div class="h-[3px] w-full rounded-t-[5px]" style="background: {familyColor(family)}"></div>
+
+  <div class="flex items-start gap-2 border-b border-border px-3 py-2">
+    <Icon class="mt-px size-4 shrink-0" style="color: {familyColor(family)}" />
+    <div class="min-w-0 flex-1">
+      <div class="truncate font-medium">
+        {definition?.title ?? node.qualifiedId}
+      </div>
+      {#if definition === null}
+        <!-- The honest sentence, rather than an empty box: its plugin is not running. -->
+        <div class="truncate text-[11px] text-muted-foreground">
+          Unavailable: {node.qualifiedId}
+        </div>
+      {:else if body !== ""}
+        <div class="truncate text-[11px] text-muted-foreground">{body}</div>
+      {/if}
     </div>
-    {#if definition === null}
-      <!-- The honest sentence, rather than an empty box: its plugin is not running. -->
-      <div class="text-[11px] text-muted-foreground">Unavailable — {node.qualifiedId}</div>
-    {:else if node.stale}
-      <div class="text-[11px] text-destructive">This node type changed. Check its wiring.</div>
-    {:else if body !== ""}
-      <div class="text-[11px] text-muted-foreground">{body}</div>
+    {#if position !== null}
+      <!--
+        The live readout. Tabular figures so the number does not shuffle the badge sideways on every
+        tick, which at two ticks a second is the difference between a counter and a jitter.
+      -->
+      <span
+        class="shrink-0 rounded-sm px-1 py-px text-[10px] tabular-nums"
+        style="background: {familyColor(family)}; color: var(--card)"
+      >
+        {position.at}/{position.of}
+      </span>
     {/if}
   </div>
 
-  <div class="flex justify-between gap-3 px-3 py-2 text-[11px]">
-    <div class="flex flex-col gap-1">
+  {#if node.stale || node.problem !== undefined}
+    <div
+      class="flex items-start gap-1.5 border-b border-border bg-destructive/10 px-3 py-1.5 text-[11px] text-destructive"
+    >
+      <CircleAlertIcon class="mt-px size-3 shrink-0" />
+      <span>{node.problem ?? "This node type changed. Check its wiring."}</span>
+    </div>
+  {/if}
+
+  <div class="flex justify-between gap-4 px-3 py-2 text-[11px]">
+    <div class="flex min-w-0 flex-col gap-1.5">
       <!--
         The input every node has and none declares. It carries no value: an edge into it says
         "not until that one has run", which is the only way to sequence a node whose inputs all
         come from value literals — those have no path from the trigger otherwise.
+
+        It reads "run after" rather than "after", which is what it said until the loop's own
+        after-the-loop output was sitting three inches away also saying "after". One word for two
+        opposite things on one screen is a collision, not a synonym.
       -->
-      {#if definition !== null && definition.kind !== "trigger"}
-        <div class="relative flex items-center gap-1 text-muted-foreground">
+      {#if executable}
+        <div class="relative flex items-center gap-1.5 text-muted-foreground">
           <Handle
             type="target"
             position={Position.Left}
             id={AFTER_PORT}
-            style="position:absolute;left:-16px;"
+            style="position:absolute;left:-6px;width:8px;height:8px;border:1px dashed var(--muted-foreground);background:var(--card);"
           />
-          <span>after</span>
+          <span>run after</span>
         </div>
       {/if}
       {#each inputs as port (port.id)}
-        <div class="relative flex items-center gap-1">
+        <div class="relative flex items-center gap-1.5" title="{port.label}: {port.type}">
           <Handle
             type="target"
             position={Position.Left}
             id={port.id}
-            style="position:absolute;left:-16px;"
+            style="position:absolute;left:-6px;{dotStyle(port.type)}"
           />
-          <span>{port.label}</span>
-          <span class="text-muted-foreground">{port.type}</span>
+          <span class="truncate">{port.label}</span>
+          {#if port.required === true}
+            <span class="text-muted-foreground" aria-label="required">*</span>
+          {/if}
         </div>
       {/each}
     </div>
-    <div class="flex flex-col items-end gap-1">
-      {#each outputs as port (port.id)}
-        <div class="relative flex items-center gap-1">
-          <span class="text-muted-foreground">{port.type}</span>
-          <span>{port.label}</span>
+
+    <div class="flex min-w-0 flex-col items-end gap-1.5">
+      {#each mainPorts as port (port.id)}
+        <div class="relative flex items-center gap-1.5" title="{port.label}: {port.type}">
+          <span class="truncate">{port.label}</span>
           <Handle
             type="source"
             position={Position.Right}
             id={port.id}
-            style="position:absolute;right:-16px;"
+            style="position:absolute;right:-6px;{dotStyle(port.type)}"
           />
         </div>
       {/each}
-      <!--
-        The port every node has and no definition declares. It is produced only when the node
-        throws, so wiring it is how an author says "tell me when this breaks" — and leaving it
-        unwired is how they say "stop the run", which is the default.
-      -->
-      {#if definition !== null && definition.kind !== "trigger"}
-        <div class="relative flex items-center gap-1 text-destructive">
-          <span>on error</span>
-          <Handle
-            type="source"
-            position={Position.Right}
-            id={ERROR_PORT}
-            style="position:absolute;right:-16px;"
-          />
-        </div>
-      {/if}
     </div>
   </div>
+
+  {#if afterPorts.length > 0 || executable}
+    <!--
+      Everything below this rule happens after the node's own work: the loop's `Done` and `Results`
+      when the iteration is over, and `on error` when it never finished at all.
+    -->
+    <div class="border-t border-dashed border-muted-foreground/40 px-3 py-2 text-[11px]">
+      <div class="flex flex-col items-end gap-1.5">
+        {#each afterPorts as port (port.id)}
+          <div class="relative flex items-center gap-1.5" title="{port.label}: {port.type}">
+            <span class="truncate text-muted-foreground">{port.label}</span>
+            <Handle
+              type="source"
+              position={Position.Right}
+              id={port.id}
+              style="position:absolute;right:-6px;{dotStyle(port.type)}"
+            />
+          </div>
+        {/each}
+        <!--
+          The port every node has and no definition declares. It is produced only when the node
+          throws, so wiring it is how an author says "tell me when this breaks" — and leaving it
+          unwired is how they say "stop the run", which is the default.
+        -->
+        {#if executable}
+          <div class="relative flex items-center gap-1.5 text-destructive" title="error: string">
+            <span>on error</span>
+            <Handle
+              type="source"
+              position={Position.Right}
+              id={ERROR_PORT}
+              style="position:absolute;right:-6px;width:9px;height:9px;border:1px solid var(--destructive);background:var(--card);"
+            />
+          </div>
+        {/if}
+      </div>
+    </div>
+  {/if}
 </div>

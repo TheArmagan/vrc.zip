@@ -88,6 +88,15 @@ export interface RunState {
   readonly skipped: string[];
   /** Node ids in execution order. Its length is the run-size ceiling's counter. */
   readonly executed: string[];
+  /**
+   * Where each loop currently is, by `foreach` node id. Present only while one is iterating.
+   *
+   * Progress, not history: the entry is written at the top of every iteration and removed when the
+   * loop ends, so the run row always answers "what is it doing right now" for anybody who asks. The
+   * editor is what asks, by polling its own `/runs` while it is open — a bus event per iteration
+   * would be traffic generated whether or not a canvas was there to read it.
+   */
+  loops?: Record<string, { readonly at: number; readonly of: number }>;
 }
 
 export type RunOutcome =

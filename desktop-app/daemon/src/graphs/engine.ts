@@ -20,10 +20,12 @@
 import { randomUUID } from "node:crypto";
 import type { NodeConfigValues, NodeDefinition, PortValues } from "@vrcz/plugin-api/nodes";
 import {
+  foreachBodies,
   type GraphDocument,
   type GraphEdge,
   type GraphEventKind,
   type GraphNode,
+  innermostLoop,
   reachableFrom,
   validateGraphDocument,
 } from "@vrcz/shared";
@@ -32,10 +34,12 @@ import type { Store } from "../store/index.ts";
 import type { GraphRow, GraphRunRow } from "../store/types.ts";
 import {
   BRANCH_TYPE,
+  COLLECT_TYPE,
   ERROR_PORT,
   FOREACH_TYPE,
   INTRINSIC_DEFINITIONS,
   MISSED_RESUME_GRACE_MS,
+  STOP_WHEN_TYPE,
   WAIT_TYPE,
 } from "./intrinsics.ts";
 import { DEFAULT_GRAPH_LIMITS, GraphCounters, type GraphLimits } from "./limits.ts";
@@ -48,6 +52,11 @@ export interface GraphEngineOptions {
   readonly limits?: Partial<GraphLimits>;
   /** Injected so a test can drive the clock without waiting for one. */
   readonly now?: () => number;
+  /**
+   * How the engine pauses between a loop's items. Injected for the same reason `now` is: a test
+   * asserting that a delay happened must not be a test that takes as long as the delay.
+   */
+  readonly sleep?: (ms: number) => Promise<void>;
   /** Resume sweep interval. `0` leaves the sweep manual, which is how the tests run it. */
   readonly sweepMs?: number;
   /** Where a failure that belongs to no run goes. Default: `console.error`. */
@@ -80,6 +89,7 @@ export class GraphEngine {
   readonly #provider: NodeProvider;
   readonly #limits: GraphLimits;
   readonly #now: () => number;
+  readonly #sleep: (ms: number) => Promise<void>;
   readonly #sweepMs: number;
   readonly #onError: (message: string, error: unknown) => void;
   readonly #secrets: GraphSecretResolver | undefined;
@@ -103,6 +113,13 @@ export class GraphEngine {
     this.#provider = options.provider;
     this.#limits = { ...DEFAULT_GRAPH_LIMITS, ...options.limits };
     this.#now = options.now ?? Date.now;
+    this.#sleep =
+      options.sleep ??
+      ((ms) =>
+        new Promise((resolve) => {
+          // Unref'd: a loop mid-pause must never be the reason the daemon refuses to exit.
+          setTimeout(resolve, ms).unref?.();
+        }));
     this.#sweepMs = options.sweepMs ?? DEFAULT_SWEEP_MS;
     this.#secrets = options.secrets;
     this.#onError =
@@ -346,7 +363,10 @@ export class GraphEngine {
     run: GraphRunRow,
     state: RunState,
   ): Promise<RunOutcome> {
-    const bodies = foreachBodies(document);
+    const bodies = foreachBodies(
+      document,
+      document.nodes.filter((node) => node.type === FOREACH_TYPE).map((node) => node.id),
+    );
     const inBody = new Set([...bodies.values()].flatMap((body) => [...body]));
     const scope: Scope = {
       graph,
@@ -356,6 +376,15 @@ export class GraphEngine {
       incoming: incomingEdges(document),
       outgoing: outgoingEdges(document),
       bodies,
+      // Resolved once per run rather than per `Collect`, because the answer cannot change while a
+      // run is in flight: it is a property of the document, and the document is read once.
+      owner: new Map(
+        [...inBody].flatMap((id) => {
+          const loop = innermostLoop(bodies, id);
+          return loop === null ? [] : [[id, loop] as const];
+        }),
+      ),
+      iterations: new Map(),
     };
     // The outer scope is everything the trigger reaches **except** the bodies of any `foreach`.
     // A body node belongs to its loop and is walked once per item by `#runForeach`; leaving it in
@@ -456,6 +485,31 @@ export class GraphEngine {
         continue;
       }
 
+      if (node.type === COLLECT_TYPE || node.type === STOP_WHEN_TYPE) {
+        const loop = scope.owner.get(nodeId);
+        const iteration = loop === undefined ? undefined : scope.iterations.get(loop);
+        if (iteration === undefined) {
+          // Drawn outside every loop, or in a body this run never entered. Failing says so; the
+          // alternative is a Collect that appends to nothing and a Stop that stops nothing, which
+          // is a graph that looks right and quietly is not.
+          return {
+            kind: "failed",
+            node: nodeId,
+            message: `${node.type === COLLECT_TYPE ? "Collect" : "Stop when"} has to be inside a For each.`,
+          };
+        }
+        if (node.type === COLLECT_TYPE) {
+          iteration.collected.push(inputs.value ?? null);
+          state.outputs[nodeId] = { out: inputs.value ?? null };
+        } else {
+          const stop = inputs.when === true;
+          if (stop) iteration.stopped = true;
+          state.outputs[nodeId] = { out: stop };
+        }
+        this.#persist(run.id, state);
+        continue;
+      }
+
       if (node.type === BRANCH_TYPE) {
         // The intrinsic in one line, and it needs no special case downstream: only the side taken
         // is recorded, so the other side's edges are dead and everything under it skips.
@@ -523,24 +577,66 @@ export class GraphEngine {
         message: `A For each may run over ${String(this.#limits.maxForeachItems)} items.`,
       };
     }
+    const delayMs = foreachDelay(scope.nodes.get(nodeId));
+    // Checked against the whole loop rather than one item: see `GraphLimits.maxForeachDelayMs`. The
+    // last item is not followed by a pause, which is why this counts the gaps and not the items.
+    const totalDelay = delayMs * Math.max(0, list.length - 1);
+    if (totalDelay > this.#limits.maxForeachDelayMs) {
+      return {
+        kind: "failed",
+        node: nodeId,
+        message: `A For each may wait ${String(Math.round(this.#limits.maxForeachDelayMs / 60_000))} minutes in total between items. This one would wait ${String(Math.round(totalDelay / 60_000))}.`,
+      };
+    }
+
     const body = scope.bodies.get(nodeId) ?? new Set<string>();
 
     // Sources are resolved per body, not per run: a `now` or a random number inside a loop is asked
     // again for each item, which is what an author drawing it there means.
     const scoped = this.#withSources(scope, body);
 
-    for (const [index, item] of list.entries()) {
-      state.outputs[nodeId] = { item: item ?? null, index };
-      clearScope(state, scoped);
-      const outcome = await this.#walkScope(scope, state, scoped, true);
-      if (outcome.kind !== "finished") return outcome;
+    // What this loop is accumulating and whether it has been told to stop. Keyed by the loop's node
+    // id so a `Collect` two loops deep reaches its own, and removed in `finally` so a failed run
+    // cannot leave a stale iteration for a later pass to append to.
+    const iteration: Iteration = { collected: [], stopped: false };
+    scope.iterations.set(nodeId, iteration);
+
+    let ran = 0;
+    try {
+      for (const [index, item] of list.entries()) {
+        state.outputs[nodeId] = { item: item ?? null, index };
+        clearScope(state, scoped);
+        // The live position, for the editor's readout. Written into the run row rather than emitted:
+        // a message per iteration would be on the bus whether or not anybody had the canvas open.
+        state.loops = { ...state.loops, [nodeId]: { at: index + 1, of: list.length } };
+        // Written before the body rather than after it, because the question the readout asks is
+        // "which item is it on now" and the answer is only useful while the item is still running.
+        this.#persist(scope.run.id, state);
+        const outcome = await this.#walkScope(scope, state, scoped, true);
+        if (outcome.kind !== "finished") return outcome;
+        ran = index + 1;
+        // Checked after the body drains rather than where `Stop when` executed: the item finishes
+        // as drawn, and only the *next* one is called off. See `STOP_WHEN_DEFINITION`.
+        if (iteration.stopped) break;
+        // Between items, not after the last one: a pause at the end delays everything downstream of
+        // the loop for no reason anybody drawing it intended.
+        if (delayMs > 0 && index < list.length - 1) await this.#sleep(delayMs);
+      }
+    } finally {
+      scope.iterations.delete(nodeId);
+      const { [nodeId]: _gone, ...rest } = state.loops ?? {};
+      state.loops = rest;
     }
 
     // The loop is over, so `item` and `index` stop being produced and `done` starts: every edge out
     // of the body side is dead from here, and the after-the-loop branch is the only live one.
     // The body's own outputs are deliberately left in place, so a node downstream of *both* the loop
     // and the body reads the last iteration rather than nothing.
-    state.outputs[nodeId] = { done: list.length };
+    //
+    // `done` counts the items that actually ran, which is the same as the list's length unless a
+    // `Stop when` cut it short — and if it said `list.length` there, the count would be a lie in the
+    // one case somebody is counting.
+    state.outputs[nodeId] = { done: ran, results: iteration.collected };
     return { kind: "finished" };
   }
 
@@ -693,45 +789,24 @@ interface Scope {
   readonly nodes: ReadonlyMap<string, GraphNode>;
   readonly incoming: ReadonlyMap<string, GraphEdge[]>;
   readonly outgoing: ReadonlyMap<string, GraphEdge[]>;
-  /** The body of each `foreach` in the document, by node id. */
+  /** The body of each `foreach` in the document, by node id. From `@vrcz/shared`. */
   readonly bodies: ReadonlyMap<string, Set<string>>;
+  /** Which loop a body node belongs to: the innermost one containing it. */
+  readonly owner: ReadonlyMap<string, string>;
+  /** The loops currently iterating, outermost first by construction. Mutated as the walk runs. */
+  readonly iterations: Map<string, Iteration>;
 }
 
 /**
- * Which nodes belong to each `foreach`'s body.
+ * One loop mid-flight: what its `Collect`s have appended, and whether a `Stop when` fired.
  *
- * The body is what the loop's `item` and `index` reach, minus what its `done` reaches. That
- * subtraction is what lets one node sit after the loop *and* read the body — it is excluded from
- * the body, runs once in the outer scope, and sees the last iteration. Anything else would need a
- * second kind of edge to say "this one is after the loop", which is a concept the canvas does not
- * have and would have to explain.
+ * Deliberately **not** in `RunState`. A run parked on a `wait` is reloaded from JSON by whichever
+ * process picks it up, and a `wait` inside a `foreach` is already refused for exactly this reason —
+ * so this lives for the length of one `#runForeach` call and never has to survive a restart.
  */
-function foreachBodies(document: GraphDocument): Map<string, Set<string>> {
-  const bodies = new Map<string, Set<string>>();
-  for (const node of document.nodes) {
-    if (node.type !== FOREACH_TYPE) continue;
-    const after = reachableFromPorts(document, node.id, new Set(["done"]));
-    const body = reachableFromPorts(document, node.id, new Set(["item", "index"]));
-    for (const id of after) body.delete(id);
-    body.delete(node.id);
-    bodies.set(node.id, body);
-  }
-  return bodies;
-}
-
-/** Everything downstream of one node's named output ports, excluding the node itself. */
-function reachableFromPorts(
-  document: GraphDocument,
-  nodeId: string,
-  ports: ReadonlySet<string>,
-): Set<string> {
-  const out = new Set<string>();
-  for (const edge of document.edges) {
-    if (edge.from.node !== nodeId || !ports.has(edge.from.port)) continue;
-    for (const id of reachableFrom(document, edge.to.node)) out.add(id);
-  }
-  out.delete(nodeId);
-  return out;
+interface Iteration {
+  readonly collected: unknown[];
+  stopped: boolean;
 }
 
 /** Un-settles a set of nodes, so the next iteration starts from nothing rather than from before. */
@@ -758,6 +833,7 @@ function readState(run: GraphRunRow): RunState {
       outputs: parsed.outputs ?? {},
       skipped: parsed.skipped ?? [],
       executed: parsed.executed ?? [],
+      ...(parsed.loops === undefined ? {} : { loops: parsed.loops }),
     };
   } catch {
     return { outputs: {}, skipped: [], executed: [] };
@@ -830,6 +906,12 @@ function actingAccount(node: GraphNode, graph: GraphRow): string | null {
 
 function waitDuration(node: GraphNode): number {
   const raw = node.config.durationMs;
+  return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : 0;
+}
+
+/** How long to pause between a loop's items. Absent, negative and NaN all mean "do not pause". */
+function foreachDelay(node: GraphNode | undefined): number {
+  const raw = node?.config.delayMs;
   return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : 0;
 }
 

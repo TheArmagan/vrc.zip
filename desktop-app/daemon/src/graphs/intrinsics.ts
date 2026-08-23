@@ -31,6 +31,8 @@ export const BUILTIN_NAMESPACE = RESERVED_NODE_NAMESPACE;
 export const WAIT_TYPE = `${BUILTIN_NAMESPACE}/wait`;
 export const BRANCH_TYPE = `${BUILTIN_NAMESPACE}/branch`;
 export const FOREACH_TYPE = `${BUILTIN_NAMESPACE}/foreach`;
+export const COLLECT_TYPE = `${BUILTIN_NAMESPACE}/collect`;
+export const STOP_WHEN_TYPE = `${BUILTIN_NAMESPACE}/stop-when`;
 
 /**
  * The manual trigger's type id.
@@ -123,15 +125,31 @@ const BRANCH_DEFINITION: NodeDefinition = {
 };
 
 /**
- * Iteration, and the reason its three outputs are not interchangeable.
+ * Iteration, and the reason its outputs are not interchangeable.
  *
- * `item` and `index` are the loop body: whatever they reach runs once per element. `done` is what
- * happens **after**, and the engine uses that split to work out which nodes belong to the body at
- * all — the body is what `item` reaches minus what `done` reaches. So a node wired to `done` is
- * after the loop by construction rather than by a flag somebody has to set.
+ * `item` and `index` are the loop body: whatever they reach runs once per element. `done` and
+ * `results` are what happens **after**, and the engine uses that split to work out which nodes
+ * belong to the body at all — the body is what `item` reaches minus what `done` reaches. So a node
+ * wired to `done` is after the loop by construction rather than by a flag somebody has to set.
+ * `foreachBodies` in `@vrcz/shared` is that subtraction, and the canvas draws the loop's tinted
+ * region from the same function so the boundary on screen is the one the engine walks.
+ *
+ * `results` is what a `vrcz/collect` in the body appended, in order. It is `list<json>` and it is
+ * always produced — an empty list when nothing collected — because a loop that ran zero times has
+ * still finished, and gating the after-the-loop branch on whether anything was collected would make
+ * "no friends online" look identical to "the loop never ran".
  *
  * `list` is `json` rather than a list type because `list<T>` joins the lattice in 4.3. A value that
  * is not an array iterates zero times, which is the same thing an empty list does.
+ *
+ * **`delayMs` paces the loop, and it is not a `Wait`.** A `Wait` inside a body is refused because
+ * parking mid-iteration would mean persisting which item the loop was on and everything it had
+ * accumulated, and a resume would have to reconstruct a scope rather than a node. This waits in
+ * process instead: nothing is persisted, nothing has to survive a restart, and a daemon that stops
+ * mid-loop simply loses the run the way it loses any other running one. That is what makes it
+ * expressible when the durable version is not — and it is the answer to the real question behind
+ * "why can I not put a Wait in here", which is almost always "I am sending forty invites and VRChat
+ * is counting". The total is bounded; see `GraphLimits.maxForeachDelayMs`.
  */
 const FOREACH_DEFINITION: NodeDefinition = {
   id: "foreach",
@@ -146,11 +164,90 @@ const FOREACH_DEFINITION: NodeDefinition = {
   outputs: [
     { id: "item", label: "Item", type: "json" },
     { id: "index", label: "Index", type: "number" },
-    { id: "done", label: "After", type: "number", description: "How many items ran." },
+    // Named `Done` rather than `After`, which is what it said until the canvas grew an implicit
+    // `after` **input** on every node. One word for two opposite things — "everything downstream of
+    // this ran" and "do not run until that one has" — on the same screen is a collision, not a
+    // synonym. The port id is unchanged, so no saved edge moves.
+    { id: "done", label: "Done", type: "number", description: "How many items ran." },
+    {
+      id: "results",
+      label: "Results",
+      type: "list<json>",
+      description: "What each Collect in the body appended, in order.",
+    },
+  ],
+  config: [
+    {
+      // `number` rather than `duration`, to match the `Wait` node beside it in the palette: both
+      // store integer ms, the editor draws them identically, and one of the two spelling it
+      // differently is a difference that means nothing.
+      kind: "number",
+      id: "delayMs",
+      label: "Wait between items (ms)",
+      description:
+        "Paced, not parked. Leave it at zero unless the body sends something VRChat counts.",
+      min: 0,
+      default: 0,
+    },
   ],
   body: [
     { kind: "literal", text: "For each item in " },
     { kind: "port", port: "list" },
+  ],
+};
+
+/**
+ * The loop's way of producing something, rather than only causing something.
+ *
+ * A `foreach` on its own is side effects: it invites, it posts, it writes. Anything it *worked out*
+ * died with the iteration, because the next one clears the body. `Collect` is where an author says
+ * which value survives — it appends whatever is wired into it to the enclosing loop's `results`,
+ * once per iteration.
+ *
+ * **The enclosing loop is the innermost one it is drawn in**, which is the scoping every language
+ * gives a `break` and the only one that needs no explaining. A `Collect` drawn outside every loop
+ * fails the run with a sentence rather than quietly collecting into nothing.
+ *
+ * It passes its value straight out again so it can sit mid-chain instead of only at the end.
+ */
+const COLLECT_DEFINITION: NodeDefinition = {
+  id: "collect",
+  kind: "action",
+  title: "Collect",
+  description: "Adds a value to the enclosing For each's Results, once per item.",
+  category: "Control",
+  inputs: [{ id: "value", label: "Value", type: "json", required: true }],
+  outputs: [{ id: "out", label: "Out", type: "json", description: "The same value, passed on." }],
+  body: [
+    { kind: "literal", text: "Collect " },
+    { kind: "port", port: "value" },
+  ],
+};
+
+/**
+ * Ending a loop early, and why the current item still finishes.
+ *
+ * Stopping mid-item would mean abandoning a scope halfway through, and the walk has never had to do
+ * that: it runs a scope until nothing in it is ready, which is the same loop that drains the outer
+ * run. So a true `when` records "no more items after this one" and the rest of the body runs as
+ * drawn. That is also the honest behaviour for a body that has already sent an invite — a `break`
+ * that skipped the note explaining the invite would be worse than one that did not.
+ *
+ * `Done` and `Results` still fire, carrying the count and the values from the items that ran.
+ */
+const STOP_WHEN_DEFINITION: NodeDefinition = {
+  id: "stop-when",
+  kind: "action",
+  title: "Stop when",
+  description: "Ends the enclosing For each after this item. The rest of this item still runs.",
+  category: "Control",
+  inputs: [{ id: "when", label: "When", type: "boolean", required: true }],
+  outputs: [
+    { id: "out", label: "Out", type: "boolean", description: "The same answer, passed on." },
+  ],
+  body: [
+    { kind: "literal", text: "Stop when " },
+    { kind: "port", port: "when" },
   ],
 };
 
@@ -159,6 +256,8 @@ export const INTRINSIC_DEFINITIONS: ReadonlyMap<string, NodeDefinition> = new Ma
   [WAIT_TYPE, WAIT_DEFINITION],
   [BRANCH_TYPE, BRANCH_DEFINITION],
   [FOREACH_TYPE, FOREACH_DEFINITION],
+  [COLLECT_TYPE, COLLECT_DEFINITION],
+  [STOP_WHEN_TYPE, STOP_WHEN_DEFINITION],
 ]);
 
 export function isIntrinsic(type: string): boolean {

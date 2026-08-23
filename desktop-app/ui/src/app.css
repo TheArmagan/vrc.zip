@@ -27,6 +27,34 @@
   --warning: oklch(0.79 0.15 78);
   --warning-foreground: oklch(0.28 0.06 78);
   --success: oklch(0.62 0.15 145);
+  /*
+   * The graph canvas, which is the one screen in this app that is not greyscale.
+   *
+   * Everything else here is deliberately neutral, and a node editor cannot be: a card has to say
+   * what kind of thing it is before you read its title, and a handle has to say what it carries
+   * before you drag from it. So there are two small families and no more.
+   *
+   * `--node-*` is one hue per **palette category** — the same axis the sidebar groups by, so the
+   * canvas and the palette teach the same taxonomy rather than two competing ones. Chroma is kept
+   * low: these are 3px accent strips and 16px icons against a neutral card, not surfaces.
+   *
+   * `--port-*` is one hue per **family** of port type, not one per type. Ten hues would be a colour
+   * nobody could name; five are learnable, and the distinction that actually stops a wire — one
+   * thing or several — is drawn as a filled dot against a hollow one instead of a sixth colour.
+   */
+  --node-trigger: oklch(0.7 0.14 70);
+  --node-logic: oklch(0.62 0.15 300);
+  --node-control: oklch(0.62 0.14 245);
+  --node-data: oklch(0.62 0.11 195);
+  --node-value: oklch(0.6 0.02 260);
+  --node-send: oklch(0.62 0.14 150);
+  --node-vrchat: oklch(0.6 0.13 265);
+  --node-plugin: oklch(0.63 0.13 15);
+  --port-json: oklch(0.6 0.02 260);
+  --port-string: oklch(0.6 0.13 245);
+  --port-number: oklch(0.68 0.13 70);
+  --port-boolean: oklch(0.62 0.15 300);
+  --port-entity: oklch(0.6 0.12 160);
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
@@ -71,6 +99,20 @@
   --warning: oklch(0.83 0.16 80);
   --warning-foreground: oklch(0.22 0.05 80);
   --success: oklch(0.75 0.17 145);
+  /* Lifted the same way, and for the same reason: a 3px strip at light-theme chroma disappears. */
+  --node-trigger: oklch(0.78 0.15 70);
+  --node-logic: oklch(0.72 0.16 300);
+  --node-control: oklch(0.72 0.15 245);
+  --node-data: oklch(0.74 0.12 195);
+  --node-value: oklch(0.68 0.02 260);
+  --node-send: oklch(0.74 0.15 150);
+  --node-vrchat: oklch(0.7 0.14 265);
+  --node-plugin: oklch(0.72 0.14 15);
+  --port-json: oklch(0.68 0.02 260);
+  --port-string: oklch(0.72 0.14 245);
+  --port-number: oklch(0.78 0.14 70);
+  --port-boolean: oklch(0.72 0.16 300);
+  --port-entity: oklch(0.72 0.13 160);
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.205 0 0);

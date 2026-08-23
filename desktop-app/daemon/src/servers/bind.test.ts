@@ -66,6 +66,7 @@ const deps: ControlDeps = {
     throw new Error("unused");
   },
   listGraphRuns: async () => [],
+  runGraphNow: async () => false,
   publishPluginPanel: () => {},
   publishPluginToast: () => {},
   runPluginCommand: async () => {},

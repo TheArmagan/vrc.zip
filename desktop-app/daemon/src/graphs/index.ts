@@ -14,6 +14,7 @@ export {
   INTRINSIC_DEFINITIONS,
   isIntrinsic,
   MISSED_RESUME_GRACE_MS,
+  RUN_NOW_TYPE,
   WAIT_ON_MISSED,
   WAIT_TYPE,
   type WaitOnMissed,

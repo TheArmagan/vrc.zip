@@ -1206,6 +1206,15 @@ export interface ControlDeps {
   setGraphArmed(graphId: string, armed: boolean): Promise<GraphSummary>;
   /** Runs that have not finished. A completed run is a `graph.*` event, not a row. */
   listGraphRuns(graphId: string): Promise<GraphRunSummary[]>;
+  /**
+   * Fires the graph's manual trigger, if it has one.
+   *
+   * Through the engine's own `fire`, which is the same door a plugin trigger comes through — so a
+   * manual run is subject to every ceiling and the graph's concurrency mode rather than being a
+   * special path around them. Answers false when the graph has no `run now` node, which is a fact
+   * about the document rather than an error.
+   */
+  runGraphNow(graphId: string): Promise<boolean>;
 
   /**
    * Every webhook registered on this daemon, newest first.
@@ -2609,6 +2618,14 @@ export function createControlApp({ port, deps, appApi, token }: ControlAppOption
     })
 
     .get("/api/graphs/:id/runs", async (c) => c.json(await deps.listGraphRuns(c.req.param("id"))))
+
+    .post("/api/graphs/:id/run", async (c) =>
+      // 409 rather than 404: the graph exists, it simply has nothing to press. A 404 would send the
+      // user looking for a graph that is right in front of them.
+      (await deps.runGraphNow(c.req.param("id")))
+        ? c.body(null, 202)
+        : c.json({ error: "no_manual_trigger" }, 409),
+    )
 
     .get("/api/settings", async (c) => c.json(await deps.getSettings()))
 

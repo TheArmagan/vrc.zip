@@ -33,6 +33,15 @@ export const BRANCH_TYPE = `${BUILTIN_NAMESPACE}/branch`;
 export const FOREACH_TYPE = `${BUILTIN_NAMESPACE}/foreach`;
 
 /**
+ * The manual trigger's type id.
+ *
+ * Named here rather than in `builtins/triggers.ts` because the control API has to find it in a saved
+ * document to answer `POST /api/graphs/:id/run`, and a route reaching into the built-in node set for
+ * a string is a route that breaks quietly when the set is rearranged.
+ */
+export const RUN_NOW_TYPE = `${BUILTIN_NAMESPACE}/run-now`;
+
+/**
  * The port every node implicitly has on its output side.
  *
  * It is produced **only** when the node throws, which is what makes "route the failure onward" work

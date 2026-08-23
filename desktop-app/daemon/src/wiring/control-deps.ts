@@ -55,7 +55,7 @@ import type { EventBus } from "../bus/event-bus.ts";
 // halves of `listWorldInstances` are location strings, and a second parser here would be a second
 // opinion on what `~region(` means.
 import { parseLocation } from "../game-logs/index.ts";
-import type { GraphEngine } from "../graphs/index.ts";
+import { type GraphEngine, RUN_NOW_TYPE } from "../graphs/index.ts";
 import { AvatarIdResolver } from "../net/avatar-ids.ts";
 import { ImageCache } from "../net/image-cache.ts";
 import type { RateBucketSnapshot, RateLimiter } from "../net/rate-limiter.ts";
@@ -2706,6 +2706,20 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
     async listGraphRuns(graphId): Promise<GraphRunSummary[]> {
       requireGraph(store, graphId);
       return await Promise.resolve(store.listGraphRuns(graphId).map(graphRunSummary));
+    },
+
+    async runGraphNow(graphId): Promise<boolean> {
+      const row = requireGraph(store, graphId);
+      const engine = options.graphs;
+      if (engine === undefined) return false;
+      const node = parseGraphDocument(row.definition).nodes.find(
+        (entry) => entry.type === RUN_NOW_TYPE,
+      );
+      if (node === undefined) return false;
+      // Not awaited to completion by the route — a run can park on a `wait` for an hour — but the
+      // engine's own error handling owns whatever happens after this returns.
+      await engine.fire(graphId, node.id, { at: Date.now() });
+      return true;
     },
 
     async listWebhooks(): Promise<WebhookSummary[]> {

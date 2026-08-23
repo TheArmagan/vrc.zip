@@ -365,7 +365,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
   // The engine is constructed here and started with the rest of the daemon, but it is *armed* from
   // the database: a graph the user switched off is not armed, and switching one on is a `reload`
   // from the control API rather than a restart.
-  const builtinNodes = createBuiltinNodes();
+  const builtinNodes = createBuiltinNodes({ bus });
   const nodeProvider = new PluginNodeProvider({ host: plugins, builtins: builtinNodes });
   const graphs = new GraphEngine({ store, bus, provider: nodeProvider });
   // Into the *same* registry a plugin's node types land in, so the palette and the type checker ask

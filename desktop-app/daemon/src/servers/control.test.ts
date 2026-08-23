@@ -497,6 +497,7 @@ interface Recorder {
   retentionRuns: number;
   budgetWrites: { grantId: string; scope: string; limit: number | null }[];
   webhooksDeleted: string[];
+  graphRuns: string[];
   pluginInstalls: { rootDir: string; accountIds: readonly string[] }[];
   pluginToggles: { id: string; enabled: boolean }[];
   pluginsUninstalled: string[];
@@ -549,6 +550,7 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     retentionRuns: 0,
     budgetWrites: [],
     webhooksDeleted: [],
+    graphRuns: [],
     pluginInstalls: [],
     pluginToggles: [],
     pluginsUninstalled: [],
@@ -720,6 +722,12 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     listGraphRuns: async (graphId) => {
       findGraph(graphId);
       return [];
+    },
+    runGraphNow: async (graphId) => {
+      findGraph(graphId);
+      seen.graphRuns.push(graphId);
+      // The fixture graph has no manual trigger unless a test gives it one.
+      return findGraph(graphId).definition.nodes.some((node) => node.type === "vrcz/run-now");
     },
     publishPluginPanel: () => {},
     publishPluginToast: () => {},
@@ -2922,6 +2930,25 @@ describe("graph routes", () => {
     expect((await call(deps, "/api/graphs/graph-1", { method: "DELETE" })).status).toBe(204);
     expect((await call(deps, "/api/graphs/graph-1", { method: "DELETE" })).status).toBe(204);
     expect((await (await call(deps, "/api/graphs")).json()) as unknown[]).toEqual([]);
+  });
+
+  test("run now is 409 on a graph with no manual trigger, and 202 when it has one", async () => {
+    // 409 rather than 404: the graph exists, it simply has nothing to press. A 404 would send the
+    // user looking for a graph that is on the screen in front of them.
+    const { deps, seen } = fakeDeps();
+    expect((await call(deps, "/api/graphs/graph-1/run", { method: "POST" })).status).toBe(409);
+
+    await call(deps, "/api/graphs/graph-1", {
+      ...json({
+        definition: {
+          nodes: [{ id: "n1", type: "vrcz/run-now", position: { x: 0, y: 0 }, config: {} }],
+          edges: [],
+        },
+      }),
+      method: "PUT",
+    });
+    expect((await call(deps, "/api/graphs/graph-1/run", { method: "POST" })).status).toBe(202);
+    expect(seen.graphRuns).toEqual(["graph-1", "graph-1"]);
   });
 
   test("the graph routes are session-token only, like every other /api route", async () => {

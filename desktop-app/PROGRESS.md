@@ -3437,6 +3437,38 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
        the point: a port that accepted `json` here would check nothing, which is what the lattice
        exists to prevent.
 
+211. **Triggers: one node with a subscription, and six presets whose value is their ports.** The
+     generic `on-event` trigger takes a comma-separated pattern and can only ever say `json`, so
+     every edge out of it is untyped and the lattice checks nothing. The presets — friend
+     online/offline, player join/leave, notification, world enter — are the *same* subscription with
+     **typed outputs**, and that is the whole reason they exist: `friend.online` carries a friend id,
+     so the preset offers a `friend` port and the graph downstream type-checks.
+
+     **A preset that cannot find what it promised drops the event rather than firing with a hole.**
+     `on-friend-online` with no `subjectId` fires nothing; the alternative runs everything downstream
+     with `undefined` where it expected a friend. `on-player-join` is the shape that taught this:
+     VRChat has shipped that log line with and without a user id, so the *name* is the required half
+     and the id is a separate port that is simply absent when the line had none.
+
+     **Filtering is in the subscription, not the callback.** `friend.location` fires for every friend
+     who moves and log tailing bursts forty joins on an instance transition, so an irrelevant event
+     costs one map lookup in the bus rather than a wake-up per armed graph.
+
+     **A bad pattern arms nothing instead of throwing.** A typo in one trigger's config would
+     otherwise fail the arm and take the rest of that graph's triggers with it. Same instinct in the
+     schedule trigger, which **clamps** a too-short period to a minute rather than refusing it: a
+     graph saved with five seconds should run every minute, not stop working with an error the author
+     only finds if they go looking.
+
+     **`run now` arms nothing at all.** `POST /api/graphs/:id/run` finds the node in the saved
+     document and calls the engine's own `fire`, which is the same door a plugin trigger comes
+     through — so a manual run is subject to every ceiling and the graph's concurrency mode rather
+     than being a path around them. It answers **409** on a graph with no manual trigger, not 404:
+     the graph exists, it simply has nothing to press.
+
+     **A built-in set constructed without a bus has no triggers**, rather than triggers that never
+     fire. A node in the palette that cannot work is worse than one that is not offered.
+
 ---
 
 ## Gotchas

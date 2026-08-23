@@ -13,9 +13,11 @@
  */
 
 import type { NodeConfigValues, NodeDefinition, PortValues } from "@vrcz/plugin-api/nodes";
+import type { EventBus } from "../../bus/event-bus.ts";
 import { BUILTIN_NAMESPACE, INTRINSIC_DEFINITIONS } from "../intrinsics.ts";
 import type { ExecuteContext } from "../types.ts";
 import { shapingNodes } from "./shaping.ts";
+import { triggerNodes } from "./triggers.ts";
 import { type BuiltinArmRequest, type BuiltinNode, builtinId } from "./types.ts";
 
 export type { BuiltinArmRequest, BuiltinNode } from "./types.ts";
@@ -77,9 +79,25 @@ export class BuiltinNodes {
  * all have a side effect and a dry-run branch, and keeping the two apart is what stops a "shaping"
  * node from quietly doing something.
  */
-export function createBuiltinNodes(): BuiltinNodes {
+export interface BuiltinNodeDeps {
+  /**
+   * The bus, for the triggers.
+   *
+   * Optional so a test of the pure half needs no daemon around it. A set built without one has no
+   * triggers at all rather than triggers that never fire — a node in the palette that cannot work
+   * is worse than one that is not offered.
+   */
+  readonly bus?: EventBus | undefined;
+  readonly now?: (() => number) | undefined;
+}
+
+export function createBuiltinNodes(deps: BuiltinNodeDeps = {}): BuiltinNodes {
   const intrinsics: BuiltinNode[] = [...INTRINSIC_DEFINITIONS.values()].map((definition) => ({
     definition,
   }));
-  return new BuiltinNodes([...intrinsics, ...shapingNodes()]);
+  const triggers =
+    deps.bus === undefined
+      ? []
+      : triggerNodes({ bus: deps.bus, ...(deps.now === undefined ? {} : { now: deps.now }) });
+  return new BuiltinNodes([...intrinsics, ...triggers, ...shapingNodes()]);
 }

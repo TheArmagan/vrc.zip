@@ -3116,7 +3116,7 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      reached VRChat's inbox. A README written from what a feature ought to do is the same rot as a
      docs banner (see §Gotchas), minus the excuse.
 
-205. **`docs/social-preview.png` is the repository's link card, and it is committed even though
+205. **`docs/social-preview.jpg` is the repository's link card, and it is committed even though
      GitHub keeps its own copy.** GitHub takes one 1280x640 image per repository (Settings, General,
      Social preview) and serves it as the `og:image` of the repo page, which is what Discord, Slack
      and X render when the link is pasted; with none set they compose a card from the avatar and the
@@ -3127,6 +3127,15 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      carries three lines, because it is usually seen at a third of its size. It keeps the UNOFFICIAL
      line: that disclaimer is worth most on the one surface that reaches people who have not opened
      the repository yet.
+
+     **It is not live, and the reason is on GitHub's side.** Three uploads on 2026-08-23 (PNG and
+     JPEG, 42KB to 649KB, all 1280x640) each ran the full pipeline correctly — `POST
+     /upload/policies/repository-images` 201, the S3 `POST` 204, `PUT /upload/repository-images/<id>`
+     200 — and yet the settings preview stayed blank and the `og:image` GitHub then advertised,
+     `repository-images.githubusercontent.com/1341684534/…`, answers 404 `WebContentNotFound`. So the
+     asset is accepted and then not stored, which reads to anyone looking at the repo card as an
+     image that renders as nothing. The file stays in `docs/` for a later attempt; nothing in this
+     repository can fix it, and the diagnosis is here so it is not made twice.
 
 ---
 

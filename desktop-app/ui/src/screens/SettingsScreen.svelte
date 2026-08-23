@@ -107,6 +107,16 @@ const startupReason = $derived(app.settings?.startWithWindowsReason ?? null);
 const installSupported = $derived(app.settings?.installSupported ?? false);
 const installed = $derived(app.settings?.installed ?? false);
 const installPath = $derived(app.settings?.installPath ?? null);
+/*
+ * An older copy is installed and this is not it.
+ *
+ * The same button does both jobs, because the underlying action is the same copy — but the words
+ * are not interchangeable. "Install vrc.zip properly" in front of somebody who installed it months
+ * ago reads as though the app has forgotten, and it buries the thing they would actually want to
+ * know, which is that the installed copy is out of date.
+ */
+const installedVersion = $derived(app.settings?.installedVersion ?? null);
+const updatable = $derived(installedVersion !== null && !installed);
 
 let installing = $state(false);
 let desktopShortcut = $state(true);
@@ -352,31 +362,46 @@ async function askForNotifications(): Promise<void> {
           {#if installSupported && !installed}
             <div class="space-y-3 px-4 py-3">
               <div class="space-y-1">
-                <p class="text-sm font-medium">Install vrc.zip properly</p>
-                <p class="text-sm text-muted-foreground">
-                  Copies vrc.zip to
-                  <span class="font-mono text-xs">{installPath ?? "your local app data folder"}</span>
-                  and adds it to the Start menu, so you can search for it by name and it survives a
-                  disk cleanup. No administrator rights, and nothing outside your own user folder.
+                <p class="text-sm font-medium">
+                  {updatable ? "Update the installed copy" : "Install vrc.zip properly"}
                 </p>
+                {#if updatable}
+                  <p class="text-sm text-muted-foreground">
+                    Version <span class="font-mono text-xs">{installedVersion}</span> is installed at
+                    <span class="font-mono text-xs">{installPath}</span>, and this is a different
+                    copy. Installing again replaces it with the one you are running. vrc.zip does not
+                    update itself, so nothing happens here until you ask for it.
+                  </p>
+                {:else}
+                  <p class="text-sm text-muted-foreground">
+                    Copies vrc.zip to
+                    <span class="font-mono text-xs"
+                      >{installPath ?? "your local app data folder"}</span
+                    >
+                    and adds it to the Start menu, so you can search for it by name and it survives a
+                    disk cleanup. No administrator rights, and nothing outside your own user folder.
+                  </p>
+                {/if}
                 {#if startupReason !== null}
                   <p class="text-sm text-amber-600 dark:text-amber-500">{startupReason}</p>
                 {/if}
               </div>
 
-              <label class="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  class="size-4 accent-primary"
-                  bind:checked={desktopShortcut}
-                  disabled={installing}
-                />
-                Also add a desktop shortcut
-              </label>
+              {#if !updatable}
+                <label class="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    class="size-4 accent-primary"
+                    bind:checked={desktopShortcut}
+                    disabled={installing}
+                  />
+                  Also add a desktop shortcut
+                </label>
+              {/if}
 
               <Button size="sm" disabled={installing} onclick={() => void install()}>
                 <DownloadIcon class="size-4" />
-                {installing ? "Installing…" : "Install"}
+                {installing ? "Installing…" : updatable ? "Update" : "Install"}
               </Button>
             </div>
           {/if}

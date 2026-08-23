@@ -54,6 +54,19 @@ export interface Settings {
    * sign-in has no console to ask in, and must not burn the offer by failing to make it.
    */
   installOffered: boolean;
+  /**
+   * The version whose update offer was declined, or empty for none.
+   *
+   * The *version* rather than a boolean, because that is what makes the offer stop nagging without
+   * also making it stop working. Somebody who says no to updating to 0.2.0 should not be asked
+   * again every time they run that same 0.2.0 executable — and should absolutely be asked when
+   * 0.3.0 comes along.
+   *
+   * Note that this lives in the state directory, which the installed copy and a freshly extracted
+   * one both share. That is the point: the two executables are having one conversation with the
+   * user, not two.
+   */
+  updateDeclinedVersion: string;
 }
 
 /** See `daemon/src/forward-proxy/`. */
@@ -87,6 +100,7 @@ export const DEFAULT_SETTINGS: Settings = {
   openBrowserOnStart: true,
   resolveAvatarIds: true,
   installOffered: false,
+  updateDeclinedVersion: "",
 };
 
 /** True until the user has completed first-run setup. The UI blocks on this. */
@@ -123,6 +137,10 @@ export async function loadSettings(env?: NodeJS.ProcessEnv): Promise<Settings> {
         typeof parsed.installOffered === "boolean"
           ? parsed.installOffered
           : DEFAULT_SETTINGS.installOffered,
+      updateDeclinedVersion:
+        typeof parsed.updateDeclinedVersion === "string"
+          ? parsed.updateDeclinedVersion
+          : DEFAULT_SETTINGS.updateDeclinedVersion,
     };
   } catch {
     // A corrupt settings file must not stop the daemon booting — the user would have no UI in

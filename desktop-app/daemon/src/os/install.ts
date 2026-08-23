@@ -42,7 +42,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { APP_NAME, APP_VERSION, REPOSITORY_URL } from "@vrcz/shared";
 import { stateDir } from "../paths.ts";
-import { deleteKey, writeDword, writeString } from "./registry.ts";
+import { deleteKey, readString, writeDword, writeString } from "./registry.ts";
 import { setStartupEnabled } from "./startup.ts";
 
 const IS_WINDOWS = process.platform === "win32";
@@ -482,4 +482,161 @@ async function scheduleDirectoryRemoval(directory: string, execPath: string): Pr
   } catch {
     return false;
   }
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* Updating an installed copy                                                                     */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * The version of the installed copy, from the Installed apps entry we wrote when we installed it.
+ *
+ * The registry rather than the executable's own file version resource, for a plain reason: the
+ * packaging step does not stamp one, so there is nothing there to read. `DisplayVersion` is written
+ * by `writeUninstallEntry` and is also what Settings shows the user, so reading it back means the
+ * update prompt and Installed apps can never disagree about which version is installed.
+ *
+ * Null when nothing is installed, or when it was installed by a build old enough not to have
+ * written the entry.
+ */
+export function installedVersion(): string | null {
+  const value = readString(UNINSTALL_KEY_PATH, "DisplayVersion");
+  return value === null || value.trim() === "" ? null : value.trim();
+}
+
+/**
+ * Whether an installed executable is actually on disk, whatever the registry believes.
+ *
+ * Synchronous, using the same `size > 0` idiom `repairStartupEntry` uses, because both callers are
+ * predicates that decide which of two prompts to show and neither wants to be async for it.
+ *
+ * The two can genuinely disagree: somebody who deletes `%LOCALAPPDATA%\Programs\vrc.zip` by hand
+ * leaves the Installed apps entry behind, and an "update the installed copy" offer for a copy that
+ * is not there would be describing the wrong thing. The registry says what was installed; this says
+ * what still is.
+ */
+export function installExists(env: NodeJS.ProcessEnv = process.env): boolean {
+  const target = installTarget(env);
+  if (target === null) return false;
+  try {
+    return Bun.file(target).size > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Orders two versions the way semver does, enough for the one question asked of it.
+ *
+ * Returns a negative number when `a` is older, positive when newer, zero when they are the same
+ * release. Numeric parts compare as numbers, so `0.10.0` is correctly newer than `0.9.0` — a string
+ * comparison gets that backwards, which is the whole reason this is not a `<`.
+ *
+ * A prerelease sorts *below* the release it leads to: `1.0.0-beta.1` is older than `1.0.0`. Only
+ * the presence of a prerelease is weighed, not its contents beyond a plain comparison, because the
+ * caller uses this for one decision — "is the copy in my hand newer than the one on disk" — and a
+ * full precedence implementation would be more machinery than that question can justify.
+ *
+ * Anything unparseable sorts as equal, which makes an unreadable version *not* an update. Failing
+ * closed is the right direction: the cost of a missed prompt is that somebody updates by hand, and
+ * the cost of a wrong one is overwriting a good install with an older build.
+ */
+export function compareVersions(a: string, b: string): number {
+  const parse = (value: string) => {
+    const match = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/.exec(value.trim());
+    if (match === null) return null;
+    return {
+      numbers: [Number(match[1]), Number(match[2]), Number(match[3])] as const,
+      prerelease: match[4] ?? null,
+    };
+  };
+
+  const left = parse(a);
+  const right = parse(b);
+  if (left === null || right === null) return 0;
+
+  for (let index = 0; index < 3; index += 1) {
+    const difference = (left.numbers[index] ?? 0) - (right.numbers[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+
+  if (left.prerelease === right.prerelease) return 0;
+  // Same numbers, and exactly one of them is a prerelease: that one is the older.
+  if (left.prerelease === null) return 1;
+  if (right.prerelease === null) return -1;
+  return left.prerelease < right.prerelease ? -1 : 1;
+}
+
+export interface UpdateResult {
+  readonly ok: boolean;
+  /** What was installed before, if we could tell. */
+  readonly from: string | null;
+  readonly to: string;
+  readonly path: string | null;
+  /** Why it did not happen, in a sentence fit to show a user. Null on success. */
+  readonly reason: string | null;
+}
+
+/**
+ * Replaces the installed executable with this one, and nothing else.
+ *
+ * Deliberately **not** `installLocally`. That function registers the autostart entry and writes the
+ * shortcuts, which is right for an install and wrong for an update: somebody who turned "start with
+ * Windows" off would have it turned back on by updating, and somebody who deleted the desktop
+ * shortcut would find it back. An update should change the version and leave every decision the
+ * user has made about the app alone.
+ *
+ * What it does touch is the Installed apps entry, because `DisplayVersion` is now wrong — an
+ * updated app still listed at its old version is a small lie that `installedVersion` would then
+ * read back and act on.
+ */
+export async function updateInstalledCopy(
+  execPath: string = process.execPath,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<UpdateResult> {
+  const from = installedVersion();
+  const to = APP_VERSION;
+
+  const directory = installDirectory(env);
+  const target = installTarget(env);
+  if (directory === null || target === null) {
+    return { ok: false, from, to, path: null, reason: "There is no installed copy to update." };
+  }
+
+  try {
+    await mkdir(directory, { recursive: true });
+    await Bun.write(target, Bun.file(execPath));
+  } catch (error) {
+    /*
+     * `EBUSY` means the installed copy is running. That is a likelier state here than it is during
+     * a first install — the whole reason there is an older copy is that somebody has been using
+     * it — even though its bound ports usually stop a second daemon getting this far.
+     */
+    const busy = String(error).includes("EBUSY");
+    return {
+      ok: false,
+      from,
+      to,
+      path: target,
+      reason: busy
+        ? "The installed copy of vrc.zip is running. Close it and try again."
+        : `Could not replace ${target}.`,
+    };
+  }
+
+  let size = 0;
+  try {
+    size = Bun.file(target).size;
+  } catch {
+    // Costs the Installed apps entry its size column and nothing else.
+  }
+  const listed = writeUninstallEntry(target, directory, size);
+
+  return {
+    ok: true,
+    from,
+    to,
+    path: target,
+    reason: listed ? null : "Updated, but the Installed apps entry could not be refreshed.",
+  };
 }

@@ -4210,6 +4210,40 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      for six months should say which build it is, and this is a project whose entire install story
      starts in that folder.
 
+239. **vrc.zip does not update itself, and now says so out loud when it matters.** It has never
+     checked for releases, never phoned home, and nothing compared versions anywhere:
+     `repairStartupEntry` only ever fixed an entry whose target was *missing*, and re-running Install
+     would have overwritten silently. That is still true of the automatic behaviour, and deliberately
+     so. What is new is that the one moment the app can *know* a newer build exists — because one is
+     executing — is no longer wasted: run a newer copy while an older one is installed, and the
+     console asks whether to replace it.
+
+     `updateInstalledCopy` exists rather than reusing `installLocally`, and the difference is the
+     whole point. Install registers the autostart entry and writes shortcuts; an update must not.
+     Somebody who turned "start with Windows" off would have it turned back on by updating, and
+     somebody who deleted the desktop shortcut would find it back. An update changes the version and
+     leaves every decision the user has made alone — the one thing it does touch beyond the
+     executable is `DisplayVersion`, because an updated app still listed at its old version is a lie
+     that `installedVersion` would then read back and act on.
+
+     Smaller calls inside it:
+
+     - **The installed version is read from `DisplayVersion` in the Installed apps key**, not from a
+       file version resource, because the packaging step does not stamp one. It also means the
+       prompt and Settings can never disagree about what is installed.
+     - **`compareVersions` is numeric, not lexical.** `"0.10.0" < "0.9.0"` as strings, so a plain
+       comparison would call 0.9 to 0.10 a downgrade and never offer it. Unparseable input sorts as
+       equal, which fails closed: a missed prompt costs a manual update, a wrong one puts an older
+       build over a good install.
+     - **The declined *version* is remembered, not a boolean.** Saying no to 0.2.0 should stop the
+       question for 0.2.0 and not for 0.3.0. It lives in `settings.json`, which the installed copy
+       and a freshly extracted one share — the two executables are having one conversation with the
+       user, not two.
+     - **Only strictly newer.** Running an older build on purpose, to check whether a regression is
+       new, is a normal thing to do, and offering to downgrade over it is not a favour.
+     - `shouldOfferInstall` now stands down whenever an installation exists, so the two prompts
+       cannot both fire and a newer build is never told to set itself up for the first time.
+
 ---
 
 ## Gotchas
@@ -4217,6 +4251,23 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **A probe with a mangled path wrote to a garbage registry key for a whole run, and reported
+  success the entire time.** Verifying the update flow meant a scratch script, and its
+  `"Software\Microsoft\..."` constants lost their backslashes on the way through a bash
+  heredoc — so every read and write went to `HKCU\SoftwareMicrosoftWindowsCurrentVersionUninstall<VT>rc.zip`,
+  a key it created on the spot. `writeString` returned true, `readString` read the value back, and
+  the results looked plausible enough to be believed for two runs. This is precisely the failure
+  `CLAUDE.md` describes and precisely the rule it gives — use the `Write` tool, never a heredoc —
+  and it cost more time than writing the file properly would have.
+
+  Two things worth keeping from it. A registry helper that reports "the key would not open" and
+  "there is no such value" as the same `null` cannot tell a caller it is addressing nothing at all;
+  the diagnosis only came from printing `JSON.stringify(path)`. And **the Installed apps key is not
+  scoped by `LOCALAPPDATA`** — it is one global key — so a probe that installs to a throwaway
+  directory still overwrites the real entry, and a probe that cleans up afterwards deletes it. The
+  executable, the `Run` value and the shortcuts are all per-path and were untouched; only that key
+  needed putting back.
 
 - **`powershell -WindowStyle Hidden` hides *your* console, not PowerShell's.** Clicking Install made
   the daemon's console window disappear for good, leaving a process that could only be stopped from

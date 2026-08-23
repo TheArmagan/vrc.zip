@@ -13,7 +13,7 @@ import { RateLimiter } from "./net/rate-limiter.ts";
 import { RequestMeter } from "./net/request-meter.ts";
 import { buildUserAgent } from "./net/user-agent.ts";
 import { notifyDesktop } from "./os/desktop-notification.ts";
-import { installLocally, installTarget, isInstalled } from "./os/install.ts";
+import { installedVersion, installLocally, installTarget, isInstalled } from "./os/install.ts";
 import { openUrl } from "./os/open-url.ts";
 import { createStartupControl } from "./os/startup.ts";
 import { databasePath, ensureStateDir } from "./paths.ts";
@@ -591,7 +591,11 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
       ? {
           install: {
             run: (request: Parameters<typeof installLocally>[0]) => installLocally(request),
-            status: () => ({ installed: isInstalled(), path: installTarget() }),
+            status: () => ({
+              installed: isInstalled(),
+              path: installTarget(),
+              version: installedVersion(),
+            }),
           },
         }
       : {}),

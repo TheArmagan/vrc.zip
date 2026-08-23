@@ -255,8 +255,14 @@ export interface InstallControl {
     desktopShortcut: boolean;
     startMenuShortcut: boolean;
   }): Promise<{ ok: boolean; reason: string | null; path: string | null }>;
-  /** Where the installed copy is, and whether this process is running from it. */
-  status(): { installed: boolean; path: string | null };
+  /**
+   * Where the installed copy is, whether this process is running from it, and which version it is.
+   *
+   * `version` is what lets the settings screen tell "not installed" from "installed, but this is a
+   * newer build" — two states that want different words on the same button. Null when nothing is
+   * installed, or when it was installed by a build too old to have recorded one.
+   */
+  status(): { installed: boolean; path: string | null; version: string | null };
 }
 
 /** What an unsupported build reports: off, unchangeable, and with a sentence saying why. */
@@ -3611,6 +3617,7 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         installSupported: options.install !== undefined,
         installed: options.install?.status().installed ?? false,
         installPath: options.install?.status().path ?? null,
+        installedVersion: options.install?.status().version ?? null,
       } as unknown as WireSettings;
     },
 
@@ -3658,6 +3665,7 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         installSupported: options.install !== undefined,
         installed: options.install?.status().installed ?? false,
         installPath: options.install?.status().path ?? null,
+        installedVersion: options.install?.status().version ?? null,
       } as unknown as WireSettings;
     },
 

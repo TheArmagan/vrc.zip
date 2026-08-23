@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { stateDir } from "../paths.ts";
 import { shouldStartHidden } from "./console.ts";
-import { installDirectory, installTarget, isInstalled, shortcutScript } from "./install.ts";
+import {
+  compareVersions,
+  installDirectory,
+  installTarget,
+  isInstalled,
+  shortcutScript,
+} from "./install.ts";
 import { startupCommand, startupEntryTarget, startupLocation, startupSupport } from "./startup.ts";
 import { shouldShowTray } from "./tray.ts";
 
@@ -200,5 +206,38 @@ describe("the shortcut script", () => {
     const script = shortcutScript().join(" ");
     expect(script).toContain("GetFolderPath('Desktop')");
     expect(script).toContain("GetFolderPath('Programs')");
+  });
+});
+
+describe("compareVersions", () => {
+  test("orders numerically, not as text", () => {
+    // The reason this function exists at all. `"0.10.0" < "0.9.0"` is true as strings, so a plain
+    // comparison would decide that upgrading from 0.9 to 0.10 is a downgrade and never offer it.
+    expect(compareVersions("0.10.0", "0.9.0")).toBeGreaterThan(0);
+    expect(compareVersions("0.9.0", "0.10.0")).toBeLessThan(0);
+    expect(compareVersions("1.0.0", "0.99.99")).toBeGreaterThan(0);
+    expect(compareVersions("0.2.10", "0.2.9")).toBeGreaterThan(0);
+  });
+
+  test("equal versions are equal, with or without a leading v", () => {
+    expect(compareVersions("1.2.3", "1.2.3")).toBe(0);
+    expect(compareVersions("v1.2.3", "1.2.3")).toBe(0);
+  });
+
+  test("a prerelease is older than the release it leads to", () => {
+    expect(compareVersions("1.0.0-beta.1", "1.0.0")).toBeLessThan(0);
+    expect(compareVersions("1.0.0", "1.0.0-beta.1")).toBeGreaterThan(0);
+    expect(compareVersions("1.0.0-beta.2", "1.0.0-beta.1")).toBeGreaterThan(0);
+  });
+
+  test("anything unparseable is not an update", () => {
+    /*
+     * Failing closed, and in the direction that matters: this decides whether to overwrite an
+     * installed executable. A missed prompt costs somebody a manual update; a wrong one puts an
+     * older build over a good install.
+     */
+    expect(compareVersions("", "1.0.0")).toBe(0);
+    expect(compareVersions("not a version", "1.0.0")).toBe(0);
+    expect(compareVersions("1.0.0", "garbage")).toBe(0);
   });
 });

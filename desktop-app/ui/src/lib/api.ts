@@ -800,6 +800,14 @@ export interface Settings {
   readonly installed: boolean;
   /** Where an installed copy would live, so the screen can name it before installing. */
   readonly installPath: string | null;
+  /**
+   * The version of the installed copy, or null when there is not one.
+   *
+   * Distinguishes "nothing is installed" from "something older is installed and you are running a
+   * newer build", which are two situations that want different words on the same button. vrc.zip
+   * does not update itself, so the second is a thing the user has to be told about.
+   */
+  readonly installedVersion: string | null;
 }
 
 /** What `POST /api/settings/install` answers with. */

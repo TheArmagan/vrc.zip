@@ -198,6 +198,54 @@ export interface GraphRunSummary {
   readonly updatedAt: number;
 }
 
+/**
+ * What one node of a graph is remembering, so the editor can offer to forget it.
+ *
+ * The list exists so the button appears **only** where there is something to forget. The alternative
+ * was a flag on `NodeDefinition` saying "this node remembers", which every definition would have to
+ * set honestly and which would change the hash of the two that already exist — marking every saved
+ * graph using them stale to add a button. Asking what is actually stored costs one grouped query and
+ * cannot be wrong.
+ */
+export interface GraphMemoryEntry {
+  readonly nodeId: string;
+  /** How many keys. A per-person cooldown has one per person. */
+  readonly entries: number;
+  readonly updatedAt: number;
+}
+
+/**
+ * One named store: data a graph put somewhere other graphs can read.
+ *
+ * Not scoped to a graph, and deliberately so — deleting a graph leaves its stores alone, because
+ * the graph beside it may be reading them. See `014_graph_stores.sql`.
+ */
+export interface GraphStoreSummary {
+  readonly name: string;
+  readonly description: string;
+  readonly entries: number;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+/**
+ * One entry in a store, as the Stores panel shows it.
+ *
+ * `collection` is the raw column — `''`, `map:x`, `set:x`, `list` — and `kind`/`name` are it split
+ * into what a person reads. Both, because the panel shows the friendly halves and a delete has to
+ * name the exact row.
+ */
+export interface GraphStoreEntry {
+  readonly collection: string;
+  readonly kind: "value" | "map" | "set" | "list";
+  /** The collection's name. Empty for a plain value, whose name is its key. */
+  readonly name: string;
+  readonly key: string;
+  /** Already decoded. The column is JSON text; nothing downstream should parse it twice. */
+  readonly value: unknown;
+  readonly updatedAt: number;
+}
+
 /** Creating a graph. The two switches are absent on purpose: a new graph is off and unarmed. */
 export interface GraphCreate {
   readonly name: string;

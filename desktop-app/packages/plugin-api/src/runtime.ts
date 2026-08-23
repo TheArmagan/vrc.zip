@@ -121,6 +121,10 @@ export interface PluginContext {
   call(method: string, params?: unknown, timeoutMs?: number): Promise<unknown>;
   readonly vrchat: VrchatApi;
   readonly storage: StorageApi;
+  /** The named stores, shared with graphs. Needs the `shared-data` capability. */
+  readonly data: DataApi;
+  /** Signals between automations. Needs the `signals` capability. */
+  readonly signals: SignalsApi;
   readonly events: EventsApi;
   readonly ui: UiApi;
   readonly nodes: NodesApi;
@@ -185,6 +189,76 @@ export interface StorageApi {
     delete(options: { prefix?: string; before?: number }): Promise<number>;
   };
   usage(): Promise<StorageUsage>;
+}
+
+/**
+ * The named stores, shared with the user's graphs.
+ *
+ * The same rows the `store-*` graph nodes read and write, addressed the same way: a store name (the
+ * `default` store when you name none), and a collection name inside it. That is the whole point — a
+ * graph writes `welcomed` and your plugin reads `welcomed`, with the name as the only coordination
+ * either of you needs.
+ *
+ * Needs the **`shared-data`** capability, which is dangerous and says so on the consent screen: it
+ * is read and write access to what every automation on this machine has stored.
+ *
+ * There is no `deleteStore`. Removing a store removes what another graph may be mid-run over, so it
+ * is a person's gesture from the Stores panel rather than anything a plugin can do.
+ */
+export interface DataApi {
+  /** One value under a name. `null` for a key that is not set. */
+  get(key: string, store?: string): Promise<unknown>;
+  set(key: string, value: unknown, store?: string): Promise<void>;
+  /** True when there was something to remove. */
+  delete(key: string, store?: string): Promise<boolean>;
+  map: {
+    get(name: string, key: string, store?: string): Promise<unknown>;
+    set(name: string, key: string, value: unknown, store?: string): Promise<void>;
+    delete(name: string, key: string, store?: string): Promise<boolean>;
+    entries(name: string, store?: string): Promise<{ key: string; value: unknown }[]>;
+    clear(name: string, store?: string): Promise<void>;
+  };
+  set_: {
+    /** True when the member was **new**, which is the half worth branching on. */
+    add(name: string, item: unknown, store?: string): Promise<boolean>;
+    has(name: string, item: unknown, store?: string): Promise<boolean>;
+    delete(name: string, item: unknown, store?: string): Promise<boolean>;
+    items(name: string, store?: string): Promise<unknown[]>;
+    clear(name: string, store?: string): Promise<void>;
+  };
+  list: {
+    /** Appends, and returns the new length. `max` keeps only the most recent few. */
+    add(name: string, item: unknown, options?: { max?: number; store?: string }): Promise<number>;
+    items(name: string, store?: string): Promise<unknown[]>;
+    /** Removes every copy, and returns how many went. */
+    remove(name: string, item: unknown, store?: string): Promise<number>;
+    clear(name: string, store?: string): Promise<void>;
+  };
+}
+
+/** One signal, as a listener receives it. */
+export interface SignalMessage {
+  readonly name: string;
+  /** Whatever the sender attached, or null. */
+  readonly value: unknown;
+  /** The graph that sent it, or `plugin:<id>` when a plugin did. */
+  readonly from: string;
+  readonly at: number;
+}
+
+/**
+ * Signals: a name and a value, between every automation on this machine.
+ *
+ * Needs the **`signals`** capability. `emit` is always global — `local` means "this graph only" and
+ * a plugin is not a graph, so a local signal from here would be heard by nobody.
+ *
+ * `on` and `once` are the event stream with a filter on it, so each costs a subscription and each
+ * returns one you can close. `once` closes itself after the first matching signal.
+ */
+export interface SignalsApi {
+  emit(name: string, value?: unknown): Promise<void>;
+  on(name: string, handler: (signal: SignalMessage) => void): Promise<Subscription>;
+  once(name: string, handler: (signal: SignalMessage) => void): Promise<Subscription>;
 }
 
 export interface EventsApi {
@@ -557,6 +631,83 @@ class Runtime {
       groups: { get: (params) => call("vrchat.groups.get", params) },
     };
 
+    /** `{store}` is omitted rather than sent empty, so the host's own default applies. */
+    const at = (store: string | undefined): { store?: string } =>
+      store === undefined || store === "" ? {} : { store };
+
+    const data: DataApi = {
+      get: (key, store) => call("data.get", { key, ...at(store) }),
+      set: async (key, value, store) => {
+        await call("data.set", { key, value, ...at(store) });
+      },
+      delete: async (key, store) => (await call("data.delete", { key, ...at(store) })) === true,
+      map: {
+        get: (name, key, store) => call("data.map.get", { name, key, ...at(store) }),
+        set: async (name, key, value, store) => {
+          await call("data.map.set", { name, key, value, ...at(store) });
+        },
+        delete: async (name, key, store) =>
+          (await call("data.map.delete", { name, key, ...at(store) })) === true,
+        entries: async (name, store) =>
+          (await call("data.map.entries", { name, ...at(store) })) as {
+            key: string;
+            value: unknown;
+          }[],
+        clear: async (name, store) => {
+          await call("data.clear", { kind: "map", name, ...at(store) });
+        },
+      },
+      /*
+       * `set_`, with the underscore, because `set` is already this object's own method for writing a
+       * plain value — `data.set("k", v)` and `data.set.add(…)` cannot both be one property. The
+       * alternative was renaming the plain write, which would make the common case the odd one out.
+       */
+      set_: {
+        add: async (name, item, store) =>
+          (await call("data.set.add", { name, item, ...at(store) })) === true,
+        has: async (name, item, store) =>
+          (await call("data.set.has", { name, item, ...at(store) })) === true,
+        delete: async (name, item, store) =>
+          (await call("data.set.delete", { name, item, ...at(store) })) === true,
+        items: async (name, store) =>
+          (await call("data.set.items", { name, ...at(store) })) as unknown[],
+        clear: async (name, store) => {
+          await call("data.clear", { kind: "set", name, ...at(store) });
+        },
+      },
+      list: {
+        add: async (name, item, options = {}) =>
+          (await call("data.list.add", {
+            name,
+            item,
+            ...(options.max === undefined ? {} : { max: options.max }),
+            ...at(options.store),
+          })) as number,
+        items: async (name, store) =>
+          (await call("data.list.items", { name, ...at(store) })) as unknown[],
+        remove: async (name, item, store) =>
+          (await call("data.list.remove", { name, item, ...at(store) })) as number,
+        clear: async (name, store) => {
+          await call("data.clear", { kind: "list", name, ...at(store) });
+        },
+      },
+    };
+
+    /** A `graph.signal` event as the shape a listener asked for. Null when it is not one. */
+    const readSignal = (event: PluginEvent): SignalMessage | null => {
+      const payload = event.payload;
+      if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return null;
+      const record = payload as Record<string, unknown>;
+      const name = record.name;
+      if (typeof name !== "string") return null;
+      return {
+        name,
+        value: record.value ?? null,
+        from: typeof record.graphId === "string" ? record.graphId : "",
+        at: event.ts,
+      };
+    };
+
     const events: EventsApi = {
       subscribe: async (handler, options = {}) => {
         const overflow = options.delivery?.overflow ?? "drop-oldest";
@@ -617,6 +768,52 @@ class Runtime {
       },
     };
 
+    const signals: SignalsApi = {
+      emit: async (name, value = null) => {
+        await call("signals.emit", { name, value });
+      },
+      on: async (name, handler) =>
+        await events.subscribe(
+          (event) => {
+            const signal = readSignal(event);
+            // The name is matched here rather than in the filter: the filter is a *kind* pattern and
+            // every signal shares one kind, so filtering by name there would mean one bus
+            // subscription per name for no gain.
+            if (signal !== null && signal.name === name) handler(signal);
+          },
+          { filter: { kinds: ["graph.signal"] } },
+        ),
+      once: async (name, handler) => {
+        let taken = false;
+        /*
+         * The subscription closes itself, and the two variables are why this is not one line.
+         *
+         * A signal can arrive *before* `subscribe` resolves — the handler is registered before the
+         * frame is sent, precisely so nothing is missed in that window — so the handler cannot
+         * assume `subscription` is assigned yet. `armed` records "close as soon as there is
+         * something to close", and the line after the await honours it.
+         */
+        let subscription: Subscription | null = null;
+        let armed = false;
+        const closeOnce = (): void => {
+          if (subscription === null) armed = true;
+          else void subscription.close();
+        };
+        subscription = await events.subscribe(
+          (event) => {
+            const signal = readSignal(event);
+            if (signal === null || signal.name !== name || taken) return;
+            taken = true;
+            closeOnce();
+            handler(signal);
+          },
+          { filter: { kinds: ["graph.signal"] } },
+        );
+        if (armed) await subscription.close();
+        return subscription;
+      },
+    };
+
     return {
       pluginId: this.#host.pluginId,
       log: (message) => {
@@ -625,6 +822,8 @@ class Runtime {
       call,
       vrchat,
       storage,
+      data,
+      signals,
       events,
       ui,
       nodes,

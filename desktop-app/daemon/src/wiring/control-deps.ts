@@ -25,8 +25,11 @@ import {
   type GraphDocument,
   type GraphExport,
   type GraphImportResult,
+  type GraphMemoryEntry,
   type GraphRunStatus,
   type GraphRunSummary,
+  type GraphStoreEntry,
+  type GraphStoreSummary,
   type GraphSummary,
   type GraphTemplate,
   isGraphConcurrency,
@@ -133,7 +136,7 @@ import {
   runRetention as runRetentionPass,
   type Store,
 } from "../store/index.ts";
-import type { GrantRow, GraphRow, GraphRunRow } from "../store/types.ts";
+import type { GrantRow, GraphKvEntryRow, GraphRow, GraphRunRow } from "../store/types.ts";
 import type { WebhookManager } from "../webhooks/index.ts";
 import { EPHEMERAL } from "./feed-writer.ts";
 import type { InstalledPluginView, PluginBudgetView, PluginHost } from "./plugin-host.ts";
@@ -1122,6 +1125,36 @@ function graphRunSummary(row: GraphRunRow): GraphRunSummary {
     startedAt: row.started_at,
     updatedAt: row.updated_at,
   };
+}
+
+/**
+ * One `graph_kv` row as the Stores panel reads it.
+ *
+ * The `collection` column is split into a kind and a name here rather than in the UI, because the
+ * encoding is the migration's — `map:x`, `set:x`, `list`, `''` — and a second decoder in Svelte is a
+ * second thing to update when a fifth kind arrives. The raw column is kept beside the split so a
+ * delete can still name the exact row.
+ */
+function graphStoreEntry(row: GraphKvEntryRow): GraphStoreEntry {
+  const { kind, name } = splitCollection(row.collection);
+  let value: unknown;
+  try {
+    value = JSON.parse(row.value);
+  } catch {
+    // A row nothing wrote through a node — somebody with a SQLite browser. Shown as the raw text
+    // rather than hidden, because a panel that silently omits rows is a panel that lies about what
+    // is in the store.
+    value = row.value;
+  }
+  return { collection: row.collection, kind, name, key: row.key, value, updatedAt: row.updated_at };
+}
+
+function splitCollection(collection: string): { kind: GraphStoreEntry["kind"]; name: string } {
+  if (collection === "") return { kind: "value", name: "" };
+  if (collection === "list") return { kind: "list", name: "" };
+  if (collection.startsWith("map:")) return { kind: "map", name: collection.slice(4) };
+  if (collection.startsWith("set:")) return { kind: "set", name: collection.slice(4) };
+  return { kind: "value", name: collection };
 }
 
 function isGraphRunStatus(value: string): value is GraphRunStatus {
@@ -2843,6 +2876,52 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
     async listGraphRuns(graphId): Promise<GraphRunSummary[]> {
       requireGraph(store, graphId);
       return await Promise.resolve(store.listGraphRuns(graphId).map(graphRunSummary));
+    },
+
+    async listGraphMemory(graphId): Promise<GraphMemoryEntry[]> {
+      requireGraph(store, graphId);
+      return await Promise.resolve(
+        store.listGraphNodeState(graphId).map((row) => ({
+          nodeId: row.node_id,
+          entries: row.n,
+          updatedAt: row.updated_at,
+        })),
+      );
+    },
+
+    async forgetGraphMemory(graphId, nodeId): Promise<void> {
+      requireGraph(store, graphId);
+      if (nodeId === null) store.clearGraphState(graphId);
+      else store.clearGraphNodeState(graphId, nodeId);
+      await Promise.resolve();
+    },
+
+    async listGraphStores(): Promise<GraphStoreSummary[]> {
+      return await Promise.resolve(
+        store.listGraphStores().map((row) => ({
+          name: row.name,
+          description: row.description,
+          entries: row.entries,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+        })),
+      );
+    },
+
+    async browseGraphStore(name): Promise<GraphStoreEntry[]> {
+      return await Promise.resolve(store.browseGraphStore(name).map(graphStoreEntry));
+    },
+
+    async deleteGraphStoreEntry(name, collection, key): Promise<void> {
+      // Idempotent, like every other delete here: removing something already gone is the outcome
+      // the caller asked for, and a 404 would make a double-click look like a failure.
+      store.deleteGraphKv(name, collection, key);
+      await Promise.resolve();
+    },
+
+    async deleteGraphStore(name): Promise<void> {
+      store.deleteGraphStore(name);
+      await Promise.resolve();
     },
 
     async runGraphNow(graphId): Promise<boolean> {

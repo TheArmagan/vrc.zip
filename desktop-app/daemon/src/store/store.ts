@@ -20,8 +20,12 @@ import type {
   FriendLogRow,
   GrantBudgetRow,
   GrantRow,
+  GraphKvEntryRow,
+  GraphKvRow,
+  GraphNodeStateRow,
   GraphRow,
   GraphRunRow,
+  GraphStoreRow,
   KindCount,
   LogOffsetRow,
   NewAuditEntry,
@@ -1129,6 +1133,78 @@ export class Store {
     this.stmts.clearGraphNodeState.run(graphId, nodeId);
   }
 
+  /** Which of a graph's nodes are remembering anything, and how much. */
+  listGraphNodeState(graphId: string): GraphNodeStateRow[] {
+    return this.stmts.listGraphNodeState.all(graphId);
+  }
+
+  /** Forgets everything the whole graph remembered. */
+  clearGraphState(graphId: string): void {
+    this.stmts.clearGraphState.run(graphId);
+  }
+
+  // -- named stores (migration 014) ------------------------------------------
+
+  /**
+   * Makes sure a store exists. Called before every write, never before a read.
+   *
+   * A read from a store nobody has written to is legitimately empty, and creating one on the way
+   * past would fill the Stores panel with names that came from typos in `get` nodes.
+   */
+  ensureGraphStore(name: string, now = Date.now()): void {
+    this.stmts.ensureGraphStore.run(name, now, now);
+  }
+
+  listGraphStores(): GraphStoreRow[] {
+    return this.stmts.listGraphStores.all();
+  }
+
+  /** Removes a store and everything in it, by foreign key. A person's gesture, never a graph's. */
+  deleteGraphStore(name: string): void {
+    this.stmts.deleteGraphStore.run(name);
+  }
+
+  getGraphKv(
+    store: string,
+    collection: string,
+    key: string,
+  ): { value: string; updatedAt: number } | null {
+    const row = this.stmts.getGraphKv.get(store, collection, key);
+    return row === null ? null : { value: row.value, updatedAt: row.updated_at };
+  }
+
+  putGraphKv(
+    store: string,
+    collection: string,
+    key: string,
+    value: string,
+    now = Date.now(),
+  ): void {
+    this.ensureGraphStore(store, now);
+    this.stmts.putGraphKv.run(store, collection, key, value, now);
+  }
+
+  deleteGraphKv(store: string, collection: string, key: string): void {
+    this.stmts.deleteGraphKv.run(store, collection, key);
+  }
+
+  listGraphKv(store: string, collection: string): GraphKvRow[] {
+    return this.stmts.listGraphKv.all(store, collection);
+  }
+
+  countGraphKv(store: string, collection: string): number {
+    return this.stmts.countGraphKv.get(store, collection)?.n ?? 0;
+  }
+
+  clearGraphKvCollection(store: string, collection: string): void {
+    this.stmts.clearGraphKvCollection.run(store, collection);
+  }
+
+  /** Everything in one store, most recently touched first. For the Stores panel. */
+  browseGraphStore(store: string, limit = 200): GraphKvEntryRow[] {
+    return this.stmts.browseGraphStore.all(store, limit);
+  }
+
   /**
    * Reclaims up to `pages` freelist pages. Only does anything with
    * `auto_vacuum = INCREMENTAL`, which {@link applyPragmas} sets before the first table exists.
@@ -1422,6 +1498,19 @@ function prepareAll(db: Database) {
     ),
     putGraphState: q<void, [string, string, string, string, number]>(SQL.putGraphState),
     clearGraphNodeState: q<void, [string, string]>(SQL.clearGraphNodeState),
+    listGraphNodeState: q<GraphNodeStateRow, [string]>(SQL.listGraphNodeState),
+    clearGraphState: q<void, [string]>(SQL.clearGraphState),
+
+    ensureGraphStore: q<void, [string, number, number]>(SQL.ensureGraphStore),
+    listGraphStores: q<GraphStoreRow, []>(SQL.listGraphStores),
+    deleteGraphStore: q<void, [string]>(SQL.deleteGraphStore),
+    getGraphKv: q<{ value: string; updated_at: number }, [string, string, string]>(SQL.getGraphKv),
+    putGraphKv: q<void, [string, string, string, string, number]>(SQL.putGraphKv),
+    deleteGraphKv: q<void, [string, string, string]>(SQL.deleteGraphKv),
+    listGraphKv: q<GraphKvRow, [string, string]>(SQL.listGraphKv),
+    countGraphKv: q<{ n: number }, [string, string]>(SQL.countGraphKv),
+    clearGraphKvCollection: q<void, [string, string]>(SQL.clearGraphKvCollection),
+    browseGraphStore: q<GraphKvEntryRow, [string, number]>(SQL.browseGraphStore),
     countPendingWebhookDeliveries: q<{ n: number }, [string]>(SQL.countPendingWebhookDeliveries),
     countSettledWebhookDeliveries: q<{ count: number }, [number]>(
       SQL.countSettledWebhookDeliveries,

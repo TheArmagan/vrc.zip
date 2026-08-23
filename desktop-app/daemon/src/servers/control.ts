@@ -15,7 +15,10 @@ import {
   type GraphDocument,
   type GraphExport,
   type GraphImportResult,
+  type GraphMemoryEntry,
   type GraphRunSummary,
+  type GraphStoreEntry,
+  type GraphStoreSummary,
   type GraphSummary,
   type GraphTemplate,
   type GraphUpdate,
@@ -1251,6 +1254,33 @@ export interface ControlDeps {
    * what the user needs — which is a fixable state rather than a dead end.
    */
   importGraph(document: unknown): Promise<GraphImportResult>;
+  /**
+   * Which of a graph's nodes are remembering something, so the editor can offer to forget it.
+   *
+   * Asked rather than declared: the button appears where there are rows, which is a fact the daemon
+   * can answer and a definition flag could only claim. See {@link GraphMemoryEntry}.
+   */
+  listGraphMemory(graphId: string): Promise<GraphMemoryEntry[]>;
+  /**
+   * Forgets what one node remembered, or the whole graph when `nodeId` is null.
+   *
+   * This is the reset behind "only the first time" and behind a cooldown that is holding a graph
+   * quiet. Idempotent: forgetting nothing is the outcome the caller asked for.
+   */
+  forgetGraphMemory(graphId: string, nodeId: string | null): Promise<void>;
+  /** Every named store, with how much is in it. Not scoped to a graph — that is the point. */
+  listGraphStores(): Promise<GraphStoreSummary[]>;
+  /** What is in one store. Capped, because a store is somewhere a graph writes in a loop. */
+  browseGraphStore(name: string): Promise<GraphStoreEntry[]>;
+  /** Removes one entry. `collection` is the raw column, so the panel can name an exact row. */
+  deleteGraphStoreEntry(name: string, collection: string, key: string): Promise<void>;
+  /**
+   * Removes a store and everything in it.
+   *
+   * A person's gesture and never a graph's, which is why there is no node for it: a graph that
+   * could delete a store could delete the store another graph is mid-run over.
+   */
+  deleteGraphStore(name: string): Promise<void>;
   /** The graphs vrc.zip ships, so a first canvas is an edit rather than a blank page. */
   listGraphTemplates(): Promise<GraphTemplate[]>;
 
@@ -2691,6 +2721,46 @@ export function createControlApp({ port, deps, appApi, token }: ControlAppOption
       );
       // 204 and nothing back. There is no route that reads a secret, and answering with the graph
       // would be one — the object carries the node whose field was just set.
+      return c.body(null, 204);
+    })
+
+    .get("/api/graphs/:id/memory", async (c) =>
+      c.json(await deps.listGraphMemory(c.req.param("id"))),
+    )
+
+    .delete("/api/graphs/:id/memory", async (c) => {
+      await deps.forgetGraphMemory(c.req.param("id"), null);
+      return c.body(null, 204);
+    })
+
+    .delete("/api/graphs/:id/memory/:node", async (c) => {
+      await deps.forgetGraphMemory(c.req.param("id"), c.req.param("node"));
+      return c.body(null, 204);
+    })
+
+    /*
+     * Stores sit beside graphs rather than under one, because they are shared by name and belong to
+     * no single graph. `/api/graphs/:id/...` would have implied an owner that does not exist.
+     */
+    .get("/api/graph-stores", async (c) => c.json(await deps.listGraphStores()))
+
+    .get("/api/graph-stores/:name", async (c) =>
+      c.json(await deps.browseGraphStore(c.req.param("name"))),
+    )
+
+    .delete("/api/graph-stores/:name", async (c) => {
+      await deps.deleteGraphStore(c.req.param("name"));
+      return c.body(null, 204);
+    })
+
+    .delete("/api/graph-stores/:name/entry", async (c) => {
+      // The collection and key are query parameters rather than path segments: a key is arbitrary
+      // text a graph chose, and `map:x` already contains the separator a path would split on.
+      await deps.deleteGraphStoreEntry(
+        c.req.param("name"),
+        c.req.query("collection") ?? "",
+        c.req.query("key") ?? "",
+      );
       return c.body(null, 204);
     })
 

@@ -672,6 +672,48 @@ export const SQL = {
       value      = excluded.value,
       updated_at = excluded.updated_at`,
   clearGraphNodeState: `DELETE FROM graph_state WHERE graph_id = ? AND node_id = ?`,
+  /**
+   * What one graph remembers, one row per node — the question the "forget" button in the editor
+   * asks. It exists so the button can appear *only* when there is something to forget: a node with
+   * no rows has nothing to reset, and offering the gesture anyway teaches people it does nothing.
+   */
+  listGraphNodeState: `
+    SELECT node_id, COUNT(*) AS n, MAX(updated_at) AS updated_at
+    FROM graph_state WHERE graph_id = ?
+    GROUP BY node_id ORDER BY updated_at DESC`,
+  clearGraphState: `DELETE FROM graph_state WHERE graph_id = ?`,
+
+  /*
+   * Named stores (migration 014). Shared between graphs on purpose, which is the whole difference
+   * from `graph_state` above.
+   */
+  ensureGraphStore: `
+    INSERT INTO graph_stores (name, description, created_at, updated_at) VALUES (?, '', ?, ?)
+    ON CONFLICT(name) DO NOTHING`,
+  listGraphStores: `
+    SELECT s.name, s.description, s.created_at, s.updated_at,
+           (SELECT COUNT(*) FROM graph_kv WHERE store = s.name) AS entries
+    FROM graph_stores s ORDER BY s.name`,
+  deleteGraphStore: `DELETE FROM graph_stores WHERE name = ?`,
+
+  getGraphKv: `
+    SELECT value, updated_at FROM graph_kv WHERE store = ? AND collection = ? AND key = ?`,
+  putGraphKv: `
+    INSERT INTO graph_kv (store, collection, key, value, updated_at) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(store, collection, key) DO UPDATE SET
+      value      = excluded.value,
+      updated_at = excluded.updated_at`,
+  deleteGraphKv: `DELETE FROM graph_kv WHERE store = ? AND collection = ? AND key = ?`,
+  /** Every entry of one collection, oldest first — insertion order is what a set browser wants. */
+  listGraphKv: `
+    SELECT key, value, updated_at FROM graph_kv
+    WHERE store = ? AND collection = ? ORDER BY updated_at, key`,
+  countGraphKv: `SELECT COUNT(*) AS n FROM graph_kv WHERE store = ? AND collection = ?`,
+  clearGraphKvCollection: `DELETE FROM graph_kv WHERE store = ? AND collection = ?`,
+  /** The Stores panel: everything in one store, whatever collection it belongs to. */
+  browseGraphStore: `
+    SELECT collection, key, value, updated_at FROM graph_kv
+    WHERE store = ? ORDER BY updated_at DESC LIMIT ?`,
 } as const;
 
 // ---------------------------------------------------------------------------

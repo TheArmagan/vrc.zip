@@ -395,3 +395,35 @@ export type GraphRunRow = {
 };
 
 export type NewGraphRun = Omit<GraphRunRow, "wait_node" | "resume_at">;
+
+/** How much one node of a graph is remembering, for the editor's "forget" button. */
+export type GraphNodeStateRow = {
+  node_id: string;
+  n: number;
+  updated_at: number;
+};
+
+/**
+ * One named store. See `014_graph_stores.sql` for why a store is a namespace rather than a file.
+ *
+ * `entries` is counted in the listing query rather than kept as a column: a counter maintained by
+ * hand is a counter that drifts, and the count is only ever asked for by a panel a person is looking
+ * at.
+ */
+export type GraphStoreRow = {
+  name: string;
+  description: string;
+  entries: number;
+  created_at: number;
+  updated_at: number;
+};
+
+/** One entry of a known collection. `value` is JSON text; nothing but the node decodes it. */
+export type GraphKvRow = {
+  key: string;
+  value: string;
+  updated_at: number;
+};
+
+/** One entry when the collection is part of the answer, for browsing a whole store. */
+export type GraphKvEntryRow = GraphKvRow & { collection: string };

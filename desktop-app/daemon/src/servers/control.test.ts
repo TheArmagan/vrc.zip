@@ -499,6 +499,7 @@ interface Recorder {
   webhooksDeleted: string[];
   graphRuns: string[];
   graphSecrets: { node: string; field: string; value: string }[];
+  storeDeletes: string[];
   pluginInstalls: { rootDir: string; accountIds: readonly string[] }[];
   pluginToggles: { id: string; enabled: boolean }[];
   pluginsUninstalled: string[];
@@ -553,6 +554,7 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     webhooksDeleted: [],
     graphRuns: [],
     graphSecrets: [],
+    storeDeletes: [],
     pluginInstalls: [],
     pluginToggles: [],
     pluginsUninstalled: [],
@@ -606,6 +608,8 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     staleNodes: [],
   };
   let graphs: Graph[] = [GRAPH];
+  /** What the "forget" button acts on, and what the Stores panel's deletes land in. */
+  const graphMemory = new Set<string>(["cooldown-node"]);
   const findGraph = (id: string): Graph => {
     const found = graphs.find((graph) => graph.id === id);
     if (found === undefined) throw new ControlError(404, "unknown_graph");
@@ -733,6 +737,37 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     listGraphRuns: async (graphId) => {
       findGraph(graphId);
       return [];
+    },
+    listGraphMemory: async (graphId) => {
+      findGraph(graphId);
+      return [...graphMemory].map((nodeId) => ({ nodeId, entries: 1, updatedAt: 1 }));
+    },
+    forgetGraphMemory: async (graphId, nodeId) => {
+      findGraph(graphId);
+      if (nodeId === null) graphMemory.clear();
+      else graphMemory.delete(nodeId);
+    },
+    listGraphStores: async () => [
+      { name: "default", description: "", entries: 1, createdAt: 0, updatedAt: 0 },
+    ],
+    browseGraphStore: async (name) =>
+      name === "default"
+        ? [
+            {
+              collection: "set:welcomed",
+              kind: "set" as const,
+              name: "welcomed",
+              key: "usr_a",
+              value: "usr_a",
+              updatedAt: 1,
+            },
+          ]
+        : [],
+    deleteGraphStoreEntry: async (name, collection, key) => {
+      seen.storeDeletes.push(`${name}|${collection}|${key}`);
+    },
+    deleteGraphStore: async (name) => {
+      seen.storeDeletes.push(name);
     },
     exportGraph: async (graphId) => {
       const graph = findGraph(graphId);
@@ -3034,6 +3069,59 @@ describe("graph routes", () => {
         })
       ).status,
     ).toBe(400);
+  });
+
+  test("a graph reports what its nodes remember, and forgets on request", async () => {
+    // The button in the editor appears only where there are rows, which is what this route answers.
+    const { deps } = fakeDeps();
+    expect((await (await call(deps, "/api/graphs/graph-1/memory")).json()) as unknown[]).toEqual([
+      { nodeId: "cooldown-node", entries: 1, updatedAt: 1 },
+    ]);
+
+    expect(
+      (await call(deps, "/api/graphs/graph-1/memory/cooldown-node", { method: "DELETE" })).status,
+    ).toBe(204);
+    expect((await (await call(deps, "/api/graphs/graph-1/memory")).json()) as unknown[]).toEqual(
+      [],
+    );
+
+    // Forgetting nothing is the outcome the caller asked for. A 404 would make a double-click on
+    // the button look like a failure.
+    expect(
+      (await call(deps, "/api/graphs/graph-1/memory/cooldown-node", { method: "DELETE" })).status,
+    ).toBe(204);
+  });
+
+  test("stores are listed and browsed beside graphs, not under one", async () => {
+    // A store is shared by name and belongs to no single graph, so `/api/graphs/:id/stores` would
+    // have implied an owner that does not exist.
+    const { deps } = fakeDeps();
+    expect((await (await call(deps, "/api/graph-stores")).json()) as unknown[]).toHaveLength(1);
+    expect((await (await call(deps, "/api/graph-stores/default")).json()) as unknown[]).toEqual([
+      {
+        collection: "set:welcomed",
+        kind: "set",
+        name: "welcomed",
+        key: "usr_a",
+        value: "usr_a",
+        updatedAt: 1,
+      },
+    ]);
+    expect((await (await call(deps, "/api/graph-stores/nothing")).json()) as unknown[]).toEqual([]);
+  });
+
+  test("one entry is deleted by naming its raw collection, in the query string", async () => {
+    // `map:x` contains the separator a path segment would split on, and a key is arbitrary text a
+    // graph chose — so both ride in the query rather than the path.
+    const { deps, seen } = fakeDeps();
+    expect(
+      (
+        await call(deps, "/api/graph-stores/default/entry?collection=set%3Awelcomed&key=usr_a", {
+          method: "DELETE",
+        })
+      ).status,
+    ).toBe(204);
+    expect(seen.storeDeletes).toEqual(["default|set:welcomed|usr_a"]);
   });
 
   test("the graph routes are session-token only, like every other /api route", async () => {

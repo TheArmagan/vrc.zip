@@ -63,6 +63,22 @@ export const PLUGIN_CAPABILITIES = {
     description: "Show you desktop and in-headset notifications.",
     dangerous: false,
   },
+  /*
+   * The shared stores, which are the opposite of `storage` above in the one way that matters: that
+   * one is a private database nothing else can open, and this one is deliberately common ground
+   * between your graphs and your plugins. So it is dangerous and the description says whose data it
+   * is — a plugin granted this can read what every graph on this machine has written, including the
+   * lists of people they keep.
+   */
+  "shared-data": {
+    description:
+      "Read and change the shared stores your automations keep on this computer, including what other plugins put there.",
+    dangerous: true,
+  },
+  signals: {
+    description: "Send and listen for signals your automations use to talk to each other.",
+    dangerous: false,
+  },
 } as const satisfies Record<string, PluginCapabilityDefinition>;
 
 export type PluginCapability = keyof typeof PLUGIN_CAPABILITIES;

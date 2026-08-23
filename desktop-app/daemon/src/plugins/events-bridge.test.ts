@@ -166,6 +166,32 @@ describe("the scope filter", () => {
     expect(onlyUnlinked(unlinked)).toBe(false);
   });
 
+  test("a signal is admitted by a capability rather than a scope, and never the local one", () => {
+    // The one kind that does not go through the account gate, because a signal carries no account.
+    // See `isSignal` in the bridge: `graph.signal.local` means "this graph only", and letting a
+    // plugin hear one would quietly turn every local signal on the machine into a global one.
+    const withSignals: PluginGrant = { ...grantOf([], []), capabilities: ["signals"] };
+    const without: PluginGrant = { ...grantOf([], []), capabilities: [] };
+    const signal = toPluginEvent({ kind: "graph.signal", accountId: null, ts: 1 });
+    const local = toPluginEvent({ kind: "graph.signal.local", accountId: null, ts: 1 });
+
+    expect(compileAuthority(withSignals)(signal)).toBe(true);
+    expect(compileAuthority(withSignals)(local)).toBe(false);
+    expect(compileAuthority(without)(signal)).toBe(false);
+
+    // And it buys nothing else in the family: run history is not what this capability describes.
+    const run = toPluginEvent({ kind: "graph.run.finished", accountId: null, ts: 1 });
+    expect(compileAuthority(withSignals)(run)).toBe(false);
+  });
+
+  test("a signal filter is serviceable on the capability alone", () => {
+    // Falling through to `scopeForEventKind` would refuse a subscription the grant permits, because
+    // there is no scope that would answer for `graph.signal`.
+    const withSignals: PluginGrant = { ...grantOf([], []), capabilities: ["signals"] };
+    expect(missingScopeFor({ kinds: ["graph.signal"] }, withSignals)).toBe(null);
+    expect(missingScopeFor({ kinds: ["graph.signal"] }, grantOf([], []))).toBe(undefined);
+  });
+
   test("events the grant does not cover are never queued at all", () => {
     const h = harness(grantOf(["friends:read"], [ACCOUNT]));
     h.subscribe({});

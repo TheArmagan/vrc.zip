@@ -239,7 +239,20 @@ export type GraphEventKind =
   /** A ceiling was hit, or the graph was switched off from the UI. Payload carries the reason. */
   | "graph.disabled"
   /** Written by the built-in feed-note action, which is a graph's way of talking to the user. */
-  | "graph.note";
+  | "graph.note"
+  /**
+   * A graph said something out loud, for any other graph to hear.
+   *
+   * Two kinds rather than one field, because the difference has to be visible to the *feed writer*
+   * and not only to the subscriber. A global signal is a thing that happened — one graph telling the
+   * others, and telling the user — so it is persisted and shows up in the feed like anything else.
+   * A local signal is one graph sequencing itself: the bus is simply how it reaches its own other
+   * trigger, and writing a feed row for every hop would bury the timeline under a graph's internal
+   * plumbing. `graph.signal.local` is therefore in the feed writer's `EPHEMERAL` set, which is the
+   * mechanism the daemon already has for "delivered, not recorded".
+   */
+  | "graph.signal"
+  | "graph.signal.local";
 
 /**
  * Every kind the daemon can emit. Producers are typed against this, so adding a kind to a bridge
@@ -356,6 +369,8 @@ export const BUS_EVENT_KINDS = [
   "graph.run.expired",
   "graph.disabled",
   "graph.note",
+  "graph.signal",
+  "graph.signal.local",
 ] as const satisfies readonly BusEventKind[];
 
 /**

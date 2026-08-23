@@ -37,6 +37,11 @@ export const EPHEMERAL: ReadonlySet<string> = new Set([
   // filed under a timeline that is otherwise about what happened in VRChat.
   "consent.pending",
   "consent.resolved",
+  // One graph reaching its own other trigger. The bus is the delivery mechanism, not the point —
+  // the *global* signal beside it is persisted, because that one is a graph telling everybody
+  // something. Writing a row for the local hop would file a graph's internal plumbing under a
+  // timeline that is otherwise about what happened in VRChat.
+  "graph.signal.local",
 ]);
 
 export interface FeedWriterOptions {

@@ -86,6 +86,7 @@ import { createVrchatMethods, type PluginAccountInfo } from "../plugins/plugin-v
 import { makeProcessTransportFactory } from "../plugins/process-transport.ts";
 import { PluginRegistry, type PluginStatus } from "../plugins/registry.ts";
 import { ensurePluginRuntime } from "../plugins/runtime-fetch.ts";
+import { createSharedDataMethods } from "../plugins/shared-data.ts";
 import { PluginStorage } from "../plugins/storage/database.ts";
 import { createStorageMethods } from "../plugins/storage/methods.ts";
 import type { TransportFactory } from "../plugins/transport.ts";
@@ -98,6 +99,7 @@ import {
 } from "../plugins/ui-panels.ts";
 import { DEFAULT_GRANT_BUDGETS } from "../proxy/passthrough.ts";
 import type { Store } from "../store/index.ts";
+import { createGraphData } from "./graph-data.ts";
 
 /**
  * The `RequestMeter` key prefix for plugin traffic. Decision 167: a namespace for *accounting*, so
@@ -475,6 +477,11 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
   const dispatcher = new PluginDispatcher({
     table: {
       ...createStorageMethods({ storageFor }),
+      /*
+       * The shared stores and the signal bus. Built from the *same* factory the graph nodes use, so
+       * "shared" means the same rows rather than two APIs over one table — see `graph-data.ts`.
+       */
+      ...createSharedDataMethods({ data: createGraphData(store), bus: options.bus }),
       ...createUiMethods({ panels }),
       ...createNodeMethods({
         nodes,

@@ -18,9 +18,12 @@ import { BUILTIN_NAMESPACE, INTRINSIC_DEFINITIONS } from "../intrinsics.ts";
 import type { ExecuteContext } from "../types.ts";
 import { actionNodes, type GraphFetch, type GraphSocialActions } from "./actions.ts";
 import { apiNodes, type GraphApiCall } from "./api.ts";
+import { collectionNodes } from "./collections.ts";
+import { dataStoreNodes, type GraphDataStore } from "./data-store.ts";
 import { operatorNodes } from "./operators.ts";
 import { type GraphReads, resolverNodes } from "./resolvers.ts";
 import { shapingNodes } from "./shaping.ts";
+import { signalNodes } from "./signals.ts";
 import { type GraphStateStore, statefulNodes } from "./stateful.ts";
 import { triggerNodes } from "./triggers.ts";
 import { type BuiltinArmRequest, type BuiltinNode, builtinId } from "./types.ts";
@@ -28,6 +31,7 @@ import { valueNodes } from "./values.ts";
 
 export type { GraphInviteTarget, GraphSocialActions } from "./actions.ts";
 export type { GraphApiCall, GraphApiRequest, GraphApiResponse } from "./api.ts";
+export type { GraphDataStore } from "./data-store.ts";
 export type { GraphReads } from "./resolvers.ts";
 export type { GraphStateStore } from "./stateful.ts";
 export type { BuiltinArmRequest, BuiltinNode } from "./types.ts";
@@ -120,6 +124,14 @@ export interface BuiltinNodeDeps {
    */
   readonly state?: GraphStateStore | undefined;
   /**
+   * The named stores, for the `store-*` nodes.
+   *
+   * Absent drops them, like the stateful nodes above and for the same reason: a `Map: set` with
+   * nowhere to write cannot even fail usefully — it would report having saved something that was
+   * never there to read back.
+   */
+  readonly data?: GraphDataStore | undefined;
+  /**
    * Calls one VRChat operation, for the generated API nodes.
    *
    * Absent leaves all 286 of them in the palette, each failing with a sentence. Hiding them would
@@ -135,6 +147,14 @@ export function createBuiltinNodes(deps: BuiltinNodeDeps = {}): BuiltinNodes {
   const bus = deps.bus;
   const clock = deps.now === undefined ? {} : { now: deps.now };
   const triggers = bus === undefined ? [] : triggerNodes({ bus, ...clock });
+  const signals =
+    bus === undefined
+      ? []
+      : signalNodes({
+          bus,
+          ...clock,
+          ...(deps.state === undefined ? {} : { state: deps.state }),
+        });
   const actions =
     bus === undefined
       ? []
@@ -146,15 +166,19 @@ export function createBuiltinNodes(deps: BuiltinNodeDeps = {}): BuiltinNodes {
         });
   const clockFn = deps.now ?? Date.now;
   const stateful = deps.state === undefined ? [] : statefulNodes(deps.state, clockFn);
+  const stored = deps.data === undefined ? [] : dataStoreNodes(deps.data);
   return new BuiltinNodes([
     ...intrinsics,
     ...triggers,
     ...shapingNodes(),
+    ...collectionNodes(),
     ...operatorNodes(clockFn),
     ...valueNodes(clockFn),
     ...resolverNodes(deps.reads),
     ...stateful,
+    ...stored,
     ...actions,
+    ...signals,
     // Last, so a hand-written node with the same id would win the map. None does today — the
     // generated ids are all `api-` prefixed — but the ordering states which is the floor.
     ...apiNodes(deps.api),

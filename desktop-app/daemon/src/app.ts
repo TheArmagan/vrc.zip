@@ -34,6 +34,7 @@ import { attachConsentAlerts } from "./wiring/consent-alert.ts";
 import { createControlDeps } from "./wiring/control-deps.ts";
 import { FeedWriter } from "./wiring/feed-writer.ts";
 import { createGraphApi } from "./wiring/graph-api.ts";
+import { createGraphData } from "./wiring/graph-data.ts";
 import { PluginNodeProvider } from "./wiring/graph-provider.ts";
 import { createGraphReads } from "./wiring/graph-reads.ts";
 import { createLogSink } from "./wiring/log-bridge.ts";
@@ -378,6 +379,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
    * on, and a resolver that somehow ran first fails with a sentence instead of a null dereference.
    */
   let graphReads: GraphReads | undefined;
+  const graphData = createGraphData(store);
   const builtinNodes = createBuiltinNodes({
     bus,
     social,
@@ -401,6 +403,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
         store.putGraphState(graphId, nodeId, key, value, at);
       },
     },
+    // The named stores, which are the *shared* half: `state` above is private to one node, this is
+    // addressed by name and read by whoever names it. The same object the plugin host gets, because
+    // "shared" has to mean the same rows. See `wiring/graph-data.ts`.
+    data: graphData,
   });
 
   function requireReads(): GraphReads {

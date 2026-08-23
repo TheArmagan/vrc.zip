@@ -118,9 +118,17 @@ export function compileAuthority(grant: PluginGrant): EventAuthority {
   const accounts = new Set(grant.accountIds);
   const scopes = new Set<string>(grant.scopes);
   const unlinked = scopes.has("sessions:unlinked");
+  const signals = grant.capabilities.includes("signals");
   const patterns = grant.events;
 
   return (event) => {
+    if (isSignal(event.kind)) {
+      // The one kind a *capability* rather than a scope admits, and it belongs on this side of the
+      // account check: a signal is a name and a value between automations on this machine, and it
+      // carries no account at all. Running it through the account gate would drop every one of them
+      // for want of an `accountId` nothing ever sets.
+      return signals && anyEventPatternMatches(patterns, event.kind);
+    }
     if (event.accountId === null) {
       if (!unlinked) return false;
     } else if (!accounts.has(event.accountId)) {
@@ -131,6 +139,18 @@ export function compileAuthority(grant: PluginGrant): EventAuthority {
     if (!scopes.has(scope)) return false;
     return anyEventPatternMatches(patterns, event.kind);
   };
+}
+
+/**
+ * Whether a kind is a signal a plugin may hear.
+ *
+ * `graph.signal` only. **Never `graph.signal.local`**, which means "this graph only" — a plugin is
+ * not that graph, and letting one listen would quietly turn every local signal on the machine into
+ * a global one. The rest of the `graph.*` family stays unmapped and therefore dropped: run history
+ * is about what the user's automations did, and no capability here claims to describe it.
+ */
+function isSignal(kind: string): boolean {
+  return kind === "graph.signal";
 }
 
 /**
@@ -145,6 +165,9 @@ function authoritySignature(grant: PluginGrant): string {
     [...grant.scopes].sort().join(","),
     [...grant.accountIds].sort().join(","),
     [...grant.events].sort().join(","),
+    // Signals are admitted by a capability rather than a scope, so a re-grant that adds or removes
+    // one has to look like a changed authority — otherwise the compiled filter keeps the old answer.
+    [...grant.capabilities].sort().join(","),
   ].join("|");
 }
 
@@ -164,6 +187,10 @@ export function missingScopeFor(filter: EventFilter, grant: PluginGrant): Scope 
   const held = new Set<string>(grant.scopes);
   let firstMissing: Scope | undefined;
   for (const pattern of kinds) {
+    // A signal filter is serviceable on the capability alone. Falling through would ask
+    // `scopeForEventKind` for a scope that does not exist and refuse a subscription the grant
+    // actually permits.
+    if (isSignal(pattern) && grant.capabilities.includes("signals")) return null;
     // `scopeForEventKind` reads the family off the first dotted segment, so `friend.*` and
     // `friend.online` resolve identically and a pattern needs no special case.
     const scope = scopeForEventKind(pattern);

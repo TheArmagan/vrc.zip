@@ -3765,6 +3765,110 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      regeneration from a silent edit. It does *not* claim a byte match against the upstream release —
      that has not been re-verified, and whoever next bumps the version should confirm both.
 
+219. **Shared data: named stores, and one adapter behind both the nodes and the plugin API.** A
+     graph could already remember things — the cooldown and counter nodes write `graph_state`, keyed
+     by (graph, node, key) and invisible to everything else. That is right for "when did I last let
+     this person through" and useless for "the people I have already welcomed", which one graph
+     writes on join and another reads at the end of the night. Asked for as "allow to create sqlite
+     database and allow them to choose which db they stored, that way multiple graphs can share".
+
+     **A store is a namespace, not a file.** Migration 014 adds `graph_stores` and `graph_kv`. The
+     literal reading of the request — a SQLite file per store, opened on demand — was answered in
+     the migration's header and dropped: it is a second connection pool, a second migration story, a
+     second thing the backup has to know about, and a file path a graph could point anywhere on the
+     disk. A `store` column buys the sharing, which was the actual ask, and keeps every store inside
+     the database that already has WAL, retention and a backup story.
+
+     **A store is created by being written to.** `INSERT OR IGNORE` on first write rather than a
+     create-it-first ceremony somebody hits at 3 AM over a name they have not registered. The Stores
+     panel lists what exists, so a typo shows up as a store nobody meant to make rather than as
+     silence. Nothing is scoped to a graph and deleting a graph leaves its stores alone — the graph
+     beside it may be reading them.
+
+     **Four families, one table, and one column keeps them apart.** `collection` is `''` for a plain
+     value, `map:<name>`, `set:<name>`, or `list`. A stored list is **one row holding the whole
+     array** rather than a row per index, because its operations are ordered — push, remove by
+     value, find — and a row-per-index makes every removal a renumbering. Read-modify-write is safe
+     here for the reason it usually is not: one process, one thread, no `await` between the read and
+     the write.
+
+     **Nineteen `store-*` nodes, and nine more that never persist.** The two look alike and are not
+     the same thing, so they are different files and different palette groups: `Stored data` writes
+     to a store, `Collections` is a value flowing down a wire. "Add this person to the list" is one
+     of those two, and which one decides whether the answer survives a restart; a config toggle on
+     one node would have hidden the only question that matters.
+
+     **A rehearsal writes.** Dry-run is about not reaching *other people*, and a row in the local
+     database reaches nobody. It has to write for the same reason the cooldown node does: a rehearsal
+     that did not record "welcomed Ada" would welcome her all over again the moment the graph is
+     armed, which makes the rehearsal a test of a different graph than the one being armed.
+
+220. **Signals, and why `local` and `global` are two event kinds rather than one field.** Graphs are
+     separate documents on purpose. That is right until two of them are about the same subject — one
+     watches joins and decides somebody is worth greeting, another owns *how* greeting is done — and
+     without a way to say so, the second has to be copied into the first. Copies drift.
+
+     A signal is a name, a value, and a scope. `local` is heard by the emitting graph only; `global`
+     by every graph, and it lands in the feed.
+
+     **The split is enforced twice and neither is redundant.** The trigger filters by the emitting
+     graph, which is what makes local *local*. The two use different bus kinds, which is what keeps
+     the local hop out of the feed: `graph.signal.local` is in the feed writer's `EPHEMERAL` set. One
+     kind with a `scope` field would have made the feed writer read payloads to decide what to
+     persist, which nothing else in the daemon does.
+
+     **A local signal never leaves its graph, whatever the listener asked for.** Checked before the
+     listener's own preference, and found by a test: a listener set to "anything" was widening
+     somebody else's local signal into a global one.
+
+     **A rehearsal does not signal.** A global signal can start a run in *another* graph whose armed
+     state is its own, so a dry run that signalled could reach through an armed neighbour and send a
+     real invite. That is the one thing dry-run exists to prevent.
+
+     **`Only the first time` is persisted, and the reset is a real button.** It claims its one fire
+     by writing `graph_state` *before* firing, so two signals in the same tick cannot both pass — the
+     cooldown node's ordering, for the cooldown node's reason. Without a store it still fires once
+     per process, in memory: a "once" that silently became "every time" is the worst of the three
+     outcomes. The `GET`/`DELETE /api/graphs/:id/memory` routes are what the button uses, and they
+     answer *what is actually stored* rather than what a definition claims — so the button appears
+     only where there is something to forget. The alternative was a `remembers` flag on
+     `NodeDefinition`, which would have changed the hash of the two nodes that already exist and
+     marked every saved graph using them stale, to add a button.
+
+221. **Plugins reach the same stores and the same signals, on two new capabilities.** Asked for as
+     "allow plugins to read/write shared kv's too, and do emit/on/once". A plugin could already
+     remember things in a private database nothing else can open — which is exactly the drift the
+     stores exist to fix, so it would be a strange kind of shared if the sharing stopped at the
+     process boundary.
+
+     `wiring/graph-data.ts` is the one adapter, and both halves take it: the graph nodes through
+     `createBuiltinNodes({ data })` and the plugin host through `createSharedDataMethods`. Not two
+     APIs over one table — one encoder, one set of collection prefixes, no way for the halves to
+     disagree about what a stored set looks like. `shared-data.test.ts` drives a plugin method and a
+     graph node against one store and expects each to read what the other wrote.
+
+     **Two capabilities, and neither is a scope**, which is the distinction `capabilities.ts` exists
+     to draw: a scope is authority over the user's VRChat account and none of this touches VRChat.
+     `shared-data` is **dangerous** and the consent line says whose data it is — a plugin holding it
+     can read what every automation on the machine has stored, including the lists of people they
+     keep. `signals` is not.
+
+     **A plugin cannot delete a store**, for the same reason no node can: removing one removes what
+     another graph may be mid-run over. It is a person's gesture from the Stores panel, and the
+     absence is asserted rather than assumed.
+
+     **A plugin's signal is always global**, because `local` means "this graph only" and a plugin is
+     not a graph — a local signal from a plugin would be heard by nobody, which is a worse answer
+     than not offering it. It carries `plugin:<id>` where a graph carries its id, so a listener can
+     tell the two apart and no plugin can claim to be a graph.
+
+     **Hearing one needed the events bridge to learn a second kind of authority.** Its per-event gate
+     was scope-only and default-deny, and the whole `graph.*` family is unmapped — correctly, since
+     no scope honestly describes it. `graph.signal` is now admitted on the `signals` capability,
+     checked *before* the account gate (a signal carries no account, so the account gate would drop
+     every one of them) and never for `graph.signal.local`. The authority signature had to grow the
+     capability list too, or a re-grant that added the capability would keep the old compiled answer.
+
 ---
 
 ## Gotchas

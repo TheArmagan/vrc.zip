@@ -1,3 +1,5 @@
+<img src="docs/icon.png" alt="" width="96" align="right">
+
 # vrc.zip
 
 A VRChat companion that runs on your own machine. It signs into more than one account at once, keeps

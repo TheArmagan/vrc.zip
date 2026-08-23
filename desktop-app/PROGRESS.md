@@ -3096,7 +3096,9 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      the honest limits belong, because that is the page a prospective user actually reads: Windows-only
      release, no node graph yet, and the plugin warning stated as *a plugin can do anything you can do
      on this computer*, not as a permission list. Screenshots live in `docs/screenshots/`, taken
-     against a real signed-in state so the empty-state screens are not the whole gallery.
+     against a real signed-in state so the empty-state screens are not the whole gallery. `docs/icon.png`
+     is the 256px layer pulled out of `tools/assets/vrczip.ico` with ffmpeg, so the README shows the
+     same mark the packaged executable carries rather than a second drawing of it that can drift.
 
 ---
 

@@ -40,6 +40,7 @@ import {
   type MethodDefinition,
   type NodeDefinition,
   type PortType,
+  RESERVED_NODE_NAMESPACE,
   validateNodeDefinition,
 } from "@vrcz/plugin-api";
 import { isJsonObject, type JsonValue } from "@vrcz/shared";
@@ -95,21 +96,49 @@ export class NodeRegistry {
     return this.#nodes.get(pluginId)?.get(qualifiedId) ?? null;
   }
 
+  /**
+   * Registers a node type the **host** owns, under the reserved namespace.
+   *
+   * Exempt from the manifest-declaration check and from nothing else: same map, same qualified ids,
+   * same `checkEdge`. Decision 206 chose one registry over two precisely so that every consumer —
+   * the editor's palette, the type checker, the run loader — asks a single place and never has to
+   * know which kind of node it is holding.
+   */
+  registerBuiltin(definition: NodeDefinition): RegisteredNode {
+    return this.#insert(RESERVED_NODE_NAMESPACE, definition);
+  }
+
   register(pluginId: string, definition: NodeDefinition): RegisteredNode {
+    if (pluginId === RESERVED_NODE_NAMESPACE) {
+      throw new DispatchError(
+        "E_BAD_REQUEST",
+        `"${RESERVED_NODE_NAMESPACE}" is reserved for vrc.zip's own node types. A saved graph names a node type by "<owner>/<id>", so a plugin claiming it could shadow a built-in on somebody else's machine.`,
+      );
+    }
     if (!this.#declared(pluginId).includes(definition.id)) {
       throw new DispatchError(
         "E_BAD_REQUEST",
         `"${definition.id}" is not in this plugin's contributes.nodes. Declare it in the manifest, which is what lets a saved graph name it while the plugin is stopped.`,
       );
     }
+    return this.#insert(pluginId, definition);
+  }
 
+  #insert(pluginId: string, definition: NodeDefinition): RegisteredNode {
     let owned = this.#nodes.get(pluginId);
     if (owned === undefined) {
       owned = new Map();
       this.#nodes.set(pluginId, owned);
     }
     const qualifiedId = `${pluginId}/${definition.id}`;
-    if (!owned.has(qualifiedId) && owned.size >= MAX_NODES_PER_PLUGIN) {
+    // The cap is per owner and the host is an owner like any other, but it is not a plugin: the
+    // sentence would be nonsense for a built-in, and a daemon that shipped more than 64 of its own
+    // node types has a design problem no error message will fix.
+    if (
+      pluginId !== RESERVED_NODE_NAMESPACE &&
+      !owned.has(qualifiedId) &&
+      owned.size >= MAX_NODES_PER_PLUGIN
+    ) {
       throw new DispatchError(
         "E_TOO_LARGE",
         `A plugin may register ${MAX_NODES_PER_PLUGIN} node types.`,

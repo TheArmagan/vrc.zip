@@ -17,10 +17,16 @@
  * and no plugin id may be the reserved word, which is the check 4.3 owes.
  */
 
-import type { NodeDefinition } from "@vrcz/plugin-api/nodes";
+import { type NodeDefinition, RESERVED_NODE_NAMESPACE } from "@vrcz/plugin-api/nodes";
 
-/** The namespace the daemon registers its own node types under. Not available to plugins. */
-export const BUILTIN_NAMESPACE = "vrcz";
+/**
+ * The namespace the daemon registers its own node types under. Not available to plugins.
+ *
+ * Declared in `@vrcz/plugin-api` beside the qualified-id convention it reserves, and re-exported
+ * here so the graph runtime has one name for it. `NodeRegistry.register` is where a plugin is
+ * refused for claiming it.
+ */
+export const BUILTIN_NAMESPACE = RESERVED_NODE_NAMESPACE;
 
 export const WAIT_TYPE = `${BUILTIN_NAMESPACE}/wait`;
 export const BRANCH_TYPE = `${BUILTIN_NAMESPACE}/branch`;
@@ -124,7 +130,10 @@ const FOREACH_DEFINITION: NodeDefinition = {
   title: "For each",
   description: "Runs everything below Item once per element, in order.",
   category: "Control",
-  inputs: [{ id: "list", label: "List", type: "json", required: true }],
+  // `list<json>`, not `json`: every typed list widens to it, so a producer of `list<friend>` wires
+  // straight in, and a raw `json` needs the explicit `vrcz/as-list` step. That conversion being
+  // visible on the canvas is the point — a lattice that let `json` in here would check nothing.
+  inputs: [{ id: "list", label: "List", type: "list<json>", required: true }],
   outputs: [
     { id: "item", label: "Item", type: "json" },
     { id: "index", label: "Index", type: "number" },

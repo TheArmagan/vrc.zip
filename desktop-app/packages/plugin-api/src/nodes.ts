@@ -17,6 +17,16 @@
  * no plugin loaded. The dependency runs one way: those modules may import this one.
  */
 
+/**
+ * The namespace the host registers its own node types under, and no plugin may claim.
+ *
+ * A saved graph stores `<owner>/<node id>`, so the two halves of "who owns this node type" are one
+ * string. Reserving one owner is what lets `vrcz/wait` mean the same thing on every machine — and
+ * the check belongs here, beside the convention, rather than in whichever registry happens to be
+ * doing the looking.
+ */
+export const RESERVED_NODE_NAMESPACE = "vrcz";
+
 /* -------------------------------------------------------------------------------------------- */
 /* The port-type lattice                                                                          */
 /* -------------------------------------------------------------------------------------------- */

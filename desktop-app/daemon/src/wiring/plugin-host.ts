@@ -48,7 +48,7 @@ import {
   parseManifest,
   type UiIntentDispatch,
 } from "@vrcz/plugin-api";
-import type { NodeConfigValues, PortValues } from "@vrcz/plugin-api/nodes";
+import type { NodeConfigValues, NodeDefinition, PortValues } from "@vrcz/plugin-api/nodes";
 import {
   isEventPatternString,
   isJsonObject,
@@ -247,6 +247,15 @@ export interface PluginHost {
   nodeTypes(): RegisteredNode[];
   /** One node type by its qualified id, or null when its plugin is not running. */
   nodeType(qualifiedId: string): RegisteredNode | null;
+  /**
+   * Adds the host's own node types to the registry, under the reserved namespace.
+   *
+   * Here rather than inside the host's construction because the built-ins belong to the graph
+   * runtime, not to the plugin subsystem — this is the one method on this interface that exists so
+   * that *one* registry answers for both. Idempotent: registering the same definition twice
+   * replaces it.
+   */
+  registerBuiltinNodes(definitions: readonly NodeDefinition[]): void;
 
   /*
    * The three host→plugin node calls. Phase 4's engine is the only caller, and it reaches them
@@ -845,6 +854,10 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
     nodeTypes: () => nodes.list(),
 
     nodeType: (qualifiedId) => nodes.get(qualifiedId),
+
+    registerBuiltinNodes(definitions) {
+      for (const definition of definitions) nodes.registerBuiltin(definition);
+    },
 
     async armNode(qualifiedId, instanceId, config) {
       await dispatcher.call(...nodeCall(qualifiedId, "nodes.arm", { instanceId, config }));

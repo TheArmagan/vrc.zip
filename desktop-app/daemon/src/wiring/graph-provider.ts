@@ -14,17 +14,20 @@
 
 import type { NodeConfigValues, NodeDefinition, PortValues } from "@vrcz/plugin-api/nodes";
 import type { JsonValue } from "@vrcz/shared";
-import type { ArmRequest, NodeProvider } from "../graphs/index.ts";
-import { INTRINSIC_DEFINITIONS } from "../graphs/index.ts";
+import type { BuiltinNodes } from "../graphs/builtins/index.ts";
+import type { ArmRequest, ExecuteContext, NodeProvider } from "../graphs/index.ts";
 import type { PluginHost } from "./plugin-host.ts";
 
 export interface PluginNodeProviderOptions {
   /** Absent for a daemon built without plugins, which is a normal configuration. */
   readonly host?: PluginHost | undefined;
+  /** The node types the daemon owns. Always present; a daemon with no built-ins has no graphs. */
+  readonly builtins: BuiltinNodes;
 }
 
 export class PluginNodeProvider implements NodeProvider {
   readonly #host: PluginHost | undefined;
+  readonly #builtins: BuiltinNodes;
 
   /**
    * Armed instances, by the id the plugin was given.
@@ -35,22 +38,22 @@ export class PluginNodeProvider implements NodeProvider {
    */
   readonly #armed = new Map<string, ArmRequest>();
 
-  constructor(options: PluginNodeProviderOptions = {}) {
+  constructor(options: PluginNodeProviderOptions) {
     this.#host = options.host;
+    this.#builtins = options.builtins;
   }
 
   definition(type: string): NodeDefinition | null {
-    const intrinsic = INTRINSIC_DEFINITIONS.get(type);
-    if (intrinsic !== undefined) return intrinsic;
-    return this.#host?.nodeType(type)?.definition ?? null;
+    return this.#builtins.definition(type) ?? this.#host?.nodeType(type)?.definition ?? null;
   }
 
   async arm(type: string, request: ArmRequest): Promise<void> {
-    // Registered before the call, not after: a plugin is free to fire from inside `onNodeArm`, and
-    // an instance that is not in the map yet would have that first fire silently dropped.
+    // Registered before the call, not after: a trigger is free to fire from inside its own arming,
+    // and an instance that is not in the map yet would have that first fire silently dropped.
     this.#armed.set(request.instanceId, request);
     try {
-      await this.#requireHost().armNode(type, request.instanceId, request.config);
+      if (this.#builtins.has(type)) await this.#builtins.arm(type, request);
+      else await this.#requireHost().armNode(type, request.instanceId, request.config);
     } catch (error) {
       this.#armed.delete(request.instanceId);
       throw error;
@@ -59,12 +62,21 @@ export class PluginNodeProvider implements NodeProvider {
 
   async disarm(type: string, instanceId: string): Promise<void> {
     this.#armed.delete(instanceId);
-    // Best effort past this point. The instance is gone from the map either way, so a plugin that
-    // cannot be told — because it already died, which is the common case — cannot start a run.
-    await this.#requireHost().disarmNode(type, instanceId);
+    // Best effort past this point. The instance is gone from the map either way, so a trigger that
+    // cannot be told — because its plugin already died, which is the common case — starts nothing.
+    if (this.#builtins.has(type)) await this.#builtins.disarm(type, instanceId);
+    else await this.#requireHost().disarmNode(type, instanceId);
   }
 
-  async execute(type: string, inputs: PortValues, config: NodeConfigValues): Promise<PortValues> {
+  async execute(
+    type: string,
+    inputs: PortValues,
+    config: NodeConfigValues,
+    context: ExecuteContext,
+  ): Promise<PortValues> {
+    if (this.#builtins.has(type)) {
+      return await this.#builtins.execute(type, inputs, config, context);
+    }
     return await this.#requireHost().executeNode(type, inputs, config);
   }
 

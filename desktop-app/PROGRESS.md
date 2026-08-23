@@ -3402,6 +3402,41 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      part of the answer. Stated here because it is a limit somebody will meet, and a refusal that
      names itself is better than a run that parks and never comes back correctly.
 
+210. **Built-ins register into the same registry, and gating is the absence of a value.** 4.3's
+     foundation: `NodeRegistry.registerBuiltin` puts the daemon's own node types under the reserved
+     `vrcz` namespace, exempt from the manifest-declaration check and **from nothing else** — same
+     map, same qualified ids, same `checkEdge`. A plugin that tries to claim the namespace is
+     refused with the reason, because a saved graph names a type `<owner>/<id>` and a plugin
+     shadowing `vrcz/wait` would break a graph on somebody else's machine. The namespace constant
+     lives in `@vrcz/plugin-api` beside the convention it reserves, not in whichever registry is
+     doing the looking.
+
+     **The intrinsics are registered too, with no handler.** `wait`, `branch` and `foreach` are
+     executed by the engine, but they still have to appear in the palette and type-check like
+     anything else. A call reaching their handler means the engine failed to intercept them, so the
+     handler throws and says that — a silent `{}` would look like a node that ran and did nothing.
+
+     **The pure nodes and the acting nodes are separate files on purpose.** `shaping.ts` is compare,
+     and/or/not, only-if, read-field, compose-text and the four list nodes: same inputs, same
+     outputs, no account, no network, nothing to dry-run. The actions all have a side effect and a
+     dry-run branch, and mixing them would make it easy to write a "shaping" node that quietly does
+     something.
+
+     Three choices in there worth keeping:
+
+     - **A gate produces nothing rather than `false`.** `{}` is what stops a run; `{out: false}`
+       would send a literal `false` down the graph and run everything below it. Same for a
+       `read-field` that finds nothing and a `first item` of an empty list — "if there is one" is
+       the shape those nodes are for, and `null` would have the graph act on nobody.
+     - **A number that arrived as text still compares as a number.** Config fields are strings and
+       ports are not, so refusing `"5" > 3` would make every comparison against a typed-in number
+       silently false. `==` was not used: it would also make `0` equal `false`, which nobody asked
+       for, so booleans are compared as booleans and everything else through its string form.
+     - **`foreach` takes `list<json>`, not `json`.** Every typed list widens into it, and a raw
+       `json` needs the explicit `vrcz/as-list` step. That conversion being visible on the canvas is
+       the point: a port that accepted `json` here would check nothing, which is what the lattice
+       exists to prevent.
+
 ---
 
 ## Gotchas

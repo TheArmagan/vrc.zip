@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import type { NodeDefinition, PluginGrant, RequestFrame } from "@vrcz/plugin-api";
+import {
+  type NodeDefinition,
+  type PluginGrant,
+  RESERVED_NODE_NAMESPACE,
+  type RequestFrame,
+} from "@vrcz/plugin-api";
 import type { JsonValue } from "@vrcz/shared";
 import { DispatchError } from "./dispatcher.ts";
 import { checkEdge, createNodeMethods, NodeRegistry } from "./node-registry.ts";
@@ -120,6 +125,36 @@ describe("registering", () => {
     await h.call("nodes.register", { definition: TRIGGER as unknown as JsonValue });
     h.nodes.clear(PLUGIN);
     expect(h.nodes.list()).toEqual([]);
+  });
+
+  test("a plugin cannot claim the reserved namespace", () => {
+    // A saved graph names a node type `<owner>/<id>`, so a plugin registering under `vrcz` could
+    // shadow a built-in on somebody else's machine.
+    const h = harness();
+    expect(() => h.nodes.register(RESERVED_NODE_NAMESPACE, ACTION)).toThrow(/reserved/);
+  });
+
+  test("the host registers its own node types, exempt from the manifest check and nothing else", () => {
+    // One registry for both, which is what lets the palette and the type checker ask a single
+    // place. `declaredNodes` here lists none of these ids, and a built-in does not care.
+    const h = harness([]);
+    const entry = h.nodes.registerBuiltin(ACTION);
+    expect(entry.qualifiedId).toBe(`${RESERVED_NODE_NAMESPACE}/write-note`);
+    expect(h.nodes.get(entry.qualifiedId)?.definition.title).toBe("Write a note");
+    expect(h.nodes.list()).toHaveLength(1);
+  });
+
+  test("a built-in and a plugin node type-check against each other", () => {
+    const h = harness(["note-added"]);
+    h.nodes.registerBuiltin(ACTION);
+    h.nodes.register(PLUGIN, TRIGGER);
+    expect(
+      checkEdge(
+        h.nodes,
+        { nodeType: `${PLUGIN}/note-added`, portId: "user" },
+        { nodeType: `${RESERVED_NODE_NAMESPACE}/write-note`, portId: "who" },
+      ),
+    ).toBeNull();
   });
 });
 

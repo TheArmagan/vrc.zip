@@ -7,6 +7,7 @@ import { PresenceService } from "./accounts/presence.ts";
 import { EventBus } from "./bus/event-bus.ts";
 import { type ForwardProxy, forwardProxyBanner, startForwardProxy } from "./forward-proxy/index.ts";
 import { discoverLogDirectories, LogWatcher } from "./game-logs/index.ts";
+import { createBuiltinNodes } from "./graphs/builtins/index.ts";
 import { GraphEngine } from "./graphs/index.ts";
 import { RateLimiter } from "./net/rate-limiter.ts";
 import { RequestMeter } from "./net/request-meter.ts";
@@ -364,8 +365,12 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
   // The engine is constructed here and started with the rest of the daemon, but it is *armed* from
   // the database: a graph the user switched off is not armed, and switching one on is a `reload`
   // from the control API rather than a restart.
-  const nodeProvider = new PluginNodeProvider({ host: plugins });
+  const builtinNodes = createBuiltinNodes();
+  const nodeProvider = new PluginNodeProvider({ host: plugins, builtins: builtinNodes });
   const graphs = new GraphEngine({ store, bus, provider: nodeProvider });
+  // Into the *same* registry a plugin's node types land in, so the palette and the type checker ask
+  // one place. See `NodeRegistry.registerBuiltin`.
+  plugins.registerBuiltinNodes(builtinNodes.definitions());
 
   // --- servers --------------------------------------------------------------
   // Must read `state.json` before `writeStateFile` below overwrites it. Fresh token by default;

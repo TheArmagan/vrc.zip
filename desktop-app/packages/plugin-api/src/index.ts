@@ -261,6 +261,7 @@ export {
   type PortDefinition,
   type PortType,
   type PortValues,
+  RESERVED_NODE_NAMESPACE,
   type TriggerArmContext,
   type TriggerNodeDefinition,
   type TriggerRegistration,

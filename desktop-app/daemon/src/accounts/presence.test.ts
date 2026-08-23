@@ -54,6 +54,14 @@ describe("PresenceService", () => {
     displayName: "Alice",
   };
 
+  /** A second account, for the cross-account questions. Multi-account is the default posture here. */
+  const BEA = {
+    username: "bea@somewhere.dev",
+    password: "pw",
+    userId: "usr_bea",
+    displayName: "Bea",
+  };
+
   async function setup(accountFriends: FixtureFriend[]): Promise<PresenceService> {
     fixture = startVrchatFixture({ accounts: [{ ...ALICE, friends: accountFriends }] });
     dir = await mkdtemp(join(tmpdir(), "vrczip-presence-"));
@@ -87,6 +95,56 @@ describe("PresenceService", () => {
     return new PresenceService({ accounts, store, bus });
   }
 
+  /**
+   * The same harness with two accounts signed in, for the questions that only exist across them.
+   *
+   * Written out rather than folded into `setup` with an optional second argument: every other test
+   * in this file is about one account's cache, and giving them all a second account would change
+   * what they are asserting to make one pair of tests shorter.
+   */
+  async function setupPair(
+    aliceFriends: FixtureFriend[],
+    beaFriends: FixtureFriend[],
+  ): Promise<PresenceService> {
+    fixture = startVrchatFixture({
+      accounts: [
+        { ...ALICE, friends: aliceFriends },
+        { ...BEA, friends: beaFriends },
+      ],
+    });
+    dir = await mkdtemp(join(tmpdir(), "vrczip-presence-"));
+
+    const key: MasterKey = {
+      key: Buffer.from(crypto.getRandomValues(new Uint8Array(KEY_BYTES))),
+      backend: "file",
+      degraded: true,
+    };
+    const secrets = await SecretsStore.open(key, { VRCZIP_STATE_DIR: dir });
+
+    store = Store.open(MEMORY);
+    bus = new EventBus();
+    accounts = new AccountManager({
+      secrets,
+      bus,
+      limiter: new RateLimiter({ burst: 500, globalBurst: 500 }),
+      userAgent: UA,
+      baseUrl: fixture.baseUrl,
+    });
+
+    for (const account of [ALICE, BEA]) {
+      await accounts.add(account.username, account.password);
+      store.upsertAccount({
+        id: account.userId,
+        display_name: account.displayName,
+        added_at: Date.now(),
+        enabled: 1,
+        last_seen_at: null,
+      });
+    }
+
+    return new PresenceService({ accounts, store, bus });
+  }
+
   beforeEach(() => {
     dir = "";
   });
@@ -107,6 +165,48 @@ describe("PresenceService", () => {
     expect(list).toHaveLength(5);
     expect(list.filter((f) => f.isOnline)).toHaveLength(3);
     expect(list.filter((f) => !f.isOnline)).toHaveLength(2);
+  });
+
+  test("two accounts sharing a friend produce one row, not two", async () => {
+    /*
+     * The bug this exists for was a *crash*, not a duplicate. Everything that renders this list
+     * keys it by user id, and a repeated key in Svelte 5 is a hard `each_key_duplicate` throw — so
+     * one shared friend blanked the entire Friends screen, on exactly the multi-account setup this
+     * app is built for. Found by the screenshot pipeline, whose two demo accounts are friends with
+     * the same people.
+     */
+    const shared = { id: "usr_shared", displayName: "Ada", online: true };
+    const presence = await setupPair(
+      [shared, { id: "usr_only_a", displayName: "Bo", online: true }],
+      [shared, { id: "usr_only_b", displayName: "Cass", online: true }],
+    );
+    await presence.refresh("usr_alice");
+    await presence.refresh("usr_bea");
+
+    const all = presence.listAll();
+    expect(all.map((friend) => friend.id).sort()).toEqual([
+      "usr_only_a",
+      "usr_only_b",
+      "usr_shared",
+    ]);
+    expect(new Set(all.map((friend) => friend.id)).size).toBe(all.length);
+    // Each account's own list is untouched: the merge is a property of "all accounts", not of the
+    // records themselves.
+    expect(presence.list("usr_alice")).toHaveLength(2);
+  });
+
+  test("the freshest reading of a shared friend wins, not the first account's", async () => {
+    // "Ada is online" and "Ada is offline" can both sit in two caches, and only one is current.
+    // Taking the first account's answer would make the merged list depend on sign-in order.
+    const presence = await setupPair(
+      [{ id: "usr_shared", displayName: "Ada", online: false }],
+      [{ id: "usr_shared", displayName: "Ada", online: true }],
+    );
+    await presence.refresh("usr_alice");
+    await presence.refresh("usr_bea");
+
+    expect(presence.listAll()).toHaveLength(1);
+    expect(presence.listAll()[0]?.isOnline).toBe(true);
   });
 
   test("pages past VRChat's 100-item cap", async () => {

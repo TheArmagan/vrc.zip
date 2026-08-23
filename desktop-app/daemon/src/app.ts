@@ -95,8 +95,56 @@ export interface RunningDaemon {
   stop(): Promise<void>;
 }
 
+/**
+ * Where the daemon may be pointed instead of VRChat, and the rule that keeps that safe.
+ *
+ * `DaemonOptions.baseUrl` and `pipelineUrl` have existed since Phase 1 for the integration tests,
+ * which construct the daemon in-process. Nothing could set them from outside, so a manual run
+ * against a stand-in — a smoke test, the screenshot pipeline in `tools/src/docs/` — had no way to
+ * exist without importing the daemon into another package.
+ *
+ * **Loopback only, and that is a safety property rather than a convenience.** These are the two
+ * addresses the user's VRChat password is sent to. An env var that could name any host is a way to
+ * talk somebody into exfiltrating their own credentials with a one-line change to a `.env` file, so
+ * anything that is not `127.0.0.1`/`::1`/`localhost` is refused loudly at startup rather than
+ * quietly ignored — ignoring it would be worse, since the run would then look like it worked.
+ */
+export const UPSTREAM_ENV = {
+  base: "VRCZIP_VRCHAT_BASE_URL",
+  pipeline: "VRCZIP_PIPELINE_URL",
+} as const;
+
+export function readUpstreamOverride(
+  env: NodeJS.ProcessEnv,
+  key: (typeof UPSTREAM_ENV)[keyof typeof UPSTREAM_ENV],
+): string | undefined {
+  const raw = env[key];
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const value = raw.trim();
+  let host: string;
+  try {
+    host = new URL(value).hostname;
+  } catch {
+    throw new Error(`${key} is not a URL: ${value}`);
+  }
+  if (host !== "127.0.0.1" && host !== "::1" && host !== "[::1]" && host !== "localhost") {
+    throw new Error(
+      `${key} may only point at this machine (127.0.0.1, ::1 or localhost). ` +
+        `Refusing ${host}: that address would receive your VRChat password.`,
+    );
+  }
+  return value;
+}
+
 export async function startDaemon(options: DaemonOptions = {}): Promise<RunningDaemon> {
   const env = options.env;
+  /*
+   * The explicit option wins over the environment: a test that constructed the daemon with a
+   * fixture URL must not have it changed by whatever is in the developer's shell.
+   */
+  const baseUrl = options.baseUrl ?? readUpstreamOverride(env ?? process.env, UPSTREAM_ENV.base);
+  const pipelineUrl =
+    options.pipelineUrl ?? readUpstreamOverride(env ?? process.env, UPSTREAM_ENV.pipeline);
 
   // Before anything else touches the filesystem. Nothing below creates its own parent directory,
   // and the failure without this is an opaque SQLITE_CANTOPEN on every genuinely fresh install.
@@ -140,7 +188,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     limiter,
     meter,
     userAgent: userAgent ?? "",
-    ...(options.baseUrl !== undefined ? { baseUrl: options.baseUrl } : {}),
+    ...(baseUrl !== undefined ? { baseUrl } : {}),
   });
 
   if (userAgent) await accounts.loadAll();
@@ -194,7 +242,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
 
     const client = new PipelineClient({
       userAgent,
-      ...(options.pipelineUrl !== undefined ? { url: options.pipelineUrl } : {}),
+      ...(pipelineUrl !== undefined ? { url: pipelineUrl } : {}),
       // Re-read on every attempt rather than captured once: a reconnect after a re-auth must use
       // the new token, and the old one is exactly what a stale closure would hand it.
       getAuthToken: async () => accounts.get(accountId)?.authToken() ?? "",
@@ -506,7 +554,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
               userAgent,
               limiter,
               meter,
-              ...(options.baseUrl !== undefined ? { baseUrl: options.baseUrl } : {}),
+              ...(baseUrl !== undefined ? { baseUrl } : {}),
             },
     },
   };

@@ -127,6 +127,18 @@ export interface PresenceServiceOptions {
 const DEFAULT_REFRESH_MS = 3 * 60_000;
 const DEFAULT_PAGE_SIZE = 100;
 
+/**
+ * Which of two readings of the same person to keep. See {@link PresenceService.listAll}.
+ *
+ * Online beats offline before timestamps are consulted, because a stale-but-online record and a
+ * fresh-but-offline one usually mean one account's poll has not run yet rather than that the person
+ * left — and showing somebody as offline when they are not is the more annoying of the two errors.
+ */
+function fresher(candidate: FriendPresenceRecord, held: FriendPresenceRecord): boolean {
+  if (candidate.isOnline !== held.isOnline) return candidate.isOnline;
+  return (candidate.lastSeenAt ?? 0) > (held.lastSeenAt ?? 0);
+}
+
 export class PresenceService {
   /** accountId -> userId -> record. Per account, because friend lists differ per account. */
   readonly #byAccount = new Map<string, Map<string, FriendPresenceRecord>>();
@@ -175,8 +187,33 @@ export class PresenceService {
     });
   }
 
+  /**
+   * Every friend across every account, **one row per person**.
+   *
+   * The dedupe is not tidiness. Two accounts commonly share friends — an alt is usually friends with
+   * the same people as the main — and this list is keyed by user id by everything that renders it.
+   * Before this, one shared friend produced two rows with the same id, which in Svelte 5 is not a
+   * warning but a hard `each_key_duplicate` throw: the entire Friends screen rendered as empty grey
+   * bars, on exactly the multi-account setup this app is built for. Found by the screenshot
+   * pipeline, whose two demo accounts share a friend list.
+   *
+   * **The freshest reading wins.** "Ada is online" and "Ada is offline" can both be true of two
+   * accounts' caches, and only one of them is current — so the record with the newer `lastSeenAt`
+   * is kept, and an online reading beats an offline one when neither has a timestamp. Picking the
+   * first account's answer would make the merged list depend on sign-in order.
+   */
   listAll(): FriendPresenceRecord[] {
-    return [...this.#byAccount.keys()].flatMap((id) => this.list(id));
+    const best = new Map<string, FriendPresenceRecord>();
+    for (const accountId of this.#byAccount.keys()) {
+      for (const record of this.list(accountId)) {
+        const held = best.get(record.id);
+        if (held === undefined || fresher(record, held)) best.set(record.id, record);
+      }
+    }
+    return [...best.values()].sort((a, b) => {
+      if (a.isOnline !== b.isOnline) return a.isOnline ? -1 : 1;
+      return a.displayName.localeCompare(b.displayName);
+    });
   }
 
   /**

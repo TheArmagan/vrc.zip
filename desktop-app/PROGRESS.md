@@ -4000,6 +4000,56 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 
      Save's tooltip says `Ctrl+S`, since a shortcut nobody is told about is a shortcut nobody uses.
 
+228. **The screenshots have a world of their own now, and it found a crash.** `tools/src/docs/` is a
+     four-step pipeline — `stage`, capture, `pages`, capture, `gif` — replacing a set of pictures
+     that had been taken by hand off a real machine.
+
+     **Why that mattered beyond repeatability.** The old shots contained real friends' display names
+     in a public repository, and nobody but their owner could ever regenerate them. Both are the same
+     fix: invent the evening and write it down. `demo.ts` is fourteen made-up friends across every
+     state the row draws differently, two accounts, four worlds; `vrchat-stub.ts` serves it as if it
+     were VRChat, including the pipeline socket, so the *feed* fills with events the daemon derived
+     rather than rows somebody forged; `seed.ts` writes the half VRChat could never tell us — game-log
+     sessions, saved graphs, a store the automations have been filling in.
+
+     **The daemon gained two loopback-only env overrides** so a stand-in can be pointed at from
+     outside the process. `baseUrl`/`pipelineUrl` have existed since Phase 1 for the integration
+     tests, which construct the daemon in-process; nothing could set them from a shell. They are
+     refused for any host that is not `127.0.0.1`/`::1`/`localhost` and that is a safety property
+     rather than tidiness: these are the two addresses the user's VRChat password is sent to, and an
+     env var that could name any host is a way to talk somebody into exfiltrating their own
+     credentials with a one-line edit to a `.env`.
+
+     **The most important line in the tool is `logDirectories`.** The first run pointed the daemon at
+     nothing in particular, log discovery found the operator's real VRChat logs, the watcher tailed
+     them, and a database created ten seconds earlier held a thousand `gamelog.*` rows — real names,
+     real worlds, bound for a public README. The staged daemon now gets an empty directory, which
+     makes that impossible rather than unlikely.
+
+     **The capture step is deliberately a person with a browser.** CDP could drive it, but half the
+     shots need a *state* rather than a URL — a palette mid-search, a wire half-dragged, a consent
+     sheet open — and scripting those means a second, worse copy of the app's own interaction code
+     kept in step with an editor that changes weekly. `shots.ts` names what to do in English instead.
+     The tool removes everything except the judgement.
+
+229. **Two accounts sharing a friend blanked the entire Friends screen.** Found on the first staged
+     run, because the demo's two accounts are friends with the same people — which is what an alt
+     account normally is.
+
+     `presence.listAll()` returned one record per (account, friend), so a shared friend produced two
+     rows with the same id. Everything that renders that list keys it by user id, and a repeated key
+     in Svelte 5 is not a warning but a hard `each_key_duplicate` throw: fourteen friends rendered as
+     six empty grey bars. On exactly the multi-account setup this app is built for, and CLAUDE.md
+     already warned about the class ("dedupe anything keyed on wire data") — the warning was there
+     and the list was not covered by it.
+
+     Merged in the daemon rather than the UI, because the UI has no way to tell the two apart:
+     `FriendPresence` carries no account id, deliberately. **The freshest reading wins**, with online
+     beating offline before timestamps are consulted — a stale-but-online record and a
+     fresh-but-offline one usually mean one account's poll has not run yet, and showing somebody as
+     offline when they are not is the more annoying of the two errors. Taking the first account's
+     answer would have made the merged list depend on sign-in order.
+
 ---
 
 ## Gotchas

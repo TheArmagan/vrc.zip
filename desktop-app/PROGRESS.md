@@ -516,7 +516,7 @@ get an **error output port**; and the port lattice grows **`list<T>`**.
       document model and `validateGraphDocument`, twenty store methods, and nine routes under
       `/api/graphs`. **Not here, and deliberately:** the registry-backed `checkEdge` pass on save,
       which needs the node registry and lands with the runtime.
-- [ ] **4.2 The engine** — DAG with many trigger roots, one run per fire walking only what that
+- [x] **4.2 The engine** — DAG with many trigger roots, one run per fire walking only what that
       trigger reaches; cycles refused on save; branch and merge; `foreach` with scoped run-state;
       `wait` that persists the run and resumes per the wait node's own policy (resume / skip as
       missed), answering with `graph.run.expired` when it skips. Per-graph concurrency mode
@@ -529,7 +529,9 @@ get an **error output port**; and the port lattice grows **`list<T>`**.
       **Core built** (decision 208): `daemon/src/graphs/` — the walk, `wait` with persistence and
       resume, the three concurrency modes, error ports, all three ceilings, and
       `wiring/graph-provider.ts` bridging the plugin host. Started and stopped in `app.ts` and
-      reloaded from the control API on every save and switch. **Outstanding: `foreach`.**
+      reloaded from the control API on every save and switch.
+      **Complete** with `foreach` (decision 209): the body is what `item` reaches minus what `done`
+      reaches, iterations are sequential, and a `wait` inside a loop is refused with a sentence.
 - [ ] **4.3 Built-in nodes** — the reserved-`pluginId` registration path into the same `NodeRegistry`
       (exempt from the manifest-declaration check and nothing else). Triggers: generic bus event,
       the named convenience triggers with typed outputs, schedule, run-now. Conditions and shaping:
@@ -3371,6 +3373,34 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      in the column and in the event, because a graph running two hundred times an hour is not going
      to recover on the next fire and dropping quietly for the rest of the evening is
      indistinguishable from being broken.
+
+209. **`foreach`, and the loop body is derived rather than declared.** 4.2 is complete. The body of a
+     loop is **what `item` and `index` reach, minus what `done` reaches**, which is why the node has
+     three outputs rather than two: a node wired to `done` is after the loop *by construction*, and
+     nothing has to carry a flag saying which side of the loop it is on. The canvas has no concept of
+     a container, and this is how it avoids needing one.
+
+     The subtraction has a second effect worth keeping: a node reachable from **both** sits outside
+     the body, runs once after the loop, and sees the last iteration's values. That is a real answer
+     to "sum this up afterwards" without a second kind of edge.
+
+     **Iterations are sequential, and each starts from a cleared body.** Sequential because the body
+     can send invites and hit webhooks and forty of those at once is exactly what the ceilings exist
+     to prevent. Cleared because a body left settled from the previous item would be *skipped* on the
+     next one — the failure mode is silence, not an error, which is why there is a test that walks
+     four elements and asserts all four.
+
+     **Two ceilings, because one cannot see the other's case.** `maxNodesPerRun` bounds the
+     expansion — a thousand iterations of a three-node body is three thousand nodes and is refused as
+     such — but a loop with an *empty* body executes nothing, so a list of a million would spin
+     without the run ever growing. Hence `maxForeachItems`, checked before the first iteration.
+
+     **A `wait` inside a loop is refused with a sentence rather than supported.** Parking
+     mid-iteration would mean persisting which item the loop was on and everything it had
+     accumulated, and a resume would have to reconstruct a *scope* rather than a node —
+     `graph_runs.wait_node` names one node because that is all a run needs to say when a loop is not
+     part of the answer. Stated here because it is a limit somebody will meet, and a refusal that
+     names itself is better than a run that parks and never comes back correctly.
 
 ---
 

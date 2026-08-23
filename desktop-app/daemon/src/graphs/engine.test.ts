@@ -5,7 +5,7 @@ import type { BusEvent } from "../bus/event-bus.ts";
 import { EventBus } from "../bus/event-bus.ts";
 import { MEMORY, Store } from "../store/store.ts";
 import { GraphEngine } from "./engine.ts";
-import { BRANCH_TYPE, ERROR_PORT, WAIT_TYPE } from "./intrinsics.ts";
+import { BRANCH_TYPE, ERROR_PORT, FOREACH_TYPE, WAIT_TYPE } from "./intrinsics.ts";
 import type { ArmRequest, ExecuteContext, NodeProvider } from "./types.ts";
 
 const T0 = 1_700_000_000_000;
@@ -327,6 +327,179 @@ describe("the walk", () => {
     const other = h.graph(document, { id: "g2" });
     await h.engine.fire(other, "n1", { out: false });
     expect(h.provider.order).toEqual(["then", "else"]);
+  });
+});
+
+/* -------------------------------------------------------------------------------------------- */
+/* Iteration                                                                                      */
+/* -------------------------------------------------------------------------------------------- */
+
+describe("foreach", () => {
+  /** trigger -> foreach -> body, with an optional node wired to the loop's `done`. */
+  function loop(h: Harness, options: { after?: boolean } = {}): string {
+    return h.graph({
+      nodes: [
+        node("n1", "t"),
+        node("n2", FOREACH_TYPE),
+        node("n3", "body"),
+        ...(options.after === true ? [node("n4", "after")] : []),
+      ],
+      edges: [
+        edge("e1", "n1", "n2", "out", "list"),
+        edge("e2", "n2", "n3", "item"),
+        ...(options.after === true ? [edge("e3", "n2", "n4", "done")] : []),
+      ],
+    });
+  }
+
+  test("runs the body once per element, in order, with the item", async () => {
+    const h = harness();
+    h.provider.trigger("t").node("body", "action", () => ({ out: 1 }));
+    const id = loop(h);
+
+    await h.engine.fire(id, "n1", { out: ["a", "b", "c"] });
+
+    expect(h.provider.order).toEqual(["body", "body", "body"]);
+    expect(h.provider.executed.map((entry) => entry.inputs.in)).toEqual(["a", "b", "c"]);
+    expect(kinds(h.events)).toEqual(["graph.run.finished"]);
+  });
+
+  test("an empty list runs the body not at all, and the run still finishes", async () => {
+    const h = harness();
+    h.provider.trigger("t").node("body", "action", () => ({ out: 1 }));
+    const id = loop(h);
+
+    await h.engine.fire(id, "n1", { out: [] });
+
+    expect(h.provider.order).toEqual([]);
+    expect(kinds(h.events)).toEqual(["graph.run.finished"]);
+  });
+
+  test("a value that is not a list iterates zero times rather than failing", async () => {
+    const h = harness();
+    h.provider.trigger("t").node("body", "action", () => ({ out: 1 }));
+    const id = loop(h);
+
+    await h.engine.fire(id, "n1", { out: "not a list" });
+
+    expect(h.provider.order).toEqual([]);
+    expect(kinds(h.events)).toEqual(["graph.run.finished"]);
+  });
+
+  test("what is wired to `done` runs once, after the loop, with the count", async () => {
+    const h = harness();
+    h.provider
+      .trigger("t")
+      .node("body", "action", () => ({ out: 1 }))
+      .node("after", "action", () => ({ out: 1 }));
+    const id = loop(h, { after: true });
+
+    await h.engine.fire(id, "n1", { out: ["a", "b"] });
+
+    expect(h.provider.order).toEqual(["body", "body", "after"]);
+    expect(h.provider.executed[2]?.inputs.in).toBe(2);
+  });
+
+  test("each iteration starts from a clean body", async () => {
+    // Without clearing, the second element would find the body already settled and skip it — which
+    // is the bug this test exists to keep out rather than a hypothetical.
+    const h = harness();
+    const seen: unknown[] = [];
+    h.provider.trigger("t").node("body", "action", (inputs) => {
+      seen.push(inputs.in);
+      return { out: inputs.in };
+    });
+    const id = loop(h);
+
+    await h.engine.fire(id, "n1", { out: [1, 2, 3, 4] });
+
+    expect(seen).toEqual([1, 2, 3, 4]);
+  });
+
+  test("a failure inside the body ends the whole run", async () => {
+    const h = harness();
+    let calls = 0;
+    h.provider.trigger("t").node("body", "action", () => {
+      calls += 1;
+      if (calls === 2) throw new Error("the second one refused");
+      return { out: 1 };
+    });
+    const id = loop(h, { after: true });
+    h.provider.node("after", "action", () => ({ out: 1 }));
+
+    await h.engine.fire(id, "n1", { out: ["a", "b", "c"] });
+
+    expect(calls).toBe(2);
+    expect(payloadOf(h.events, "graph.run.failed").message).toBe("the second one refused");
+  });
+
+  test("the run-size ceiling bounds the loop", async () => {
+    const h = harness({ maxNodesPerRun: 3 });
+    h.provider.trigger("t").node("body", "action", () => ({ out: 1 }));
+    const id = loop(h);
+
+    await h.engine.fire(id, "n1", { out: [1, 2, 3, 4, 5] });
+
+    // Three nodes executed: the foreach itself, then two body iterations.
+    expect(h.provider.order).toEqual(["body", "body"]);
+    expect(payloadOf(h.events, "graph.run.failed").message).toContain("more than 3 nodes");
+  });
+
+  test("a huge list is refused before it runs at all", async () => {
+    // The ceiling the run-size one cannot catch: an empty body executes nothing, so a list of a
+    // million would spin without the run ever growing.
+    const h = harness({ maxForeachItems: 4 });
+    h.provider.trigger("t").node("body", "action", () => ({ out: 1 }));
+    const id = loop(h);
+
+    await h.engine.fire(id, "n1", { out: [1, 2, 3, 4, 5] });
+
+    expect(h.provider.order).toEqual([]);
+    expect(payloadOf(h.events, "graph.run.failed").message).toContain("over 4 items");
+  });
+
+  test("a wait inside a loop is refused, and says so", async () => {
+    const h = harness();
+    h.provider.trigger("t").node("body", "action", () => ({ out: 1 }));
+    const id = h.graph({
+      nodes: [node("n1", "t"), node("n2", FOREACH_TYPE), node("n3", WAIT_TYPE, { durationMs: 10 })],
+      edges: [edge("e1", "n1", "n2", "out", "list"), edge("e2", "n2", "n3", "item")],
+    });
+
+    await h.engine.fire(id, "n1", { out: ["a"] });
+
+    expect(payloadOf(h.events, "graph.run.failed").message).toBe(
+      "A Wait cannot be used inside a For each.",
+    );
+    // And nothing is parked: a run that failed is gone, not left waiting on a timer.
+    expect(h.store.listGraphRuns(id)).toHaveLength(0);
+  });
+
+  test("a nested loop runs the inner body once per pair", async () => {
+    const h = harness();
+    h.provider.trigger("t").node("inner", "action", (inputs) => ({ out: inputs.in }));
+    const id = h.graph({
+      nodes: [
+        node("n1", "t"),
+        node("n2", FOREACH_TYPE),
+        node("n3", FOREACH_TYPE),
+        node("n4", "inner"),
+      ],
+      edges: [
+        edge("e1", "n1", "n2", "out", "list"),
+        edge("e2", "n2", "n3", "item", "list"),
+        edge("e3", "n3", "n4", "item"),
+      ],
+    });
+
+    await h.engine.fire(id, "n1", {
+      out: [
+        ["a", "b"],
+        ["c", "d", "e"],
+      ],
+    });
+
+    expect(h.provider.executed.map((entry) => entry.inputs.in)).toEqual(["a", "b", "c", "d", "e"]);
   });
 });
 

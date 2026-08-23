@@ -24,6 +24,7 @@ export const BUILTIN_NAMESPACE = "vrcz";
 
 export const WAIT_TYPE = `${BUILTIN_NAMESPACE}/wait`;
 export const BRANCH_TYPE = `${BUILTIN_NAMESPACE}/branch`;
+export const FOREACH_TYPE = `${BUILTIN_NAMESPACE}/foreach`;
 
 /**
  * The port every node implicitly has on its output side.
@@ -106,10 +107,40 @@ const BRANCH_DEFINITION: NodeDefinition = {
   ],
 };
 
+/**
+ * Iteration, and the reason its three outputs are not interchangeable.
+ *
+ * `item` and `index` are the loop body: whatever they reach runs once per element. `done` is what
+ * happens **after**, and the engine uses that split to work out which nodes belong to the body at
+ * all — the body is what `item` reaches minus what `done` reaches. So a node wired to `done` is
+ * after the loop by construction rather than by a flag somebody has to set.
+ *
+ * `list` is `json` rather than a list type because `list<T>` joins the lattice in 4.3. A value that
+ * is not an array iterates zero times, which is the same thing an empty list does.
+ */
+const FOREACH_DEFINITION: NodeDefinition = {
+  id: "foreach",
+  kind: "action",
+  title: "For each",
+  description: "Runs everything below Item once per element, in order.",
+  category: "Control",
+  inputs: [{ id: "list", label: "List", type: "json", required: true }],
+  outputs: [
+    { id: "item", label: "Item", type: "json" },
+    { id: "index", label: "Index", type: "number" },
+    { id: "done", label: "After", type: "number", description: "How many items ran." },
+  ],
+  body: [
+    { kind: "literal", text: "For each item in " },
+    { kind: "port", port: "list" },
+  ],
+};
+
 /** Every intrinsic, by qualified type id. */
 export const INTRINSIC_DEFINITIONS: ReadonlyMap<string, NodeDefinition> = new Map([
   [WAIT_TYPE, WAIT_DEFINITION],
   [BRANCH_TYPE, BRANCH_DEFINITION],
+  [FOREACH_TYPE, FOREACH_DEFINITION],
 ]);
 
 export function isIntrinsic(type: string): boolean {

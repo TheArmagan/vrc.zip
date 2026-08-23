@@ -23,6 +23,13 @@ export interface GraphLimits {
   readonly defaultFiresPerMinute: number;
   /** Nodes one run may execute. `foreach` expansion counts against it. */
   readonly maxNodesPerRun: number;
+  /**
+   * Items one `foreach` may run over.
+   *
+   * Separate from the run ceiling because it catches the case that one cannot: a loop with an empty
+   * body executes no nodes, so a list of a million would spin without the run ever growing.
+   */
+  readonly maxForeachItems: number;
   /** Runs one graph may start per hour before it is switched off. */
   readonly maxRunsPerHour: number;
   /** Live runs one `parallel` graph may hold at once. */
@@ -34,6 +41,7 @@ export interface GraphLimits {
 export const DEFAULT_GRAPH_LIMITS: GraphLimits = {
   defaultFiresPerMinute: 120,
   maxNodesPerRun: 500,
+  maxForeachItems: 1_000,
   maxRunsPerHour: 200,
   maxParallelRuns: 4,
   maxQueuedRuns: 32,

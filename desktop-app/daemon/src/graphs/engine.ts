@@ -33,6 +33,7 @@ import type { GraphRow, GraphRunRow } from "../store/types.ts";
 import {
   BRANCH_TYPE,
   ERROR_PORT,
+  FOREACH_TYPE,
   INTRINSIC_DEFINITIONS,
   MISSED_RESUME_GRACE_MS,
   WAIT_TYPE,
@@ -328,13 +329,42 @@ export class GraphEngine {
     run: GraphRunRow,
     state: RunState,
   ): Promise<RunOutcome> {
-    const nodes = new Map(document.nodes.map((node) => [node.id, node]));
-    const reachable = reachableFrom(document, run.trigger_node);
-    const incoming = incomingEdges(document);
-    const outgoing = outgoingEdges(document);
+    const bodies = foreachBodies(document);
+    const inBody = new Set([...bodies.values()].flatMap((body) => [...body]));
+    const scope: Scope = {
+      graph,
+      document,
+      run,
+      nodes: new Map(document.nodes.map((node) => [node.id, node])),
+      incoming: incomingEdges(document),
+      outgoing: outgoingEdges(document),
+      bodies,
+    };
+    // The outer scope is everything the trigger reaches **except** the bodies of any `foreach`.
+    // A body node belongs to its loop and is walked once per item by `#runForeach`; leaving it in
+    // the outer scope would run it a second time, with whatever the last iteration left behind.
+    const outer = new Set(
+      [...reachableFrom(document, run.trigger_node)].filter((id) => !inBody.has(id)),
+    );
+    return await this.#walkScope(scope, state, outer, false);
+  }
 
+  /**
+   * Walks one scope until nothing in it is ready.
+   *
+   * The outer scope draining means the run finished; a `foreach` body draining means one iteration
+   * finished. They are the same loop because they are the same question — which is what keeps a
+   * loop body from needing a second set of rules about skipping, errors and ceilings.
+   */
+  async #walkScope(
+    scope: Scope,
+    state: RunState,
+    allowed: ReadonlySet<string>,
+    insideForeach: boolean,
+  ): Promise<RunOutcome> {
+    const { graph, document, run, nodes, incoming, outgoing } = scope;
     for (;;) {
-      const nodeId = this.#pickNext(document, reachable, state, incoming);
+      const nodeId = this.#pickNext(document, allowed, state, incoming);
       if (nodeId === null) return { kind: "finished" };
       const node = nodes.get(nodeId);
       if (node === undefined) return { kind: "finished" };
@@ -358,9 +388,27 @@ export class GraphEngine {
       state.executed.push(nodeId);
 
       if (node.type === WAIT_TYPE) {
+        if (insideForeach) {
+          // A limit, stated rather than discovered. Parking mid-iteration would mean persisting
+          // which item the loop was on and everything it had accumulated, and a resume would have
+          // to reconstruct a scope rather than a node. `graph_runs.wait_node` names one node
+          // because that is all a run needs to say when the loop is not part of the answer.
+          return {
+            kind: "failed",
+            node: nodeId,
+            message: "A Wait cannot be used inside a For each.",
+          };
+        }
         const resumeAt = this.#now() + waitDuration(node);
         this.#store.parkGraphRun(run.id, nodeId, resumeAt, JSON.stringify(state), this.#now());
         return { kind: "waiting", resumeAt };
+      }
+
+      if (node.type === FOREACH_TYPE) {
+        const outcome = await this.#runForeach(scope, state, nodeId, inputs);
+        if (outcome.kind !== "finished") return outcome;
+        this.#persist(run.id, state);
+        continue;
       }
 
       if (node.type === BRANCH_TYPE) {
@@ -402,6 +450,48 @@ export class GraphEngine {
       }
       this.#persist(run.id, state);
     }
+  }
+
+  /**
+   * Runs a `foreach` body once per element, in order.
+   *
+   * Sequential rather than concurrent, and that is the answer for a v1: the body can send invites
+   * and hit webhooks, and forty of those at once is the shape the ceilings exist to prevent. Each
+   * iteration starts from a clean body — the previous iteration's outputs are cleared — so a node
+   * cannot silently read the last item instead of this one.
+   *
+   * `executed` is **not** cleared, which is what makes the run-size ceiling bound the loop: a
+   * thousand iterations of a three-node body is three thousand nodes, and it is refused as such.
+   */
+  async #runForeach(
+    scope: Scope,
+    state: RunState,
+    nodeId: string,
+    inputs: PortValues,
+  ): Promise<RunOutcome> {
+    const list = Array.isArray(inputs.list) ? (inputs.list as unknown[]) : [];
+    if (list.length > this.#limits.maxForeachItems) {
+      return {
+        kind: "failed",
+        node: nodeId,
+        message: `A For each may run over ${String(this.#limits.maxForeachItems)} items.`,
+      };
+    }
+    const body = scope.bodies.get(nodeId) ?? new Set<string>();
+
+    for (const [index, item] of list.entries()) {
+      state.outputs[nodeId] = { item: item ?? null, index };
+      clearScope(state, body);
+      const outcome = await this.#walkScope(scope, state, body, true);
+      if (outcome.kind !== "finished") return outcome;
+    }
+
+    // The loop is over, so `item` and `index` stop being produced and `done` starts: every edge out
+    // of the body side is dead from here, and the after-the-loop branch is the only live one.
+    // The body's own outputs are deliberately left in place, so a node downstream of *both* the loop
+    // and the body reads the last iteration rather than nothing.
+    state.outputs[nodeId] = { done: list.length };
+    return { kind: "finished" };
   }
 
   /** The next node whose every incoming edge has settled. Document order, so a run is repeatable. */
@@ -526,6 +616,63 @@ export class GraphEngine {
 /* -------------------------------------------------------------------------------------------- */
 /* Pure helpers — the walk's rules, testable without an engine                                    */
 /* -------------------------------------------------------------------------------------------- */
+
+/** Everything a walk needs that does not change while it runs. Built once per `#advance`. */
+interface Scope {
+  readonly graph: GraphRow;
+  readonly document: GraphDocument;
+  readonly run: GraphRunRow;
+  readonly nodes: ReadonlyMap<string, GraphNode>;
+  readonly incoming: ReadonlyMap<string, GraphEdge[]>;
+  readonly outgoing: ReadonlyMap<string, GraphEdge[]>;
+  /** The body of each `foreach` in the document, by node id. */
+  readonly bodies: ReadonlyMap<string, Set<string>>;
+}
+
+/**
+ * Which nodes belong to each `foreach`'s body.
+ *
+ * The body is what the loop's `item` and `index` reach, minus what its `done` reaches. That
+ * subtraction is what lets one node sit after the loop *and* read the body — it is excluded from
+ * the body, runs once in the outer scope, and sees the last iteration. Anything else would need a
+ * second kind of edge to say "this one is after the loop", which is a concept the canvas does not
+ * have and would have to explain.
+ */
+function foreachBodies(document: GraphDocument): Map<string, Set<string>> {
+  const bodies = new Map<string, Set<string>>();
+  for (const node of document.nodes) {
+    if (node.type !== FOREACH_TYPE) continue;
+    const after = reachableFromPorts(document, node.id, new Set(["done"]));
+    const body = reachableFromPorts(document, node.id, new Set(["item", "index"]));
+    for (const id of after) body.delete(id);
+    body.delete(node.id);
+    bodies.set(node.id, body);
+  }
+  return bodies;
+}
+
+/** Everything downstream of one node's named output ports, excluding the node itself. */
+function reachableFromPorts(
+  document: GraphDocument,
+  nodeId: string,
+  ports: ReadonlySet<string>,
+): Set<string> {
+  const out = new Set<string>();
+  for (const edge of document.edges) {
+    if (edge.from.node !== nodeId || !ports.has(edge.from.port)) continue;
+    for (const id of reachableFrom(document, edge.to.node)) out.add(id);
+  }
+  out.delete(nodeId);
+  return out;
+}
+
+/** Un-settles a set of nodes, so the next iteration starts from nothing rather than from before. */
+function clearScope(state: RunState, scope: ReadonlySet<string>): void {
+  for (const id of scope) delete state.outputs[id];
+  const kept = state.skipped.filter((id) => !scope.has(id));
+  state.skipped.length = 0;
+  state.skipped.push(...kept);
+}
 
 function readDocument(graph: GraphRow): GraphDocument | null {
   try {

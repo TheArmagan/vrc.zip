@@ -4191,6 +4191,25 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      rather than a rehearsal for one. `CLAUDE.md` says so in those words now — the five are not a
      courtesy ahead of CI, they are the whole of it.
 
+238. **The release ships a zip holding one executable, not the bare executable.** The asset is
+     `vrc.zip-<version>-windows-x64.zip` and it contains exactly `vrc.zip.exe` at the root, which is
+     asserted in the workflow rather than assumed: an archive with a stray file in it, or the
+     executable nested under a folder, is not something anybody notices until it is downloaded.
+     `Compress-Archive` does the zipping because it is the one tool certainly present on a Windows
+     runner.
+
+     The checksum moved with it. It is now the digest of the *zip*, since that is what people
+     actually download — a digest of a file nobody fetches is one nobody can check.
+
+     The release notes changed more than the file name. Extracting matters now in a way it did not
+     before: double-clicking the executable from inside the zip runs it out of the temp folder
+     Explorer extracts to, and `startupLocation` refuses to register an autostart from there, so the
+     notes say to extract it first and then say what vrc.zip will offer to do about it if you do not.
+
+     Naming: versioned and platform-tagged rather than a bare `vrc.zip.zip`. A file kept in Downloads
+     for six months should say which build it is, and this is a project whose entire install story
+     starts in that folder.
+
 ---
 
 ## Gotchas

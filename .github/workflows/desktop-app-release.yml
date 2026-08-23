@@ -92,6 +92,10 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          # The published asset. Versioned and platform-tagged because it is a file people keep:
+          # a `vrc.zip.zip` sitting in Downloads six months from now says nothing about which build
+          # it is, and this is a project whose whole install story starts in that folder.
+          echo "zip=vrc.zip-$version-windows-x64.zip" >> "$GITHUB_OUTPUT"
           echo "Publishing $tag from version $version"
 
       # Refuse *before* building rather than after: a twenty-minute Windows build that ends in
@@ -119,12 +123,30 @@ jobs:
       - name: package
         run: bun run package
 
+      # One executable, at the root of the archive and nothing beside it. `Compress-Archive` rather
+      # than a `zip` binary because it is the one that is certainly on a Windows runner, and the
+      # paths reach it through the environment for the same reason everything else here does.
+      - name: zip
+        env:
+          EXE_PATH: dist/vrc.zip.exe
+          ZIP_PATH: dist/${{ steps.meta.outputs.zip }}
+        run: |
+          powershell -NoProfile -NonInteractive -Command 'Compress-Archive -Path $env:EXE_PATH -DestinationPath $env:ZIP_PATH -Force'
+          # Prove what came out rather than trusting that it did: an archive with the wrong number
+          # of entries, or the executable nested under a folder, is the kind of thing nobody notices
+          # until somebody downloads it.
+          powershell -NoProfile -NonInteractive -Command 'Add-Type -AssemblyName System.IO.Compression.FileSystem; $z=[IO.Compression.ZipFile]::OpenRead((Resolve-Path $env:ZIP_PATH)); $z.Entries | ForEach-Object { $_.FullName }; if ($z.Entries.Count -ne 1 -or $z.Entries[0].FullName -ne "vrc.zip.exe") { $z.Dispose(); throw "expected exactly vrc.zip.exe at the archive root" }; $z.Dispose()'
+
+      # The checksum is of the *zip*, because the zip is what people download and what the notes
+      # tell them to verify. A digest of a file nobody fetches is a digest nobody can check.
       - name: checksum
         id: checksum
+        env:
+          ZIP_NAME: ${{ steps.meta.outputs.zip }}
         run: |
           cd dist
-          sha256sum "vrc.zip.exe" | awk '{print $1}' > "vrc.zip.exe.sha256"
-          digest=$(cat "vrc.zip.exe.sha256")
+          sha256sum "$ZIP_NAME" | awk '{print $1}' > "$ZIP_NAME.sha256"
+          digest=$(cat "$ZIP_NAME.sha256")
           echo "sha256=$digest" >> "$GITHUB_OUTPUT"
           echo "sha256 $digest"
 
@@ -148,25 +170,36 @@ jobs:
           SHA256: ${{ steps.checksum.outputs.sha256 }}
           COMMIT: ${{ github.sha }}
           PRERELEASE: ${{ inputs.prerelease }}
+          ZIP_NAME: ${{ steps.meta.outputs.zip }}
         run: |
-          notes=$(cat <<'NOTES'
+          notes=$(cat <<NOTES
           **UNOFFICIAL.** Not affiliated with, endorsed by, or operated by VRChat Inc. You sign in
           with your own VRChat credentials, and everything runs on your machine.
 
           ### Install
 
-          Download `vrc.zip.exe` and run it. There is no installer: it is one file carrying the
-          daemon, the UI and its own Bun runtime. It opens a console window and prints a link — open
-          that link, or press <kbd>O</kbd>.
+          Download \`$ZIP_NAME\` and extract it. Inside is a single \`vrc.zip.exe\` carrying the
+          daemon, the UI and its own Bun runtime — there is no installer and nothing else to copy.
+
+          **Extract it somewhere before running it.** Double-clicking the executable from inside the
+          zip runs it out of a temporary folder that Windows deletes, and running it from Downloads
+          is not much better. vrc.zip notices both: it offers to copy itself to
+          \`%LOCALAPPDATA%\Programs\vrc.zip\`, add a Start menu entry and start with Windows,
+          and you can decline and move it yourself.
+
+          It opens a console window and prints a link — open that link, or press <kbd>O</kbd>. There
+          is a tray icon for the rest.
 
           Windows will warn about an unrecognised publisher the first time. The executable is not
           code-signed; verify the checksum below if that matters to you.
 
           ### Verify
 
-          ```
-          certutil -hashfile vrc.zip.exe SHA256
-          ```
+          The digest is of the zip, which is what you downloaded.
+
+          \`\`\`
+          certutil -hashfile $ZIP_NAME SHA256
+          \`\`\`
           NOTES
           )
           notes="$notes
@@ -182,7 +215,7 @@ jobs:
           args=(--target "$COMMIT" --title "vrc.zip $VERSION" --notes "$notes")
           if [ "$PRERELEASE" = "true" ]; then args+=(--prerelease); fi
 
-          gh release create "$TAG" "${args[@]}" "dist/vrc.zip.exe" "dist/vrc.zip.exe.sha256"
+          gh release create "$TAG" "${args[@]}" "dist/$ZIP_NAME" "dist/$ZIP_NAME.sha256"
 
       - name: summary
         env:
@@ -190,11 +223,13 @@ jobs:
           VERSION: ${{ steps.meta.outputs.version }}
           REPLACED: ${{ steps.existing.outputs.exists }}
           SHA256: ${{ steps.checksum.outputs.sha256 }}
+          ZIP_NAME: ${{ steps.meta.outputs.zip }}
         run: |
           {
             echo "### vrc.zip $VERSION"
             echo
             echo "- tag: \`$TAG\`"
+            echo "- asset: \`$ZIP_NAME\`"
             echo "- replaced an existing release: \`$REPLACED\`"
-            echo "- sha256: \`$SHA256\`"
+            echo "- sha256 (of the zip): \`$SHA256\`"
           } >> "$GITHUB_STEP_SUMMARY"

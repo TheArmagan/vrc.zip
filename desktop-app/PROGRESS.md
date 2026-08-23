@@ -3902,6 +3902,37 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      unlike arming, this removes data the user is looking at and can put back by running the graph
      again, and two gestures should not look equally grave.
 
+223. **A desktop notification node, beside the VR one rather than instead of it.** The overlay node
+     has been there since Phase 4 and only reaches somebody wearing the headset — which is the wrong
+     half of the day for most of what an automation wants to say. The pair is the point: neither is a
+     fallback for the other, so neither tries to be. A node that silently chose would be wrong
+     roughly half the time and never say so.
+
+     **`Shown` is a real answer rather than decoration.** `os/desktop-notification.ts` never throws
+     and reports whether the toast actually appeared — the OS can refuse it, the user can switch
+     notifications off, and a headless box or a Linux install without `notify-send` has none at all.
+     So the port is wired into a condition and the graph falls through to Discord, instead of a
+     `sent: true` that means "we tried". A missing *seam* is different and throws a sentence: "your
+     machine showed nothing" and "this build cannot notify at all" are different problems, and only
+     one of them is the user's.
+
+     The seam is injected like `fetch`, and not only for assertions — a `bun test` that reached the
+     real notifier would spawn PowerShell per test on Windows and put toasts on the developer's
+     desktop. (That module already suppresses itself under `NODE_ENV=test` for exactly this reason;
+     the seam means the node's own test does not have to rely on it.)
+
+224. **Deleting a graph is a hold, not a click.** Asked for after the fact, and right: `Delete` sat at
+     the end of a row of ordinary buttons — `Run now`, `Export` — where a click that overshoots by
+     forty pixels destroys a document with no version history and no undo. The same control as
+     arming, for the same reason: the cost of a hold is *attention*, which is exactly what a
+     mis-aimed click did not have.
+
+     Deleting a **store** is held too, and that reverses decision 222's call. The argument there was
+     that a store holds data you can put back by running the graph again, so it should not look as
+     grave as arming. That underrates what the gesture takes: a store is shared by name, so removing
+     one removes what *every* graph and plugin naming it was reading, not just the one on screen.
+     Removing a single entry is still a click, because that is one row you are looking at.
+
 ---
 
 ## Gotchas

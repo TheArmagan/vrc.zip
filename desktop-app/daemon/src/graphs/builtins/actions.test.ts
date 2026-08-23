@@ -40,6 +40,8 @@ afterAll(() => {
 interface Harness {
   readonly events: BusEvent[];
   readonly sent: { user: string; kind: string }[];
+  /** Every desktop notification the run raised. Never a real toast — see the seam. */
+  readonly toasts: { title: string; body: string }[];
   run(
     type: string,
     inputs: PortValues,
@@ -48,10 +50,11 @@ interface Harness {
   ): Promise<PortValues>;
 }
 
-function harness(): Harness {
+function harness(options: { canNotify?: boolean } = {}): Harness {
   const bus = new EventBus();
   const events: BusEvent[] = [];
   const sent: { user: string; kind: string }[] = [];
+  const toasts: { title: string; body: string }[] = [];
   bus.subscribe((event) => {
     events.push(event);
   });
@@ -79,11 +82,28 @@ function harness(): Harness {
     // The local server is http and `validateWebhookUrl` refuses that for a good reason, so the
     // fetch seam is where the test server is reached instead of by weakening the check.
     fetch: async (url, init) => await fetch(url.replace("https://vrc.zip.test", base), init),
+    /*
+     * Injected rather than letting the real notifier through, and not only for assertions: a `bun
+     * test` that reached `os/desktop-notification.ts` would spawn PowerShell per test on Windows.
+     * (That path suppresses itself under NODE_ENV=test for exactly this reason — this seam means the
+     * node's own test does not have to rely on it.)
+     */
+    ...(options.canNotify === false
+      ? {}
+      : {
+          notify: async (notification) => {
+            toasts.push(notification);
+            // `shown: false` for a blank body, standing in for an OS that refused it — the case the
+            // node's `Shown` port exists to make visible.
+            return await Promise.resolve({ shown: notification.body !== "" });
+          },
+        }),
   });
 
   return {
     events,
     sent,
+    toasts,
     run: (type, inputs, config = {}, context = {}) =>
       nodes.execute(`vrcz/${type}`, inputs, config, {
         graphId: "g1",
@@ -236,6 +256,47 @@ describe("osc", () => {
     };
     expect(payload).toMatchObject({ content: "Ada joined", title: "vrc.zip", timeout: 3 });
     socket.close();
+  });
+});
+
+describe("the desktop notification", () => {
+  test("raises a toast and reports that it appeared", async () => {
+    const h = harness();
+    const result = await h.run("desktop-notification", { text: "Ada is online" }, { title: "Ada" });
+    expect(result).toEqual({ shown: true });
+    expect(h.toasts).toEqual([{ title: "Ada", body: "Ada is online" }]);
+  });
+
+  test("`Shown` is a real answer, not decoration", async () => {
+    // A notification can be refused by the OS, switched off in settings, or unavailable entirely.
+    // The daemon's notifier reports all three as not-shown rather than throwing, so a graph that
+    // genuinely has to reach somebody can wire this into a condition and fall through to Discord.
+    const h = harness();
+    expect(await h.run("desktop-notification", { text: "" })).toEqual({ shown: false });
+  });
+
+  test("falls back to a title when none is configured", async () => {
+    const h = harness();
+    await h.run("desktop-notification", { text: "hello" });
+    expect(h.toasts[0]?.title).toBe("vrc.zip");
+  });
+
+  test("a rehearsal writes a note and raises nothing", async () => {
+    const h = harness();
+    expect(
+      await h.run("desktop-notification", { text: "Ada is online" }, {}, { dryRun: true }),
+    ).toEqual({ shown: false });
+    expect(h.toasts).toEqual([]);
+    expect(notes(h.events)).toEqual(["desktop notification: Ada is online"]);
+  });
+
+  test("a daemon built without the seam fails with a sentence rather than a silent false", async () => {
+    // "Nothing appeared" and "this build cannot notify at all" are different problems, and only one
+    // of them is the user's machine.
+    const h = harness({ canNotify: false });
+    await expect(h.run("desktop-notification", { text: "hello" })).rejects.toThrow(
+      /cannot raise desktop notifications/,
+    );
   });
 });
 

@@ -15,7 +15,6 @@ import DownloadIcon from "@lucide/svelte/icons/download";
 import PlayIcon from "@lucide/svelte/icons/play";
 import PlusIcon from "@lucide/svelte/icons/plus";
 import UploadIcon from "@lucide/svelte/icons/upload";
-import TrashIcon from "@lucide/svelte/icons/trash-2";
 import WorkflowIcon from "@lucide/svelte/icons/workflow";
 import { api, describeError, type GraphSummary, type GraphTemplate } from "$lib/api.ts";
 import EmptyState from "$lib/components/EmptyState.svelte";
@@ -356,15 +355,19 @@ async function runNow(graph: GraphSummary): Promise<void> {
                   <DownloadIcon class="size-4" />
                   Export
                 </Button>
-                <Button
+                <!--
+                  Held, not clicked. A graph is a document with no version history and no undo, and
+                  Delete sits at the end of a row of ordinary buttons — Run now, Export — where a
+                  click that overshoots by forty pixels destroys work that took an evening to wire.
+                  The same reasoning as arming, and deliberately the same control: the cost of a
+                  hold is attention, which is exactly what a mis-aimed click did not have.
+                -->
+                <HoldToConfirm
+                  label="Hold to delete"
                   variant="ghost"
-                  size="sm"
                   disabled={busy === graph.id}
-                  onclick={() => void remove(graph)}
-                >
-                  <TrashIcon class="size-4" />
-                  Delete
-                </Button>
+                  onconfirm={() => void remove(graph)}
+                />
               </div>
             </div>
           </div>

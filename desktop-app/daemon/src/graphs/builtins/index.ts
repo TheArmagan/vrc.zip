@@ -16,7 +16,12 @@ import type { NodeConfigValues, NodeDefinition, PortValues } from "@vrcz/plugin-
 import type { EventBus } from "../../bus/event-bus.ts";
 import { BUILTIN_NAMESPACE, INTRINSIC_DEFINITIONS } from "../intrinsics.ts";
 import type { ExecuteContext } from "../types.ts";
-import { actionNodes, type GraphFetch, type GraphSocialActions } from "./actions.ts";
+import {
+  actionNodes,
+  type GraphFetch,
+  type GraphNotify,
+  type GraphSocialActions,
+} from "./actions.ts";
 import { apiNodes, type GraphApiCall } from "./api.ts";
 import { collectionNodes } from "./collections.ts";
 import { dataStoreNodes, type GraphDataStore } from "./data-store.ts";
@@ -29,7 +34,7 @@ import { triggerNodes } from "./triggers.ts";
 import { type BuiltinArmRequest, type BuiltinNode, builtinId } from "./types.ts";
 import { valueNodes } from "./values.ts";
 
-export type { GraphInviteTarget, GraphSocialActions } from "./actions.ts";
+export type { GraphInviteTarget, GraphNotify, GraphSocialActions } from "./actions.ts";
 export type { GraphApiCall, GraphApiRequest, GraphApiResponse } from "./api.ts";
 export type { GraphDataStore } from "./data-store.ts";
 export type { GraphReads } from "./resolvers.ts";
@@ -112,6 +117,14 @@ export interface BuiltinNodeDeps {
   /** Injected so a test can answer an outbound POST without a network. */
   readonly fetch?: GraphFetch;
   /**
+   * Raises an OS notification, for the desktop node.
+   *
+   * Absent leaves the node in the palette failing with a sentence, like the resolvers: "this build
+   * cannot notify" and "your machine showed nothing" are different problems, and a node that
+   * vanished would make a saved graph draw a hole with no explanation.
+   */
+  readonly notify?: GraphNotify | undefined;
+  /**
    * VRChat reads and the game log, for the resolver nodes.
    *
    * Absent leaves them in the palette and failing with a sentence. That is better than hiding them:
@@ -163,6 +176,7 @@ export function createBuiltinNodes(deps: BuiltinNodeDeps = {}): BuiltinNodes {
           ...clock,
           ...(deps.social === undefined ? {} : { social: deps.social }),
           ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
+          ...(deps.notify === undefined ? {} : { notify: deps.notify }),
         });
   const clockFn = deps.now ?? Date.now;
   const stateful = deps.state === undefined ? [] : statefulNodes(deps.state, clockFn);

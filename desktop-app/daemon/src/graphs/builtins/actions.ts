@@ -62,11 +62,26 @@ export interface GraphSocialActions {
  */
 export type GraphFetch = (url: string, init: RequestInit) => Promise<Response>;
 
+/**
+ * Raising an OS notification, as the graph runtime needs it.
+ *
+ * Structurally satisfied by `os/desktop-notification.ts`, which never rejects and answers with
+ * whether the toast was actually shown. Both halves of that matter here: a graph must not fail
+ * because the machine has notifications switched off, and it is entitled to *know* that nothing
+ * appeared rather than being told it worked.
+ */
+export type GraphNotify = (notification: {
+  title: string;
+  body: string;
+}) => Promise<{ shown: boolean; reason?: string }>;
+
 export interface ActionDeps {
   readonly bus: EventBus;
   readonly social?: GraphSocialActions | undefined;
   /** Injected so a test can answer without a network. */
   readonly fetch?: GraphFetch;
+  /** Injected so a test does not put a real toast on the developer's desktop. */
+  readonly notify?: GraphNotify | undefined;
   readonly now?: () => number;
 }
 
@@ -289,6 +304,40 @@ const XSOVERLAY: NodeDefinition = {
   ],
   body: [
     { kind: "literal", text: "VR: " },
+    { kind: "port", port: "text" },
+  ],
+};
+
+/**
+ * The desktop toast, and the one beside `Notify in VR` on purpose.
+ *
+ * The pair is the point: an automation that fires while the headset is on wants the overlay, and one
+ * that fires while it is not wants the desktop. Neither is a fallback for the other, so neither
+ * tries to be — a node that silently chose would be wrong roughly half the time and never say so.
+ *
+ * `Shown` is a real answer rather than decoration. A notification can be refused by the OS, switched
+ * off in settings, or unavailable entirely (a headless box, a Linux install with no `notify-send`),
+ * and the daemon's notifier reports all three as *not shown* instead of throwing. So a graph that
+ * genuinely has to reach somebody can wire this into a condition and fall through to Discord.
+ */
+const DESKTOP: NodeDefinition = {
+  id: "desktop-notification",
+  kind: "action",
+  title: "Notify on this computer",
+  description: "Raises an ordinary desktop notification. The VR overlay node is the headset half.",
+  category: "Send",
+  inputs: [{ id: "text", label: "Message", type: "string", required: true }],
+  outputs: [
+    {
+      id: "shown",
+      label: "Shown",
+      type: "boolean",
+      description: "False when the system refused it or has notifications switched off.",
+    },
+  ],
+  config: [{ kind: "text", id: "title", label: "Title", default: "vrc.zip" }],
+  body: [
+    { kind: "literal", text: "notify: " },
     { kind: "port", port: "text" },
   ],
 };
@@ -522,6 +571,24 @@ export function actionNodes(deps: ActionDeps): BuiltinNode[] {
         }
         await sendUdp(host, port, xsOverlayPacket(title, message, seconds));
         return { sent: true };
+      },
+    },
+    {
+      definition: DESKTOP,
+      execute: async (inputs, config, context) => {
+        const title = configText(config, "title") || "vrc.zip";
+        const message = text(inputs.text);
+        if (context.dryRun) {
+          rehearse(deps, context, `desktop notification: ${message.slice(0, 200)}`);
+          return { shown: false };
+        }
+        // A sentence rather than a silent false: "nothing appeared" and "this build cannot notify
+        // at all" are different problems, and only one of them is the user's machine.
+        if (deps.notify === undefined) {
+          throw new Error("This daemon cannot raise desktop notifications.");
+        }
+        const result = await deps.notify({ title, body: message });
+        return { shown: result.shown };
       },
     },
     {

@@ -395,6 +395,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     // Every VRChat operation the spec describes, as a node. Through the account, the limiter and
     // the User-Agent like everything else — see `wiring/graph-api.ts`.
     api: createGraphApi({ accounts }),
+    // The same notifier the consent alert uses, so a graph's toast and the daemon's own look alike
+    // and obey the same suppression switch. It never rejects and reports whether anything actually
+    // appeared, which is what the node hands back on its `Shown` port.
+    notify: async (notification) => await notifyDesktop(notification, undefined, env),
     // The cooldown and counter nodes. Four SQL statements behind a two-method seam, so the graph
     // runtime never learns that SQLite is under there.
     state: {

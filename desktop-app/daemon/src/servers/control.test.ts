@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type {
   DaemonStatus,
+  Graph,
   JsonValue,
   RetentionSettings,
   RetentionUpdate,
@@ -581,6 +582,35 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     preview: false,
   };
 
+  /*
+   * Graphs live in a mutable array rather than a frozen constant, because the routes under test are
+   * CRUD: a create that cannot be read back afterwards would pass a test that proves nothing.
+   */
+  const GRAPH: Graph = {
+    id: "graph-1",
+    name: "Greet arrivals",
+    description: "",
+    enabled: false,
+    armed: false,
+    concurrency: "parallel",
+    accountId: "usr_a",
+    disabledReason: null,
+    nodeCount: 0,
+    createdAt: 1_700_000_000_000,
+    updatedAt: 1_700_000_000_000,
+    definition: { nodes: [], edges: [] },
+  };
+  let graphs: Graph[] = [GRAPH];
+  const findGraph = (id: string): Graph => {
+    const found = graphs.find((graph) => graph.id === id);
+    if (found === undefined) throw new ControlError(404, "unknown_graph");
+    return found;
+  };
+  const replaceGraph = (next: Graph): Graph => {
+    graphs = graphs.map((graph) => (graph.id === next.id ? next : graph));
+    return next;
+  };
+
   const deps: ControlDeps = {
     status: async () => ({
       degradedKeychain: false,
@@ -639,6 +669,57 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     },
     uninstallPlugin: async (pluginId) => {
       seen.pluginsUninstalled.push(pluginId);
+    },
+    listGraphs: async () => graphs.map(({ definition: _definition, ...summary }) => summary),
+    getGraph: async (graphId) => findGraph(graphId),
+    createGraph: async (input) => {
+      const created: Graph = {
+        ...GRAPH,
+        id: `graph-${String(graphs.length + 1)}`,
+        name: input.name,
+        description: input.description ?? "",
+        concurrency: input.concurrency ?? "parallel",
+        accountId: input.accountId ?? null,
+        definition: input.definition ?? { nodes: [], edges: [] },
+        nodeCount: input.definition?.nodes.length ?? 0,
+      };
+      graphs.push(created);
+      return created;
+    },
+    updateGraph: async (graphId, input) => {
+      const graph = findGraph(graphId);
+      return replaceGraph({
+        ...graph,
+        ...(input.name === undefined ? {} : { name: input.name }),
+        ...(input.description === undefined ? {} : { description: input.description }),
+        ...(input.concurrency === undefined ? {} : { concurrency: input.concurrency }),
+        ...(input.accountId === undefined ? {} : { accountId: input.accountId }),
+        ...(input.definition === undefined
+          ? {}
+          : { definition: input.definition, nodeCount: input.definition.nodes.length }),
+      });
+    },
+    deleteGraph: async (graphId) => {
+      graphs = graphs.filter((graph) => graph.id !== graphId);
+    },
+    setGraphEnabled: async (graphId, enabled) => {
+      const { definition: _definition, ...summary } = replaceGraph({
+        ...findGraph(graphId),
+        enabled,
+        disabledReason: null,
+      });
+      return summary;
+    },
+    setGraphArmed: async (graphId, armed) => {
+      const { definition: _definition, ...summary } = replaceGraph({
+        ...findGraph(graphId),
+        armed,
+      });
+      return summary;
+    },
+    listGraphRuns: async (graphId) => {
+      findGraph(graphId);
+      return [];
     },
     publishPluginPanel: () => {},
     publishPluginToast: () => {},
@@ -2719,6 +2800,140 @@ describe("plugin management", () => {
       const res = await call(deps, path, { method, headers: { authorization: "" } });
       expect(res.status).toBe(401);
     }
+  });
+});
+
+describe("graph routes", () => {
+  const json = (body: unknown): RequestInit & { headers: Record<string, string> } => ({
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  test("lists summaries without the document, and serves one graph with it", async () => {
+    const { deps } = fakeDeps();
+    const list = (await (await call(deps, "/api/graphs")).json()) as Record<string, unknown>[];
+    expect(list).toHaveLength(1);
+    expect(list[0]).not.toHaveProperty("definition");
+
+    const one = (await (await call(deps, "/api/graphs/graph-1")).json()) as Record<string, unknown>;
+    expect(one.definition).toEqual({ nodes: [], edges: [] });
+  });
+
+  test("an unknown id is 404 on every route that names one", async () => {
+    const { deps } = fakeDeps();
+    expect((await call(deps, "/api/graphs/ghost")).status).toBe(404);
+    expect((await call(deps, "/api/graphs/ghost/runs")).status).toBe(404);
+    expect((await call(deps, "/api/graphs/ghost/enable", { method: "POST" })).status).toBe(404);
+    expect(
+      (await call(deps, "/api/graphs/ghost/armed", json({ armed: true })).then((r) => r)).status,
+    ).toBe(404);
+  });
+
+  test("POST creates and answers 201", async () => {
+    const { deps } = fakeDeps();
+    const res = await call(deps, "/api/graphs", json({ name: "New one", concurrency: "queue" }));
+    expect(res.status).toBe(201);
+    const created = (await res.json()) as Record<string, unknown>;
+    expect(created.name).toBe("New one");
+    expect(created.concurrency).toBe("queue");
+    // A new graph is off and unarmed. Neither switch is something creating a graph asks for.
+    expect(created.enabled).toBe(false);
+    expect(created.armed).toBe(false);
+  });
+
+  test("refuses a nameless graph and an unknown concurrency mode", async () => {
+    const { deps } = fakeDeps();
+    expect((await call(deps, "/api/graphs", json({}))).status).toBe(400);
+    expect((await call(deps, "/api/graphs", json({ name: "" }))).status).toBe(400);
+    expect(
+      (await call(deps, "/api/graphs", json({ name: "x", concurrency: "whenever" }))).status,
+    ).toBe(400);
+  });
+
+  test("a save validates the document and names every broken thing", async () => {
+    // The editor validates too; this is the second pass, because the frontend is a client and
+    // clients lie. A body that got past the canvas must not reach the store.
+    const { deps } = fakeDeps();
+    const broken = {
+      definition: {
+        nodes: [{ id: "a", type: "vrcz/log", position: { x: 0, y: 0 }, config: {} }],
+        edges: [{ id: "e1", from: { node: "a", port: "out" }, to: { node: "ghost", port: "in" } }],
+      },
+    };
+    const res = await call(deps, "/api/graphs/graph-1", {
+      ...json(broken),
+      method: "PUT",
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; message: string };
+    expect(body.error).toBe("invalid_graph");
+    // The path is in the message so the editor can mark the edge that broke, rather than telling
+    // the user their graph is invalid and leaving them to find out where.
+    expect(body.message).toContain("edges[0].to.node");
+  });
+
+  test("a save cannot arm a graph or switch it on", async () => {
+    const { deps } = fakeDeps();
+    await call(deps, "/api/graphs/graph-1", {
+      ...json({ name: "Renamed", enabled: true, armed: true }),
+      method: "PUT",
+    });
+    const after = (await (await call(deps, "/api/graphs/graph-1")).json()) as Record<
+      string,
+      unknown
+    >;
+    expect(after.name).toBe("Renamed");
+    expect(after.enabled).toBe(false);
+    expect(after.armed).toBe(false);
+  });
+
+  test("enable, disable and arm are their own calls", async () => {
+    const { deps } = fakeDeps();
+    const enabled = (await (
+      await call(deps, "/api/graphs/graph-1/enable", { method: "POST" })
+    ).json()) as Record<string, unknown>;
+    expect(enabled.enabled).toBe(true);
+    // Enabling does not arm. That is the whole shape of the dry-run posture.
+    expect(enabled.armed).toBe(false);
+
+    const armed = (await (
+      await call(deps, "/api/graphs/graph-1/armed", { ...json({ armed: true }), method: "PUT" })
+    ).json()) as Record<string, unknown>;
+    expect(armed.armed).toBe(true);
+
+    const disabled = (await (
+      await call(deps, "/api/graphs/graph-1/disable", { method: "POST" })
+    ).json()) as Record<string, unknown>;
+    expect(disabled.enabled).toBe(false);
+  });
+
+  test("arming needs a boolean, not a truthy string", async () => {
+    const { deps } = fakeDeps();
+    const res = await call(deps, "/api/graphs/graph-1/armed", {
+      ...json({ armed: "yes" }),
+      method: "PUT",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("DELETE is a 204 and is idempotent", async () => {
+    const { deps } = fakeDeps();
+    expect((await call(deps, "/api/graphs/graph-1", { method: "DELETE" })).status).toBe(204);
+    expect((await call(deps, "/api/graphs/graph-1", { method: "DELETE" })).status).toBe(204);
+    expect((await (await call(deps, "/api/graphs")).json()) as unknown[]).toEqual([]);
+  });
+
+  test("the graph routes are session-token only, like every other /api route", async () => {
+    // Decision 206: graphs are first-party. There is no `/app` surface for them, and the guards
+    // that make that true are the shared middleware rather than anything per-route.
+    const { deps } = fakeDeps();
+    const res = await app(deps).fetch(
+      new Request(`http://127.0.0.1:${PORT}/api/graphs`, {
+        headers: { host: `127.0.0.1:${PORT}` },
+      }),
+    );
+    expect(res.status).toBe(401);
   });
 });
 

@@ -47,6 +47,33 @@ export {
   type SessionEventKind,
   type UserEventKind,
 } from "./events.ts";
+export {
+  GRAPH_CONCURRENCY_MODES,
+  GRAPH_RUN_STATUSES,
+  type Graph,
+  type GraphConcurrency,
+  type GraphCreate,
+  type GraphDocument,
+  type GraphEdge,
+  type GraphEdgeEnd,
+  type GraphIssue,
+  type GraphNode,
+  type GraphNodeConfig,
+  type GraphNodePosition,
+  type GraphRunStatus,
+  type GraphRunSummary,
+  type GraphSummary,
+  type GraphUpdate,
+  type GraphValidation,
+  graphRoots,
+  isGraphConcurrency,
+  MAX_GRAPH_DESCRIPTION,
+  MAX_GRAPH_EDGES,
+  MAX_GRAPH_NAME,
+  MAX_GRAPH_NODES,
+  reachableFrom,
+  validateGraphDocument,
+} from "./graphs.ts";
 export { isJsonObject, type JsonObject, type JsonValue } from "./json.ts";
 export {
   ALL_SCOPES,

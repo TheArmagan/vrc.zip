@@ -9,6 +9,7 @@ import notificationsTs008 from "./008_notifications_ts.sql" with { type: "text" 
 import avatarFileIds009 from "./009_avatar_file_ids.sql" with { type: "text" };
 import dropPluginSigning010 from "./010_drop_plugin_signing.sql" with { type: "text" };
 import pluginGrantEvents011 from "./011_plugin_grant_events.sql" with { type: "text" };
+import graphs012 from "./012_graphs.sql" with { type: "text" };
 
 /** One numbered migration. `version` must be unique, contiguous from 1, and ascending. */
 export type Migration = {
@@ -33,4 +34,5 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 9, name: "009_avatar_file_ids", sql: avatarFileIds009 },
   { version: 10, name: "010_drop_plugin_signing", sql: dropPluginSigning010 },
   { version: 11, name: "011_plugin_grant_events", sql: pluginGrantEvents011 },
+  { version: 12, name: "012_graphs", sql: graphs012 },
 ];

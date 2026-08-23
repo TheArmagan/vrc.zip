@@ -41,6 +41,8 @@ describe("migrate", () => {
       "friend_log_history",
       "grant_budgets",
       "grants",
+      "graph_runs",
+      "graphs",
       "log_offsets",
       "meta",
       "notes",

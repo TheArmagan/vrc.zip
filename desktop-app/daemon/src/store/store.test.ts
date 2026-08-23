@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MEMORY, Store } from "./store.ts";
+import type { NewGraph, NewGraphRun } from "./types.ts";
 
 const ACCOUNT = "usr_test";
 const T0 = 1_700_000_000_000;
@@ -627,6 +628,203 @@ describe("retention config and housekeeping", () => {
     const store = seed();
     expect(store.dbSizeBytes()).toBeGreaterThan(0);
     store.incrementalVacuum();
+    store.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// graphs (Phase 4)
+// ---------------------------------------------------------------------------
+
+function addGraph(store: Store, id = "g1", overrides: Partial<NewGraph> = {}): void {
+  store.insertGraph({
+    id,
+    name: "Greet arrivals",
+    description: "",
+    enabled: 0,
+    armed: 0,
+    concurrency: "parallel",
+    account_id: ACCOUNT,
+    definition: JSON.stringify({ nodes: [], edges: [] }),
+    created_at: T0,
+    updated_at: T0,
+    ...overrides,
+  });
+}
+
+function addRun(
+  store: Store,
+  id = "r1",
+  graphId = "g1",
+  overrides: Partial<NewGraphRun> = {},
+): void {
+  store.insertGraphRun({
+    id,
+    graph_id: graphId,
+    trigger_node: "n_trigger",
+    status: "running",
+    dry_run: 1,
+    state: "{}",
+    started_at: T0,
+    updated_at: T0,
+    ...overrides,
+  });
+}
+
+describe("graphs", () => {
+  test("round-trips, and a new graph is neither enabled nor armed", () => {
+    const store = seed();
+    addGraph(store);
+
+    const row = store.getGraph("g1");
+    expect(row?.name).toBe("Greet arrivals");
+    expect(row?.enabled).toBe(0);
+    expect(row?.armed).toBe(0);
+    expect(row?.concurrency).toBe("parallel");
+    expect(row?.disabled_reason).toBeNull();
+    expect(store.listGraphs()).toHaveLength(1);
+    expect(store.listEnabledGraphs()).toHaveLength(0);
+    store.close();
+  });
+
+  test("a save cannot arm a graph or switch it on", () => {
+    const store = seed();
+    addGraph(store);
+    store.setGraphEnabled("g1", true);
+    store.setGraphArmed("g1", true);
+
+    store.updateGraph(
+      "g1",
+      {
+        name: "Renamed",
+        description: "now with a body",
+        concurrency: "queue",
+        account_id: null,
+        definition: '{"nodes":[1]}',
+      },
+      T0 + 10,
+    );
+
+    const row = store.getGraph("g1");
+    expect(row?.name).toBe("Renamed");
+    expect(row?.concurrency).toBe("queue");
+    expect(row?.definition).toBe('{"nodes":[1]}');
+    expect(row?.updated_at).toBe(T0 + 10);
+    // The point of the test: the two switches are untouched by a document save, in both directions.
+    expect(row?.enabled).toBe(1);
+    expect(row?.armed).toBe(1);
+    store.close();
+  });
+
+  test("disabling carries a reason, and enabling clears it", () => {
+    const store = seed();
+    addGraph(store, "g1", { enabled: 1 });
+
+    store.setGraphEnabled("g1", false, "Hit 200 runs in an hour");
+    expect(store.getGraph("g1")?.enabled).toBe(0);
+    expect(store.getGraph("g1")?.disabled_reason).toBe("Hit 200 runs in an hour");
+
+    store.setGraphEnabled("g1", true);
+    expect(store.getGraph("g1")?.disabled_reason).toBeNull();
+    store.close();
+  });
+
+  test("removing an account leaves the graph, without an acting account", () => {
+    const store = seed();
+    addGraph(store);
+    store.deleteAccount(ACCOUNT);
+
+    // ON DELETE SET NULL, not CASCADE: removing an account must not silently delete the
+    // automations that referenced it.
+    const row = store.getGraph("g1");
+    expect(row).not.toBeNull();
+    expect(row?.account_id).toBeNull();
+    store.close();
+  });
+
+  test("rejects a concurrency mode and a run status that are not in the vocabulary", () => {
+    const store = seed();
+    expect(() => addGraph(store, "bad", { concurrency: "whenever" })).toThrow();
+    addGraph(store);
+    expect(() => addRun(store, "bad", "g1", { status: "finished" })).toThrow();
+    store.close();
+  });
+});
+
+describe("graph runs", () => {
+  test("a parked run counts as live and comes back when it is due", () => {
+    const store = seed();
+    addGraph(store, "g1", { enabled: 1 });
+    addRun(store, "r1");
+
+    expect(store.countLiveGraphRuns("g1")).toBe(1);
+
+    store.parkGraphRun("r1", "n_wait", T0 + 60_000, '{"done":["n_trigger"]}', T0 + 1);
+    const parked = store.getGraphRun("r1");
+    expect(parked?.status).toBe("waiting");
+    expect(parked?.wait_node).toBe("n_wait");
+    expect(parked?.resume_at).toBe(T0 + 60_000);
+    // Still live. A run that waits has not finished, and treating it as a free slot is how one
+    // graph ends up with fifty copies of itself in flight.
+    expect(store.countLiveGraphRuns("g1")).toBe(1);
+
+    expect(store.listDueGraphRuns(T0 + 59_999)).toHaveLength(0);
+    expect(store.listDueGraphRuns(T0 + 60_000).map((r) => r.id)).toEqual(["r1"]);
+    store.close();
+  });
+
+  test("advancing a run clears the parking", () => {
+    const store = seed();
+    addGraph(store);
+    addRun(store);
+    store.parkGraphRun("r1", "n_wait", T0 + 60_000, "{}", T0 + 1);
+
+    store.updateGraphRunState("r1", "running", '{"done":["n_wait"]}', T0 + 2);
+    const row = store.getGraphRun("r1");
+    expect(row?.status).toBe("running");
+    expect(row?.wait_node).toBeNull();
+    expect(row?.resume_at).toBeNull();
+    expect(store.listDueGraphRuns(T0 + 999_999)).toHaveLength(0);
+    store.close();
+  });
+
+  test("queued runs come back oldest first, and by status", () => {
+    const store = seed();
+    addGraph(store);
+    addRun(store, "r1", "g1", { status: "queued", started_at: T0 + 20 });
+    addRun(store, "r2", "g1", { status: "queued", started_at: T0 + 10 });
+    addRun(store, "r3", "g1", { status: "running" });
+
+    expect(store.nextQueuedGraphRun("g1")?.id).toBe("r2");
+    expect(store.countGraphRunsByStatus("g1", "queued")).toBe(2);
+    expect(store.listGraphRunsByStatus("queued").map((r) => r.id)).toEqual(["r2", "r1"]);
+    expect(store.countLiveGraphRuns("g1")).toBe(3);
+    store.close();
+  });
+
+  test("a run ends by being deleted, and deleting the graph takes its runs with it", () => {
+    const store = seed();
+    addGraph(store);
+    addRun(store, "r1");
+    addRun(store, "r2");
+
+    store.deleteGraphRun("r1");
+    expect(store.getGraphRun("r1")).toBeNull();
+    expect(store.listGraphRuns("g1")).toHaveLength(1);
+
+    store.deleteGraph("g1");
+    expect(store.getGraphRun("r2")).toBeNull();
+    store.close();
+  });
+
+  test("the graph retention windows are seeded", () => {
+    const store = seed();
+    const byKind = new Map(store.listRetentionConfig().map((r) => [r.kind, r.retain_days]));
+
+    expect(byKind.get("graph.*")).toBe(30);
+    expect(byKind.get("graph.run.dropped")).toBe(7);
+    // A note a graph wrote to tell the user something outlives the run that produced it.
+    expect(byKind.get("graph.note")).toBe(365);
     store.close();
   });
 });

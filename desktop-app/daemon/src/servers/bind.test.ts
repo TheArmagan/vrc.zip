@@ -48,6 +48,24 @@ const deps: ControlDeps = {
     throw new Error("unused");
   },
   uninstallPlugin: async () => {},
+  listGraphs: async () => [],
+  getGraph: async () => {
+    throw new Error("unused");
+  },
+  createGraph: async () => {
+    throw new Error("unused");
+  },
+  updateGraph: async () => {
+    throw new Error("unused");
+  },
+  deleteGraph: async () => {},
+  setGraphEnabled: async () => {
+    throw new Error("unused");
+  },
+  setGraphArmed: async () => {
+    throw new Error("unused");
+  },
+  listGraphRuns: async () => [],
   publishPluginPanel: () => {},
   publishPluginToast: () => {},
   runPluginCommand: async () => {},

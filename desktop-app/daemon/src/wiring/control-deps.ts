@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type {
   Avatar,
   Badge,
@@ -18,6 +19,13 @@ import type {
 } from "@vrcz/api/types";
 import { PLUGIN_CAPABILITIES } from "@vrcz/plugin-api";
 import {
+  GRAPH_RUN_STATUSES,
+  type Graph,
+  type GraphDocument,
+  type GraphRunStatus,
+  type GraphRunSummary,
+  type GraphSummary,
+  isGraphConcurrency,
   isScope,
   type JsonValue,
   type PluginPanelFrame,
@@ -32,6 +40,7 @@ import {
   STREAM_PLUGIN_PANEL,
   STREAM_PLUGIN_TOAST,
   STREAM_RATE,
+  validateGraphDocument,
   type WebhookSummary,
   type WorldInstanceList,
   type WorldInstanceOccupant,
@@ -115,7 +124,7 @@ import {
   runRetention as runRetentionPass,
   type Store,
 } from "../store/index.ts";
-import type { GrantRow } from "../store/types.ts";
+import type { GrantRow, GraphRow, GraphRunRow } from "../store/types.ts";
 import type { WebhookManager } from "../webhooks/index.ts";
 import { EPHEMERAL } from "./feed-writer.ts";
 import type { InstalledPluginView, PluginBudgetView, PluginHost } from "./plugin-host.ts";
@@ -878,6 +887,77 @@ function pluginOrThrow(host: PluginHost, pluginId: string): PluginSummary {
     throw new ControlError(404, "unknown_plugin", `${pluginId} is not installed.`);
   }
   return toPluginSummary(found, host.budgets(pluginId));
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* Graphs                                                                                         */
+/* -------------------------------------------------------------------------------------------- */
+
+/** What `createGraph` stores when the caller sends no document. A blank canvas, not a null. */
+const EMPTY_GRAPH: GraphDocument = { nodes: [], edges: [] };
+
+function requireGraph(store: Store, graphId: string): GraphRow {
+  const row = store.getGraph(graphId);
+  if (row === null) throw new ControlError(404, "unknown_graph", `${graphId} does not exist.`);
+  return row;
+}
+
+/**
+ * A stored document, or an empty one.
+ *
+ * A blob that will not parse is a bug on the write side, and the honest response is an empty canvas
+ * with the graph still listed rather than a 500 that takes the whole screen down: the user can see
+ * the graph, switch it off, and delete it. The runtime refuses to arm a graph it cannot read, so an
+ * empty document here can never be mistaken for a graph that does nothing.
+ */
+function parseGraphDocument(definition: string): GraphDocument {
+  try {
+    const parsed: unknown = JSON.parse(definition);
+    const result = validateGraphDocument(parsed);
+    return result.ok ? (parsed as GraphDocument) : EMPTY_GRAPH;
+  } catch {
+    return EMPTY_GRAPH;
+  }
+}
+
+function graphSummary(row: GraphRow): GraphSummary {
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    enabled: row.enabled === 1,
+    armed: row.armed === 1,
+    // The column is CHECK-constrained to the three modes, so this narrows rather than defaults;
+    // the fallback is for a row written by a newer build than this one.
+    concurrency: isGraphConcurrency(row.concurrency) ? row.concurrency : "parallel",
+    accountId: row.account_id,
+    disabledReason: row.disabled_reason,
+    nodeCount: parseGraphDocument(row.definition).nodes.length,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toGraph(row: GraphRow): Graph {
+  return { ...graphSummary(row), definition: parseGraphDocument(row.definition) };
+}
+
+function graphRunSummary(row: GraphRunRow): GraphRunSummary {
+  return {
+    id: row.id,
+    graphId: row.graph_id,
+    triggerNode: row.trigger_node,
+    status: isGraphRunStatus(row.status) ? row.status : "running",
+    dryRun: row.dry_run === 1,
+    waitNode: row.wait_node,
+    resumeAt: row.resume_at,
+    startedAt: row.started_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function isGraphRunStatus(value: string): value is GraphRunStatus {
+  return (GRAPH_RUN_STATUSES as readonly string[]).includes(value);
 }
 
 export function createControlDeps(options: ControlDepsOptions): ControlDeps {
@@ -2534,6 +2614,79 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       await options.plugins?.uninstall(pluginId, {
         keepData: uninstallOptions?.keepData === true,
       });
+    },
+
+    /*
+     * Graphs (Phase 4, step 4.1). Storage and CRUD only — nothing here runs a graph yet.
+     *
+     * The document has already been validated by the route; what is left is the part that needs the
+     * store: that the id exists, and that the two switches move only through their own calls.
+     */
+
+    async listGraphs(): Promise<GraphSummary[]> {
+      return await Promise.resolve(store.listGraphs().map(graphSummary));
+    },
+
+    async getGraph(graphId): Promise<Graph> {
+      return await Promise.resolve(toGraph(requireGraph(store, graphId)));
+    },
+
+    async createGraph(input): Promise<Graph> {
+      const now = Date.now();
+      const id = randomUUID();
+      store.insertGraph({
+        id,
+        name: input.name,
+        description: input.description ?? "",
+        // Off and unarmed. Both switches are gestures, and creating a graph is neither of them.
+        enabled: 0,
+        armed: 0,
+        concurrency: input.concurrency ?? "parallel",
+        account_id: input.accountId ?? null,
+        definition: JSON.stringify(input.definition ?? EMPTY_GRAPH),
+        created_at: now,
+        updated_at: now,
+      });
+      return toGraph(requireGraph(store, id));
+    },
+
+    async updateGraph(graphId, input): Promise<Graph> {
+      const row = requireGraph(store, graphId);
+      store.updateGraph(graphId, {
+        name: input.name ?? row.name,
+        description: input.description ?? row.description,
+        concurrency: input.concurrency ?? row.concurrency,
+        // `?? row.account_id` would make clearing the account impossible, since the caller clears it
+        // by sending null. Absent and null are different answers here.
+        account_id: input.accountId === undefined ? row.account_id : input.accountId,
+        definition:
+          input.definition === undefined ? row.definition : JSON.stringify(input.definition),
+      });
+      return toGraph(requireGraph(store, graphId));
+    },
+
+    async deleteGraph(graphId): Promise<void> {
+      // Idempotent, like every other removal here. The runs go with it, by foreign key.
+      await Promise.resolve(store.deleteGraph(graphId));
+    },
+
+    async setGraphEnabled(graphId, enabled): Promise<GraphSummary> {
+      requireGraph(store, graphId);
+      // Switching on clears `disabled_reason`: the sentence explains a state the graph is no longer
+      // in, and leaving it behind would have the UI reporting a ceiling that has been dealt with.
+      store.setGraphEnabled(graphId, enabled);
+      return graphSummary(requireGraph(store, graphId));
+    },
+
+    async setGraphArmed(graphId, armed): Promise<GraphSummary> {
+      requireGraph(store, graphId);
+      store.setGraphArmed(graphId, armed);
+      return graphSummary(requireGraph(store, graphId));
+    },
+
+    async listGraphRuns(graphId): Promise<GraphRunSummary[]> {
+      requireGraph(store, graphId);
+      return await Promise.resolve(store.listGraphRuns(graphId).map(graphRunSummary));
     },
 
     async listWebhooks(): Promise<WebhookSummary[]> {

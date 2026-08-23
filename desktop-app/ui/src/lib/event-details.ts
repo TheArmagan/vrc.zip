@@ -45,6 +45,7 @@ import TriangleAlertIcon from "@lucide/svelte/icons/triangle-alert";
 import UserMinusIcon from "@lucide/svelte/icons/user-minus";
 import UserPlusIcon from "@lucide/svelte/icons/user-plus";
 import UsersIcon from "@lucide/svelte/icons/users";
+import WorkflowIcon from "@lucide/svelte/icons/workflow";
 import type { EventKind } from "./api.ts";
 import type { LiveEvent } from "./events.ts";
 import { eventLabel, platformLabel, subjectName } from "./format.ts";
@@ -161,6 +162,12 @@ function familyFallback(kind: EventKind): Pick<EventDetails, "icon" | "tone"> {
   if (kind.startsWith("instance.")) return { icon: DoorOpenIcon, tone: "place" };
   if (kind.startsWith("consent.")) return { icon: ShieldCheckIcon, tone: "alert" };
   if (kind.startsWith("content.")) return { icon: PackageIcon, tone: "system" };
+  // A failed or dropped run is `alert`, not `system`: those two kinds exist precisely so an
+  // automation that did not do its job is visible, and a neutral row is how that gets missed.
+  if (kind === "graph.run.failed" || kind === "graph.run.dropped") {
+    return { icon: TriangleAlertIcon, tone: "alert" };
+  }
+  if (kind.startsWith("graph.")) return { icon: WorkflowIcon, tone: "system" };
   return { icon: CircleDotIcon, tone: "neutral" };
 }
 

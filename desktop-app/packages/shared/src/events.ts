@@ -37,6 +37,7 @@ export type EventFamily =
   | "economy"
   | "content"
   | "consent"
+  | "graph"
   | "other";
 
 /**
@@ -55,6 +56,7 @@ export const EVENT_FAMILIES: readonly EventFamily[] = [
   "instance",
   "account",
   "pipeline",
+  "graph",
   "economy",
   "content",
   "consent",
@@ -213,6 +215,33 @@ export type ContentEventKind = "content.refresh" | "content.image_updated";
 export type ConsentEventKind = "consent.pending" | "consent.resolved";
 
 /**
+ * What a node graph did — the *durable* half of Phase 4's run bookkeeping. See PLAN.md §Phase 4.
+ *
+ * The split is deliberate and it is decision 206: `graph_runs` holds live state and is pruned when a
+ * run ends, and the record that outlives it is an ordinary `events` row. That is what buys graph runs
+ * the per-kind retention config, the feed, the enriched stream and outbound webhooks without a line
+ * of new code, and it is why this family has to exist before anything can emit — the union below is
+ * closed and exhaustiveness-checked, so a `graph.*` string is a compile error until it is listed.
+ *
+ * **There is no `graph.run.started`.** A run that is running is in `graph_runs`, which is where the
+ * inspector reads it from; writing a feed row for every fire would double the volume of the noisiest
+ * kind in the app to say something that is already visible and about to be superseded.
+ *
+ * `graph.run.dropped` is the one that must never be silent: it is the fire that was *not* honoured —
+ * a trigger over `maxFiresPerMinute`, a `drop`-mode graph that was busy, a full queue. An automation
+ * that quietly skips is indistinguishable from one that is broken.
+ */
+export type GraphEventKind =
+  | "graph.run.finished"
+  | "graph.run.failed"
+  | "graph.run.dropped"
+  | "graph.run.expired"
+  /** A ceiling was hit, or the graph was switched off from the UI. Payload carries the reason. */
+  | "graph.disabled"
+  /** Written by the built-in feed-note action, which is a graph's way of talking to the user. */
+  | "graph.note";
+
+/**
  * Every kind the daemon can emit. Producers are typed against this, so adding a kind to a bridge
  * without adding it here does not compile.
  */
@@ -228,7 +257,8 @@ export type BusEventKind =
   | InstanceEventKind
   | EconomyEventKind
   | ContentEventKind
-  | ConsentEventKind;
+  | ConsentEventKind
+  | GraphEventKind;
 
 /** @deprecated Prefer {@link BusEventKind}. Kept as the name the UI already imports. */
 export type KnownEventKind = BusEventKind;
@@ -320,6 +350,12 @@ export const BUS_EVENT_KINDS = [
   "content.image_updated",
   "consent.pending",
   "consent.resolved",
+  "graph.run.finished",
+  "graph.run.failed",
+  "graph.run.dropped",
+  "graph.run.expired",
+  "graph.disabled",
+  "graph.note",
 ] as const satisfies readonly BusEventKind[];
 
 /**

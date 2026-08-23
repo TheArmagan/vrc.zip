@@ -351,3 +351,47 @@ export type PluginCrashRow = {
 };
 
 export type NewPluginCrash = Omit<PluginCrashRow, "id">;
+
+/**
+ * One graph. See `012_graphs.sql` for why the definition is a blob and why there are two switches.
+ *
+ * `enabled` and `armed` are both integers because SQLite has no boolean, and both are kept that way
+ * up to the API boundary rather than mapped here — every other row in this file does the same, and a
+ * type that silently converts is a type that disagrees with the SQL a reader has open beside it.
+ */
+export type GraphRow = {
+  id: string;
+  name: string;
+  description: string;
+  enabled: number;
+  armed: number;
+  concurrency: string;
+  account_id: string | null;
+  definition: string;
+  disabled_reason: string | null;
+  created_at: number;
+  updated_at: number;
+};
+
+export type NewGraph = Omit<GraphRow, "disabled_reason">;
+
+/**
+ * One run that has not finished — running, waiting on a `wait` node, or queued behind another.
+ *
+ * There is no row here for a run that ended: history is an `events` row with a `graph.*` kind, which
+ * is what gives it retention, the feed and webhooks for free. This table is the resume log.
+ */
+export type GraphRunRow = {
+  id: string;
+  graph_id: string;
+  trigger_node: string;
+  status: string;
+  dry_run: number;
+  wait_node: string | null;
+  resume_at: number | null;
+  state: string;
+  started_at: number;
+  updated_at: number;
+};
+
+export type NewGraphRun = Omit<GraphRunRow, "wait_node" | "resume_at">;

@@ -662,6 +662,14 @@ const EVENT_LABELS: Readonly<Partial<Record<BusEventKind, string>>> = {
   "content.image_updated": "Image updated",
   "consent.pending": "App requested access",
   "consent.resolved": "App access decided",
+  "graph.run.finished": "Graph ran",
+  "graph.run.failed": "Graph failed",
+  // Not "skipped": the user needs to read this as something that did not happen when it should
+  // have, which is the whole reason the kind exists rather than the fire being swallowed.
+  "graph.run.dropped": "Graph fire dropped",
+  "graph.run.expired": "Graph run expired",
+  "graph.disabled": "Graph disabled",
+  "graph.note": "Graph note",
 };
 
 /** Falls back to humanising the raw kind, so a kind this build has never seen still reads. */
@@ -689,6 +697,7 @@ const FAMILY_LABELS: Readonly<Record<string, string>> = {
   pipeline: "Pipeline",
   economy: "Economy",
   content: "Content",
+  graph: "Graphs",
   other: "Other",
 };
 

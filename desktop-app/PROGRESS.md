@@ -5,6 +5,8 @@ the architecture and the reasoning. This file tracks only *state*: what exists, 
 was decided along the way.
 
 **Last updated:** 2026-08-23
+**Phase 4 is under way:** 4.1 is built (decision 207) — the two tables, the `graph` event family, the
+document model with its validator, and `/api/graphs`. Next is 4.2, the engine.
 **Current phase:** Phase 3 is **complete** — 3.0 through 3.11. Next is Phase 4, the node graph
 (decision 182), and it is now **scoped rather than started**: a planning pass on 2026-08-23 put
 twenty-four questions to the user four at a time, rewrote `PLAN.md` §Phase 4 from one paragraph into
@@ -504,12 +506,16 @@ Three answers enlarge the phase beyond what PLAN.md used to promise, and they ar
 the big step rather than 4.5: a run can **wait**, so it is a durable object rather than a walk; nodes
 get an **error output port**; and the port lattice grows **`list<T>`**.
 
-- [ ] **4.1 Graph store and CRUD** — migration 012: `graphs` (one row, JSON blob holding nodes, edges,
+- [x] **4.1 Graph store and CRUD** — migration 012: `graphs` (one row, JSON blob holding nodes, edges,
       positions, config and the `nodeDefinitionHash` of every node type used) and `graph_runs` (live
       state only, pruned on completion). The `graph` **`EventFamily`** in `packages/shared/src/events.ts`
       with its kind union members — the union is closed and exhaustiveness-checked, so this is a
       compile error until it is done, and skipping it buckets every run under `other` in the feed's
       filter chips. Session-token routes; no execution yet.
+      **Built** (decision 207): migration 012, six `graph.*` kinds, `@vrcz/shared/graphs.ts` with the
+      document model and `validateGraphDocument`, twenty store methods, and nine routes under
+      `/api/graphs`. **Not here, and deliberately:** the registry-backed `checkEdge` pass on save,
+      which needs the node registry and lands with the runtime.
 - [ ] **4.2 The engine** — DAG with many trigger roots, one run per fire walking only what that
       trigger reaches; cycles refused on save; branch and merge; `foreach` with scoped run-state;
       `wait` that persists the run and resumes per the wait node's own policy (resume / skip as
@@ -3262,6 +3268,59 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      their routes, so they have to be lifted into a reusable module; and `graph` is not an
      `EventFamily`, so emitting `graph.*` is a **compile error** until `packages/shared/src/events.ts`
      grows the family and the kind union members.
+
+207. **4.1: graphs are storable, and two switches are better than one.** Migration 012, the `graph`
+     event family, the document model in `@vrcz/shared`, and `/api/graphs`. Nothing runs a graph yet;
+     this is the layer everything in 4.2 writes to.
+
+     **`enabled` and `armed` are separate columns, and no save can touch either.** They answer
+     different questions — *should this run* and *are its outbound actions real* — and collapsing
+     them would mean pressing enable on a graph wired wrong sends real invites on its first fire.
+     `SQL.updateGraph` names its columns explicitly and the two switches are not among them, so the
+     property holds in SQL rather than in a check somebody has to remember. The route and store tests
+     both assert it in *both* directions: a save cannot arm, and a save cannot disarm.
+
+     **`dry_run` is captured on the run, not read from the graph when an action executes.** With a
+     `wait` node a run can be parked for hours; reading `graphs.armed` at execution time would mean
+     arming a graph silently promotes an in-flight rehearsal into the real thing.
+
+     **A parked run counts as live.** `countLiveGraphRuns` includes `waiting`, because a run that is
+     waiting has not finished, and treating it as a free slot is how a graph that waits five minutes
+     ends up with fifty copies of itself in flight — exactly what the concurrency modes exist to stop.
+
+     **The `graph` family had to be added before anything could emit.** `BusEventKind` is closed and
+     exhaustiveness-checked (`EVENT_KIND_COVERAGE_NOTE`), so a `graph.*` string is a compile error
+     until it is listed — which is the mechanism working, not an obstacle. Six kinds, and **there is
+     no `graph.run.started`**: a running run is in `graph_runs`, which is where the inspector reads
+     it, and a feed row per fire would double the volume of the noisiest kind in the app to say
+     something already visible. `graph.run.dropped` is the one that matters most — the fire that was
+     *not* honoured, because an automation that silently skips is indistinguishable from a broken one.
+     It is drawn with the alert tone for the same reason.
+
+     **The document model lives in `@vrcz/shared`, not `@vrcz/plugin-api`, and the dependency
+     direction settles it.** `plugin-api` imports `shared`, so `shared` cannot import back;
+     `GraphNodeConfig` therefore mirrors `NodeConfigValues` structurally. That mirror is the one real
+     cost of the split and it is worth naming: nothing enforces it today. The daemon is the one place
+     that imports both, so an assignability check belongs there — **not yet written**, and 4.2 is
+     where it should land.
+
+     `validateGraphDocument` returns **every** issue rather than the first, each with a path. A canvas
+     that reports one broken edge per save is a canvas nobody finishes fixing. It also refuses a
+     second edge into an occupied input port — no merge semantics exist, and a graph that takes
+     whichever value arrived last behaves differently on a busy evening than it does under test — and
+     it finds cycles **iteratively**, because it runs on a document that arrived over HTTP and a
+     validator that can blow the stack on hostile input is a denial of service in the shape of a
+     helper.
+
+     **Retention is seeded per kind rather than left to inherit.** `graph.*` at 30 days because run
+     rows are the highest-volume kind the app can produce, `graph.run.dropped` at 7, and `graph.note`
+     at 365 — a note a graph wrote deliberately to tell the user something outlives the run that
+     produced it.
+
+     One gap worth stating plainly rather than discovering later: **the save path does not type-check
+     ports yet.** `checkEdge` needs the node registry, which is populated by running plugins, so the
+     second half of "type checking happens twice" arrives with the runtime. Until then a document can
+     be saved with edges that will not run.
 
 ---
 

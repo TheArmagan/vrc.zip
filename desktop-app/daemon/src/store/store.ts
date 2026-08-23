@@ -20,12 +20,16 @@ import type {
   FriendLogRow,
   GrantBudgetRow,
   GrantRow,
+  GraphRow,
+  GraphRunRow,
   KindCount,
   LogOffsetRow,
   NewAuditEntry,
   NewEvent,
   NewFriendLogHistory,
   NewGrant,
+  NewGraph,
+  NewGraphRun,
   NewPairingRequest,
   NewPlugin,
   NewPluginCrash,
@@ -956,6 +960,140 @@ export class Store {
     return this.stmts.listPluginCrashes.all(pluginId, limit);
   }
 
+  // -- graphs (Phase 4) ------------------------------------------------------
+
+  insertGraph(graph: NewGraph): void {
+    this.stmts.insertGraph.run(
+      graph.id,
+      graph.name,
+      graph.description,
+      graph.enabled,
+      graph.armed,
+      graph.concurrency,
+      graph.account_id,
+      graph.definition,
+      graph.created_at,
+      graph.updated_at,
+    );
+  }
+
+  /**
+   * Saves the editable half of a graph. Cannot touch `enabled`, `armed` or `disabled_reason` — see
+   * the note on `SQL.updateGraph` for why a save must not be able to arm anything.
+   */
+  updateGraph(
+    id: string,
+    fields: Pick<GraphRow, "name" | "description" | "concurrency" | "account_id" | "definition">,
+    updatedAt = Date.now(),
+  ): void {
+    this.stmts.updateGraph.run(
+      fields.name,
+      fields.description,
+      fields.concurrency,
+      fields.account_id,
+      fields.definition,
+      updatedAt,
+      id,
+    );
+  }
+
+  getGraph(id: string): GraphRow | null {
+    return this.stmts.getGraph.get(id);
+  }
+
+  listGraphs(): GraphRow[] {
+    return this.stmts.listGraphs.all();
+  }
+
+  /** What the runtime arms at boot. */
+  listEnabledGraphs(): GraphRow[] {
+    return this.stmts.listEnabledGraphs.all();
+  }
+
+  deleteGraph(id: string): void {
+    this.stmts.deleteGraph.run(id);
+  }
+
+  /**
+   * `reason` is what the daemon owes the user when it disables a graph itself — which ceiling, in
+   * one sentence. A user switching a graph off passes null.
+   */
+  setGraphEnabled(
+    id: string,
+    enabled: boolean,
+    reason: string | null = null,
+    updatedAt = Date.now(),
+  ): void {
+    this.stmts.setGraphEnabled.run(enabled ? 1 : 0, reason, updatedAt, id);
+  }
+
+  /** Lifts (or restores) dry-run. The gesture behind this is a hold-to-confirm, never a timer. */
+  setGraphArmed(id: string, armed: boolean, updatedAt = Date.now()): void {
+    this.stmts.setGraphArmed.run(armed ? 1 : 0, updatedAt, id);
+  }
+
+  insertGraphRun(run: NewGraphRun): void {
+    this.stmts.insertGraphRun.run(
+      run.id,
+      run.graph_id,
+      run.trigger_node,
+      run.status,
+      run.dry_run,
+      run.state,
+      run.started_at,
+      run.updated_at,
+    );
+  }
+
+  getGraphRun(id: string): GraphRunRow | null {
+    return this.stmts.getGraphRun.get(id);
+  }
+
+  listGraphRuns(graphId: string, limit = 50): GraphRunRow[] {
+    return this.stmts.listGraphRuns.all(graphId, limit);
+  }
+
+  listGraphRunsByStatus(status: string, limit = 200): GraphRunRow[] {
+    return this.stmts.listGraphRunsByStatus.all(status, limit);
+  }
+
+  /** Queued, running and waiting all count. See the note on `SQL.countLiveGraphRuns`. */
+  countLiveGraphRuns(graphId: string): number {
+    return this.stmts.countLiveGraphRuns.get(graphId)?.n ?? 0;
+  }
+
+  countGraphRunsByStatus(graphId: string, status: string): number {
+    return this.stmts.countGraphRunsByStatus.get(graphId, status)?.n ?? 0;
+  }
+
+  nextQueuedGraphRun(graphId: string): GraphRunRow | null {
+    return this.stmts.nextQueuedGraphRun.get(graphId);
+  }
+
+  /** Advances a run and clears any parking. The engine calls this at every node boundary. */
+  updateGraphRunState(id: string, status: string, state: string, updatedAt = Date.now()): void {
+    this.stmts.updateGraphRunState.run(status, state, updatedAt, id);
+  }
+
+  parkGraphRun(
+    id: string,
+    waitNode: string,
+    resumeAt: number,
+    state: string,
+    updatedAt = Date.now(),
+  ): void {
+    this.stmts.parkGraphRun.run(waitNode, resumeAt, state, updatedAt, id);
+  }
+
+  listDueGraphRuns(now = Date.now(), limit = 100): GraphRunRow[] {
+    return this.stmts.listDueGraphRuns.all(now, limit);
+  }
+
+  /** A run ends by being deleted from here; its record is the `graph.*` event that was emitted. */
+  deleteGraphRun(id: string): void {
+    this.stmts.deleteGraphRun.run(id);
+  }
+
   /**
    * Reclaims up to `pages` freelist pages. Only does anything with
    * `auto_vacuum = INCREMENTAL`, which {@link applyPragmas} sets before the first table exists.
@@ -1212,6 +1350,34 @@ function prepareAll(db: Database) {
     ),
     countPluginCrashesSince: q<{ n: number }, [string, number]>(SQL.countPluginCrashesSince),
     listPluginCrashes: q<PluginCrashRow, [string, number]>(SQL.listPluginCrashes),
+
+    insertGraph: q<
+      void,
+      [string, string, string, number, number, string, string | null, string, number, number]
+    >(SQL.insertGraph),
+    updateGraph: q<void, [string, string, string, string | null, string, number, string]>(
+      SQL.updateGraph,
+    ),
+    getGraph: q<GraphRow, [string]>(SQL.getGraph),
+    listGraphs: q<GraphRow, []>(SQL.listGraphs),
+    listEnabledGraphs: q<GraphRow, []>(SQL.listEnabledGraphs),
+    deleteGraph: q<void, [string]>(SQL.deleteGraph),
+    setGraphEnabled: q<void, [number, string | null, number, string]>(SQL.setGraphEnabled),
+    setGraphArmed: q<void, [number, number, string]>(SQL.setGraphArmed),
+
+    insertGraphRun: q<void, [string, string, string, string, number, string, number, number]>(
+      SQL.insertGraphRun,
+    ),
+    getGraphRun: q<GraphRunRow, [string]>(SQL.getGraphRun),
+    listGraphRuns: q<GraphRunRow, [string, number]>(SQL.listGraphRuns),
+    listGraphRunsByStatus: q<GraphRunRow, [string, number]>(SQL.listGraphRunsByStatus),
+    countLiveGraphRuns: q<{ n: number }, [string]>(SQL.countLiveGraphRuns),
+    countGraphRunsByStatus: q<{ n: number }, [string, string]>(SQL.countGraphRunsByStatus),
+    nextQueuedGraphRun: q<GraphRunRow, [string]>(SQL.nextQueuedGraphRun),
+    updateGraphRunState: q<void, [string, string, number, string]>(SQL.updateGraphRunState),
+    parkGraphRun: q<void, [string, number, string, number, string]>(SQL.parkGraphRun),
+    listDueGraphRuns: q<GraphRunRow, [number, number]>(SQL.listDueGraphRuns),
+    deleteGraphRun: q<void, [string]>(SQL.deleteGraphRun),
     countPendingWebhookDeliveries: q<{ n: number }, [string]>(SQL.countPendingWebhookDeliveries),
     countSettledWebhookDeliveries: q<{ count: number }, [number]>(
       SQL.countSettledWebhookDeliveries,

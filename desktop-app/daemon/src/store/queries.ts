@@ -572,6 +572,74 @@ export const SQL = {
     SELECT COUNT(*) AS n FROM plugin_crashes WHERE plugin_id = ? AND ts >= ?`,
   listPluginCrashes: `
     SELECT * FROM plugin_crashes WHERE plugin_id = ? ORDER BY ts DESC LIMIT ?`,
+
+  // -- graphs (Phase 4) -------------------------------------------------------
+  insertGraph: `
+    INSERT INTO graphs
+      (id, name, description, enabled, armed, concurrency, account_id, definition,
+       created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  /*
+   * The editor's save. It deliberately cannot touch `enabled`, `armed` or `disabled_reason`: those
+   * three are gestures the user makes elsewhere, and a save that could flip them would mean a
+   * canvas PUT could arm a graph's outbound actions without anybody holding a button.
+   */
+  updateGraph: `
+    UPDATE graphs
+    SET name = ?, description = ?, concurrency = ?, account_id = ?, definition = ?, updated_at = ?
+    WHERE id = ?`,
+  getGraph: `SELECT * FROM graphs WHERE id = ?`,
+  listGraphs: `SELECT * FROM graphs ORDER BY updated_at DESC`,
+  /* The runtime's boot query: what should have its triggers armed. */
+  listEnabledGraphs: `SELECT * FROM graphs WHERE enabled = 1 ORDER BY updated_at DESC`,
+  deleteGraph: `DELETE FROM graphs WHERE id = ?`,
+  /*
+   * Enable and disable are one statement with a nullable reason, unlike the plugin pair above: the
+   * reason is the *point* here rather than an aside. The daemon disables a graph when it hits a
+   * ceiling, and a row switched off with no sentence attached is the case the user cannot act on.
+   */
+  setGraphEnabled: `
+    UPDATE graphs SET enabled = ?, disabled_reason = ?, updated_at = ? WHERE id = ?`,
+  setGraphArmed: `UPDATE graphs SET armed = ?, updated_at = ? WHERE id = ?`,
+
+  insertGraphRun: `
+    INSERT INTO graph_runs
+      (id, graph_id, trigger_node, status, dry_run, wait_node, resume_at, state,
+       started_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)`,
+  getGraphRun: `SELECT * FROM graph_runs WHERE id = ?`,
+  listGraphRuns: `
+    SELECT * FROM graph_runs WHERE graph_id = ? ORDER BY started_at DESC LIMIT ?`,
+  listGraphRunsByStatus: `
+    SELECT * FROM graph_runs WHERE status = ? ORDER BY started_at LIMIT ?`,
+  /*
+   * The concurrency check, and a `waiting` run counts. A run parked on a `wait` has not finished —
+   * treating it as a free slot is how a graph that waits five minutes ends up with fifty live runs
+   * of itself, which is precisely the shape the ceilings exist to prevent.
+   */
+  countLiveGraphRuns: `
+    SELECT COUNT(*) AS n FROM graph_runs
+    WHERE graph_id = ? AND status IN ('queued', 'running', 'waiting')`,
+  countGraphRunsByStatus: `
+    SELECT COUNT(*) AS n FROM graph_runs WHERE graph_id = ? AND status = ?`,
+  nextQueuedGraphRun: `
+    SELECT * FROM graph_runs
+    WHERE graph_id = ? AND status = 'queued' ORDER BY started_at LIMIT 1`,
+  updateGraphRunState: `
+    UPDATE graph_runs
+    SET status = ?, state = ?, wait_node = NULL, resume_at = NULL, updated_at = ?
+    WHERE id = ?`,
+  /* Parking is its own statement because it is the only one that may set the two wait columns. */
+  parkGraphRun: `
+    UPDATE graph_runs
+    SET status = 'waiting', wait_node = ?, resume_at = ?, state = ?, updated_at = ?
+    WHERE id = ?`,
+  /* Uses ix_graph_runs_resume. Asked on a timer and once at boot; the boot sweep passes now. */
+  listDueGraphRuns: `
+    SELECT * FROM graph_runs
+    WHERE status = 'waiting' AND resume_at IS NOT NULL AND resume_at <= ?
+    ORDER BY resume_at LIMIT ?`,
+  deleteGraphRun: `DELETE FROM graph_runs WHERE id = ?`,
 } as const;
 
 // ---------------------------------------------------------------------------

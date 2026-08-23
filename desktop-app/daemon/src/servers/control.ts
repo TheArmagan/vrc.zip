@@ -9,6 +9,13 @@ import {
   type FeedEvent,
   type FriendPresence,
   type GameSession,
+  GRAPH_CONCURRENCY_MODES,
+  type Graph,
+  type GraphCreate,
+  type GraphDocument,
+  type GraphRunSummary,
+  type GraphSummary,
+  type GraphUpdate,
   type GroupGalleryImagePage,
   type GroupGalleryImageSummary,
   type GroupGallerySummary,
@@ -18,10 +25,13 @@ import {
   type GroupMemberSummary,
   type GroupPostPage,
   type GroupPostSummary,
+  isGraphConcurrency,
   isJsonObject,
   type JsonValue,
   type LoginInput,
   type LoginResult,
+  MAX_GRAPH_DESCRIPTION,
+  MAX_GRAPH_NAME,
   type PluginPanelFrame,
   type PluginToastFrame,
   type RateLimitSnapshot,
@@ -36,6 +46,7 @@ import {
   type StreamFrame,
   type TwoFactorMethod,
   type VerifyTwoFactorInput,
+  validateGraphDocument,
   type WebhookSummary,
   type WorldInstanceList,
 } from "@vrcz/shared";
@@ -1164,6 +1175,37 @@ export interface ControlDeps {
    * reinstall case and is opt-in for the same reason.
    */
   uninstallPlugin(pluginId: string, options?: { readonly keepData?: boolean }): Promise<void>;
+
+  /*
+   * Graphs (Phase 4). Session-token only, deliberately: graphs are a first-party feature and there
+   * is no `/app` scope for them (decision 206). An app can still *observe* runs, because those are
+   * `graph.*` events on the enriched stream, but it cannot rewrite the user's automations.
+   */
+
+  /** Every graph, newest edit first. Summaries — the document is only sent for one graph. */
+  listGraphs(): Promise<GraphSummary[]>;
+  /** Throws `ControlError(404, "unknown_graph")`. */
+  getGraph(graphId: string): Promise<Graph>;
+  createGraph(input: GraphCreate): Promise<Graph>;
+  /**
+   * Saves the editable half. Cannot touch either switch — enabling and arming are separate calls
+   * because they are separate gestures, and a canvas save that could arm a graph would make the
+   * hold-to-confirm decorative.
+   */
+  updateGraph(graphId: string, input: GraphUpdate): Promise<Graph>;
+  /** Idempotent; an unknown id is not an error. Takes its runs with it. */
+  deleteGraph(graphId: string): Promise<void>;
+  /** Switching on clears any `disabledReason` the daemon left behind when it switched off. */
+  setGraphEnabled(graphId: string, enabled: boolean): Promise<GraphSummary>;
+  /**
+   * Lifts or restores dry-run for a whole graph.
+   *
+   * The gesture behind this is a hold-to-confirm with the dry-run log beside it, never a timer —
+   * decision 109's posture for plugins, applied to graphs.
+   */
+  setGraphArmed(graphId: string, armed: boolean): Promise<GraphSummary>;
+  /** Runs that have not finished. A completed run is a `graph.*` event, not a row. */
+  listGraphRuns(graphId: string): Promise<GraphRunSummary[]>;
 
   /**
    * Every webhook registered on this daemon, newest first.
@@ -2500,6 +2542,74 @@ export function createControlApp({ port, deps, appApi, token }: ControlAppOption
       return c.body(null, 204);
     })
 
+    /*
+     * Graphs.
+     *
+     * The document is validated *here*, before it reaches the store, and again in the editor before
+     * it is sent — twice on purpose, because the frontend is a client and clients lie. What this
+     * layer cannot check is port types and whether a node type exists: both need the node registry,
+     * so `checkEdge` runs where the registry lives.
+     */
+    .get("/api/graphs", async (c) => c.json(await deps.listGraphs()))
+
+    .post("/api/graphs", async (c) => {
+      const body = await readJsonObject(c.req.raw);
+      if (body === undefined) throw new ControlError(400, "invalid_body", "expected a JSON object");
+      const name = stringField(body, "name");
+      if (name === undefined || name.length > MAX_GRAPH_NAME) {
+        throw new ControlError(
+          400,
+          "invalid_body",
+          `name must be 1 to ${String(MAX_GRAPH_NAME)} characters`,
+        );
+      }
+      return c.json(await deps.createGraph({ name, ...graphFields(body) }), 201);
+    })
+
+    .get("/api/graphs/:id", async (c) => c.json(await deps.getGraph(c.req.param("id"))))
+
+    .put("/api/graphs/:id", async (c) => {
+      const body = await readJsonObject(c.req.raw);
+      if (body === undefined) throw new ControlError(400, "invalid_body", "expected a JSON object");
+      const update: { -readonly [K in keyof GraphUpdate]: GraphUpdate[K] } = graphFields(body);
+      if (body.name !== undefined) {
+        const name = stringField(body, "name");
+        if (name === undefined || name.length > MAX_GRAPH_NAME) {
+          throw new ControlError(
+            400,
+            "invalid_body",
+            `name must be 1 to ${String(MAX_GRAPH_NAME)} characters`,
+          );
+        }
+        update.name = name;
+      }
+      return c.json(await deps.updateGraph(c.req.param("id"), update));
+    })
+
+    .delete("/api/graphs/:id", async (c) => {
+      await deps.deleteGraph(c.req.param("id"));
+      return c.body(null, 204);
+    })
+
+    .post("/api/graphs/:id/enable", async (c) =>
+      c.json(await deps.setGraphEnabled(c.req.param("id"), true)),
+    )
+
+    .post("/api/graphs/:id/disable", async (c) =>
+      c.json(await deps.setGraphEnabled(c.req.param("id"), false)),
+    )
+
+    .put("/api/graphs/:id/armed", async (c) => {
+      const body = await readJsonObject(c.req.raw);
+      const armed = body?.armed;
+      if (typeof armed !== "boolean") {
+        return c.json({ error: "invalid_body", detail: "armed must be true or false" }, 400);
+      }
+      return c.json(await deps.setGraphArmed(c.req.param("id"), armed));
+    })
+
+    .get("/api/graphs/:id/runs", async (c) => c.json(await deps.listGraphRuns(c.req.param("id"))))
+
     .get("/api/settings", async (c) => c.json(await deps.getSettings()))
 
     .put("/api/settings", async (c) => {
@@ -2629,6 +2739,66 @@ function narrowingList(
 function stringField(body: Record<string, JsonValue> | undefined, key: string): string | undefined {
   const value = body?.[key];
   return typeof value === "string" && value !== "" ? value : undefined;
+}
+
+/**
+ * The fields create and update share, each one absent unless the caller sent it.
+ *
+ * Absent means "leave it alone" and is not the same as a value, which is why every field is spread
+ * in rather than defaulted here — a save that omits `definition` is the enable button doing its job,
+ * not an empty canvas.
+ *
+ * `accountId` is the one field where `null` is meaningful: it clears the acting account.
+ */
+function graphFields(body: Record<string, JsonValue>): GraphUpdate {
+  const out: { -readonly [K in keyof GraphUpdate]: GraphUpdate[K] } = {};
+
+  if (body.description !== undefined) {
+    const description = body.description;
+    if (typeof description !== "string" || description.length > MAX_GRAPH_DESCRIPTION) {
+      throw new ControlError(
+        400,
+        "invalid_body",
+        `description must be a string of at most ${String(MAX_GRAPH_DESCRIPTION)} characters`,
+      );
+    }
+    out.description = description;
+  }
+
+  if (body.concurrency !== undefined) {
+    if (!isGraphConcurrency(body.concurrency)) {
+      throw new ControlError(
+        400,
+        "invalid_body",
+        `concurrency must be one of ${GRAPH_CONCURRENCY_MODES.join(", ")}`,
+      );
+    }
+    out.concurrency = body.concurrency;
+  }
+
+  if (body.accountId !== undefined) {
+    const accountId = body.accountId;
+    if (accountId !== null && typeof accountId !== "string") {
+      throw new ControlError(400, "invalid_body", "accountId must be an account id or null");
+    }
+    out.accountId = accountId === "" ? null : accountId;
+  }
+
+  if (body.definition !== undefined) {
+    const result = validateGraphDocument(body.definition);
+    if (!result.ok) {
+      // Every issue, not the first: a canvas that reports one broken edge per save is a canvas
+      // nobody finishes fixing. `detail` carries the paths so the editor can mark them.
+      throw new ControlError(
+        400,
+        "invalid_graph",
+        result.issues.map((issue) => `${issue.path}: ${issue.message}`).join("; "),
+      );
+    }
+    out.definition = body.definition as unknown as GraphDocument;
+  }
+
+  return out;
 }
 
 function isTwoFactorMethod(value: string | undefined): value is TwoFactorMethod {

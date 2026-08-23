@@ -35,6 +35,36 @@ export async function openUrl(
 }
 
 /**
+ * Opens a public https URL, for the handful of links that are deliberately *not* ours.
+ *
+ * Separate from {@link openUrl} rather than a flag on it, and the split is the point. `openUrl`
+ * carries a session token, so its loopback check is a security guard and must not grow an escape
+ * hatch — the first caller who passes `allowExternal: true` by mistake is leaking the token to
+ * whatever host the string names. This function can never see the token: it takes a hard-coded
+ * link (the repository, and whatever joins it later), and it refuses anything that is not https,
+ * so `file://` and every other scheme stay out of reach.
+ *
+ * Best-effort in the same way, and for the same reasons.
+ */
+export async function openExternalUrl(
+  url: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<boolean> {
+  if (!isPublicHttpsUrl(url)) return false;
+
+  const argv = openerArgv(url, platform);
+  if (argv === null) return false;
+
+  try {
+    const child = Bun.spawn(argv, { stdout: "ignore", stderr: "ignore", stdin: "ignore" });
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Whether to open a browser at startup: `--open` / `--no-open` if either is given, otherwise only a
  * packaged build does.
  *
@@ -82,4 +112,20 @@ export function isLoopbackHttpUrl(url: string): boolean {
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
   return ["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname);
+}
+
+/**
+ * True for an https URL with a hostname, which is all {@link openExternalUrl} will open.
+ *
+ * https only: the links this opens are ours and are all https, and permitting `http:` would buy
+ * nothing except a scheme that can be intercepted.
+ */
+export function isPublicHttpsUrl(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  return parsed.protocol === "https:" && parsed.hostname !== "";
 }

@@ -95,7 +95,12 @@ export {
   type Scope,
   type ScopeDefinition,
 } from "./scopes.ts";
-export { APP_NAME, APP_VERSION, PLUGIN_API_PROTOCOL_MAJOR } from "./version.ts";
+export {
+  APP_NAME,
+  APP_VERSION,
+  PLUGIN_API_PROTOCOL_MAJOR,
+  REPOSITORY_URL,
+} from "./version.ts";
 export {
   AVATAR_ID_PATTERN,
   FILE_ID_PATTERN,

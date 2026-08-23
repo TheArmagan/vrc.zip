@@ -9,6 +9,15 @@ export const APP_NAME = "vrc.zip";
 export const APP_VERSION = "0.1.0";
 
 /**
+ * Where the project lives.
+ *
+ * Here rather than typed out at the two places that open it, because one of them is a menu item in
+ * the notification area and the other is the README's own link: a repository that moves and takes
+ * one of them with it is the kind of drift nothing would catch.
+ */
+export const REPOSITORY_URL = "https://github.com/TheArmagan/vrc.zip";
+
+/**
  * Protocol major for the plugin API. Plugins declare `engines.pluginApi` against *this*, not
  * against `APP_VERSION` — the app and the plugin protocol version independently, and conflating
  * them would force a plugin-ecosystem break on every app release.

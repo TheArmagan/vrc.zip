@@ -4124,6 +4124,20 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      Along with it: no em-dashes in anything a reader sees. Captions, page copy and the README are
      rewritten without them; comments keep theirs, because a comment is not user-facing text.
 
+235. **Opening a public link is a second function, not a flag on `openUrl`.** `openUrl` refuses
+     anything that is not loopback http, and that check is a security guard: the URL it is normally
+     handed carries the session token, so the predicate is the thing standing between the token and
+     a remote page. The tray's "Open on GitHub" went through it and was a menu item that silently
+     did nothing. The tempting fix is an `allowExternal` option, and it is the wrong one — the first
+     caller who passes it by mistake leaks the token to whatever host the string names. So there is
+     `openExternalUrl` instead, https only, called with a hard-coded link and never with anything
+     that has a token in it, and the tray takes the two openers as two separate injected functions
+     so the distinction survives at the call site rather than living in a boolean.
+
+     `startTray` also gained a real `WNDPROC` in the same pass, reversing the design note the file
+     opened with. That one is in §Gotchas, because it was reality contradicting an assumption rather
+     than a call made in advance.
+
 ---
 
 ## Gotchas
@@ -4131,6 +4145,40 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **A tray icon cannot be driven from `PeekMessageW` alone; the shell's clicks are *sent*, not
+  posted.** `daemon/src/os/tray.ts` was written to avoid handing Windows a function pointer into
+  JavaScript: the window class registered `DefWindowProcW` as its own procedure, and the pump read
+  the thread queue with `PeekMessageW` and recognised `WM_TRAY` there. The icon drew perfectly,
+  correct artwork and tooltip, `NIM_ADD` and `NIM_MODIFY` both reporting success, and no click of any
+  kind ever arrived. The distinction that explains it: `PeekMessageW` returns *posted* messages,
+  which sit in the queue, and a *sent* message is never queued at all — the retrieval call delivers
+  it by invoking the target window's procedure directly. The shell's tray callbacks are sent, and so
+  is the `WM_CONTEXTMENU` that `NOTIFYICON_VERSION_4` uses for a right-click. So every click went
+  into `DefWindowProcW` and was discarded, while `PostMessageW`-ing `WM_TRAY` at our own window by
+  hand ran the menu fine, which is what made it read as a delivery problem in the shell. Two false
+  leads were chased first and are worth naming, because both are real fixes for *other* versions of
+  this failure and neither was the cause here: `NIM_SETVERSION` (an icon left on the 1996 contract),
+  and `ChangeWindowMessageFilterEx` (UIPI silently dropping a posted message from medium-integrity
+  explorer to an elevated daemon). Both are still in the file, both are correct, and neither moved
+  the needle. The fix is what Electron does — `NotifyIconHost` registers a real `WndProcStatic` — so
+  there is a `JSCallback` now. The original worry about it is answered by keeping the procedure
+  trivial rather than by not having one: it turns a notification into a `PostMessageW` at our own
+  window and returns, so the menu, the modal `TrackPopupMenu` and the shutdown all still happen on
+  our own stack, and Windows only ever calls into JavaScript from inside our own `PeekMessageW` on
+  our own thread. `tray.test.ts` now covers it with a cross-process `SendNotifyMessageW`, which is
+  the only shape of test that could have caught this: anything that posts passes against the broken
+  version.
+
+  Two more fell out of it the moment clicks started arriving, both worth writing down. **A version 4
+  icon delivers the raw mouse message *as well as* the `NIN_*` notification for the same click**, so
+  a pump that accepted both spellings opened the launch URL twice per click. Accepting both looked
+  like tolerance and was a bug; the pump now records whether `NIM_SETVERSION` actually succeeded and
+  listens to that contract only. And **"Open on GitHub" did nothing, because it went through
+  `openUrl`, whose loopback check is a security guard rather than a restriction to route around** —
+  it is normally handed a URL with a session token in it. That is the guard working correctly, and
+  the answer is a second function (`openExternalUrl`, https only) that never sees a token, not a
+  flag on the first one.
 
 - **`DELETE /api/plugins/:id` answers 500 after it has already succeeded.** Observed on Windows on
   2026-08-23 while uninstalling the two example plugins: both calls returned

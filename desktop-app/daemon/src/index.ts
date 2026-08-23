@@ -1,4 +1,4 @@
-import { APP_NAME, APP_VERSION } from "@vrcz/shared";
+import { APP_NAME, APP_VERSION, REPOSITORY_URL } from "@vrcz/shared";
 import { startDaemon } from "./app.ts";
 import {
   attention,
@@ -16,7 +16,8 @@ import {
   onConsoleKey,
   setConsoleTitle,
 } from "./os/console.ts";
-import { openUrl, shouldOpenBrowser } from "./os/open-url.ts";
+import { openExternalUrl, openUrl, shouldOpenBrowser } from "./os/open-url.ts";
+import { startTray } from "./os/tray.ts";
 import { isPackaged } from "./servers/embedded-ui.ts";
 import { needsFirstRun } from "./settings.ts";
 
@@ -193,6 +194,40 @@ async function main(): Promise<void> {
   // paths, and whichever of us runs last is what the user reads on the title bar.
   setConsoleTitle(`${APP_NAME} ${APP_VERSION}`);
 
+  /*
+   * The notification-area icon.
+   *
+   * It exists for the same person the `O` and `F` keys exist for: somebody who double-clicked the
+   * executable and has one console window standing between them and a running daemon. From the tray
+   * they can open the app, put that window away, and get it back — which is what makes hiding it
+   * safe to offer at all.
+   *
+   * `ownsConsole` is the whole reason `claimConsole`'s answer is threaded down here. A daemon that
+   * inherited a developer's terminal must not offer to hide it, and the tray builds no Hide item
+   * when the window is not ours.
+   */
+  const tray = startTray({
+    title: `${APP_NAME} ${APP_VERSION}`,
+    launchUrl: daemon.launchUrl,
+    githubUrl: REPOSITORY_URL,
+    ownsConsole: console_ !== null,
+    open: (url) => {
+      void openUrl(url);
+    },
+    // A second opener, not the same one: `openUrl` refuses anything off loopback because the URL it
+    // is normally handed carries a session token, and "Open on GitHub" going through it is a menu
+    // item that quietly does nothing.
+    openExternal: (url) => {
+      void openExternalUrl(url);
+    },
+    // Routed through the same shutdown path a signal takes, rather than `process.exit`: the exit
+    // has to flush queued feed rows and close SQLite, and "quit from the tray" is not a reason to
+    // skip that.
+    onExit: () => {
+      shutdown("tray exit");
+    },
+  });
+
   let stopping = false;
   const shutdown = (signal: string): void => {
     // A second Ctrl-C during shutdown should not start a second one; the flush is not reentrant.
@@ -200,6 +235,7 @@ async function main(): Promise<void> {
     stopping = true;
 
     stopKeys?.();
+    tray?.stop();
     console.log(`\n${APP_NAME}: ${signal} received, shutting down...`);
     daemon
       .stop()

@@ -40,6 +40,7 @@ import {
   type Node,
   type OnConnectEnd,
   SvelteFlow,
+  type Viewport,
 } from "@xyflow/svelte";
 import "@xyflow/svelte/dist/style.css";
 import {
@@ -51,10 +52,11 @@ import {
 } from "$lib/api.ts";
 import ErrorNote from "$lib/components/ErrorNote.svelte";
 import CanvasMenu, { type MenuItem } from "$lib/components/graphs/CanvasMenu.svelte";
-import ConnectionPicker, {
-  type PickerChoice,
-} from "$lib/components/graphs/ConnectionPicker.svelte";
 import GraphNodeCard from "$lib/components/graphs/GraphNodeCard.svelte";
+import NodePicker, {
+  type PickerChoice,
+  type PickerSource,
+} from "$lib/components/graphs/NodePicker.svelte";
 import RelativeTime from "$lib/components/RelativeTime.svelte";
 import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
@@ -78,6 +80,10 @@ let selectedId = $state<string | null>(null);
 let secretDraft = $state<Record<string, string>>({});
 /** What is typed in the palette's search box. */
 let paletteQuery = $state("");
+/** Which palette row the arrows are on, counted across every open group. */
+let paletteActive = $state(0);
+/** The rendered palette rows, so the highlighted one can be scrolled back into view. */
+let paletteRows = $state.raw<(HTMLButtonElement | null)[]>([]);
 /**
  * Palette groups the user has collapsed, and the ones that start that way.
  *
@@ -94,22 +100,27 @@ let running = $state(false);
 let menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
 
 /**
- * A wire let go over empty canvas.
+ * The node picker: a wire let go over empty canvas, or a double-click on it.
  *
- * `at` is in **flow** coordinates and `screen` is in the browser's, because the two are answering
- * different questions: the node is created where the wire ended on the canvas, and the picker is
- * drawn where the pointer is on the screen. Conflating them puts the menu in the wrong place at any
- * zoom but 1.
+ * `at` is in **flow** coordinates and `screenX`/`screenY` are in the browser's, because the two
+ * answer different questions: the node is created where the gesture landed on the canvas, and the
+ * picker is drawn where the pointer is on the screen. Conflating them puts the menu in the wrong
+ * place at any zoom but 1.
+ *
+ * `wire` is null for the double-click case — there is nothing attached, so the whole palette is
+ * offered and picking one only creates a node.
  */
 let picking = $state<{
   screenX: number;
   screenY: number;
   at: { x: number; y: number };
-  nodeId: string;
-  portId: string;
-  portType: string;
-  side: "source" | "target";
+  wire: (PickerSource & { nodeId: string; portId: string }) | null;
 } | null>(null);
+
+/** The canvas element, so a double-click can be told from one on a node. */
+let canvas = $state<HTMLDivElement | null>(null);
+/** Bound so a double-click can be turned into a flow position without the flow's own context. */
+let viewport = $state.raw<Viewport>({ x: 0, y: 0, zoom: 1 });
 
 function startsClosed(group: string): boolean {
   // A plugin's own groups start **open**: somebody who installed a plugin for its nodes should see
@@ -169,6 +180,62 @@ const palette = $derived.by(() => {
     }))
     .filter((group) => group.types.length > 0);
 });
+
+/**
+ * The palette flattened to what is actually on screen, in the order it is drawn.
+ *
+ * The arrows walk *this*, not `palette` — a row inside a collapsed group is not something you can
+ * arrow onto, and counting it would make the highlight skip invisibly past a dozen entries whenever
+ * an API group happened to be shut.
+ */
+const paletteWalk = $derived.by(() => {
+  const walk: { qualifiedId: string; definition: NodeDefinition }[] = [];
+  for (const group of palette) {
+    if (!searching && isCollapsed(group.owner)) continue;
+    for (const type of group.types) {
+      walk.push({ qualifiedId: type.qualifiedId, definition: type.definition });
+    }
+  }
+  return walk;
+});
+
+/** Back to the top whenever the list changes underneath, so Enter never adds a stale row. */
+$effect(() => {
+  void paletteQuery;
+  paletteActive = 0;
+});
+
+$effect(() => {
+  paletteRows[paletteActive]?.scrollIntoView({ block: "nearest" });
+});
+
+/**
+ * Arrow through the palette from its search box, Enter to add.
+ *
+ * Focus stays in the box the whole way, so the arrows move a highlight rather than the focus ring —
+ * moving focus into a list of four hundred buttons would take the caret out of a search somebody is
+ * still typing. Escape clears the query rather than blurring: the box is the only thing between the
+ * user and a palette they were reading.
+ */
+function onPaletteKey(event: KeyboardEvent): void {
+  if (event.key === "Escape") {
+    paletteQuery = "";
+    return;
+  }
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    const count = paletteWalk.length;
+    if (count === 0) return;
+    const step = event.key === "ArrowDown" ? 1 : -1;
+    paletteActive = (paletteActive + step + count) % count;
+    return;
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    const row = paletteWalk[paletteActive];
+    if (row !== undefined) void addNode(row.qualifiedId, row.definition);
+  }
+}
 
 const selected = $derived(nodes.find((node) => node.id === selectedId) ?? null);
 const selectedDefinition = $derived(definitionOf(selected));
@@ -308,33 +375,53 @@ const onconnectend: OnConnectEnd = (event, state) => {
     screenX: pointer.clientX,
     screenY: pointer.clientY,
     at: state.to ?? { x: 0, y: 0 },
-    nodeId,
-    portId,
-    portType: type,
-    side,
+    wire: { nodeId, portId, portType: type, side },
   };
 };
 
-/** Creates the chosen node where the wire was dropped, and wires it up in the same gesture. */
+/**
+ * Double-clicking empty canvas offers the palette there.
+ *
+ * A native listener on the wrapper rather than a Svelte Flow prop, because there is no pane
+ * double-click event — and the target check is what keeps it to *empty* canvas: a double-click on a
+ * node is somebody selecting a word in its title, and on an input it is somebody editing.
+ *
+ * `zoomOnDoubleClick` is switched off for this. Two things on one gesture is one thing too many,
+ * and the zoom is the one nobody was reaching for: the wheel and the controls both already do it.
+ */
+function onCanvasDoubleClick(event: MouseEvent): void {
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  // The pane is the element Svelte Flow puts under everything drawn on the canvas.
+  if (target.closest(".svelte-flow__pane") === null) return;
+  const box = canvas?.getBoundingClientRect();
+  if (box === undefined) return;
+  picking = {
+    screenX: event.clientX,
+    screenY: event.clientY,
+    // Screen to flow by hand: `useSvelteFlow()` needs the flow's own context, which this component
+    // is the parent of rather than inside. One subtraction and a divide is cheaper than wrapping
+    // the whole editor in a provider to reach a helper.
+    at: {
+      x: (event.clientX - box.left - viewport.x) / viewport.zoom,
+      y: (event.clientY - box.top - viewport.y) / viewport.zoom,
+    },
+    wire: null,
+  };
+}
+
+/** Creates the chosen node where the gesture landed, and wires it up when a wire was attached. */
 function pick(choice: PickerChoice): void {
   const request = picking;
   picking = null;
   if (request === null) return;
   const id = addNode(choice.qualifiedId, choice.definition, request.at);
+  const wire = request.wire;
+  if (wire === null || choice.portId === null) return;
   onconnect(
-    request.side === "source"
-      ? {
-          source: request.nodeId,
-          sourceHandle: request.portId,
-          target: id,
-          targetHandle: choice.portId,
-        }
-      : {
-          source: id,
-          sourceHandle: choice.portId,
-          target: request.nodeId,
-          targetHandle: request.portId,
-        },
+    wire.side === "source"
+      ? { source: wire.nodeId, sourceHandle: wire.portId, target: id, targetHandle: choice.portId }
+      : { source: id, sourceHandle: choice.portId, target: wire.nodeId, targetHandle: wire.portId },
   );
 }
 
@@ -385,6 +472,22 @@ function removeSelected(): void {
 function removeEdge(id: string): void {
   edges = edges.filter((edge) => edge.id !== id);
   dirty = true;
+}
+
+/**
+ * Delete removes whatever is selected, and Svelte Flow has already done the removing by the time
+ * this runs — the bound `nodes` and `edges` are the new ones. What is left is the bookkeeping only
+ * this component knows about: the document is now different from what is on disk, and the inspector
+ * may be pointing at something that no longer exists.
+ *
+ * **Delete, not Backspace.** Backspace is the default and it is the wrong default here: the
+ * inspector is a column of text fields, and a Backspace that escaped one would delete the node
+ * being configured. Svelte Flow does guard against input elements, but the safe key is the one
+ * nobody types into a field by accident.
+ */
+function ondelete({ nodes: gone }: { nodes: Node[] }): void {
+  dirty = true;
+  if (selectedId !== null && gone.some((node) => node.id === selectedId)) selectedId = null;
 }
 
 /** What a node's context menu offers. The definition is only needed for the label. */
@@ -559,16 +662,15 @@ async function saveSecret(fieldId: string): Promise<void> {
           bind:value={paletteQuery}
           placeholder="Search nodes"
           aria-label="Search nodes"
-          onkeydown={(event: KeyboardEvent) => {
-            // Escape clears rather than blurs: the box is the only thing between the user and a
-            // palette they were reading, and clearing it puts that back in one key.
-            if (event.key === "Escape") paletteQuery = "";
-          }}
+          onkeydown={onPaletteKey}
         />
       </div>
       <div class="flex-1 overflow-y-auto p-2">
       {#each palette as group (group.owner)}
         {@const shut = searching ? false : isCollapsed(group.owner)}
+        <!-- Where this group's first row sits in `paletteWalk`. A lookup rather than a counter,
+             because an `{#each}` body cannot carry state between iterations. -->
+        {@const offset = shut ? -1 : paletteWalk.findIndex((row) => row.qualifiedId === group.types[0]?.qualifiedId)}
         <div class="mb-2">
           <!--
             A group header is a button, and searching forces every group open: a hit inside a
@@ -584,11 +686,17 @@ async function saveSecret(fieldId: string): Promise<void> {
             <span class="ml-auto tabular-nums opacity-60">{group.types.length}</span>
           </button>
           {#if !shut}
-            {#each group.types as type (type.qualifiedId)}
+            {#each group.types as type, index (type.qualifiedId)}
+              {@const position = offset + index}
               <button
-                class="w-full rounded px-2 py-1 pl-6 text-left text-sm hover:bg-accent"
+                bind:this={paletteRows[position]}
+                class="w-full rounded px-2 py-1 pl-6 text-left text-sm hover:bg-accent {position ===
+                paletteActive
+                  ? 'bg-accent'
+                  : ''}"
                 title={type.definition.description ?? type.qualifiedId}
                 onclick={() => void addNode(type.qualifiedId, type.definition)}
+                onmouseenter={() => (paletteActive = position)}
               >
                 {type.definition.title}
               </button>
@@ -607,10 +715,13 @@ async function saveSecret(fieldId: string): Promise<void> {
       `colorMode` is not decoration: Svelte Flow ships its own light and dark palettes, and without
       it the controls and the selection ring render white on a dark canvas.
     -->
-    <div class="min-w-0 flex-1">
+    <!-- svelte-ignore a11y_no_static_element_interactions -- the double-click is a shortcut for
+         something the palette on the left already does with a keyboard and a click. -->
+    <div class="min-w-0 flex-1" bind:this={canvas} ondblclick={onCanvasDoubleClick}>
       <SvelteFlow
         bind:nodes
         bind:edges
+        bind:viewport
         {nodeTypes}
         {isValidConnection}
         {onconnect}
@@ -636,6 +747,9 @@ async function saveSecret(fieldId: string): Promise<void> {
         colorMode={theme.current}
         fitView
         fitViewOptions={FIT_VIEW}
+        zoomOnDoubleClick={false}
+        deleteKey={["Delete"]}
+        {ondelete}
       >
         <Background />
         <Controls />
@@ -644,11 +758,10 @@ async function saveSecret(fieldId: string): Promise<void> {
         <CanvasMenu x={menu.x} y={menu.y} items={menu.items} onclose={() => (menu = null)} />
       {/if}
       {#if picking !== null}
-        <ConnectionPicker
+        <NodePicker
           x={picking.screenX}
           y={picking.screenY}
-          portType={picking.portType}
-          side={picking.side}
+          from={picking.wire}
           onpick={pick}
           onclose={() => (picking = null)}
         />

@@ -3933,6 +3933,58 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      one removes what *every* graph and plugin naming it was reading, not just the one on screen.
      Removing a single entry is still a click, because that is one row you are looking at.
 
+225. **Delete deletes, double-click adds, and the double-click no longer zooms.** Three small
+     gestures, one of which fixed a collision the other two would have made worse.
+
+     **`Delete`, not `Backspace`.** Svelte Flow's default delete key is Backspace, and that is the
+     wrong default in this editor: the inspector is a column of text fields, and a Backspace that
+     escaped one would delete the node being configured. Svelte Flow does guard against events from
+     input elements — verified by holding a config field and pressing the key three times, which
+     edited the field and left the node alone — but the safe key is the one nobody types into a
+     field by accident, so `deleteKey` names only `Delete`. `ondelete` does the bookkeeping the
+     library cannot know about: the document is now different from disk, and the inspector may be
+     pointing at something that no longer exists.
+
+     **Double-clicking empty canvas offers the palette there**, which makes the drop-a-wire picker
+     and the add-a-node picker the same component with one prop between them: `from` set means a
+     wire is attached and only compatible ports are offered; `from` null means the whole palette and
+     nothing to connect. Everything else — the search, the clamp into the viewport, the backdrop, the
+     ordering — is identical, and two copies of that is two places for the keyboard handling to
+     drift. `ConnectionPicker.svelte` became `NodePicker.svelte` because it is no longer only about
+     connections.
+
+     A native `dblclick` on the wrapper rather than a Svelte Flow prop, because there is no pane
+     double-click event; the target is checked against `.svelte-flow__pane` so a double-click on a
+     node stays a double-click on a node. Screen-to-flow is done by hand off a bound `viewport`,
+     since `useSvelteFlow()` needs the flow's own context and this component is the flow's *parent* —
+     one subtraction and a divide beats wrapping the editor in a provider to reach a helper.
+
+     **`zoomOnDoubleClick` is off.** Two things on one gesture is one thing too many, and the zoom is
+     the one nobody was reaching for — the wheel and the on-canvas controls both already do it.
+
+     **`autofocus` did not take, in either picker.** Both gestures that open one are pointer
+     gestures, and the browser had just moved focus as part of the drag or the double-click, so the
+     attribute lost the race; the box is focused explicitly in an effect instead. Found by typing
+     into a picker that had just opened and watching the characters go nowhere.
+
+226. **Type, arrow, Enter — in the picker and in the palette, and the focus never leaves the box.**
+     Both lists are now reachable without a pointer, and the interesting decision is that the arrows
+     move a **highlight** rather than the focus ring. Moving focus into the list is the obvious
+     implementation and it is wrong here: it takes the caret out of a search somebody is still
+     typing, and in the palette it would put focus into one of four hundred buttons with no way back
+     but Shift+Tab. So the keydown handler lives on the input, `preventDefault` stops the caret
+     jumping to the ends of the query, and the row is highlighted rather than focused.
+
+     **The palette's arrows walk what is on screen, not what exists.** A row inside a collapsed group
+     is not something you can arrow onto, so `paletteWalk` is the flattened *visible* list — counting
+     hidden rows would make the highlight skip invisibly past a dozen entries whenever an API group
+     happened to be shut. Each row finds its own position from that list rather than a running
+     counter, because an `{#each}` body cannot carry state between iterations.
+
+     The highlight resets to the first row whenever the query changes, so Enter can never take a
+     stale row from the list that was there two keystrokes ago; hovering moves it, so the pointer and
+     the keyboard do not disagree about what Enter would do.
+
 ---
 
 ## Gotchas

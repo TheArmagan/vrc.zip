@@ -62,6 +62,7 @@ import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
 import { Input } from "$lib/components/ui/input/index.js";
 import { hrefFor } from "$lib/router.ts";
+import { app } from "$lib/state/app.svelte.ts";
 import { graphs } from "$lib/state/graphs.svelte.ts";
 import { theme } from "$lib/state/theme.svelte.ts";
 
@@ -836,6 +837,34 @@ async function saveSecret(fieldId: string): Promise<void> {
                 onchange={(event: Event) =>
                   setConfig(field.id, (event.currentTarget as HTMLInputElement).checked)}
               />
+            {:else if field.kind === "account"}
+              <!--
+                A picker rather than a text box, because nobody types an account id. The blank
+                option is the default and it means "the graph's own account", which is what almost
+                every node wants — so it stays selectable even when accounts exist.
+
+                An account the daemon no longer manages still shows its stored id rather than
+                silently resetting to blank: quietly re-pointing a node at a different account is
+                the one outcome worth avoiding here. The daemon checks the id again at run time.
+              -->
+              {@const stored = String(
+                (selected.data as { config: Record<string, unknown> }).config[field.id] ?? "",
+              )}
+              <select
+                id={`cfg-${field.id}`}
+                class="rounded border border-input bg-background px-2 py-1 text-sm"
+                value={stored}
+                onchange={(event: Event) =>
+                  setConfig(field.id, (event.currentTarget as HTMLSelectElement).value)}
+              >
+                <option value="">The graph's account</option>
+                {#each app.accounts as account (account.id)}
+                  <option value={account.id}>{account.displayName}</option>
+                {/each}
+                {#if stored !== "" && !app.accounts.some((account) => account.id === stored)}
+                  <option value={stored}>{stored} (not signed in)</option>
+                {/if}
+              </select>
             {:else if field.kind === "select"}
               <select
                 id={`cfg-${field.id}`}

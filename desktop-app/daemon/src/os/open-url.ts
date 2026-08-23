@@ -129,3 +129,65 @@ export function isPublicHttpsUrl(url: string): boolean {
   }
   return parsed.protocol === "https:" && parsed.hostname !== "";
 }
+
+/* -------------------------------------------------------------------------------------------- */
+/* VRChat's own scheme                                                                            */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * The `vrchat://` deep link for an instance, or null if the location is not one.
+ *
+ * **`attach=1` is why this is worth having.** Without it the handler starts a *second* client, and
+ * two clients on one account fight over it — which is why the UI has always preferred a self-invite
+ * whenever a client was already running. With it, the running client brings the instance page up
+ * instead, and the user presses join. That makes the deep link safe in the case it was previously
+ * wrong in, so it is the default everywhere.
+ *
+ * The location is validated rather than interpolated: `wrld_…:12345~region(eu)` and nothing else.
+ * This string reaches a shell-less spawn as one argument, but it also reaches the *operating
+ * system's* protocol handler, which is somebody else's parser, and handing that a caller-chosen
+ * string is how a URL becomes an argument injection.
+ */
+export function vrchatLaunchUrl(location: string, attach = true): string | null {
+  const colon = location.indexOf(":");
+  if (colon <= 0 || colon === location.length - 1) return null;
+  const worldId = location.slice(0, colon);
+  const instanceId = location.slice(colon + 1);
+  // `wrld_` plus a UUID, and an instance id whose tags VRChat writes with `~()-_` and letters. A
+  // location with anything else in it did not come from VRChat.
+  if (!/^wrld_[0-9a-fA-F-]{36}$/.test(worldId)) return null;
+  if (!/^[0-9A-Za-z~()._-]+$/.test(instanceId)) return null;
+  return `vrchat://launch?ref=vrc.zip&id=${encodeURIComponent(location)}${attach ? "&attach=1" : ""}`;
+}
+
+/**
+ * Opens an instance in the VRChat client on this machine.
+ *
+ * The third opener rather than a flag on either of the others, and the reason is the same one that
+ * split those two: `openUrl` carries a session token and its loopback check is a security guard,
+ * `openExternalUrl` takes hard-coded https links. This one takes a *location* — never a URL — and
+ * builds the link itself, so there is no caller-chosen string reaching the protocol handler.
+ *
+ * Best-effort like the others: a machine with no VRChat installed, or a Linux box with no handler
+ * registered for the scheme, are both normal, and neither is a reason to fail a graph run. The
+ * boolean says the opener was launched, never that VRChat did anything with it.
+ */
+export async function openVrchatLaunch(
+  location: string,
+  attach = true,
+  platform: NodeJS.Platform = process.platform,
+): Promise<boolean> {
+  const url = vrchatLaunchUrl(location, attach);
+  if (url === null) return false;
+
+  const argv = openerArgv(url, platform);
+  if (argv === null) return false;
+
+  try {
+    const child = Bun.spawn(argv, { stdout: "ignore", stderr: "ignore", stdin: "ignore" });
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}

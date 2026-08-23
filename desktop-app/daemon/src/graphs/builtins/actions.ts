@@ -29,6 +29,7 @@ import { APP_NAME, APP_VERSION } from "@vrcz/shared";
 import type { EventBus } from "../../bus/event-bus.ts";
 import { validateWebhookUrl } from "../../webhooks/url.ts";
 import type { ExecuteContext } from "../types.ts";
+import { ME_CATEGORY } from "./me.ts";
 import { encodeOscMessage, sendUdp } from "./osc.ts";
 import type { BuiltinNode } from "./types.ts";
 
@@ -379,7 +380,7 @@ const INVITE: NodeDefinition = {
   outputs: [{ id: "sent", label: "Sent", type: "boolean" }],
   config: [
     {
-      kind: "text",
+      kind: "account",
       id: "accountId",
       label: "Act as",
       description: "Leave blank to use the graph's account.",
@@ -399,7 +400,7 @@ const REQUEST_INVITE: NodeDefinition = {
   category: "VRChat",
   inputs: [{ id: "user", label: "From", type: "user", required: true }],
   outputs: [{ id: "sent", label: "Sent", type: "boolean" }],
-  config: [{ kind: "text", id: "accountId", label: "Act as" }],
+  config: [{ kind: "account", id: "accountId", label: "Act as" }],
   body: [
     { kind: "literal", text: "ask " },
     { kind: "port", port: "user" },
@@ -414,7 +415,7 @@ const BOOP: NodeDefinition = {
   category: "VRChat",
   inputs: [{ id: "user", label: "Who", type: "user", required: true }],
   outputs: [{ id: "sent", label: "Sent", type: "boolean" }],
-  config: [{ kind: "text", id: "accountId", label: "Act as" }],
+  config: [{ kind: "account", id: "accountId", label: "Act as" }],
   body: [
     { kind: "literal", text: "boop " },
     { kind: "port", port: "user" },
@@ -425,11 +426,14 @@ const WEAR_AVATAR: NodeDefinition = {
   id: "wear-avatar",
   kind: "action",
   title: "Wear an avatar",
-  description: "Switches the account's avatar. The one VRChat action that acts on you.",
-  category: "VRChat",
+  description: "Switches the account's avatar.",
+  // Under **Me** rather than VRChat: the category means "acts on you", and this is the one action
+  // in this file that does. It used to say so in its own description instead, which was the same
+  // observation with nowhere to put it. See `me.ts`.
+  category: ME_CATEGORY,
   inputs: [{ id: "avatar", label: "Avatar", type: "avatar", required: true }],
   outputs: [{ id: "worn", label: "Worn", type: "boolean" }],
-  config: [{ kind: "text", id: "accountId", label: "Act as" }],
+  config: [{ kind: "account", id: "accountId", label: "Act as" }],
   body: [
     { kind: "literal", text: "wear " },
     { kind: "port", port: "avatar" },

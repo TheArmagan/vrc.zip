@@ -23,6 +23,7 @@
 
 import type { NodeDefinition, PortValues } from "@vrcz/plugin-api/nodes";
 import type { ExecuteContext } from "../types.ts";
+import { ME_CATEGORY } from "./me.ts";
 import type { BuiltinNode } from "./types.ts";
 
 /**
@@ -175,7 +176,10 @@ const FRIENDS: NodeDefinition = {
   kind: "action",
   title: "My friends",
   description: "Everyone this account is friends with, as vrc.zip already knows them.",
-  category: "VRChat",
+  // **Me**, like the other two nodes here whose subject is the user rather than an id they were
+  // handed. Both take no input for exactly that reason: there is nothing to name, because the
+  // answer is about you. See `me.ts`.
+  category: ME_CATEGORY,
   inputs: [],
   outputs: [
     { id: "friends", label: "Friends", type: "list<friend>" },
@@ -190,7 +194,7 @@ const INSTANCE_PLAYERS: NodeDefinition = {
   kind: "action",
   title: "Who is here",
   description: "The people in your instance right now, from the running game client's log.",
-  category: "VRChat",
+  category: ME_CATEGORY,
   inputs: [],
   outputs: [
     { id: "names", label: "Names", type: "list<string>" },

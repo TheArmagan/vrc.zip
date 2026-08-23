@@ -259,6 +259,25 @@ export type NodeConfigField =
       readonly label: string;
       readonly description?: string;
       readonly required?: boolean;
+    }
+  | {
+      /**
+       * Which of the user's accounts a node acts as. Stores an account id; blank means the graph's
+       * own account, which is what almost every node wants and why this is never `required`.
+       *
+       * The editor renders it as a picker over the signed-in accounts rather than a text box, and
+       * that is the whole reason it is a kind of its own: an account id is not something anybody
+       * types, and multi-account is this project's default posture rather than an advanced mode.
+       *
+       * **It is a picker, not a grant.** The stored value is checked against the accounts the
+       * daemon actually manages at execute time, so a graph naming an account that has since been
+       * removed fails with a sentence instead of silently acting as somebody else.
+       */
+      readonly kind: "account";
+      readonly id: string;
+      readonly label: string;
+      readonly description?: string;
+      readonly required?: boolean;
     };
 
 /** A configured instance's values, keyed by field id. Integer unix-ms for `duration` fields. */
@@ -501,6 +520,7 @@ const CONFIG_KINDS = [
   "duration",
   "user",
   "world",
+  "account",
 ] as const;
 
 /** `publisher.name`-ish: an identifier a graph can store and a person can read in an error. */

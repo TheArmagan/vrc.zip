@@ -25,6 +25,7 @@ import {
 import { apiNodes, type GraphApiCall } from "./api.ts";
 import { collectionNodes } from "./collections.ts";
 import { dataStoreNodes, type GraphDataStore } from "./data-store.ts";
+import { type GraphLaunchVrchat, type GraphSelf, meNodes } from "./me.ts";
 import { operatorNodes } from "./operators.ts";
 import { type GraphReads, resolverNodes } from "./resolvers.ts";
 import { shapingNodes } from "./shaping.ts";
@@ -37,6 +38,14 @@ import { valueNodes } from "./values.ts";
 export type { GraphInviteTarget, GraphNotify, GraphSocialActions } from "./actions.ts";
 export type { GraphApiCall, GraphApiRequest, GraphApiResponse } from "./api.ts";
 export type { GraphDataStore } from "./data-store.ts";
+export type {
+  GraphAccountSummary,
+  GraphFavoriteKind,
+  GraphGameState,
+  GraphLaunchVrchat,
+  GraphModeration,
+  GraphSelf,
+} from "./me.ts";
 export type { GraphReads } from "./resolvers.ts";
 export type { GraphStateStore } from "./stateful.ts";
 export type { BuiltinArmRequest, BuiltinNode } from "./types.ts";
@@ -151,6 +160,21 @@ export interface BuiltinNodeDeps {
    * be worse: a saved graph naming one would draw a hole with no explanation.
    */
   readonly api?: GraphApiCall | undefined;
+  /**
+   * Acting on the user's **own** account, for the Me nodes.
+   *
+   * Absent leaves all of them in the palette failing with a sentence, like the resolvers and for the
+   * same reason: a node that vanished would make a saved graph draw a hole with no explanation.
+   */
+  readonly self?: GraphSelf | undefined;
+  /**
+   * Opening a `vrchat://` link, for `Show an instance in VRChat`.
+   *
+   * Absent leaves the one node unable to open anything. That is the honest state for a daemon with
+   * no desktop under it, and it is separate from `self` because it is a different machine entirely:
+   * everything else here reaches VRChat's API, and this reaches the operating system.
+   */
+  readonly launch?: GraphLaunchVrchat | undefined;
 }
 
 export function createBuiltinNodes(deps: BuiltinNodeDeps = {}): BuiltinNodes {
@@ -179,6 +203,22 @@ export function createBuiltinNodes(deps: BuiltinNodeDeps = {}): BuiltinNodes {
           ...(deps.notify === undefined ? {} : { notify: deps.notify }),
         });
   const clockFn = deps.now ?? Date.now;
+  /*
+   * The Me nodes, which need the bus for their rehearsal notes like every other action.
+   *
+   * `state` doubles as the invisible/restore pair's memory: it is the same table, the same seam and
+   * the same shape the cooldown uses, so there is nothing here for a second store to be.
+   */
+  const me =
+    bus === undefined
+      ? []
+      : meNodes({
+          bus,
+          ...clock,
+          ...(deps.self === undefined ? {} : { self: deps.self }),
+          ...(deps.launch === undefined ? {} : { launch: deps.launch }),
+          ...(deps.state === undefined ? {} : { memory: deps.state }),
+        });
   const stateful = deps.state === undefined ? [] : statefulNodes(deps.state, clockFn);
   const stored = deps.data === undefined ? [] : dataStoreNodes(deps.data);
   return new BuiltinNodes([
@@ -192,6 +232,7 @@ export function createBuiltinNodes(deps: BuiltinNodeDeps = {}): BuiltinNodes {
     ...stateful,
     ...stored,
     ...actions,
+    ...me,
     ...signals,
     // Last, so a hand-written node with the same id would win the map. None does today — the
     // generated ids are all `api-` prefixed — but the ordering states which is the floor.

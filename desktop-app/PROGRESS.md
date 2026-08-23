@@ -8,6 +8,10 @@ was decided along the way.
 **Phase 4 landed in one pass:** decisions 207–215. A durable run engine, thirty-two built-in node
 types, a Svelte Flow canvas, and graphs that export to a file. Read decision 206 first for why it is shaped
 the way it is; 208 is the engine's one load-bearing rule.
+**The palette grew a second time since:** decision 240 adds the **Me** family — thirty-seven nodes
+that act on the user's own account rather than on somebody else, plus three that moved in — an
+`account` config-field kind, and a `vrchat://` opener that attaches to a running client instead of
+starting a second one.
 **Current phase:** Phase 4 is **complete** — 4.1 through 4.6, built on 2026-08-23 from the spec the
 planning pass of the same day produced (decision 206). Graphs are stored, run, edited on a canvas,
 armed behind a hold, and shared as files. What remains in the plan is Phase 5, packaging and polish,
@@ -575,6 +579,15 @@ get an **error output port**; and the port lattice grows **`list<T>`**.
       templates so the first graph is an edit rather than a blank canvas.
       **Built** (decision 215), and it closes 4.5's outstanding item too: node definition hashes are
       stamped on save, compared on load, and the canvas marks the nodes whose type has moved.
+
+- [x] **4.7 The Me nodes** — not in the original plan; scoped and built on 2026-08-23 after the
+      palette turned out to have exactly one node that acts on the user's own account
+      (`Wear an avatar`) and everything else about themselves reachable only through the raw `(API)`
+      nodes. Thirty-seven built-ins under a new **Me** category over a `GraphSelf` seam and
+      `wiring/self-actions.ts`; an `account` config-field kind with a picker in the editor, which the
+      four existing social nodes moved to; and `openVrchatLaunch`, a third opener carrying `attach=1`
+      so a running client shows an instance rather than a second client starting.
+      **Built** (decision 240). `PLAN.md` §Phase 4 carries the spec.
 
 **Phase 4 is complete.** 4.1 through 4.6 are built, and everything below the checklist that once
 said "Phase 4's" now has a caller. What is *not* here, stated rather than implied: no undo/redo on
@@ -4244,6 +4257,65 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      - `shouldOfferInstall` now stands down whenever an installation exists, so the two prompts
        cannot both fire and a newer build is never told to set itself up for the first time.
 
+240. **The Me nodes: a graph can now act on your own account without hand-building a JSON body.**
+     Thirty-seven new built-ins under a new **Me** category (forty in it, counting the three that
+     moved), a `GraphSelf` seam, `wiring/self-actions.ts` behind it, and an `account` config-field
+     kind. Scoped by a planning pass the same day — six
+     batches of four questions — and built in one commit. `PLAN.md` §Phase 4 carries the spec.
+
+     All of it was already reachable through the 286 generated `(API)` nodes, which is the argument
+     *for* building it rather than against: `Update user (API)` wants a `json` body assembled by hand
+     out of VRChat's field names, hands back an untyped blob, and reports a refusal as the number
+     403. The generated nodes stay the floor — the endpoint nobody wrote a node for is still there.
+
+     The calls that shaped it:
+
+     - **`VRChat` and `Me` split on who the node acts on**, not on what it is called. Outward
+       (invite, boop, look somebody up) against your own account (status, friends, favourites, the
+       badge on your profile). `Wear an avatar`, `My friends` and `Who is here` moved into Me; its
+       description used to say "the one VRChat action that acts on you", which was the same
+       observation with nowhere to put it.
+     - **Two current-user nodes rather than one.** `MAX_NODE_PORTS` is 16 and the useful fields are
+       about twenty, so the split was forced — but it landed between the ports a graph *reaches for*
+       (`Me`: identity and state) and the ports it *checks* (`My account`: counts and entitlements).
+       Both read the `CurrentUser` the account already holds, so **neither costs a request** and two
+       nodes is not two requests. That is what makes one safe at the top of a graph firing on every
+       `player_join` in a public instance.
+     - **One favourite node per kind per direction**, eight in all. A single node with a kind picker
+       would have to take `json`, so a world wired into a friend favourite becomes a 400 at 3 AM
+       instead of a refused edge. Same reasoning puts `friend` rather than `user` on `Unfriend`.
+     - **VRC+ limits are reported, never worked around.** A full favourite group answers 400 with
+       VRChat's own sentence about the user's entitlements, and that sentence is what the node says.
+       Checking the count locally first was the alternative and it buys a clearer message for the
+       price of a request per run, against a limit only VRChat actually knows. See PLAN.md
+       §Guardrails.
+     - **Every write rehearses, including the destructive ones; the reads run.** Block and unfriend
+       carry no extra confirmation beyond dry-run and the arming hold — an armed graph does what it
+       says, and a second gesture inside the graph would be a worse version of the one that already
+       exists. Reads run in a rehearsal for the reason the generated `GET` nodes already do:
+       suppressing them leaves everything downstream with no data, which tests a different graph.
+     - **`account` is a config-field kind, and the four existing social nodes moved to it.** Nobody
+       types an account id. The stored value is unchanged — still an account id, blank still meaning
+       the graph's account — so saved graphs load exactly as they were; only the editor's control
+       changed. It is a picker and not a grant: the daemon re-checks the id against the accounts it
+       manages at execute time.
+     - **Travel is two nodes and never a guess.** `Invite myself` costs a request and moves a client
+       that is already running. `Show an instance in VRChat` fires the `vrchat://` handler with
+       **`attach=1`**, which brings the instance page up in a running client instead of starting a
+       second one — the behaviour that made the deep link unsafe whenever a client was open. That is
+       a third opener in `os/open-url.ts`, beside the loopback and https ones, and it takes a
+       *location* rather than a URL: the string reaches the operating system's protocol handler,
+       which is somebody else's parser, so it is validated and rebuilt rather than passed through.
+       The UI's join affordance gained `attach=1` and **kept its branch** — a self-invite still wins
+       whenever a client is running, because it travels rather than opening a page.
+     - **`attach=1` is not in VRChat's documented launch link** and nothing in the pinned spec
+       mentions it. It is in on the user's report of it working. Recorded here rather than presented
+       as documented behaviour.
+     - **Tests are thin on purpose.** Definitions validate, ids are unique, every write rehearses
+       against a seam that throws on contact, and the account picker resolves. The HTTP shape is one
+       `vrcFetch` per method with no branching in it; what is easy to break is a definition that will
+       not register and a dry-run branch somebody forgot.
+
 ---
 
 ## Gotchas
@@ -4251,6 +4323,17 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **`graph_state` cannot hold anything that is not owned by a graph, so the invisible/restore pair is
+  graph-scoped and not account-scoped.** The intent when `Go invisible` was specced was that any
+  graph's `Put my status back` could restore what any graph's `Go invisible` replaced, keyed only by
+  account. The table refuses it: `graph_state.graph_id` is `REFERENCES graphs (id) ON DELETE CASCADE`,
+  so there is no row a sentinel graph id could occupy, and a shared scope would need either a
+  migration or the named data stores (which are visible in the Stores panel, and a remembered status
+  is not something to put on a screen). What shipped is `(graph, "previous-status", account)` — a
+  constant in the *node* slot so two different nodes can read each other's row, and the account as
+  the key so one graph handling two accounts keeps them apart. Two graphs going invisible on one
+  account each remember their own status, which is a smaller promise than the spec made.
 
 - **A probe with a mangled path wrote to a garbage registry key for a whole run, and reported
   success the entire time.** Verifying the update flow meant a scratch script, and its

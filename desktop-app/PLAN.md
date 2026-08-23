@@ -1127,6 +1127,68 @@ features uninstallable and burn a grant on the app's own behaviour.
 closure today and are reachable only from their routes; a graph action node calling them means a
 reusable social-actions module, not `ControlDeps` smuggled into the runtime.
 
+#### The Me nodes: acting on your own account
+
+The social actions above all reach *outward* — an invite lands in a stranger's inbox with the user's
+name on it. The mirror image is everything that changes the user's **own** account, and it is a
+separate family with its own wiring module (`wiring/self-actions.ts`), its own seam (`GraphSelf`),
+and its own palette category (**Me**). `VRChat` and `Me` split on who the node acts on, which is the
+distinction a person checks before arming a graph.
+
+All of it was already reachable through the generated `(API)` nodes, and that is the argument for
+building it rather than against: `Update user (API)` wants a `json` body assembled by hand out of
+VRChat's field names, hands back an untyped blob, and reports a refusal as the number 403. The Me
+nodes are the same calls with typed ports, a name somebody can find in a palette search, and
+VRChat's own sentence when it says no. **The generated nodes stay the floor** — the endpoint nobody
+wrote a node for is still reachable, which is the whole reason they were generated.
+
+- **Reading yourself.** `Me` (identity and state: name, status, bio, pronouns, where you are, what
+  you are wearing) and `My account` (counts and entitlements: friends, trust, VRC+, verification).
+  Two nodes rather than one because `MAX_NODE_PORTS` is 16 and the useful fields are about twenty —
+  but the split lands somewhere real, between the ports a graph *reaches for* and the ports it
+  *checks*. Both read the `CurrentUser` the account already holds and therefore **cost no request**,
+  which is what makes one safe at the top of a graph firing on every `player_join` in a public
+  instance. Plus `My accounts`, `Is my game running` (from the log, the only honest source),
+  `My notifications` and `My groups`.
+- **Profile.** `Set my status` (the dot and the message, either or both), `Set my bio`,
+  `Set my pronouns`, and the `Go invisible` / `Put my status back` pair, which remembers the replaced
+  status in `graph_state` keyed by account.
+- **Friends and moderation.** `Unfriend` — taking a `friend` rather than a `user`, which is the
+  clearest thing the lattice buys: a graph wiring a stranger into it is refused *in the editor* —
+  plus `Block`/`Unblock`, `Mute`/`Unmute`, `Hide their avatar`/`Show their avatar` over VRChat's one
+  player-moderation endpoint.
+- **Favourites.** One node per kind per direction, eight in all, each with the right typed input. A
+  single node with a kind picker was the alternative and it costs exactly what the lattice is for:
+  its input would have to be `json`, so a world wired into a friend favourite becomes a 400 at 3 AM
+  instead of a refused edge. **VRC+ limits stay VRChat's to enforce**: a full group answers 400 with
+  a sentence about the user's own entitlements, and that sentence is what the node reports. See
+  §Guardrails — working around a paid limit is not something this project does.
+- **Notifications and groups.** Accept, decline, mark read, clear, reply to an invite with a saved
+  response slot; join, leave, represent, post.
+- **Travel, as two nodes and never a guess.** `Invite myself` costs a VRChat request and puts an
+  invite in the user's own inbox, which a client that is *already running* can act on.
+  `Show an instance in VRChat` costs nothing upstream and touches the machine instead, firing the
+  `vrchat://` handler. **`attach=1` is what makes the second one safe**: without it the handler
+  starts a second client, and two clients on one account fight over it; with it, a running client
+  brings the instance page up and the user presses join. That is a third opener in `os/open-url.ts`
+  beside the loopback and https ones, taking a *location* rather than a URL so no caller-chosen
+  string reaches the operating system's protocol handler. The UI's own join affordance gains
+  `attach=1` and keeps its existing branch: a self-invite still wins whenever a client is running,
+  because it travels rather than opening a page.
+
+**Every write rehearses; the reads run.** Dry-run exists to keep a graph from reaching *other people*
+before its author has armed it, and these reach nobody — but suppressing a read leaves every node
+downstream with no data, which turns the rehearsal into a test of a different graph. Same rule the
+generated `GET` nodes already follow.
+
+**`account` joins the config-field kinds.** Nobody types an account id, and multi-account is this
+project's default posture rather than an advanced mode, so the "Act as" field on every node that has
+one is a picker over the signed-in accounts. Blank means the graph's account, which is why it is
+never `required`. It is a picker and not a grant: the stored id is re-checked against the accounts
+the daemon actually manages at execute time, so a graph naming a removed account fails with a
+sentence instead of silently acting as somebody else. The four existing social nodes moved to it,
+and the stored value is unchanged, so saved graphs load as they were.
+
 **`list<T>` joins the port lattice.** `foreach` and the list nodes need it, and the honest version is
 a parameterised type with covariance (`list<friend>` assignable to `list<user>`) plus `list<X> <: json`
 — not a flat enumeration of `friendList` / `userList` that grows forever, and certainly not "a list is

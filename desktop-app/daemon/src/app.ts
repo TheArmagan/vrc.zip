@@ -14,7 +14,7 @@ import { RequestMeter } from "./net/request-meter.ts";
 import { buildUserAgent } from "./net/user-agent.ts";
 import { notifyDesktop } from "./os/desktop-notification.ts";
 import { installedVersion, installLocally, installTarget, isInstalled } from "./os/install.ts";
-import { openUrl } from "./os/open-url.ts";
+import { openUrl, openVrchatLaunch } from "./os/open-url.ts";
 import { createStartupControl } from "./os/startup.ts";
 import { databasePath, ensureStateDir } from "./paths.ts";
 import { PipelineClient } from "./pipeline/index.ts";
@@ -44,6 +44,7 @@ import { createLogSink } from "./wiring/log-bridge.ts";
 import { NotificationSink } from "./wiring/notification-sink.ts";
 import { publishPipelineEvent } from "./wiring/pipeline-bridge.ts";
 import { createPluginHost } from "./wiring/plugin-host.ts";
+import { createSelfActions } from "./wiring/self-actions.ts";
 import { createSocialActions } from "./wiring/social-actions.ts";
 import { UpdateDiffSet } from "./wiring/update-diff.ts";
 import { attachWebhookBridge } from "./wiring/webhook-bridge.ts";
@@ -423,6 +424,9 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
   // One instance, handed to both the control deps and the graph action nodes: two copies would be
   // two places for a future rate budget or audit hook to be added to, and only one would get it.
   const social = createSocialActions({ accounts, store });
+  // The other half of that pair: the things vrc.zip does to the user's *own* account, which the Me
+  // nodes are made of. Separate from `social` because it is a different kind of act — see the file.
+  const self = createSelfActions({ accounts, store });
   /*
    * The resolver nodes read through the control deps, which do not exist yet — they are built below
    * and need the plugin host, which needs this. A holder rather than a forward reference, the same
@@ -434,6 +438,11 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
   const builtinNodes = createBuiltinNodes({
     bus,
     social,
+    self,
+    // The one node in the Me set that touches the machine rather than VRChat. `attach` is the
+    // node's own config, defaulting on, so a running client shows the instance instead of a second
+    // client starting up and fighting the first for the account.
+    launch: async (location, attach) => await openVrchatLaunch(location, attach),
     reads: {
       user: async (accountId, userId) => await requireReads().user(accountId, userId),
       world: async (accountId, worldId) => await requireReads().world(accountId, worldId),

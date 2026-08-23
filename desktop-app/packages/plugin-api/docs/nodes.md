@@ -71,6 +71,13 @@ group name whatever you call the category, for the same reason your panels sit u
 heading in the sidebar: a group called "Reading" with no owner attached would read as a feature of
 vrc.zip, and your plugin is not vrc.zip.
 
+The built-in categories, for reference, are `Triggers`, `Logic`, `Data`, `Lists`, `Values`,
+`Send`, `Pipeline`, `VRChat`, `Me`, and one `API: <tag>` group per VRChat spec tag. **`VRChat` and
+`Me` split on who the node acts on**: `VRChat` is everything aimed at somebody else — look a user
+up, invite them, boop them — and `Me` is everything aimed at the user's own account: their status,
+their friends list, their favourites, the group badge on their profile. It is a distinction worth
+copying if your plugin does both, because it is the one a person checks before arming a graph.
+
 ## The lattice: exactly three widening rules
 
 `assignable(from, to)` answers "can a value of `from` flow into a port of `to`?" It is identity, plus:
@@ -144,7 +151,7 @@ Reusing `UINode` here would mean reading values back out of a rendering, which i
 a form that means something different after a redesign. The host draws config fields with the same
 components the [UI vocabulary](./ui.md) uses, so they look identical to a user regardless.
 
-Eight kinds:
+Nine kinds:
 
 | `kind` | Extra props | Notes |
 | --- | --- | --- |
@@ -156,8 +163,16 @@ Eight kinds:
 | `duration` | `default?: number`, `required?` | **Integer unix-ms**, like every duration and timestamp in this project. |
 | `user` | `required?` | Host renders its own user picker. |
 | `world` | `required?` | Host renders its own world picker. |
+| `account` | `required?` | Which of the user's accounts the node acts as. Host renders a picker over the signed-in accounts. |
 
 Every kind also carries `id`, `label` (both required) and `description?`.
+
+**`account` stores an account id, and blank means "the graph's account".** That is the convention
+every built-in follows and the reason the field is never `required`: a graph already has an account,
+and a node that names one is the exception rather than the rule. The picker is a picker and not a
+grant — the host re-checks the stored id against the accounts it actually manages when the node
+runs, so a graph naming an account that has since been removed fails with a sentence rather than
+quietly acting as somebody else.
 
 **`secret` is the one whose value does not live in the graph.** A webhook URL, a topic, a token: the
 host keeps it in the encrypted credential store, keyed by (graph, node, field), and substitutes it

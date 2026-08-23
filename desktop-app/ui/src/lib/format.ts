@@ -382,11 +382,22 @@ export function parseLocation(location: string | null): ParsedLocation {
   };
 }
 
-/** The `vrchat://` deep link that launches the game into an instance, or null if there is none. */
+/**
+ * The `vrchat://` deep link that opens an instance in the game, or null if there is none.
+ *
+ * **`attach=1` is the difference between this and a second client.** Without it the handler starts
+ * a fresh client, which is why `planJoin` below only ever reaches for this when nothing is running.
+ * With it, a client that *is* running brings the instance page up instead and the user presses join.
+ *
+ * The branch below is unchanged: a self-invite still wins whenever a client is running, because it
+ * travels rather than opening a page. `attach=1` only makes the deep link safe in the case where it
+ * used to be actively harmful. The daemon builds the same link for the graph editor's
+ * `Show an instance in VRChat` node — see `daemon/src/os/open-url.ts`.
+ */
 export function launchLink(location: string | null): string | null {
   const parsed = parseLocation(location);
   if (parsed.opaque || location === null) return null;
-  return `vrchat://launch?ref=vrchat.com&id=${encodeURIComponent(location)}`;
+  return `vrchat://launch?ref=vrchat.com&id=${encodeURIComponent(location)}&attach=1`;
 }
 
 /**

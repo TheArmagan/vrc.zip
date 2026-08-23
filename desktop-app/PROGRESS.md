@@ -3088,6 +3088,16 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      just moved onto the person committing. `CLAUDE.md` says so where it lists the five commands,
      rather than leaving the reader to infer it from an absent file.
 
+203. **The repository root gets an end-user `README.md`, and `desktop-app/README.md` stays the
+     developer one.** They answer different questions and merging them serves neither: the root file
+     is for someone who found the repository and wants to know what the app is, how to get it, and
+     what it will not do, so it is written around the screens and carries screenshots of the running
+     app; `desktop-app/README.md` stays layout, toolchain and packaging. The root file is also where
+     the honest limits belong, because that is the page a prospective user actually reads: Windows-only
+     release, no node graph yet, and the plugin warning stated as *a plugin can do anything you can do
+     on this computer*, not as a permission list. Screenshots live in `docs/screenshots/`, taken
+     against a real signed-in state so the empty-state screens are not the whole gallery.
+
 ---
 
 ## Gotchas
@@ -3095,6 +3105,20 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **`DELETE /api/plugins/:id` answers 500 after it has already succeeded.** Observed on Windows on
+  2026-08-23 while uninstalling the two example plugins: both calls returned
+  `{"error":"internal_error","message":"Error: EBUSY: resource busy or locked, rm '…\\plugin-data\\
+  example.friend-watch'"}`, and yet `GET /api/plugins` came back `[]` and `plugins/` was clean. The
+  deregistration and the content-addressed directory removal had both landed; only the *data*
+  directory removal threw, and it threw out of the same handler, so the caller is told the uninstall
+  failed when the only thing left is a folder. A UI that retries on the 500 finds nothing to retry.
+  The handle belonged to a plugin host from a second daemon instance the user had started, which is
+  the ordinary case on Windows rather than an exotic one: a file being held open is the normal state
+  there, not the error state. Two things to fix, and they are separable — the data-directory removal
+  needs to survive `EBUSY` (retry, or leave it and sweep on next start, the way `plugins/` already
+  survives a partial write), and it must not be able to fail the request once the plugin is gone from
+  the registry.
 
 - **A docs banner written to *understate* still rots, and it rots into a lie in both directions.**
   Every page in `packages/plugin-api/docs/` opened with a warning that nothing could be installed,

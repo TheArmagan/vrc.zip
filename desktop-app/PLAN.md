@@ -1127,6 +1127,55 @@ features uninstallable and burn a grant on the app's own behaviour.
 closure today and are reachable only from their routes; a graph action node calling them means a
 reusable social-actions module, not `ControlDeps` smuggled into the runtime.
 
+#### Named triggers: the events, not the event catalogue
+
+The generic triggers reach everything — `When something happens` takes a pattern, and there is one
+for the game log and one for the pipeline besides. What they cannot do is the thing the preset
+triggers exist for, and the file that holds them already says it: **a preset's value is typed
+outputs**. A generic trigger can only offer `json`, so every edge out of it is unchecked and the
+author's next node is always `Read field`.
+
+So the events a person actually builds automations about get names, ports, and a place in a palette
+search. Twenty-eight of them, in two halves.
+
+- **About you, from the pipeline.** The eight aspects of your own profile as eight triggers
+  (status, status message, avatar, profile picture, bio, display name, trust, platform); where you
+  are; VRC+ starting or lapsing and the credit balance moving; an account of yours signing in, and
+  an account of yours having a problem; joining and leaving a group, and your membership or role in
+  one changing; entering an instance queue and reaching the front of it.
+- **About the game, from the log.** A portal appearing, a destination being picked, leaving a room,
+  a join being refused with VRChat's reason, a screenshot, the client starting and quitting, VR mode
+  switching, and a client naming the account it signed in as.
+
+Three decisions inside that are worth stating, because each was a fork:
+
+- **A profile trigger subscribes to two kinds, not one.** The daemon refines `user-update` into
+  `user.updated.status` and friends **only when exactly one aspect moved** — a frame that changed
+  three things keeps the generic kind, because picking one of the three to be the headline would be
+  arbitrary. An exact-kind subscription therefore silently misses every multi-aspect frame, which is
+  the common case when somebody edits their profile properly. Each node watches both and, on the
+  generic kind, checks whether its own aspect is named in the payload's `changes` list. Exactly one
+  fire either way.
+- **The typed port reads the payload, not the change record.** `FieldChange` carries *rendered*
+  strings — a trust rank arrives as a tag list and leaves as `"trusted"` — but the whole user object
+  sits beside it, so the avatar trigger can offer a real `avatar` id that flows into
+  `Look up an avatar`. Where the field genuinely is a string, the port is a string.
+- **`Where I am` has two sources and the node says which.** The game log is what the client on *this
+  machine* is doing: immediate, works for an unmanaged account, blind to a client elsewhere.
+  VRChat's `user.location` is what it was last told: arrives wherever the client is, and lags. The
+  log is the default, matching every other "where am I" answer in this project; the picker exists
+  because the other answer is the right one on a second PC.
+
+**Three existing triggers gain filters rather than growing siblings.** `When someone joins your
+instance` and `…leaves` take an anyone / friends / strangers choice plus an optional named person,
+and both gain an `Is a friend` port; `When a notification arrives` takes a type and gains the
+notification **id**, without which a graph could watch an invite arrive and had no way to hand it to
+the node that answers it. The friendship answer comes from the presence service's live map through a
+new `TriggerContext` seam — **synchronous and free by contract**, because a trigger's map runs inside
+a bus subscription and a burst of forty player-joins runs it forty times per armed graph. With no
+context the filter fails **open**: a build that cannot tell who is a friend fires for everybody, not
+silently for nobody.
+
 #### The Me nodes: acting on your own account
 
 The social actions above all reach *outward* — an invite lands in a stranger's inbox with the user's

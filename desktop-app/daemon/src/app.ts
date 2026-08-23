@@ -46,6 +46,7 @@ import { publishPipelineEvent } from "./wiring/pipeline-bridge.ts";
 import { createPluginHost } from "./wiring/plugin-host.ts";
 import { createSelfActions } from "./wiring/self-actions.ts";
 import { createSocialActions } from "./wiring/social-actions.ts";
+import { createTriggerContext } from "./wiring/trigger-context.ts";
 import { UpdateDiffSet } from "./wiring/update-diff.ts";
 import { attachWebhookBridge } from "./wiring/webhook-bridge.ts";
 
@@ -443,6 +444,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     // node's own config, defaulting on, so a running client shows the instance instead of a second
     // client starting up and fighting the first for the account.
     launch: async (location, attach) => await openVrchatLaunch(location, attach),
+    // What a trigger asks about the world as it fires. Both answers come from memory — the open
+    // sessions and the presence map — because a map runs inside a bus subscription and a burst of
+    // forty player-joins runs it forty times per armed graph.
+    triggerContext: createTriggerContext({ store, presence }),
     reads: {
       user: async (accountId, userId) => await requireReads().user(accountId, userId),
       world: async (accountId, worldId) => await requireReads().world(accountId, worldId),

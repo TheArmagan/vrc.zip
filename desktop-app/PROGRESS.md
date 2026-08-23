@@ -8,10 +8,12 @@ was decided along the way.
 **Phase 4 landed in one pass:** decisions 207–215. A durable run engine, thirty-two built-in node
 types, a Svelte Flow canvas, and graphs that export to a file. Read decision 206 first for why it is shaped
 the way it is; 208 is the engine's one load-bearing rule.
-**The palette grew a second time since:** decision 240 adds the **Me** family — thirty-seven nodes
-that act on the user's own account rather than on somebody else, plus three that moved in — an
-`account` config-field kind, and a `vrchat://` opener that attaches to a running client instead of
-starting a second one.
+**The palette grew twice since.** Decision 240 adds the **Me** family — thirty-seven nodes that act
+on the user's own account rather than on somebody else, plus three that moved in — an `account`
+config-field kind, and a `vrchat://` opener that attaches to a running client instead of starting a
+second one. Decision 241 adds twenty-eight **named triggers** over the pipeline and the game log, so
+a graph starts on "my status changed" or "a portal appeared" with typed ports, rather than on a
+pattern with a `json` blob.
 **Current phase:** Phase 4 is **complete** — 4.1 through 4.6, built on 2026-08-23 from the spec the
 planning pass of the same day produced (decision 206). Graphs are stored, run, edited on a canvas,
 armed behind a hold, and shared as files. What remains in the plan is Phase 5, packaging and polish,
@@ -588,6 +590,13 @@ get an **error output port**; and the port lattice grows **`list<T>`**.
       four existing social nodes moved to; and `openVrchatLaunch`, a third opener carrying `attach=1`
       so a running client shows an instance rather than a second client starting.
       **Built** (decision 240). `PLAN.md` §Phase 4 carries the spec.
+- [x] **4.8 Named triggers** — the other half of 4.7, and scoped the same way on the same day. The
+      palette could reach every pipeline and game-log event through the three generic triggers and
+      could type none of them. Twenty-eight presets with typed ports: eight for the aspects of your
+      own profile, then location, entitlements, accounts, groups and queues from the pipeline, and
+      portals, destinations, joins, screenshots and client lifecycle from the log. Three existing
+      triggers gained filters, and `wiring/trigger-context.ts` is the new seam behind them.
+      **Built** (decision 241). `PLAN.md` §Phase 4 carries the spec.
 
 **Phase 4 is complete.** 4.1 through 4.6 are built, and everything below the checklist that once
 said "Phase 4's" now has a caller. What is *not* here, stated rather than implied: no undo/redo on
@@ -4316,6 +4325,56 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
        `vrcFetch` per method with no branching in it; what is easy to break is a definition that will
        not register and a dry-run branch somebody forgot.
 
+241. **Twenty-eight named triggers, so a graph starts on the thing that happened rather than on a
+     pattern.** The generic triggers already reached all of this; what they could not do is the one
+     thing presets exist for, which `triggers.ts` states in its own header: a preset's value is
+     *typed outputs*. `When something happens` can only offer `json`, so the author's next node is
+     always `Read field`.
+
+     Two halves. From the pipeline: the eight aspects of your own profile as eight triggers, where
+     you are, VRC+ and the credit balance, an account signing in and an account having a problem,
+     the four group events, and the two queue events. From the game log: portals, destinations,
+     leaving a room, a refused join with VRChat's reason, screenshots, the client starting and
+     quitting, VR mode, and a client naming its account.
+
+     The calls that shaped it:
+
+     - **A profile trigger subscribes to two kinds.** `wiring/pipeline-bridge.ts` refines
+       `user-update` into `user.updated.status` and friends **only when exactly one aspect moved** —
+       a frame that moved three keeps the generic kind, because picking a headline would be
+       arbitrary. So an exact-kind subscription misses every multi-aspect frame, which is what
+       happens whenever somebody edits their profile properly. Each node watches both and checks the
+       payload's `changes` list on the generic one. Exactly one fire either way, because the two
+       kinds are mutually exclusive for any one frame.
+     - **Eight nodes, not one with an aspect picker.** "When my status changes" is a thing somebody
+       types into a palette search. A single node with a multi-select is one entry nobody finds that
+       way, and its ports would be the lowest common denominator of eight different fields.
+     - **The typed port reads the payload, not the change record.** `FieldChange` carries rendered
+       strings — an avatar change renders as an image URL — but the whole user object is beside it,
+       so `currentAvatar` gives a real `avatar` port that flows into `Look up an avatar`. Trust is
+       the exception and falls back to the rendered value, because it has no field of its own: it is
+       computed from a tag list.
+     - **`When I go somewhere` has a source picker.** The log and VRChat genuinely disagree and
+       neither is wrong — the log is what the client on this machine is doing, VRChat is what it was
+       last told. The log is the default, matching every other "where am I" answer here.
+     - **Three existing triggers gained filters instead of siblings.** The two player triggers take
+       anyone / friends / strangers plus an optional named person and gained an `Is a friend` port;
+       the notification trigger takes a type and gained the notification **id**, whose absence meant
+       a graph could watch an invite arrive with no way to hand it to the Me family's accept node.
+       Both cost a definition hash and therefore a "node changed" badge on saved graphs, which is
+       one re-save and was the explicit trade.
+     - **`TriggerContext` is synchronous and free by contract.** A trigger's map runs inside a bus
+       subscription, and `gamelog.player_join` bursts forty times on an instance transition — per
+       armed graph. So both answers come from memory: the open sessions for the location, the
+       presence service's live map for friendship. Not `friend_log`, which would serve stale rows
+       after a restart until the first poll landed, the same trap `listFriends` documents.
+     - **The friend filter fails open.** With no context, "only friends" fires for everybody rather
+       than for nobody. A build that cannot tell should not silently stop an automation.
+     - **The account filter on every trigger became the `account` picker too.** Decision 240 added
+       the kind and moved the four social actions to it; leaving every trigger on a free-text
+       account id would have been the same field rendered two ways in one editor. Same stored value,
+       same behaviour, and the same one-re-save badge as above.
+
 ---
 
 ## Gotchas
@@ -4323,6 +4382,24 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **`Number(null)` is `0`, so the first balance a graph ever saw was reported as a windfall.** The
+  balance trigger computed `delta` by coercing `FieldChange.from`, and `from` is null when the daemon
+  held no previous value — a distinction that type documents in as many words. The coercion turned
+  "vrc.zip has never seen your balance" into "your balance was zero", so the first
+  `economy.update.wallet_balance` after a sign-in fired with the entire balance as the gain. Caught
+  by a test written for the delta, not for the null. `Number("")` is `0` as well, which is the same
+  bug spelled the other way, so the reader that replaced it refuses both.
+
+- **Changing a config field's *kind* moves the node's definition hash, and the four social actions
+  had already tripped it.** `canonicalNodeDefinition` hashes each config field as `id:kind`
+  precisely so a text field that became a select invalidates stored values — which is right, and
+  which decision 240's `text` → `account` migration walked straight into while its commit message
+  said saved graphs load unchanged. They do *run* unchanged: the stored value is still an account
+  id and the semantics are identical. But a graph using Invite, Ask for an invite, Boop or Wear an
+  avatar shows a "node changed" badge until it is re-saved, and decision 241 extended that to every
+  trigger by moving the account filter to the same picker. Marked, never blocked — but the claim as
+  originally written was wrong.
 
 - **`graph_state` cannot hold anything that is not owned by a graph, so the invisible/restore pair is
   graph-scoped and not account-scoped.** The intent when `Go invisible` was specced was that any

@@ -118,12 +118,16 @@ describe("the presets", () => {
       name: "Ada",
       user: "usr_a",
       location: "wrld_x:1~private",
+      // False rather than absent: this harness arms without a `TriggerContext`, and "vrc.zip cannot
+      // tell" is reported as not-a-friend rather than as a missing port. The filter that reads the
+      // same answer stays *open* in that case — see `passesWho`.
+      isFriend: false,
       at: T0,
     });
 
     const withoutId = await armed("on-player-join");
     withoutId.emit({ kind: "gamelog.player_join", payload: { displayName: "Ada" } });
-    expect(withoutId.fired[0]?.outputs).toEqual({ name: "Ada", at: T0 });
+    expect(withoutId.fired[0]?.outputs).toEqual({ name: "Ada", isFriend: false, at: T0 });
   });
 
   test("a notification fires with its type and sender", async () => {

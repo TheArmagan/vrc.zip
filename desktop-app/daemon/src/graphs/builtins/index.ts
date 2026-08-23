@@ -31,7 +31,7 @@ import { type GraphReads, resolverNodes } from "./resolvers.ts";
 import { shapingNodes } from "./shaping.ts";
 import { signalNodes } from "./signals.ts";
 import { type GraphStateStore, statefulNodes } from "./stateful.ts";
-import { triggerNodes } from "./triggers.ts";
+import { type TriggerContext, triggerNodes } from "./triggers.ts";
 import { type BuiltinArmRequest, type BuiltinNode, builtinId } from "./types.ts";
 import { valueNodes } from "./values.ts";
 
@@ -48,6 +48,7 @@ export type {
 } from "./me.ts";
 export type { GraphReads } from "./resolvers.ts";
 export type { GraphStateStore } from "./stateful.ts";
+export type { TriggerContext } from "./triggers.ts";
 export type { BuiltinArmRequest, BuiltinNode } from "./types.ts";
 
 export class BuiltinNodes {
@@ -175,6 +176,15 @@ export interface BuiltinNodeDeps {
    * everything else here reaches VRChat's API, and this reaches the operating system.
    */
   readonly launch?: GraphLaunchVrchat | undefined;
+  /**
+   * What a trigger asks about the world at the moment it fires: where the running client is, and
+   * whether somebody is a friend.
+   *
+   * Absent leaves the ports that need it unset and the filters that need it **open** — a build that
+   * cannot tell who is a friend fires for everybody rather than silently for nobody. Both answers
+   * are required to be synchronous and free; see `TriggerContext` for why that is load-bearing.
+   */
+  readonly triggerContext?: TriggerContext | undefined;
 }
 
 export function createBuiltinNodes(deps: BuiltinNodeDeps = {}): BuiltinNodes {
@@ -183,7 +193,14 @@ export function createBuiltinNodes(deps: BuiltinNodeDeps = {}): BuiltinNodes {
   }));
   const bus = deps.bus;
   const clock = deps.now === undefined ? {} : { now: deps.now };
-  const triggers = bus === undefined ? [] : triggerNodes({ bus, ...clock });
+  const triggers =
+    bus === undefined
+      ? []
+      : triggerNodes({
+          bus,
+          ...clock,
+          ...(deps.triggerContext === undefined ? {} : { context: deps.triggerContext }),
+        });
   const signals =
     bus === undefined
       ? []

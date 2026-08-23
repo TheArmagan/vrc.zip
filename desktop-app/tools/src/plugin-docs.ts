@@ -26,13 +26,14 @@ import { dirname, join, resolve } from "node:path";
 import {
   ALL_PLUGIN_CAPABILITIES,
   assignable,
+  BASE_PORT_TYPES,
+  LIST_PORT_TYPES,
   MAX_FRAME_BYTES,
   MAX_STORAGE_VALUE_BYTES,
   MAX_TABLE_ROWS,
   MAX_UI_DEPTH,
   MAX_UI_NODES,
   PLUGIN_CAPABILITIES,
-  PORT_TYPES,
   PROTOCOL_ERRORS,
   pluginManifestSchema,
 } from "@vrcz/plugin-api";
@@ -138,12 +139,17 @@ function eventCatalog(): string {
 }
 
 function portMatrix(): string {
-  const header = `| from \\ to | ${PORT_TYPES.map((type) => `\`${type}\``).join(" | ")} |`;
-  const divider = `| --- | ${PORT_TYPES.map(() => "---").join(" | ")} |`;
-  const rows = PORT_TYPES.map(
+  // The scalars only. The full set is every scalar plus a `list<>` of each, and a 20x20 grid is a
+  // picture of a rule rather than a table anybody reads — the list half is one line of prose below,
+  // generated from the same function so it still cannot describe a rule that is not implemented.
+  const header = `| from \\ to | ${BASE_PORT_TYPES.map((type) => `\`${type}\``).join(" | ")} |`;
+  const divider = `| --- | ${BASE_PORT_TYPES.map(() => "---").join(" | ")} |`;
+  const rows = BASE_PORT_TYPES.map(
     (from) =>
-      `| **\`${from}\`** | ${PORT_TYPES.map((to) => (assignable(from, to) ? "yes" : "—")).join(" | ")} |`,
+      `| **\`${from}\`** | ${BASE_PORT_TYPES.map((to) => (assignable(from, to) ? "yes" : "—")).join(" | ")} |`,
   );
+  const listRule = assignable("list<friend>", "list<user>") ? "widen" : "do not widen";
+  const listToScalar = assignable("list<friend>", "user") ? "does" : "does not";
   return [
     BANNER,
     "",
@@ -152,12 +158,22 @@ function portMatrix(): string {
     "Generated from `assignable`, which is the single source of truth — this table cannot describe a",
     "rule that is not implemented.",
     "",
-    "Two widening rules, and that is the whole list: `friend <: user`, and `X <: json`. Every",
-    "additional rule would be an explanation you owe a user whose edge just got refused.",
+    "Three widening rules, and that is the whole list: `friend <: user`, `X <: json`, and",
+    `\`list<A> <: list<B>\` when \`A <: B\`. Every additional rule would be an explanation you owe a`,
+    "user whose edge just got refused.",
     "",
     header,
     divider,
     ...rows,
+    "",
+    "## Lists",
+    "",
+    `Every scalar above has a \`list<>\` form: \`${LIST_PORT_TYPES.slice(0, 3).join("`, `")}\`, and so`,
+    `on for all ${String(BASE_PORT_TYPES.length)} of them. Lists ${listRule} exactly as their`,
+    "elements do, so the table above answers for them too: read `list<A> -> list<B>` as `A -> B`.",
+    "",
+    `A list ${listToScalar} satisfy a scalar port, and a scalar never satisfies a list port. Both`,
+    "still erase to `json`. Lists do not nest: `list<list<user>>` is not a port type.",
     "",
   ].join("\n");
 }

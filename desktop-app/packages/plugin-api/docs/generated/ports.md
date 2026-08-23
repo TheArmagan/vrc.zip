@@ -5,8 +5,9 @@
 Generated from `assignable`, which is the single source of truth — this table cannot describe a
 rule that is not implemented.
 
-Two widening rules, and that is the whole list: `friend <: user`, and `X <: json`. Every
-additional rule would be an explanation you owe a user whose edge just got refused.
+Three widening rules, and that is the whole list: `friend <: user`, `X <: json`, and
+`list<A> <: list<B>` when `A <: B`. Every additional rule would be an explanation you owe a
+user whose edge just got refused.
 
 | from \ to | `friend` | `user` | `world` | `instance` | `group` | `avatar` | `string` | `number` | `boolean` | `json` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -20,3 +21,12 @@ additional rule would be an explanation you owe a user whose edge just got refus
 | **`number`** | — | — | — | — | — | — | — | yes | — | yes |
 | **`boolean`** | — | — | — | — | — | — | — | — | yes | yes |
 | **`json`** | — | — | — | — | — | — | — | — | — | yes |
+
+## Lists
+
+Every scalar above has a `list<>` form: `list<friend>`, `list<user>`, `list<world>`, and so
+on for all 10 of them. Lists widen exactly as their
+elements do, so the table above answers for them too: read `list<A> -> list<B>` as `A -> B`.
+
+A list does not satisfy a scalar port, and a scalar never satisfies a list port. Both
+still erase to `json`. Lists do not nest: `list<list<user>>` is not a port type.

@@ -45,41 +45,51 @@ host context at all.
 ## Port types
 
 ```ts
-const PORT_TYPES = [
+const BASE_PORT_TYPES = [
   "friend", "user", "world", "instance", "group", "avatar",
   "string", "number", "boolean", "json",
 ] as const;
+
+// Each scalar also has a list form. `PORT_TYPES` is both halves, twenty in total.
+type ListPortType = `list<${BasePortType}>`;   // list<friend>, list<string>, …
 ```
 
-Ten members, closed. Every one is something the runtime can actually carry between nodes and the
-editor can label on an edge. **Domain types are ids with host-known meaning** — `user` is a user id,
-not a user object — which is what lets your node accept a `user` from any producer without the two of
-you agreeing on a payload shape.
+Ten scalars, closed, plus a `list<>` of each. Every one is something the runtime can actually carry
+between nodes and the editor can label on an edge. **Domain types are ids with host-known meaning** —
+`user` is a user id, not a user object — which is what lets your node accept a `user` from any
+producer without the two of you agreeing on a payload shape.
 
 Each absence is a decision, not an oversight:
 
-- **No array or list types.** An `X[] <: json` rule plus an elementwise rule would double the lattice
-  for a v1 that ships triggers only.
+- **No nesting.** `list<list<user>>` is not a port type. A graph that needs one wants a different
+  node, and the depth would have to be legible on an edge label at a glance.
 - **No `timestamp` distinct from `number`.** Timestamps are integer unix-ms everywhere in this
   project, so a separate type would refuse an edge the user is right to expect.
 - **No `any`.** That is what `json` is, with the direction stated.
 
-`isPortType(value)` is the runtime guard.
+`isPortType(value)` is the runtime guard; `listElement(type)` gives a list's element type or null.
 
-## The lattice: exactly two widening rules
+## The lattice: exactly three widening rules
 
 `assignable(from, to)` answers "can a value of `from` flow into a port of `to`?" It is identity, plus:
 
 1. **`friend <: user`** — a friend is a user you also have a relationship with, so anything that takes
    a user takes a friend. Not the reverse: a node that needs friendship (unfriend, favourite) must be
    able to refuse a stranger **at edit time** rather than at 3 AM.
-2. **`X <: json`** — every type erases to JSON. Not the reverse: `json` into a typed port is the
-   unchecked cast that makes a type system decorative, and the graph editor's whole value is telling
-   the user *before* they save.
+2. **`X <: json`** — every type erases to JSON, lists included. Not the reverse: `json` into a typed
+   port is the unchecked cast that makes a type system decorative, and the graph editor's whole value
+   is telling the user *before* they save.
+3. **`list<A> <: list<B>` when `A <: B`** — lists widen exactly as their elements do, and no further.
+   A list is never a scalar and a scalar is never a list, in either direction.
 
 That is the whole list, and it stops there deliberately. **Every additional rule is an explanation you
-owe a user whose edge just got refused.** A user who learns two rules can predict the entire matrix; a
-user facing eight rules learns none of them and tries edges until one sticks.
+owe a user whose edge just got refused.** Three rules still fit in a sentence, and the third is the
+one people already expect from every other type system they have used.
+
+> This section said **two** rules until Phase 4. The third arrived with `foreach` and the list nodes,
+> which needed *some* answer: the alternatives were a flat enumeration of `friendList` / `userList`
+> that grows every time a scalar is added, or "a list is `json`", which hands back exactly the
+> property the lattice exists to hold.
 
 ### Compatibility matrix
 
@@ -98,6 +108,10 @@ that isn't implemented.
 | **number** | — | — | — | — | — | — | — | yes | — | yes |
 | **boolean** | — | — | — | — | — | — | — | — | yes | yes |
 | **json** | — | — | — | — | — | — | — | — | — | yes |
+
+The list half is not drawn: read `list<A> -> list<B>` as `A -> B` in the table above, since rule 3 is
+exactly that. `docs/generated/ports.md` is the generated copy, and it says the same in one line
+rather than as a twenty-by-twenty grid.
 
 Note what the matrix says about your own design: `number` does not flow into `string`, and `string`
 does not flow into `number`. If you want that, it is a conversion node, not a lattice rule.

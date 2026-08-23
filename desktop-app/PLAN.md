@@ -920,9 +920,10 @@ the type checker — so they cannot drift. **Only two of those three exist in Ph
 scopes 3.10 to registration, the runtime that arms triggers and executes actions, and `assignable()`
 enforced on save; `@xyflow/svelte` is not a dependency yet and the canvas is Phase 4's, which is also
 what Phase 4 is then mostly *made of*. The point of the single definition is unaffected — the third
-consumer reads the same object when it arrives. A small closed port-type lattice with exactly two widening
-rules (`friend <: user`, `X <: json`); every additional rule is an explanation you owe a user whose
-edge just got refused.
+consumer reads the same object when it arrives. A small closed port-type lattice with exactly three
+widening rules (`friend <: user`, `X <: json`, and `list<A> <: list<B>` when `A <: B` — added in 4.3
+for `foreach` and the list nodes); every additional rule is an explanation you owe a user whose edge
+just got refused.
 
 Node bodies render from a **host-evaluated template**, not an RPC into the plugin — Svelte Flow
 re-renders on every pan and zoom, and per-frame RPC at 60Hz is not viable. Plugin nodes get the standard

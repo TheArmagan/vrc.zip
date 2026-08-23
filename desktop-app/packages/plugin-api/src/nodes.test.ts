@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
   assignable,
+  BASE_PORT_TYPES,
   canonicalNodeDefinition,
   evaluateNodeBody,
   isPortType,
   isTriggerDefinition,
+  listElement,
   type NodeDefinition,
   nodeDefinitionHash,
   PORT_TYPES,
@@ -16,12 +18,12 @@ describe("assignable", () => {
     for (const t of PORT_TYPES) expect(assignable(t, t)).toBe(true);
   });
 
-  test("the two widening rules hold", () => {
+  test("the two scalar widening rules hold", () => {
     expect(assignable("friend", "user")).toBe(true);
     for (const t of PORT_TYPES) expect(assignable(t, "json")).toBe(true);
   });
 
-  test("neither rule holds in reverse", () => {
+  test("neither scalar rule holds in reverse", () => {
     // A node that needs friendship must be able to refuse a stranger at edit time.
     expect(assignable("user", "friend")).toBe(false);
     // `json` into a typed port is the unchecked cast that makes the type system decorative.
@@ -31,11 +33,36 @@ describe("assignable", () => {
     }
   });
 
+  test("lists widen exactly as their elements do", () => {
+    expect(assignable("list<friend>", "list<user>")).toBe(true);
+    expect(assignable("list<user>", "list<friend>")).toBe(false);
+    expect(assignable("list<user>", "list<json>")).toBe(true);
+    expect(assignable("list<json>", "list<user>")).toBe(false);
+  });
+
+  test("a list is never a scalar, in either direction", () => {
+    // The distinction the type exists to draw. `list<friend>` must not reach a `user` port on the
+    // strength of the friend rule, and a single user must not satisfy a port that wants several.
+    expect(assignable("list<friend>", "user")).toBe(false);
+    expect(assignable("user", "list<user>")).toBe(false);
+    // Except through `json`, which everything erases to — including a list.
+    expect(assignable("list<user>", "json")).toBe(true);
+    expect(assignable("json", "list<user>")).toBe(false);
+  });
+
   test("nothing else widens — asserted over the whole matrix", () => {
-    // The point of this test is to fail loudly the day someone adds a third rule. PLAN.md: every
+    // The point of this test is to fail loudly the day someone adds a fourth rule. PLAN.md: every
     // additional rule is an explanation you owe a user whose edge just got refused, so a new one is
-    // a decision that gets made deliberately, not one that lands in a diff nobody read.
-    const expected = new Set(["friend->user"]);
+    // a decision that gets made deliberately, not one that lands in a diff nobody read. It did its
+    // job when the third rule landed, which is why the expected set is spelled out rather than
+    // derived from `assignable` — a set built from the function under test proves nothing.
+    const expected = new Set([
+      "friend->user",
+      "list<friend>->list<user>",
+      ...BASE_PORT_TYPES.filter((type) => type !== "json").map(
+        (type) => `list<${type}>->list<json>`,
+      ),
+    ]);
     const surprises: string[] = [];
     for (const from of PORT_TYPES) {
       for (const to of PORT_TYPES) {
@@ -52,8 +79,16 @@ describe("assignable", () => {
     for (const from of PORT_TYPES)
       for (const to of PORT_TYPES) if (assignable(from, to)) accepted++;
     const n = PORT_TYPES.length;
-    // identity (n) + X->json for every X except json itself (n-1) + friend->user (1)
-    expect(accepted).toBe(n + (n - 1) + 1);
+    const bases = BASE_PORT_TYPES.length;
+    // identity (n) + X->json for every X but json (n-1) + friend->user (1)
+    // + list<X>->list<json> for every X but json (bases-1) + list<friend>->list<user> (1)
+    expect(accepted).toBe(n + (n - 1) + 1 + (bases - 1) + 1);
+  });
+
+  test("nesting is not a port type", () => {
+    expect(isPortType("list<list<user>>")).toBe(false);
+    expect(listElement("list<user>")).toBe("user");
+    expect(listElement("user")).toBeNull();
   });
 });
 

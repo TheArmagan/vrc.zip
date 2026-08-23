@@ -235,12 +235,17 @@ export {
 
 export {
   assignable,
+  BASE_PORT_TYPES,
+  type BasePortType,
   canonicalNodeDefinition,
   type ExecutableNodeDefinition,
   type ExecutableRegistration,
   evaluateNodeBody,
   isPortType,
   isTriggerDefinition,
+  LIST_PORT_TYPES,
+  type ListPortType,
+  listElement,
   MAX_NODE_CONFIG_FIELDS,
   MAX_NODE_PORTS,
   type NodeBodySegment,

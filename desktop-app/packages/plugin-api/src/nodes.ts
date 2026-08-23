@@ -22,20 +22,19 @@
 /* -------------------------------------------------------------------------------------------- */
 
 /**
- * The closed set of port types.
+ * The scalar port types.
  *
  * Small on purpose. Every member is something the graph runtime can actually carry between nodes and
  * the editor can label on an edge; nothing here is a shape a plugin invented. Domain types are ids
  * with host-known meaning (`user` is a user id, not a user object), which is what lets a node accept
  * a `user` from any producer without the producers agreeing on a payload shape.
  *
- * Not present, and each absence is a decision: no array/list types (an `X[] <: json` rule and an
- * elementwise rule would double the lattice for a v1 that ships triggers only), no `timestamp`
- * distinct from `number` (timestamps are integer unix-ms everywhere in this project, so a separate
- * type would refuse an edge the user is right to expect), and no `any` (that is what `json` is, with
- * the direction stated).
+ * Still not present, and each absence is a decision: no `timestamp` distinct from `number`
+ * (timestamps are integer unix-ms everywhere in this project, so a separate type would refuse an
+ * edge the user is right to expect), and no `any` (that is what `json` is, with the direction
+ * stated).
  */
-export const PORT_TYPES = [
+export const BASE_PORT_TYPES = [
   "friend",
   "user",
   "world",
@@ -48,7 +47,38 @@ export const PORT_TYPES = [
   "json",
 ] as const;
 
-export type PortType = (typeof PORT_TYPES)[number];
+export type BasePortType = (typeof BASE_PORT_TYPES)[number];
+
+/**
+ * A list of one scalar type. `list<friend>`, `list<string>`, and so on.
+ *
+ * **This entry used to say lists were deliberately absent**, on the grounds that an elementwise rule
+ * would double the lattice for a v1 that ships triggers only. Decision 206 reversed it, and the
+ * reason is that `foreach` and the list nodes need *some* answer: the alternatives were a flat
+ * enumeration (`friendList`, `userList`, …) that grows every time a scalar is added, or "a list is
+ * `json`", which hands back exactly the property the lattice exists to hold. One parameterised type
+ * with one covariance rule buys several nodes and stays explicable in a sentence.
+ *
+ * Not nested: `list<list<user>>` is not a port type. A graph that needs one is a graph that wants a
+ * different node, and the depth would have to be drawn on an edge label somebody reads at a glance.
+ */
+export type ListPortType = `list<${BasePortType}>`;
+
+export type PortType = BasePortType | ListPortType;
+
+export const LIST_PORT_TYPES: readonly ListPortType[] = BASE_PORT_TYPES.map(
+  (type) => `list<${type}>` as const,
+);
+
+/** Every port type, scalars first. Iterated by the docs generator and by the editor's palette. */
+export const PORT_TYPES: readonly PortType[] = [...BASE_PORT_TYPES, ...LIST_PORT_TYPES];
+
+/** The element type of a list port, or null for a scalar. */
+export function listElement(type: PortType): BasePortType | null {
+  if (!type.startsWith("list<") || !type.endsWith(">")) return null;
+  const inner = type.slice(5, -1);
+  return (BASE_PORT_TYPES as readonly string[]).includes(inner) ? (inner as BasePortType) : null;
+}
 
 export function isPortType(value: unknown): value is PortType {
   return typeof value === "string" && (PORT_TYPES as readonly string[]).includes(value);
@@ -57,18 +87,21 @@ export function isPortType(value: unknown): value is PortType {
 /**
  * Can a value of `from` flow into a port of `to`?
  *
- * **Exactly two widening rules**, plus identity:
+ * **Three widening rules**, plus identity:
  *
  * 1. `friend <: user` — a friend is a user you also have a relationship with, so anything that takes
  *    a user takes a friend. Not the reverse: a node that needs friendship (unfriend, favourite) must
  *    be able to refuse a stranger at edit time rather than at 3 AM.
- * 2. `X <: json` — every type erases to JSON. Not the reverse: `json` into a typed port is the
- *    unchecked cast that makes a type system decorative, and the graph editor's whole value is
- *    telling the user *before* they save.
+ * 2. `X <: json` — every type erases to JSON, lists included. Not the reverse: `json` into a typed
+ *    port is the unchecked cast that makes a type system decorative, and the graph editor's whole
+ *    value is telling the user *before* they save.
+ * 3. `list<A> <: list<B>` when `A <: B` — lists widen exactly as their elements do, and no further.
+ *    A list is never a scalar and a scalar is never a list, in either direction: "it is one thing or
+ *    several" is the distinction the type exists to draw.
  *
  * PLAN.md is emphatic about why the list stops there: **every additional rule is an explanation you
- * owe a user whose edge just got refused.** A user who learns two rules can predict the whole
- * matrix; a user facing eight rules learns none of them and tries edges until one sticks.
+ * owe a user whose edge just got refused.** Three rules still fit in a sentence, and the third is
+ * the one people already expect from every other type system they have used.
  *
  * The port compatibility matrix in the docs is generated from this function, so it is the single
  * source of truth and cannot describe a rule that isn't implemented.
@@ -76,8 +109,15 @@ export function isPortType(value: unknown): value is PortType {
 export function assignable(from: PortType, to: PortType): boolean {
   if (from === to) return true;
   if (to === "json") return true;
-  if (from === "friend" && to === "user") return true;
-  return false;
+  const fromElement = listElement(from);
+  const toElement = listElement(to);
+  // One side a list and the other not: refused before the scalar rules get a look, so
+  // `list<friend>` cannot slip into a `user` port on the strength of rule 1.
+  if (fromElement === null || toElement === null) {
+    if (fromElement !== null || toElement !== null) return false;
+    return from === "friend" && to === "user";
+  }
+  return assignable(fromElement, toElement);
 }
 
 /* -------------------------------------------------------------------------------------------- */

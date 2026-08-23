@@ -269,18 +269,21 @@ Filter fields are ANDed; values within a field are ORed. Omitted means "all". An
 
 ## Port types
 
-`PORT_TYPES`: `friend`, `user`, `world`, `instance`, `group`, `avatar`, `string`, `number`, `boolean`,
-`json`.
+`BASE_PORT_TYPES`: `friend`, `user`, `world`, `instance`, `group`, `avatar`, `string`, `number`,
+`boolean`, `json`. Each has a `list<>` form (`list<friend>`, …); `PORT_TYPES` is both halves.
 
-`assignable(from, to)` is identity plus **exactly two widening rules**:
+`assignable(from, to)` is identity plus **exactly three widening rules**:
 
 1. `friend <: user` — anything taking a user takes a friend. Not the reverse: a node needing
    friendship must be able to refuse a stranger at edit time.
-2. `X <: json` — every type erases to JSON. Not the reverse: `json` into a typed port is the unchecked
-   cast that makes a type system decorative.
+2. `X <: json` — every type erases to JSON, lists included. Not the reverse: `json` into a typed port
+   is the unchecked cast that makes a type system decorative.
+3. `list<A> <: list<B>` when `A <: B` — lists widen exactly as their elements do. A list is never a
+   scalar and a scalar is never a list.
 
-No arrays, no `timestamp` distinct from `number` (timestamps are integer unix-ms everywhere), no
-`any`. Every additional rule is an explanation owed to a user whose edge just got refused.
+No nesting (`list<list<user>>` is not a port type), no `timestamp` distinct from `number` (timestamps
+are integer unix-ms everywhere), no `any`. Every additional rule is an explanation owed to a user
+whose edge just got refused.
 
 ## UI node types
 

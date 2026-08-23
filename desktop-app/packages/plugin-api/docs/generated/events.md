@@ -2,8 +2,8 @@
 
 # Event catalog
 
-Every event kind this build publishes: 70 kinds across
-13 families.
+Every event kind this build publishes: 76 kinds across
+14 families.
 
 Declare what you want in `permissions.events` — one exact kind, a whole family with
 `family.*`, or `*` for everything. **A family pattern is stable across versions and an exact
@@ -102,6 +102,15 @@ always wins, so a pattern cannot widen a scope you were not granted.
 ## `pipeline.*`
 
 - `pipeline.state`
+
+## `graph.*`
+
+- `graph.disabled`
+- `graph.note`
+- `graph.run.dropped`
+- `graph.run.expired`
+- `graph.run.failed`
+- `graph.run.finished`
 
 ## `economy.*`
 

@@ -1115,9 +1115,11 @@ features uninstallable and burn a grant on the app's own behaviour.
   **field extract** from a `json` port into a typed port, without which the generic trigger is close
   to unusable; **string template**, which reuses the `NodeBodyTemplate` evaluator that already exists;
   and list **filter / count / first**.
-- **Actions:** **HTTP webhook** through the Phase 2 delivery path (SSRF-validated URL, HMAC
-  signature, retry queue, dead-lettering, all of it already built and hardened); **Discord and ntfy**
-  as presets over that same path; **VR overlay** via XSOverlay / OVR Toolkit / OSC, which is outbound
+- **Actions:** **HTTP webhook** through the Phase 2 delivery path's *hardening* — the SSRF-validated
+  URL, the mandatory User-Agent, a hard timeout, a capped response — but **not its queue**: a graph
+  run does not retry, and a `webhooks` row per action node would put a graph's internals into the
+  user's Connected-apps list. See PROGRESS.md decision 212, which is where that departure was made
+  and why. **Discord and ntfy** as presets over the same path; **VR overlay** via XSOverlay / OVR Toolkit / OSC, which is outbound
   UDP to a local port and is entirely greenfield; and the **VRChat social actions** (invite, request
   invite, boop, select avatar) plus a node that writes a `graph.note` into the feed.
 
@@ -1150,8 +1152,11 @@ closed set with rules a refusal message can explain in one sentence.
   never deleted, and a **changed `nodeDefinitionHash` blocks that graph until the user migrates it in
   the editor.** Running half an automation is worse than not running it, and silently adopting a
   redefined node means a plugin update can change behaviour under a graph the user already armed.
-- **Secrets are a `secret` config-field kind stored in `secrets.enc`**, referenced from the graph
-  blob, write-only in the UI and absent from exports. Plugins get the same field kind.
+- **Secrets are a `secret` config-field kind stored in `secrets.enc`**, write-only in the UI and
+  absent from exports — and **absent from the graph document entirely**, not referenced from it: the
+  host substitutes by (graph, node, field) and overwrites whatever the document held, so "a graph
+  cannot leak a token" holds at execution time rather than depending on every writer. Plugins get the
+  same field kind. Decision 213.
 
 ### The editor and the surface
 

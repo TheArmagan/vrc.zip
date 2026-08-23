@@ -9,10 +9,14 @@
  * Start menu, and will be deleted the first time Storage Sense runs. `os/startup.ts` refuses to
  * register an autostart from there, and refusing without offering a way forward is a dead end.
  *
- * So this is the way forward: copy the executable to `%LOCALAPPDATA%\vrc.zip`, put shortcuts where
- * Windows looks for programs, and register the autostart against the copy. Still per-user, still no
- * elevation, still nothing in the registry beyond the one `Run` value — an "install" only in the
- * sense that the file is now somewhere it will survive.
+ * So this is the way forward: copy the executable to `%LOCALAPPDATA%\Programs\vrc.zip`, put
+ * shortcuts where Windows looks for programs, and register the autostart against the copy. Still
+ * per-user, still no elevation, still nothing in the registry beyond the `Run` value and an
+ * Installed apps entry — an "install" only in the sense that the file is now somewhere it survives.
+ *
+ * The `Programs` segment is load-bearing and has its own note on {@link APP_PARENT}: the state tree
+ * is at `%LOCALAPPDATA%\vrc.zip`, and installing into it made `--uninstall` a command that deleted
+ * the user's credentials.
  *
  * ## Shortcuts are PowerShell, and the tray icon is not
  *
@@ -37,12 +41,26 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { APP_NAME, APP_VERSION, REPOSITORY_URL } from "@vrcz/shared";
+import { stateDir } from "../paths.ts";
 import { deleteKey, writeDword, writeString } from "./registry.ts";
 import { setStartupEnabled } from "./startup.ts";
 
 const IS_WINDOWS = process.platform === "win32";
 
-/** The folder name under `%LOCALAPPDATA%`, and the shortcut's name without its extension. */
+/**
+ * Where the executable goes, under `%LOCALAPPDATA%`.
+ *
+ * **`Programs\vrc.zip`, never `vrc.zip`**, and the difference is not cosmetic: `paths.ts` already
+ * puts the *state* tree at `%LOCALAPPDATA%\vrc.zip`. Installing the executable there would drop it
+ * next to `secrets.enc`, the SQLite database and `settings.json` — and then `--uninstall`, which
+ * removes its own install directory, would take the user's credentials, accounts and entire feed
+ * with it. An uninstaller that silently destroys the data is the worst bug this file could have,
+ * and it was one path separator away.
+ *
+ * `Programs\<app>` is also simply where per-user installs go on Windows; it is what VS Code and a
+ * user-scoped Chrome do.
+ */
+const APP_PARENT = "Programs";
 const APP_FOLDER = "vrc.zip";
 const EXECUTABLE_NAME = "vrc.zip.exe";
 
@@ -93,6 +111,26 @@ function writeUninstallEntry(target: string, directory: string, sizeBytes: numbe
   return ok;
 }
 
+/**
+ * Case-insensitive, separator-normalised "is `child` at or inside `parent`".
+ *
+ * Its own copy rather than an import from `startup.ts`, where the twin lives: that one answers "may
+ * an autostart entry point here", this one guards a recursive delete. Two callers with the same
+ * arithmetic and very different consequences, and a shared helper would invite a change made for
+ * one of them to alter the other.
+ */
+function isInside(child: string, parent: string): boolean {
+  if (parent === "") return false;
+  const normalise = (value: string) =>
+    value
+      .replace(/[\\/]+/g, "\\")
+      .replace(/\\$/, "")
+      .toLowerCase();
+  const inner = normalise(child);
+  const outer = normalise(parent);
+  return inner === outer || inner.startsWith(`${outer}\\`);
+}
+
 /** Removes the Installed apps entry. True when it is gone, including when it never existed. */
 export function removeUninstallEntry(): boolean {
   return deleteKey(UNINSTALL_PARENT, UNINSTALL_KEY_NAME);
@@ -130,7 +168,7 @@ export interface InstallResult {
 export function installDirectory(env: NodeJS.ProcessEnv = process.env): string | null {
   const local = env.LOCALAPPDATA;
   if (local === undefined || local.trim() === "") return null;
-  return join(local, APP_FOLDER);
+  return join(local, APP_PARENT, APP_FOLDER);
 }
 
 /** The full path of the installed executable, or null. */
@@ -175,15 +213,10 @@ export function shortcutScript(): string[] {
     "if ($env:VRCZ_LNK_STARTMENU -eq '1') { New-VrcShortcut ([Environment]::GetFolderPath('Programs')) }",
   ].join("; ");
 
-  return [
-    "powershell",
-    "-NoProfile",
-    "-NonInteractive",
-    "-WindowStyle",
-    "Hidden",
-    "-Command",
-    script,
-  ];
+  // No `-WindowStyle Hidden`. It hides the console PowerShell *inherited*, which is the daemon's
+  // own window; see the note on `powershellToast` in `desktop-notification.ts`. `windowsHide` at
+  // the spawn covers the case where there is no console to inherit.
+  return ["powershell", "-NoProfile", "-NonInteractive", "-Command", script];
 }
 
 /** Writes the shortcuts. Best-effort: a failure here does not undo a successful copy. */
@@ -200,6 +233,7 @@ async function writeShortcuts(
       stdout: "ignore",
       stderr: "ignore",
       stdin: "ignore",
+      windowsHide: true,
       env: {
         ...process.env,
         VRCZ_LNK_TARGET: target,
@@ -330,7 +364,7 @@ export interface UninstallResult {
  * of a self-uninstaller and there is no better one available: the alternative is leaving the folder
  * for the user to find, which is exactly the untidiness an uninstall entry exists to avoid.
  *
- * The user's data is deliberately **not** touched. `%APPDATA%rc.zip` holds the credential store,
+ * The user's data is deliberately **not** touched. `%APPDATA%\vrc.zip` holds the credential store,
  * the database and `settings.json`, and an uninstall that silently deletes a signed-in account's
  * secrets is one nobody can safely try. Removing the app is not the same as saying the data was a
  * mistake.
@@ -353,6 +387,23 @@ export async function uninstallLocally(
     return { ok: true, reason: null, path: null };
   }
 
+  /*
+   * The guard that must never be removed.
+   *
+   * What follows hands a directory to `rmdir /s /q`, and the directory is computed. The state tree
+   * lives under the same `%LOCALAPPDATA%` root, so a wrong constant here is not a wrong path — it is
+   * the user's credential store, their database and every account they have signed in, deleted with
+   * no prompt and no undo. This check makes that outcome impossible rather than merely unlikely, and
+   * it is cheap enough that there is no argument for leaving it out.
+   */
+  if (isInside(stateDir(env), directory) || isInside(directory, stateDir(env))) {
+    return {
+      ok: false,
+      reason: `Refusing to remove ${directory}: it holds vrc.zip's accounts and settings. This is a bug — please report it.`,
+      path: directory,
+    };
+  }
+
   const scheduled = await scheduleDirectoryRemoval(directory, execPath);
   return {
     ok: true,
@@ -373,10 +424,12 @@ async function removeShortcuts(): Promise<boolean> {
     "}",
   ].join("; ");
   try {
-    const child = Bun.spawn(
-      ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script],
-      { stdout: "ignore", stderr: "ignore", stdin: "ignore" },
-    );
+    const child = Bun.spawn(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], {
+      stdout: "ignore",
+      stderr: "ignore",
+      stdin: "ignore",
+      windowsHide: true,
+    });
     return (await child.exited) === 0;
   } catch {
     return false;

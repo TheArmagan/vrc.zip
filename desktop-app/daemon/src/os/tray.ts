@@ -750,8 +750,40 @@ export function startTray(options: TrayOptions): Tray | null {
    * closes, so an unbounded loop over a queue that keeps filling would be a way to stall the whole
    * daemon. Sixty-four messages is far more than a tray icon ever produces in a tick.
    */
+  /*
+   * How many pump ticks between "is the icon still there?" checks. 120ms x 40 is roughly five
+   * seconds, which is soon enough that nobody sits looking at an empty notification area and rare
+   * enough that the cost is nothing.
+   */
+  const HEALTH_TICKS = 40;
+  let ticks = 0;
+
+  /**
+   * Puts the icon back if it has gone, and answers whether it had to.
+   *
+   * `NIM_MODIFY` is the cheap existence check the shell already offers: it fails when there is no
+   * icon with our id, which is exactly the question. `TaskbarCreated` handles the case we get told
+   * about; this handles the ones we do not, and there turn out to be several. An icon can go
+   * because the shell decided our window had stopped answering, because explorer was replaced by
+   * something that never sent the broadcast, or because of whatever the shell was doing while some
+   * other part of this process was busy. A tray icon is the only way back to a daemon whose console
+   * is hidden, so "it is usually there" is not a good enough guarantee for it.
+   */
+  const healIcon = (): boolean => {
+    if (shell32.Shell_NotifyIconW(NIM_MODIFY, data) !== 0) return false;
+    install();
+    return true;
+  };
+
   const pump = (): void => {
     if (stopped) return;
+
+    ticks += 1;
+    if (ticks >= HEALTH_TICKS) {
+      ticks = 0;
+      healIcon();
+    }
+
     for (let index = 0; index < 64; index += 1) {
       /*
        * This call is doing two jobs, and the second one is invisible.

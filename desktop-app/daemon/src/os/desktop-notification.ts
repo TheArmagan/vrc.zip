@@ -115,15 +115,21 @@ export function powershellToast(): string[] {
     "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Microsoft.PowerShell').Show($toast)",
   ].join("; ");
 
-  return [
-    "powershell",
-    "-NoProfile",
-    "-NonInteractive",
-    "-WindowStyle",
-    "Hidden",
-    "-Command",
-    script,
-  ];
+  /*
+   * No `-WindowStyle Hidden`, and that omission is a fix rather than an oversight.
+   *
+   * A console process spawned from a console process inherits the console, and `-WindowStyle
+   * Hidden` is implemented as `ShowWindow(GetConsoleWindow(), SW_HIDE)` — on the console it
+   * inherited, which is *ours*. So the flag meant to keep PowerShell out of sight hid the daemon's
+   * own window instead, permanently, every time a notification was shown. Measured, not guessed:
+   * with the flag `IsWindowVisible` on our console goes true to false across the spawn, and without
+   * it stays true.
+   *
+   * Nothing is lost by dropping it. Inheriting our console means PowerShell never draws a window of
+   * its own, and where there is no console to inherit, `windowsHide` at the spawn (`CREATE_NO_WINDOW`)
+   * stops one being created. See `run`.
+   */
+  return ["powershell", "-NoProfile", "-NonInteractive", "-Command", script];
 }
 
 /** Runs an argv, with the toast text supplied out of band. Never throws. */
@@ -136,6 +142,9 @@ async function run(argv: string[], text?: { title: string; body: string }): Prom
       stdout: "ignore",
       stderr: "ignore",
       stdin: "ignore",
+      // `CREATE_NO_WINDOW`: no console of its own when we have none to lend it. This is the half of
+      // "keep the helper out of sight" that does not reach for our window. See `powershellToast`.
+      windowsHide: true,
       env: {
         ...process.env,
         ...(text === undefined ? {} : { VRCZ_TOAST_TITLE: text.title, VRCZ_TOAST_BODY: text.body }),

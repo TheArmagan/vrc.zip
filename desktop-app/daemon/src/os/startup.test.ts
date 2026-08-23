@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { stateDir } from "../paths.ts";
 import { shouldStartHidden } from "./console.ts";
 import { installDirectory, installTarget, isInstalled, shortcutScript } from "./install.ts";
 import { startupCommand, startupEntryTarget, startupLocation, startupSupport } from "./startup.ts";
@@ -137,9 +138,18 @@ describe("the flags", () => {
 describe("install paths", () => {
   const env = { LOCALAPPDATA: "C:\\Users\\a\\AppData\\Local" } as unknown as NodeJS.ProcessEnv;
 
-  test("installs under LOCALAPPDATA", () => {
-    expect(installDirectory(env)).toBe("C:\\Users\\a\\AppData\\Local\\vrc.zip");
-    expect(installTarget(env)).toBe("C:\\Users\\a\\AppData\\Local\\vrc.zip\\vrc.zip.exe");
+  test("installs under LOCALAPPDATA\\Programs, never beside the state tree", () => {
+    /*
+     * The `Programs` segment is the entire point of this assertion.
+     *
+     * `paths.ts` puts the state tree at `%LOCALAPPDATA%\vrc.zip`: the credential store, the SQLite
+     * database, `settings.json`. The executable was installed there too at first, which made
+     * `--uninstall` — which removes its own install directory with `rmdir /s /q` — a command that
+     * would have deleted every account the user had ever signed in, with no prompt and no undo.
+     */
+    expect(installDirectory(env)).toBe("C:\\Users\\a\\AppData\\Local\\Programs\\vrc.zip");
+    expect(installTarget(env)).toBe("C:\\Users\\a\\AppData\\Local\\Programs\\vrc.zip\\vrc.zip.exe");
+    expect(installDirectory(env)).not.toBe(stateDir(env));
   });
 
   test("has nowhere to install without it", () => {
@@ -147,13 +157,34 @@ describe("install paths", () => {
   });
 
   test("recognises the installed copy however the path is spelled", () => {
-    expect(isInstalled("C:\\Users\\a\\AppData\\Local\\vrc.zip\\vrc.zip.exe", env)).toBe(true);
-    expect(isInstalled("c:/users/a/appdata/local/vrc.zip/vrc.zip.exe", env)).toBe(true);
+    expect(isInstalled("C:\\Users\\a\\AppData\\Local\\Programs\\vrc.zip\\vrc.zip.exe", env)).toBe(
+      true,
+    );
+    expect(isInstalled("c:/users/a/appdata/local/programs/vrc.zip/vrc.zip.exe", env)).toBe(true);
     expect(isInstalled("C:\\Users\\a\\Downloads\\vrc.zip.exe", env)).toBe(false);
+    // The state directory is not the install directory, and must never start looking like one.
+    expect(isInstalled("C:\\Users\\a\\AppData\\Local\\vrc.zip\\vrc.zip.exe", env)).toBe(false);
   });
 });
 
 describe("the shortcut script", () => {
+  test("does not hide the console it inherited", () => {
+    /*
+     * The bug this replaced: clicking Install made the daemon's console window vanish for good.
+     *
+     * A console process spawned from a console process inherits that console, and PowerShell
+     * implements `-WindowStyle Hidden` as `ShowWindow(GetConsoleWindow(), SW_HIDE)` — on the
+     * console it inherited, which is ours. Measured rather than reasoned: with the flag,
+     * `IsWindowVisible` on our own console goes true to false across the spawn, and without it
+     * stays true.
+     *
+     * The replacement is `windowsHide` at the spawn, which is `CREATE_NO_WINDOW` and can only
+     * affect a window the child would have created for itself.
+     */
+    expect(shortcutScript()).not.toContain("-WindowStyle");
+    expect(shortcutScript()).not.toContain("Hidden");
+  });
+
   test("carries no path in its text", () => {
     // The rule `desktop-notification.ts` set: PowerShell has its own quoting on top of the argv
     // boundary, so a folder with a quote in it would break the script or extend it. Paths go

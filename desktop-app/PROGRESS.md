@@ -4199,6 +4199,41 @@ Empirical notes. Add to this as you hit things — especially where the plan tur
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
 
+- **`powershell -WindowStyle Hidden` hides *your* console, not PowerShell's.** Clicking Install made
+  the daemon's console window disappear for good, leaving a process that could only be stopped from
+  Task Manager. The cause is that a console process spawned from a console process **inherits the
+  console**, and PowerShell implements `-WindowStyle Hidden` as `ShowWindow(GetConsoleWindow(),
+  SW_HIDE)` — on the window it inherited, which is ours. Measured rather than reasoned: with the
+  flag, `IsWindowVisible` on our own console goes true to false across the spawn; without it, it
+  stays true. The flag was doing nothing useful even on its own terms, because a child that inherits
+  a console never draws a window to hide. `windowsHide: true` on `Bun.spawn` (`CREATE_NO_WINDOW`) is
+  the correct spelling: it only affects a window the child would have created for itself.
+
+  This had been latent in `desktop-notification.ts` since long before the installer — `powershellToast`
+  carried the same flag, so **every desktop notification was hiding the daemon's console**. Nobody
+  hit it because the notification paths that matter are suppressed under the test runner and a
+  developer running from source has a terminal the daemon does not own. Both call sites are fixed and
+  both are asserted, because this is not the kind of thing a reader spots in review.
+
+- **The installer was writing the executable into the state directory.** `installDirectory` was
+  `%LOCALAPPDATA%\vrc.zip`, which is exactly what `paths.ts` returns from `stateDir()` on Windows.
+  So `vrc.zip.exe` landed next to `secrets.enc`, the SQLite database and `settings.json` — and
+  `--uninstall`, which hands its own install directory to `rmdir /s /q`, would have deleted every
+  account the user had ever signed in, their whole feed and their settings, with no prompt and no
+  undo. It never shipped, but only because the uninstall path had not been run yet; the install path
+  had, and had already copied a binary into the state tree. It is now
+  `%LOCALAPPDATA%\Programs\vrc.zip`, which is where per-user installs belong anyway. Two guards
+  went in with it: the paths are asserted against each other in a test, and `uninstallLocally`
+  refuses outright if its target overlaps `stateDir()` — the deletion is computed, so the guard has
+  to be structural rather than a matter of getting a constant right.
+
+- **A tray icon can go away without anybody telling you.** `TaskbarCreated` covers the case the shell
+  announces, and the shell does not announce all of them. Since the tray icon is the only way back to
+  a daemon whose console is hidden, "usually there" is not a strong enough guarantee for it, so the
+  pump now re-asserts the icon every ~5 seconds: `NIM_MODIFY` fails when no icon with our id exists,
+  which is the existence check the shell already offers, and a failure triggers a re-add. Verified by
+  deleting the icon out from under a running tray and watching it come back.
+
 - **One more route tipped the control API's Hono chain into "type instantiation is excessively
   deep".** `daemon/src/servers/control.ts` builds its app as a single chained
   `new Hono().get(...).post(...)`, and Hono types that by accumulating every route into one growing

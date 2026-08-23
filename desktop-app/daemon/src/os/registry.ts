@@ -237,8 +237,16 @@ export function writeDword(path: string, name: string, value: number): boolean {
  * so that it is not there, and `ERROR_FILE_NOT_FOUND` is that outcome, not a failure to reach it.
  */
 export function deleteValue(path: string, name: string): boolean {
-  const result = withKey(path, KEY_SET_VALUE, (lib, key) => lib.RegDeleteValueW(key, wide(name)));
-  if (result === null) return false;
+  withKey(path, KEY_SET_VALUE, (lib, key) => lib.RegDeleteValueW(key, wide(name)));
+  /*
+   * The answer is read back rather than taken from the return code, and the open failing is not
+   * treated as a failure either — a key that does not exist cannot contain the value, which is the
+   * state the caller asked for.
+   *
+   * This is not hypothetical tidiness. `setStartupEnabled(false)` runs through here, so reporting
+   * "could not write to the registry" for a value that was simply already gone would put an error
+   * toast under a switch the user turned off successfully.
+   */
   return readString(path, name) === null;
 }
 

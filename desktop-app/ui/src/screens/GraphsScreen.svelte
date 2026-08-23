@@ -24,6 +24,7 @@ import GraphEditor from "$lib/components/graphs/GraphEditor.svelte";
 import HoldToConfirm from "$lib/components/HoldToConfirm.svelte";
 import RelativeTime from "$lib/components/RelativeTime.svelte";
 import SectionHeader from "$lib/components/SectionHeader.svelte";
+import StoresPanel from "$lib/components/graphs/StoresPanel.svelte";
 import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
 import { Input } from "$lib/components/ui/input/index.js";
@@ -369,6 +370,15 @@ async function runNow(graph: GraphSummary): Promise<void> {
           </div>
         {/each}
       {/if}
+
+      <!--
+        Below the graphs rather than on a route of its own: a store is only interesting because a
+        graph is writing to it, and a screen you have to go looking for is one nobody checks after a
+        typo turns into a store.
+      -->
+      <div class="mt-4 border-t border-border pt-6">
+        <StoresPanel />
+      </div>
     </div>
   </div>
 {/if}

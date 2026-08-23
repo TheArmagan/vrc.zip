@@ -37,7 +37,10 @@ import {
   type GraphCreate,
   type GraphExport,
   type GraphImportResult,
+  type GraphMemoryEntry,
   type GraphRunSummary,
+  type GraphStoreEntry,
+  type GraphStoreSummary,
   type GraphSummary,
   type GraphTemplate,
   type GraphUpdate,
@@ -78,8 +81,11 @@ export type {
   GraphEdge,
   GraphExport,
   GraphImportResult,
+  GraphMemoryEntry,
   GraphNode,
   GraphRunSummary,
+  GraphStoreEntry,
+  GraphStoreSummary,
   GraphSummary,
   GraphTemplate,
   GraphUpdate,
@@ -1550,6 +1556,51 @@ export const api = {
         `/graphs/${encodeURIComponent(graphId)}/secrets/${encodeURIComponent(nodeId)}/${encodeURIComponent(fieldId)}`,
         { method: "PUT", body: { value } },
       ),
+
+    /**
+     * Which of a graph's nodes are remembering something.
+     *
+     * Asked rather than declared, which is what lets the editor show a "forget" button *only* where
+     * there is something to forget — a node with no rows has nothing to reset, and offering the
+     * gesture anyway teaches people it does nothing.
+     */
+    memory: (graphId: string, signal?: AbortSignal): Promise<GraphMemoryEntry[]> =>
+      request<GraphMemoryEntry[]>(
+        `/graphs/${encodeURIComponent(graphId)}/memory`,
+        withSignal(signal),
+      ),
+
+    /** Forgets one node's memory, or the whole graph's when `nodeId` is null. Idempotent. */
+    forget: (graphId: string, nodeId: string | null): Promise<void> =>
+      request<void>(
+        nodeId === null
+          ? `/graphs/${encodeURIComponent(graphId)}/memory`
+          : `/graphs/${encodeURIComponent(graphId)}/memory/${encodeURIComponent(nodeId)}`,
+        { method: "DELETE" },
+      ),
+  },
+
+  /*
+   * The named stores. Beside graphs rather than under one, because a store is shared by name and
+   * belongs to no single graph — `/graphs/:id/stores` would imply an owner that does not exist.
+   */
+  graphStores: {
+    list: (signal?: AbortSignal): Promise<GraphStoreSummary[]> =>
+      request<GraphStoreSummary[]>("/graph-stores", withSignal(signal)),
+
+    browse: (name: string, signal?: AbortSignal): Promise<GraphStoreEntry[]> =>
+      request<GraphStoreEntry[]>(`/graph-stores/${encodeURIComponent(name)}`, withSignal(signal)),
+
+    /** Removes one entry. The raw collection rides in the query: `map:x` contains a path separator. */
+    removeEntry: (name: string, collection: string, key: string): Promise<void> =>
+      request<void>(
+        `/graph-stores/${encodeURIComponent(name)}/entry?collection=${encodeURIComponent(collection)}&key=${encodeURIComponent(key)}`,
+        { method: "DELETE" },
+      ),
+
+    /** Removes a store and everything in it. A person's gesture; no graph and no plugin can do it. */
+    remove: (name: string): Promise<void> =>
+      request<void>(`/graph-stores/${encodeURIComponent(name)}`, { method: "DELETE" }),
   },
 
   /*

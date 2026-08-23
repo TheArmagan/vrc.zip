@@ -144,6 +144,11 @@ const GROUP_ORDER: readonly string[] = [
   "Control",
   "Data",
   "Lists",
+  // Two groups, not one, and the split is the point: `Collections` is a value on a wire and
+  // `Stored data` is a named collection in a store somebody else can read. Next to each other in
+  // the palette so the choice is visible, because it decides whether the answer survives a restart.
+  "Collections",
+  "Stored data",
   "Values",
   "Send",
   "VRChat",

@@ -3869,6 +3869,39 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      every one of them) and never for `graph.signal.local`. The authority signature had to grow the
      capability list too, or a re-grant that added the capability would keep the old compiled answer.
 
+222. **The canvas learned four gestures, and one of them was a refusal that looked like a bug.**
+
+     **Dropping a wire on nothing now asks what you meant.** It used to do nothing at all, which is
+     the least informative outcome a gesture can have: the wire vanishes and the canvas looks exactly
+     as it did, throwing away the two useful things the drag said — *this* port, and *there*. The
+     picker lists only node types with a port that would actually connect, checked with the same
+     `assignable` the canvas and the daemon use, and names the port on the row (a node with three
+     `json` inputs is a guess otherwise). The whole palette at 407 entries is not an answer to "what
+     goes here".
+
+     **Drawing a second wire into an occupied input replaces the first.** The invariant is unchanged
+     and is still the right one — two producers for one input has no defined merge, and a graph that
+     takes whichever arrived last behaves differently on a busy evening than under test. What was
+     wrong was the *refusal*: it meant finding and deleting the old edge first, two gestures for one
+     plainly single intention, and it looked identical to a type error. "Why will this not connect"
+     had two very different answers with one appearance.
+
+     **Right-click deletes a node or a connection**, and offers to forget what a node remembers when
+     it is remembering anything. A plain positioned `<div>` rather than a shadcn `DropdownMenu`,
+     because a dropdown anchors to a trigger element and there is no trigger here — the anchor is
+     wherever the pointer was over an SVG edge.
+
+     **Run now sits beside Save**, and its tooltip says what it does when the canvas is dirty: it
+     runs the *saved* graph. It deliberately does not save first — a canvas that saved itself in
+     order to run once is a canvas that rewrote an enabled graph without being asked.
+
+     **The Stores panel is below the graph list rather than on a route of its own.** A store is only
+     interesting because a graph is writing to it, and a screen you have to go looking for is one
+     nobody checks after a typo turns into a store — which is the cost of stores being created by
+     being written to. Deleting one lives here and nowhere else, and without a hold-to-confirm:
+     unlike arming, this removes data the user is looking at and can put back by running the graph
+     again, and two gestures should not look equally grave.
+
 ---
 
 ## Gotchas

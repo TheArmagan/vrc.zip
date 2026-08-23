@@ -140,8 +140,7 @@ const ON_SIGNAL: NodeDefinition = {
       id: "once",
       label: "Only the first time",
       default: false,
-      description:
-        "Fires once and then never again. The graph's page has a button to forget that it did.",
+      description: "Fires once and then never again. Select this node to forget that it did.",
     },
   ],
   maxFiresPerMinute: 240,

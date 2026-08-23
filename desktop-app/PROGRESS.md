@@ -4084,6 +4084,46 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      panel that read as a layout bug. Cropping from the top-left keeps the type at a readable size,
      and the top-left is where every screen in this app puts the thing it is about.
 
+232. **All seventeen screens are now shot from the demo, and three of them needed the tool to grow.**
+     The four that had been left on their old captures were left there for reasons, and each reason
+     turned out to be fixable.
+
+     **Plugins and the consent sheet needed real installs.** A plugin is a directory that gets
+     compiled, scanned and approved, and the sheet exists only while an install is in flight, so
+     neither can come from the database. The staged run now installs two of the examples and leaves a
+     third waiting. Two things had to be worked out: **the install POST does not return until
+     somebody answers** (awaiting the first one deadlocks the run against a sheet nobody is looking
+     at, so each is fired and the approval comes from polling the pending list), and
+     `@vrcz/plugin-api` **resolves through the workspace only while an example sits in the
+     repository** — copied out it fails to compile, so the package is copied in beside it.
+
+     **Every path on screen is now somebody-else-proof.** Three screens print a filesystem path: the
+     forward-proxy page names its own certificate, the consent sheet names the directory it is
+     installing from, and Settings lists the log directories. All three read
+     `C:\Users\<whoever ran this>\...`, which is a name in a public README. The whole demo tree moved
+     to `%PUBLIC%`, which has no username in it and needs no elevation. A *state* directory there is
+     only acceptable because nothing in this one is real.
+
+233. **The forward-proxy page named one specific companion app four times, and does not any more.**
+     It was the worked example for both steps: which certificate store to use, and which flag to
+     pass. Two reasons to stop, and the second is the one that decided it. It dates the page — the
+     instruction is "a Chromium or Electron app", and naming one of them makes a reader with a
+     different one wonder whether the page applies. And it is somebody else's product name in our own
+     setup instructions: what this app does instead of that one is a fair thing to *show*, but the
+     name in the copy hands the reader something else to think about at the exact moment they are
+     trying to configure something. The flags are unchanged, because they are Chromium's rather than
+     any one app's. The two internal comments that name it are comments about why a number is what it
+     is, and a comment is not user-facing copy.
+
+234. **The type on every render was a third smaller than it was drawn.** Sizes were chosen against a
+     1280px page; the pages then moved to a 1912px viewport that the capture scales down to 1568, so
+     every number was multiplied by 0.82 before anybody read it. A 15px caption arrived at 12px, over
+     a screenshot whose own UI type is already small. Everything is now sized against the *captured
+     file*, which unlike the page is the only place any of it is ever read.
+
+     Along with it: no em-dashes in anything a reader sees. Captions, page copy and the README are
+     rewritten without them; comments keep theirs, because a comment is not user-facing text.
+
 ---
 
 ## Gotchas

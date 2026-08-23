@@ -52,7 +52,7 @@ export const SHOTS: readonly Shot[] = [
     id: "graphs",
     route: "/graphs",
     title: "Automations",
-    caption: "Two switches, not one — a graph can run without being allowed to reach anybody yet.",
+    caption: "Two switches, not one. A graph can run without being allowed to reach anybody yet.",
     uses: ["poster", "ad"],
   },
   {
@@ -83,7 +83,7 @@ export const SHOTS: readonly Shot[] = [
     id: "game-log",
     route: "/gamelog",
     title: "Game log",
-    caption: "Who joined, who left, which world — read straight out of VRChat's own log files.",
+    caption: "Who joined, who left, which world. Read straight out of VRChat's own log files.",
     uses: ["poster", "ad"],
   },
   {
@@ -124,6 +124,14 @@ export const SHOTS: readonly Shot[] = [
     uses: ["poster"],
   },
   {
+    id: "plugin-consent",
+    route: "/plugins",
+    title: "Consent",
+    caption: "Every capability spelled out in plain language, and held down rather than clicked.",
+    hold: "Leave one install unapproved so the sheet is open.",
+    uses: ["poster"],
+  },
+  {
     id: "forward-proxy",
     route: "",
     title: "Forward proxy",
@@ -131,6 +139,20 @@ export const SHOTS: readonly Shot[] = [
       "Point an app at one address and it reaches VRChat through vrc.zip's limits, not around them.",
     hold: "Open the forward proxy page on its own port.",
     uses: ["poster"],
+  },
+  {
+    id: "settings",
+    route: "/settings",
+    title: "Settings",
+    caption: "Contact address, where the logs are, and how long each kind of event is kept.",
+  },
+  {
+    id: "command-palette",
+    route: "/feed",
+    title: "Command palette",
+    caption: "Ctrl+Shift+P reaches every screen, every account, and whatever a plugin contributed.",
+    hold: "Press Ctrl+Shift+P.",
+    uses: ["ad"],
   },
 ];
 

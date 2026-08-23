@@ -3,7 +3,7 @@
 <img src="docs/icon.png" alt="" width="96">
 
 A VRChat companion that runs on your own machine. It signs into several accounts at once, keeps their
-presence live, records a feed you can search, reads VRChat's game logs — and then lets you draw
+presence live, records a feed you can search, and reads VRChat's game logs. Then it lets you draw
 automations over all of it, so the app does something about what it sees instead of only showing you.
 
 It opens in your browser, but nothing leaves your computer. Every port it binds is `127.0.0.1`.
@@ -56,14 +56,14 @@ more triggers, wired to things that happen.
 
 **Two switches, and they are not the same question.** *Enabled* means the graph runs. *Armed* means
 its outbound actions are real rather than rehearsed. A new graph is enabled and unarmed, so it runs
-and writes down what it *would* have done — and arming it is a deliberate hold, with that log sitting
+and writes down what it *would* have done. Arming it is a deliberate hold, with that log sitting
 next to the button as the evidence. A graph wired wrong sends real invites; nothing here lets that
 happen by a mis-click.
 
 ![The canvas](docs/renders/graph-editor.jpg)
 
 Drag from a port to wire it. Every edge is type-checked as you draw it and again when you save, by
-the same function — a `user` port will not accept a world id, so a whole class of automation bug is
+the same function. A `user` port will not accept a world id, so a whole class of automation bug is
 impossible rather than merely unlikely. Drop a wire on empty canvas and it asks what goes there,
 offering only the nodes that would actually connect. Double-click empty canvas to add one anywhere.
 `Delete` removes what is selected, `Ctrl+S` saves.
@@ -72,7 +72,7 @@ offering only the nodes that would actually connect. Double-click empty canvas t
 
 **Four hundred node types**, and most of them are generated rather than written: every operation in
 VRChat's API is a node, every event VRChat pushes down its socket is a trigger, and a plugin can
-contribute its own into its own group. Alongside those are the hand-written ones — comparisons,
+contribute its own into its own group. Alongside those are the hand-written ones: comparisons,
 branches, loops, waits, list and text handling, cooldowns, counters, OSC, Discord and ntfy webhooks,
 desktop and in-headset notifications.
 
@@ -88,7 +88,7 @@ A few of the shapes people build with it:
 ![Shared stores](docs/renders/graph-stores.jpg)
 
 Automations remember things. A **store** is a name, and anything naming the same store shares what is
-in it — one graph writes the list of people it has welcomed, another reads it, and a plugin can read
+in it. One graph writes the list of people it has welcomed, another reads it, and a plugin can read
 it too. Values, maps, sets and ordered lists, all in the database that already has backup and
 retention.
 
@@ -147,9 +147,16 @@ plugins add, grouped by where they came from.
 report, a `wrld_` from Discord, a `vrchat://` copied out of the game. If the clipboard holds
 something that is not an id, it says so instead of guessing.
 
+![Command palette](docs/renders/command-palette.jpg)
+
 ### History you control
 
-![History settings](docs/renders/history.jpg)
+![History](docs/renders/history.jpg)
+
+Every event vrc.zip recorded about a person, on their card. This is its own record rather than
+VRChat's, and it is the one thing no VRChat client can show you.
+
+![Settings](docs/renders/settings.jpg)
 
 Retention is per kind of event, and you set it. Notes, friend history, the avatar log and the user
 cache are outside all of it and are never deleted.
@@ -233,6 +240,13 @@ Bun 1.4.0. `desktop-app/PLAN.md` is the architecture and `desktop-app/PROGRESS.m
 is built and what was decided along the way.
 
 `backend/` in this repository is a separate project and is not part of the app.
+
+## Help and community
+
+Questions, bug reports, and whatever you built with it: **[discord.gg/spfmB7S78n](https://discord.gg/spfmB7S78n)**.
+
+Bugs are also welcome as [issues](https://github.com/TheArmagan/vrc.zip/issues), and a graph you are
+proud of exports to a file you can hand to somebody.
 
 ## License
 

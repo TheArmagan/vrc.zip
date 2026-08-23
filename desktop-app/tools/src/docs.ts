@@ -21,7 +21,7 @@
  * repeatable, the layout is code, the encoding is one command. What is left is aiming.
  */
 
-import { mkdir, rm } from "node:fs/promises";
+import { cp, mkdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { evening } from "./docs/demo.ts";
 import { cropFor, encodeGif } from "./docs/gif.ts";
@@ -45,8 +45,28 @@ const ROOT = resolve(import.meta.dir, "../..");
 const REPO = resolve(ROOT, "..");
 const DOCS = join(REPO, "docs");
 const BUILD = join(ROOT, "build", "docs");
-/** Deliberately inside `desktop-app/` and gitignored: it holds a keychain-backed secrets file. */
-const STATE = join(ROOT, ".docs-state");
+/**
+ * Where everything the staged run creates lives, and why it is not in the repository.
+ *
+ * Three screens put a filesystem path on screen: the forward-proxy page prints the path to its own
+ * certificate, the plugin consent sheet names the directory it is installing from, and Settings
+ * lists the log directories. Under a normal state directory every one of those reads
+ * `C:\Users\<whoever ran this>\...`, which is somebody's name in a public README.
+ *
+ * `%PUBLIC%` has no username in it, is writable without elevation, and exists on every Windows
+ * install. Elsewhere this falls back to the repository, where the path is at least short.
+ *
+ * Putting a *state* directory somewhere world-readable is only acceptable because nothing in this
+ * one is real: the accounts are invented, their credentials authenticate against a stub on loopback,
+ * and the whole tree is deleted and rebuilt on every run.
+ */
+const DEMO_FILES =
+  process.env.PUBLIC === undefined
+    ? join(ROOT, ".docs-state")
+    : join(process.env.PUBLIC, "vrc.zip-demo");
+
+/** The staged daemon's own state: database, secrets file, TLS material. */
+const STATE = join(DEMO_FILES, "state");
 
 function say(line = ""): void {
   console.log(line);
@@ -65,9 +85,11 @@ function say(line = ""): void {
  * loopback-only env overrides that exist for this (see `UPSTREAM_ENV` in `daemon/src/app.ts`).
  */
 async function stage(): Promise<void> {
-  await rm(STATE, { recursive: true, force: true });
+  // The whole demo tree goes first, state included: a half-cleared one is how a previous run's
+  // rows end up in a screenshot of a database that was supposedly created ten seconds ago.
+  await rm(DEMO_FILES, { recursive: true, force: true });
+  const logs = join(DEMO_FILES, "logs");
   await mkdir(STATE, { recursive: true });
-  const logs = join(STATE, "logs");
   await mkdir(logs, { recursive: true });
 
   const stub = startVrchatStub();
@@ -119,6 +141,7 @@ async function stage(): Promise<void> {
   say(`daemon       ${ui}`);
 
   await signIn(control, token);
+  await installPlugins(control, token);
   const result = seed(join(STATE, "vrczip.sqlite"), evening(Date.now()));
   say(
     `seeded       ${String(result.sessions)} sessions, ${String(result.events)} events, ` +
@@ -178,6 +201,88 @@ async function signIn(control: string, token: string): Promise<void> {
     }
     say(`signed in    ${account.displayName}`);
   }
+}
+
+/**
+ * Two plugins installed and approved, and a third left waiting at the consent sheet.
+ *
+ * Real installs of the examples in `examples/plugins/`, so the Plugins screen shows the actual scan
+ * result and the sheet shows the capabilities that plugin really asks for.
+ *
+ * **The install POST does not return until somebody answers**, which is correct behaviour and the
+ * reason this is not three awaited calls in a row: awaiting the first one deadlocks the whole staged
+ * run against a consent sheet nobody is looking at. So each install is fired and left in flight, and
+ * the approval comes from polling `/api/plugins/pending` for the request it created.
+ *
+ * The third is deliberately never approved. The sheet exists only while an install is in flight, so
+ * that shot cannot be taken any other way.
+ */
+async function installPlugins(control: string, token: string): Promise<void> {
+  // Copied out of the repository first, because the consent sheet shows the directory it is
+  // installing from and the repository's path has the operator's home directory in it.
+  const plugins = join(DEMO_FILES, "plugins");
+  await cp(join(ROOT, "examples", "plugins"), plugins, { recursive: true });
+  /*
+   * And the one dependency they have, because `@vrcz/plugin-api` resolves through the workspace
+   * only while an example sits inside the repository. Copied out, the compile step fails with
+   * "Maybe you need to bun install" — so the package is placed where Bun looks for it. Copied
+   * rather than linked: a junction needs elevation on Windows often enough not to rely on.
+   */
+  for (const name of ["hello-panel", "friend-watch", "note-keeper"]) {
+    await cp(
+      join(ROOT, "packages", "plugin-api"),
+      join(plugins, name, "node_modules", "@vrcz", "plugin-api"),
+      { recursive: true, filter: (source) => !source.includes("node_modules") },
+    );
+  }
+  const dir = (name: string) => join(plugins, name);
+
+  for (const name of ["hello-panel", "friend-watch"]) {
+    // Fired, not awaited. The rejection is swallowed because the daemon answers this request only
+    // after the approval below, and by then nothing is waiting on the promise.
+    void post(control, token, "/api/plugins", { path: dir(name) }).catch((cause: unknown) => {
+      // Swallowed *after* being shown. The daemon answers this request only once the approval below
+      // lands, so a rejection here is a real refusal and worth reading rather than a stale promise.
+      say(`  install refused: ${String(cause)}`);
+    });
+    const pending = await waitForPending(control, token);
+    if (pending === null) {
+      say(`skipped      ${name}: no consent request appeared`);
+      continue;
+    }
+    await post(control, token, `/api/plugins/pending/${pending}/approve`, {
+      // Everything the plugin asked for, which is what "approve" means here. A demo that narrowed
+      // the grant would be showing a screen nobody chose.
+      accountIds: [],
+    });
+    say(`installed    ${name}`);
+  }
+
+  void post(control, token, "/api/plugins", { path: dir("note-keeper") }).catch(() => undefined);
+  const sheet = await waitForPending(control, token);
+  say(
+    sheet === null
+      ? "skipped      note-keeper: no consent request appeared"
+      : "pending      note-keeper, left at the consent sheet",
+  );
+}
+
+/** The id of the install currently waiting, once one shows up. Null if none does. */
+async function waitForPending(control: string, token: string): Promise<string | null> {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    await Bun.sleep(250);
+    const list = (await get(control, token, "/api/plugins/pending")) as { id?: string }[];
+    const first = list[0]?.id;
+    if (first !== undefined) return first;
+  }
+  return null;
+}
+
+async function get(control: string, token: string, path: string): Promise<unknown> {
+  const response = await fetch(`${control}${path}`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  return response.ok ? ((await response.json()) as unknown) : [];
 }
 
 async function post(control: string, token: string, path: string, body: unknown): Promise<unknown> {

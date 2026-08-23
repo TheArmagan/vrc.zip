@@ -83,6 +83,14 @@ export const AD_ASPECT = 16 / 9;
  *
  * `image-rendering: -webkit-optimize-contrast` is not decoration: every source image is a screenshot
  * of text being scaled down, and the default smooth filter turns 12px UI type into grey mush.
+ *
+ * ## Type is sized against the file, not the page
+ *
+ * The first pass was drawn at what looked right in a browser and shipped about a third smaller than
+ * that: the page is laid out in a 1912px-wide viewport and the capture comes back at 1568, so every
+ * number written here is multiplied by 0.82 before anybody reads it. A caption at 15px arrived at
+ * 12px, on top of a screenshot whose own UI type is already small. Everything below is sized for the
+ * captured file — which, unlike the page, is the only place any of it is ever read.
  */
 function styles(): string {
   return `
@@ -141,9 +149,9 @@ function centred(aspect: number, inner: string): string {
 export function captionPage(entry: Shot, imageHref: string): string {
   return page(
     `<div style="display:flex; flex-direction:column; height:100%; padding:26px 30px 30px; gap:12px;">
-       <div class="rule" style="width:52px;"></div>
-       <div class="title" style="font-size:25px;">${escapeHtml(entry.title)}</div>
-       <div class="caption" style="font-size:15px; max-width:96ch;">${escapeHtml(entry.caption)}</div>
+       <div class="rule" style="width:76px;"></div>
+       <div class="title" style="font-size:42px;">${escapeHtml(entry.title)}</div>
+       <div class="caption" style="font-size:23px; max-width:80ch;">${escapeHtml(entry.caption)}</div>
        <div class="shot" style="flex:1; min-height:0;"><img src="${escapeHtml(imageHref)}" alt=""></div>
      </div>`,
   );
@@ -169,9 +177,9 @@ export function posterPage(hero: string, imageHref: (id: string) => string): str
     .map(
       (entry) => `
       <div style="display:flex; flex-direction:column; gap:5px; min-width:0;">
-        <div class="shot" style="height:104px;"><img src="${escapeHtml(imageHref(entry.id))}" alt=""></div>
-        <div class="title" style="font-size:13px;">${escapeHtml(entry.title)}</div>
-        <div class="caption" style="font-size:11.5px;">${escapeHtml(entry.caption)}</div>
+        <div class="shot" style="height:132px;"><img src="${escapeHtml(imageHref(entry.id))}" alt=""></div>
+        <div class="title" style="font-size:19px;">${escapeHtml(entry.title)}</div>
+        <div class="caption" style="font-size:15.5px;">${escapeHtml(entry.caption)}</div>
       </div>`,
     )
     .join("");
@@ -179,17 +187,17 @@ export function posterPage(hero: string, imageHref: (id: string) => string): str
   return page(
     `<div style="display:flex; height:100%; padding:32px; gap:28px;">
        <div style="flex:0 0 46%; display:flex; flex-direction:column; gap:12px; min-width:0;">
-         <div class="mark" style="font-size:44px;">vrc.zip</div>
-         <div class="caption" style="font-size:15px;">A VRChat companion that runs on your own machine. Several accounts at once, a feed you can search, and automations you draw.</div>
+         <div class="mark" style="font-size:62px;">vrc.zip</div>
+         <div class="caption" style="font-size:21px;">A VRChat companion that runs on your own machine. Several accounts at once, a feed you can search, and automations you draw.</div>
          <div class="rule" style="width:100%;"></div>
          <div class="shot" style="flex:1; min-height:0;"><img src="${escapeHtml(imageHref(hero))}" alt=""></div>
-         <div class="caption" style="font-size:12.5px;">${escapeHtml(heroShot.caption)}</div>
+         <div class="caption" style="font-size:18px;">${escapeHtml(heroShot.caption)}</div>
        </div>
        <div style="flex:1; display:flex; flex-direction:column; gap:14px; min-width:0;">
          <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px 16px; flex:1; min-height:0;">${panels}</div>
          <div style="display:flex; justify-content:space-between; align-items:center; gap:14px; border-top:1px solid #26262b; padding-top:12px;">
-           <div class="caption" style="font-size:12.5px;">Local-only · 50–80&nbsp;MB idle · plugins · one file</div>
-           <div class="unofficial" style="font-size:11.5px;">UNOFFICIAL — not affiliated with VRChat Inc.</div>
+           <div class="caption" style="font-size:17px;">Local-only · 50-80&nbsp;MB idle · plugins · one file</div>
+           <div class="unofficial" style="font-size:15px;">UNOFFICIAL. Not affiliated with VRChat Inc.</div>
          </div>
        </div>
      </div>`,
@@ -205,10 +213,10 @@ export function shortFramePage(entry: Shot, imageHref: string): string {
   return centred(
     SHORT_ASPECT,
     `<div style="display:flex; flex-direction:column; height:100%; padding:30px; gap:14px;">
-       <div class="mark" style="font-size:24px;">vrc.zip</div>
-       <div class="rule" style="width:44px;"></div>
-       <div class="title" style="font-size:27px;">${escapeHtml(entry.title)}</div>
-       <div class="caption" style="font-size:15px;">${escapeHtml(entry.caption)}</div>
+       <div class="mark" style="font-size:34px;">vrc.zip</div>
+       <div class="rule" style="width:60px;"></div>
+       <div class="title" style="font-size:40px;">${escapeHtml(entry.title)}</div>
+       <div class="caption" style="font-size:22px;">${escapeHtml(entry.caption)}</div>
        <div class="shot" style="flex:1; min-height:0;"><img src="${escapeHtml(imageHref)}" alt=""></div>
      </div>`,
   );
@@ -219,10 +227,10 @@ export function adTitlePage(headline: string, sub: string): string {
   return centred(
     AD_ASPECT,
     `<div style="display:flex; flex-direction:column; height:100%; padding:70px; justify-content:center; gap:20px;">
-       <div class="rule" style="width:68px;"></div>
-       <div class="mark" style="font-size:72px;">vrc.zip</div>
-       <div class="title" style="font-size:32px; max-width:24ch; line-height:1.2;">${escapeHtml(headline)}</div>
-       <div class="caption" style="font-size:19px; max-width:54ch;">${escapeHtml(sub)}</div>
+       <div class="rule" style="width:92px;"></div>
+       <div class="mark" style="font-size:104px;">vrc.zip</div>
+       <div class="title" style="font-size:46px; max-width:24ch; line-height:1.2;">${escapeHtml(headline)}</div>
+       <div class="caption" style="font-size:27px; max-width:54ch;">${escapeHtml(sub)}</div>
      </div>`,
   );
 }
@@ -234,10 +242,10 @@ export function adFramePage(entry: Shot, imageHref: string): string {
     `<div style="display:flex; height:100%; padding:40px; gap:30px; align-items:stretch;">
        <div class="shot" style="flex:1 1 64%; min-width:0;"><img src="${escapeHtml(imageHref)}" alt=""></div>
        <div style="flex:0 0 30%; display:flex; flex-direction:column; gap:12px;">
-         <div class="rule" style="width:42px;"></div>
-         <div class="title" style="font-size:29px; line-height:1.15;">${escapeHtml(entry.title)}</div>
-         <div class="caption" style="font-size:16px;">${escapeHtml(entry.caption)}</div>
-         <div class="mark" style="font-size:17px; margin-top:auto;">vrc.zip</div>
+         <div class="rule" style="width:58px;"></div>
+         <div class="title" style="font-size:42px; line-height:1.15;">${escapeHtml(entry.title)}</div>
+         <div class="caption" style="font-size:23px;">${escapeHtml(entry.caption)}</div>
+         <div class="mark" style="font-size:24px; margin-top:auto;">vrc.zip</div>
        </div>
      </div>`,
   );
@@ -249,10 +257,10 @@ export function adEndPage(): string {
     AD_ASPECT,
     `<div style="display:flex; flex-direction:column; height:100%; padding:70px; justify-content:center; gap:18px;">
        <div class="rule" style="width:68px;"></div>
-       <div class="mark" style="font-size:64px;">vrc.zip</div>
-       <div class="title" style="font-size:27px;">One file. Nothing to install.</div>
-       <div class="caption" style="font-size:19px;">github.com/TheArmagan/vrc.zip</div>
-       <div class="unofficial" style="font-size:13px; margin-top:16px;">UNOFFICIAL — not affiliated with, endorsed by, or operated by VRChat Inc.</div>
+       <div class="mark" style="font-size:92px;">vrc.zip</div>
+       <div class="title" style="font-size:38px;">One file. Nothing to install.</div>
+       <div class="caption" style="font-size:27px;">github.com/TheArmagan/vrc.zip</div>
+       <div class="unofficial" style="font-size:18px; margin-top:20px;">UNOFFICIAL. Not affiliated with, endorsed by, or operated by VRChat Inc.</div>
      </div>`,
   );
 }

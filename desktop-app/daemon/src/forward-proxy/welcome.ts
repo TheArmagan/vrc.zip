@@ -52,7 +52,7 @@ that lives only on this machine, and your app has to trust that CA first.</p>
 <p><a href="/vrczip-ca.crt" download>Download vrczip-ca.crt</a>, or take it from
 <code>${path}</code>.</p>
 
-<p><strong>Windows</strong> (this is what Chromium, and therefore VRCX, reads):</p>
+<p><strong>Windows</strong> (this is the store Chromium and Electron apps read):</p>
 <pre>certutil -addstore -user Root "${path}"</pre>
 
 <p><strong>Linux</strong>, system trust store:</p>
@@ -63,8 +63,8 @@ sudo update-ca-certificates</pre>
 <pre>certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n vrc.zip -i "${path}"</pre>
 
 <h2>2. Point the app at the proxy</h2>
-<p>VRCX and anything else built on Chromium or Electron:</p>
-<pre>VRCX.exe --proxy-server=${escapeHtml(proxyUrl)}</pre>
+<p>Anything built on Chromium or Electron takes a flag:</p>
+<pre>YourApp.exe --proxy-server=${escapeHtml(proxyUrl)}</pre>
 <p>Most other tooling reads the environment:</p>
 <pre>HTTP_PROXY=${escapeHtml(proxyUrl)} HTTPS_PROXY=${escapeHtml(proxyUrl)}</pre>
 

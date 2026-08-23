@@ -3048,11 +3048,10 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      reads the build input.
 
 201. **Releases are cut by hand, and the tag follows the binary rather than the other way round.**
-     `.github/workflows/desktop-app-release.yml` is `workflow_dispatch` only. It is deliberately a
-     second workflow rather than a branch inside `desktop-app.yml`: that one is the *gate* — it runs
-     on every push, it is allowed to be noisy, and it needs no permissions. This one *publishes*, so
-     it writes to releases, moves a tag, and hands strangers an executable. Those wanted different
-     triggers and different grants (`contents: write`, and nothing else).
+     `.github/workflows/desktop-app-release.yml` is `workflow_dispatch` only, because it
+     *publishes*: it writes to releases, moves a tag, and hands strangers an executable, and none of
+     that should happen because somebody pushed a commit. (Written as a second workflow alongside
+     the push-triggered gate, which decision 202 then removed — it is now the only one.)
 
      Three calls in it are worth keeping:
 
@@ -3073,6 +3072,21 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      that can write releases is one where a tag containing a quote and a semicolon would otherwise
      be *code* — the standard Actions script-injection hole. Same reason `--prerelease` is pushed
      onto a bash array instead of being spliced in by an expression.
+
+202. **The push-triggered gate is gone, and with it the option to skip checks.** `desktop-app.yml`
+     — decision 67's path-filtered workflow — was deleted, so the release workflow is the only one
+     in the repository. `skip_checks` went with it in the same breath, and the reasoning is the
+     point: it existed to avoid re-running five gates that a push had *already* run. With nothing
+     running them on a push, the switch stopped meaning "this was checked a minute ago" and started
+     meaning "this was never checked" — reachable only on the build where being wrong is most
+     expensive, since a bad release is the one artifact that leaves the machine.
+
+     **What this actually costs, stated plainly:** a change is now unverified until someone runs
+     `bun run test`, `bun run test:ui`, `bun run typecheck`, `bun run lint` and `cd ui && bun run
+     check` by hand, and the first automated run is the release that ships it. Decision 67 was
+     written because "it works here" is not a verification, and that concern did not go away. It
+     just moved onto the person committing. `CLAUDE.md` says so where it lists the five commands,
+     rather than leaving the reader to infer it from an absent file.
 
 ---
 

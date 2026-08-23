@@ -1,8 +1,11 @@
 # Packages `desktop-app/` and publishes it to a GitHub Release. Manual trigger only.
 #
-# Separate from `desktop-app.yml` on purpose. That one is the gate: it runs on every push and pull
-# request and is allowed to be noisy. This one *publishes* — it writes to the repository's releases,
-# moves a tag, and hands strangers an executable — so it never fires on its own.
+# Manual because this workflow *publishes*: it writes to the repository's releases, moves a tag, and
+# hands strangers an executable. None of that should happen because somebody pushed a commit.
+#
+# It is also the only workflow in the repository, so the five checks below are not a second opinion
+# on a gate that already ran — they are the only time they run in CI at all. That is why none of
+# them are skippable.
 #
 # ## Overwriting
 #
@@ -30,11 +33,6 @@ on:
         default: true
       prerelease:
         description: 'Mark the release as a pre-release'
-        required: false
-        type: boolean
-        default: false
-      skip_checks:
-        description: 'Skip typecheck, lint and tests (for re-cutting a build that already passed)'
         required: false
         type: boolean
         default: false
@@ -79,27 +77,26 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
-      # The same five gates as `desktop-app.yml`, because a release is the one build where "it
-      # compiled" is not enough. Skippable by input for re-cutting a commit that already passed.
+      # All five checks, unconditionally. A release is the one build where "it compiled" is not
+      # enough, and nothing else in CI runs them — so a switch to skip them would only ever be
+      # reached on the build where being wrong is most expensive.
+      #
+      # Both runners, because the split is real: `bun test` owns daemon/packages/tools, and `ui/` is
+      # Vitest. Running one is not running the suite.
       - name: typecheck
-        if: ${{ !inputs.skip_checks }}
         run: bun run typecheck
 
       - name: lint
-        if: ${{ !inputs.skip_checks }}
         run: bun run lint
 
       - name: svelte-check
-        if: ${{ !inputs.skip_checks }}
         run: bun run check
         working-directory: desktop-app/ui
 
       - name: test (daemon, packages, tools)
-        if: ${{ !inputs.skip_checks }}
         run: bun run test
 
       - name: test (ui)
-        if: ${{ !inputs.skip_checks }}
         run: bun run test:ui
 
       # Inputs reach these scripts as environment variables, never as `${{ }}` interpolated into

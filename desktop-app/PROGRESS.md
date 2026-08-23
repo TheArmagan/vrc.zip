@@ -3100,6 +3100,21 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      is the 256px layer pulled out of `tools/assets/vrczip.ico` with ffmpeg, so the README shows the
      same mark the packaged executable carries rather than a second drawing of it that can drift.
 
+204. **The root README leads with a rendered collage, and the feature list was rewritten from the
+     code rather than from the first draft's memory.** Two changes, one reason. The collage
+     (`docs/collage.jpg`, 1600x760) is three screenshots fanned on a lighter ground, composed in a
+     browser canvas and saved from the page; the ground is deliberately *not* the app's near-black,
+     because dark panels on a dark field have only their border to sit on. A screenshot pinned under
+     every heading was also the whole of the first draft's layout, so the two log-shaped screens now
+     share a two-column HTML table and the keyboard section carries no image at all, which is what
+     gives the page a rhythm rather than a column of equal slabs. The feature pass came from reading
+     `control.ts`'s route table, `user-actions.ts` and the command registry, and it found four things
+     the README had never mentioned: the palette on `Ctrl+Shift+P`, the paste-an-id front door on
+     `Ctrl+Shift+V`, the social actions and per-user notes, and webhooks. It also found one sentence
+     to *delete* rather than add: marking a notification seen is local, and the draft had claimed it
+     reached VRChat's inbox. A README written from what a feature ought to do is the same rot as a
+     docs banner (see §Gotchas), minus the excuse.
+
 ---
 
 ## Gotchas

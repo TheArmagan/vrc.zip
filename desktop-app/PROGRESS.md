@@ -4050,6 +4050,40 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      offline when they are not is the more annoying of the two errors. Taking the first account's
      answer would have made the merged list depend on sign-in order.
 
+230. **The README leads with automations now, and every picture in it is generated.** A full rewrite
+     rather than an addition: graphs are the largest thing in the app, and a README whose fourth
+     section mentioned them was describing a previous version.
+
+     **It never names the app it replaces.** The old one did, once, in the forward-proxy section.
+     Naming a competitor in your own README hands the reader something else to think about, and the
+     comparison is better made by the screenshots than by the noun.
+
+     **Eleven captioned renders, a poster, and two GIFs**, all out of `tools/src/docs/`. The ad GIF
+     is 16:9, thirteen frames at 2 fps, 0.94 MB — under Discord's free-tier limit with room to spare.
+     The short one is 2:3 at 1 fps for a phone-shaped feed. Both loop.
+
+231. **The capture tool has one viewport and no way to ask for another, which decided three things.**
+     Worth writing down because every one of them looks like a taste and is not.
+
+     **Pages are authored in `vw`/`vh`, not pixels.** The first poster came out with 160px of black
+     under it: the page was 738px tall and the viewport was 901. The tool returns a *uniform* scale
+     of whatever window it is taken in, so the only correct authoring unit is a fraction of it.
+
+     **A frame that wants a different aspect ratio is drawn centred on black and cropped by ffmpeg.**
+     `frameBox` in `pages.ts` and `cropFor` in `gif.ts` derive the same rectangle from one number,
+     with a test asserting they agree — because if they drift, every GIF frame is off-centre by a few
+     pixels and nothing fails.
+
+     **The poster is landscape.** It was specified as a tall poster, hero over a grid, and a tall
+     image cannot be captured one viewport at a time. The compromise turned out to have a consolation:
+     landscape is the shape that embeds in a README without a scroll, which is where it will mostly
+     be seen.
+
+     **`object-fit: cover`, not `contain`.** Every box has a different aspect ratio from the 2.1:1
+     screenshot inside it, and fitting the whole shot in left a band of dead background in every
+     panel that read as a layout bug. Cropping from the top-left keeps the type at a readable size,
+     and the top-left is where every screen in this app puts the thing it is about.
+
 ---
 
 ## Gotchas

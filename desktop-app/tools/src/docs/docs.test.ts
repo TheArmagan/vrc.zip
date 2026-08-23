@@ -1,7 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { ACCOUNTS, evening, FRIENDS, NOTIFICATIONS, WORLDS } from "./demo.ts";
-import { concatList, ffmpegArgs } from "./gif.ts";
-import { allPages, escapeHtml, posterPage } from "./pages.ts";
+import { concatList, cropFor, ffmpegArgs } from "./gif.ts";
+import {
+  AD_ASPECT,
+  allPages,
+  CAPTURE,
+  escapeHtml,
+  frameBox,
+  posterPage,
+  SHORT_ASPECT,
+} from "./pages.ts";
 import { SHORT_FRAMES, SHOTS, shot, shotsFor } from "./shots.ts";
 
 /**
@@ -123,6 +131,21 @@ describe("the GIF encoding", () => {
     // ffmpeg's list parser treats a backslash as an escape, so `C:\frames\a.png` loses its
     // separators and the encode fails with a file-not-found on a path that is plainly there.
     expect(concatList(["C:\\frames\\a.png"], 1)).toContain("file 'C:/frames/a.png'");
+  });
+
+  test("the crop the pages compose to is the crop ffmpeg takes back out", () => {
+    // Two halves of one decision, in two files. If they drift, every GIF frame is off-centre by a
+    // few pixels and nothing fails — which is exactly the kind of wrong this file is for.
+    for (const aspect of [SHORT_ASPECT, AD_ASPECT]) {
+      const box = frameBox(aspect);
+      expect(cropFor(aspect, CAPTURE)).toBe(
+        `${String(box.width)}:${String(box.height)}:${String(box.left)}:0`,
+      );
+      // Odd widths are refused by several encoders, and a frame wider than the capture is a frame
+      // with its edges already gone.
+      expect(box.width % 2).toBe(0);
+      expect(box.width).toBeLessThanOrEqual(CAPTURE.width);
+    }
   });
 
   test("the filter graph builds a palette from the frames rather than using the default one", () => {

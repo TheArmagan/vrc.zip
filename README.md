@@ -2,16 +2,16 @@
 
 <img src="docs/icon.png" alt="" width="96">
 
-A VRChat companion that runs on your own machine. It signs into more than one account at once, keeps
-their presence live, records a feed you can search later, reads VRChat's game logs, and can hand that
-same access to other apps you already use.
+A VRChat companion that runs on your own machine. It signs into several accounts at once, keeps their
+presence live, records a feed you can search, reads VRChat's game logs — and then lets you draw
+automations over all of it, so the app does something about what it sees instead of only showing you.
 
 It opens in your browser, but nothing leaves your computer. Every port it binds is `127.0.0.1`.
 
 > **UNOFFICIAL.** Not affiliated with, endorsed by, or operated by VRChat Inc. You sign in with your
 > own VRChat credentials, and vrc.zip talks to VRChat as you.
 
-![vrc.zip](docs/collage.jpg)
+![vrc.zip](docs/vrc-zip.gif)
 
 ## Get it
 
@@ -47,7 +47,56 @@ rarely as possible.
 
 ![Accounts](docs/renders/accounts.jpg)
 
-## What you get
+## Automations
+
+This is the part that makes vrc.zip more than a window onto VRChat. An automation is a graph: one or
+more triggers, wired to things that happen.
+
+![Automations](docs/renders/graphs.jpg)
+
+**Two switches, and they are not the same question.** *Enabled* means the graph runs. *Armed* means
+its outbound actions are real rather than rehearsed. A new graph is enabled and unarmed, so it runs
+and writes down what it *would* have done — and arming it is a deliberate hold, with that log sitting
+next to the button as the evidence. A graph wired wrong sends real invites; nothing here lets that
+happen by a mis-click.
+
+![The canvas](docs/renders/graph-editor.jpg)
+
+Drag from a port to wire it. Every edge is type-checked as you draw it and again when you save, by
+the same function — a `user` port will not accept a world id, so a whole class of automation bug is
+impossible rather than merely unlikely. Drop a wire on empty canvas and it asks what goes there,
+offering only the nodes that would actually connect. Double-click empty canvas to add one anywhere.
+`Delete` removes what is selected, `Ctrl+S` saves.
+
+![Four hundred nodes](docs/renders/graph-palette.jpg)
+
+**Four hundred node types**, and most of them are generated rather than written: every operation in
+VRChat's API is a node, every event VRChat pushes down its socket is a trigger, and a plugin can
+contribute its own into its own group. Alongside those are the hand-written ones — comparisons,
+branches, loops, waits, list and text handling, cooldowns, counters, OSC, Discord and ntfy webhooks,
+desktop and in-headset notifications.
+
+A few of the shapes people build with it:
+
+- Greet somebody the first time they join tonight, and never twice.
+- Tell your phone when a specific friend comes online, but not more than once an hour.
+- Count who is in the instance every hour and write it to the feed.
+- Send an OSC parameter to your avatar when a friend enters your world.
+
+### Shared stores
+
+![Shared stores](docs/renders/graph-stores.jpg)
+
+Automations remember things. A **store** is a name, and anything naming the same store shares what is
+in it — one graph writes the list of people it has welcomed, another reads it, and a plugin can read
+it too. Values, maps, sets and ordered lists, all in the database that already has backup and
+retention.
+
+**Signals** are the other half: one graph says something by name, and any graph listening for that
+name reacts. Local signals stay inside the graph that sent them; global ones reach every graph and
+land in the feed.
+
+## What else you get
 
 ### Live sessions
 
@@ -70,8 +119,10 @@ the game.
 
 ![Feed](docs/renders/feed.jpg)
 
-Rows link to the thing they mention. Profiles, worlds, groups and avatars open in the same panel with
-a back stack, so following a name three levels deep still has a way back.
+One timeline for everything: presence, the game log, notifications, and what your automations did.
+Searchable and filterable in SQL rather than in the browser, so "load older" walks real history.
+Rows link to the thing they mention, and profiles, worlds, groups and avatars open in the same panel
+with a back stack.
 
 ### Game log
 
@@ -100,13 +151,14 @@ something that is not an id, it says so instead of guessing.
 
 ![History settings](docs/renders/history.jpg)
 
-Notes, friend history, the avatar log and the user cache are outside all of it and are never deleted.
+Retention is per kind of event, and you set it. Notes, friend history, the avatar log and the user
+cache are outside all of it and are never deleted.
 
 ## Let your other apps use it
 
-vrc.zip can stand in front of VRChat for other local apps, VRCX included. The app logs in the way it
-always does, except the credentials it ends up holding are vrc.zip's, not VRChat's, and you decide
-what it may do with them.
+vrc.zip can stand in front of VRChat for other local apps. The app logs in the way it always does,
+except the credentials it ends up holding are vrc.zip's, not VRChat's, and you decide what it may do
+with them.
 
 ![Forward proxy setup](docs/renders/forward-proxy.jpg)
 
@@ -133,7 +185,8 @@ plugins you trust.
 
 ![Plugins](docs/renders/plugins.jpg)
 
-Writing one:
+A plugin can read VRChat through your accounts, draw its own screens, contribute node types to the
+graph editor, read and write the same shared stores your automations use, and send and hear signals.
 
 ```
 vrc.zip create-plugin my-plugin
@@ -160,11 +213,10 @@ id, no display name. Leave it off and those rows stay unresolved.
 
 - **No packaged build outside Windows yet.** It runs from source anywhere Bun runs, and it knows
   where the logs live on Linux, Proton, Flatpak and Steam Deck, but the release is a Windows binary.
-- **No node graph editor yet.** Plugins can already contribute node types. The canvas that wires them
-  together is planned and not built.
 - **No mobile, no remote access.** It binds to localhost only, and that is deliberate.
 - **No monetization end-runs.** Favorite counts, invite slots and group limits are whatever your real
   VRC+ entitlements say. vrc.zip will not pretend otherwise.
+- **Plugins are not sandboxed**, and the app says so everywhere rather than implying otherwise.
 
 It is version 0.1.0. Expect rough edges, and expect the database schema to move.
 

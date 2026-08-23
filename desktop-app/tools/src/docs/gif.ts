@@ -27,10 +27,26 @@ export interface GifOptions {
   readonly out: string;
   /** Frames per second. The short GIF is 1; the ad is 2. */
   readonly fps: number;
-  /** Output width. Height follows the frames' aspect ratio. */
+  /** Output width. Height follows whatever is left after the crop. */
   readonly width: number;
+  /**
+   * The rectangle to take out of each captured frame, as `w:h:x:y`.
+   *
+   * Every frame arrives as a full browser viewport with the real frame centred on black, because the
+   * capture tool has one fixed size and no way to ask for another. `pages.ts` composes to that
+   * constraint and this undoes it. See {@link cropFor}, which derives both halves from one number so
+   * they cannot disagree.
+   */
+  readonly crop?: string;
   /** How many times to loop. 0 is forever, which is what every surface expects of a GIF. */
   readonly loop?: number;
+}
+
+/** The `crop` filter argument for a frame of `aspect`, centred in a `width`×`height` capture. */
+export function cropFor(aspect: number, capture: { width: number; height: number }): string {
+  const frameWidth = Math.round((capture.height * aspect) / 2) * 2;
+  const left = Math.round((capture.width - frameWidth) / 2);
+  return `${String(frameWidth)}:${String(capture.height)}:${String(left)}:0`;
 }
 
 /** Where ffmpeg is, or null. Checked rather than assumed — see the note above. */
@@ -60,6 +76,9 @@ export const FFMPEG_MISSING =
 export function ffmpegArgs(options: GifOptions, listPath: string): string[] {
   const filters = [
     `fps=${String(options.fps)}`,
+    // Cropped before scaling, so the scale factor is computed against the real frame rather than
+    // against the black surround it arrived in.
+    ...(options.crop === undefined ? [] : [`crop=${options.crop}`]),
     `scale=${String(options.width)}:-1:flags=lanczos`,
     "split[a][b]",
     "[a]palettegen=stats_mode=diff[p]",
@@ -114,6 +133,11 @@ export async function encodeGif(options: GifOptions): Promise<{ ok: boolean; not
     stderr: "pipe",
   });
   const code = await child.exited;
+  // The list is ffmpeg's input, not an output: left behind it lands in `docs/` beside the GIF and
+  // gets committed by the next `git add docs`.
+  await Bun.file(listPath)
+    .delete()
+    .catch(() => undefined);
   if (code !== 0) {
     const stderr = await new Response(child.stderr).text();
     return {

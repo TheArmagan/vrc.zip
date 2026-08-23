@@ -24,15 +24,16 @@
 import { mkdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { evening } from "./docs/demo.ts";
-import { encodeGif } from "./docs/gif.ts";
+import { cropFor, encodeGif } from "./docs/gif.ts";
 import {
-  AD_SIZE,
+  AD_ASPECT,
   adEndPage,
   adFramePage,
   adTitlePage,
+  CAPTURE,
   captionPage,
   posterPage,
-  SHORT_SIZE,
+  SHORT_ASPECT,
   shortFramePage,
 } from "./docs/pages.ts";
 import { seed } from "./docs/seed.ts";
@@ -264,19 +265,22 @@ async function pages(): Promise<void> {
   const base = `http://127.0.0.1:${String(server.port)}`;
   say(`Wrote ${String(written.length)} pages to build/docs, served at ${base}`);
   say();
-  say(`Captions → docs/renders/<id>.jpg, ${String(1280)}px wide:`);
+  // Every page is authored to exactly one viewport, so there is one capture size for all of them
+  // and nothing to remember per page. See the note at the top of `pages.ts`.
+  say(
+    `Capture each page whole, at ${String(CAPTURE.width)}x${String(CAPTURE.height)}. ` +
+      `The GIF frames are cropped out of that by ffmpeg.`,
+  );
+  say();
+  say("Captions → docs/renders/<id>.jpg:");
   for (const entry of SHOTS) say(`  ${base}/render-${entry.id}.html`);
   say();
   say(`Poster   → docs/poster.jpg — ${base}/poster.html`);
   say();
-  say(
-    `Short GIF frames → build/docs/frames/short-N.png at ${String(SHORT_SIZE.width)}x${String(SHORT_SIZE.height)}:`,
-  );
+  say("Short GIF frames → build/docs/frames/short-N.png:");
   for (const index of SHORT_FRAMES.keys()) say(`  ${base}/short-${String(index + 1)}.html`);
   say();
-  say(
-    `Ad GIF frames → build/docs/frames/ad-NN.png at ${String(AD_SIZE.width)}x${String(AD_SIZE.height)}:`,
-  );
+  say("Ad GIF frames → build/docs/frames/ad-NN.png:");
   for (const name of written.filter((entry) => entry.startsWith("ad-"))) say(`  ${base}/${name}`);
   say();
   say("Ctrl+C when every page has been captured.");
@@ -299,9 +303,29 @@ async function gifs(): Promise<void> {
   for (const [label, options] of [
     [
       "short",
-      { frames: short, out: join(DOCS, "vrc-zip-short.gif"), fps: 1, width: SHORT_SIZE.width },
+      {
+        frames: short,
+        out: join(DOCS, "vrc-zip-short.gif"),
+        fps: 1,
+        // 720 wide rather than the frame's own 492: the frames are captured at a fixed viewport
+        // height, so upscaling here is what gets a portrait GIF to a size a phone will not squint
+        // at. Lanczos on a 1.5x upscale of flat UI colour is close to lossless.
+        width: 720,
+        crop: cropFor(SHORT_ASPECT, CAPTURE),
+      },
     ],
-    ["ad", { frames: adFiles, out: join(DOCS, "vrc-zip.gif"), fps: 2, width: AD_SIZE.width }],
+    [
+      "ad",
+      {
+        frames: adFiles,
+        out: join(DOCS, "vrc-zip.gif"),
+        fps: 2,
+        // Below the frame's own 1312, which is the one knob that reliably keeps the file under
+        // Discord's free-tier limit without touching the palette.
+        width: 1000,
+        crop: cropFor(AD_ASPECT, CAPTURE),
+      },
+    ],
   ] as const) {
     const missing = options.frames.filter((frame) => !Bun.file(frame).size);
     if (options.frames.length === 0 || missing.length > 0) {

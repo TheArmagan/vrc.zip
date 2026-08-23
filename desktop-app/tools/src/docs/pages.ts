@@ -6,11 +6,22 @@
  * The alternative was decoding the JPEGs and drawing text by hand, which means a new dependency in
  * `tools/` and hand-rolled line breaking for the one thing these pictures are made of: sentences.
  * A browser already does that, is already in the loop for capturing the app itself, and lets anybody
- * open `build/docs/feed.html` and nudge the layout with devtools before committing to it.
+ * open `build/docs/poster.html` and nudge the layout with devtools before committing to it.
  *
  * The pages are deliberately plain — no framework, no fonts fetched from anywhere, one stylesheet
  * shared by all of them. A render that depended on a webfont would render differently on a machine
  * that was offline, which is a strange property for a build artifact.
+ *
+ * ## Every page is one viewport, and that is a constraint rather than a taste
+ *
+ * The browser tool screenshots the **visible viewport**, at {@link CAPTURE}. It cannot capture a
+ * full page and it cannot be resized to an arbitrary shape. So nothing here scrolls: each page is
+ * composed to fit exactly one screenful, and anything that wants a different aspect ratio — the 2:3
+ * short GIF, the 16:9 ad — is drawn *centred inside* that screenful on black and cropped afterwards
+ * by ffmpeg. See {@link frameBox}, and `cropFor` in `gif.ts`, which are two halves of one decision
+ * and have a test asserting they agree.
+ *
+ * The visible cost is the poster: it wanted to be tall, and it is landscape.
  *
  * ## The brand is one colour and one rule
  *
@@ -27,6 +38,19 @@ const INK = "#0b0b0d";
 const PAPER = "#f4f4f5";
 const MUTED = "#a1a1aa";
 
+/**
+ * What the browser tool hands back. Measured, not chosen, and **not** the size a page is authored at.
+ *
+ * The viewport it captures is whatever the operator's window happens to be — 1912x901 on the machine
+ * this was built on — and the file comes back scaled uniformly to 1568 wide. So a page authored in
+ * *pixels* renders with black around it, which is how the first poster came out. Every page is
+ * therefore laid out in `vw`/`vh` and fills whatever it is given.
+ *
+ * This constant exists only for the crop: because the scale is uniform, a frame that is one third of
+ * the viewport is one third of the file, and `cropFor` can work entirely in the file's own numbers.
+ */
+export const CAPTURE = { width: 1568, height: 738 } as const;
+
 export function escapeHtml(value: string): string {
   return value
     .replaceAll("&", "&amp;")
@@ -36,36 +60,71 @@ export function escapeHtml(value: string): string {
 }
 
 /**
+ * Where a frame of a given aspect ratio sits inside the capture.
+ *
+ * Full height, centred horizontally. Height is the axis to pin because it is the scarcer one here:
+ * the capture is 2.1:1 and every target is narrower than that, so fitting to width would leave the
+ * frame short and the crop would have to guess a vertical offset as well.
+ */
+export function frameBox(aspect: number): { width: number; height: number; left: number } {
+  const height = CAPTURE.height;
+  // Even, because an odd-width crop is a thing several encoders quietly refuse.
+  const width = Math.round((height * aspect) / 2) * 2;
+  return { width, height, left: Math.round((CAPTURE.width - width) / 2) };
+}
+
+/** 2:3 portrait, for a phone-shaped feed. */
+export const SHORT_ASPECT = 2 / 3;
+/** 16:9, the shape that embeds without letterboxing in a README, a chat and a timeline. */
+export const AD_ASPECT = 16 / 9;
+
+/**
  * The shared stylesheet.
  *
  * `image-rendering: -webkit-optimize-contrast` is not decoration: every source image is a screenshot
- * of text being scaled down, and the default smooth filter turns 12px UI type into grey mush. The
- * `letter-spacing` on the wordmark is the same trade in the other direction.
+ * of text being scaled down, and the default smooth filter turns 12px UI type into grey mush.
  */
 function styles(): string {
   return `
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { background: ${INK}; color: ${PAPER};
+    /* Viewport units, not pixels: the capture is whatever window it is taken in. See CAPTURE. */
+    html, body { width: 100vw; height: 100vh;
+      overflow: hidden; background: ${INK}; color: ${PAPER};
       font-family: "Segoe UI", ui-sans-serif, system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
-    .frame { display: flex; flex-direction: column; overflow: hidden; background: ${INK}; }
     .rule { height: 3px; background: ${BRAND}; border-radius: 2px; }
     .mark { font-weight: 700; letter-spacing: -0.02em; color: ${BRAND}; }
     .title { font-weight: 650; letter-spacing: -0.01em; }
     .caption { color: ${MUTED}; line-height: 1.4; }
-    .shot { display: block; width: 100%; height: auto; border-radius: 10px;
-      border: 1px solid #26262b; image-rendering: -webkit-optimize-contrast; }
-    .fill { flex: 1; min-height: 0; overflow: hidden; border-radius: 10px; border: 1px solid #26262b; }
-    .fill img { display: block; width: 100%; image-rendering: -webkit-optimize-contrast; }
-    .unofficial { color: #71717a; font-size: 13px; }
+    /* **Cover, not contain.** Every one of these boxes has a different aspect ratio from the 2.1:1
+       screenshot inside it, and fitting the whole shot in leaves a band of dead background that
+       reads as a layout bug. Covering crops instead — anchored to the top-left, which is where
+       every screen in this app puts the thing it is about, and it keeps the type at a readable
+       size rather than shrinking it to fit. */
+    .shot { overflow: hidden; border-radius: 10px; border: 1px solid #26262b; background: #111; }
+    .shot img { display: block; width: 100%; height: 100%;
+      object-fit: cover; object-position: left top; image-rendering: -webkit-optimize-contrast; }
+    .unofficial { color: #71717a; }
   `;
 }
 
-function page(title: string, width: number, body: string, extra = ""): string {
+function page(body: string, extra = ""): string {
   return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>
-<style>${styles()}${extra}
-  body { width: ${String(width)}px; }
-</style></head><body>${body}</body></html>`;
+<html lang="en"><head><meta charset="utf-8"><title>vrc.zip</title>
+<style>${styles()}${extra}</style></head><body>${body}</body></html>`;
+}
+
+/**
+ * The black surround a cropped frame is centred on.
+ *
+ * `aspect-ratio` against `100vh` rather than a pixel width, for the same reason everything else here
+ * is in viewport units — and it keeps this in exact agreement with {@link frameBox}, which derives
+ * the same rectangle in the captured file's numbers.
+ */
+function centred(aspect: number, inner: string): string {
+  return page(
+    `<div style="position:absolute; left:50%; top:0; transform:translateX(-50%);
+       height:100vh; aspect-ratio:${aspect.toFixed(6)}; overflow:hidden;">${inner}</div>`,
+  );
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -75,21 +134,17 @@ function page(title: string, width: number, body: string, extra = ""): string {
 /**
  * The render that goes in the README beside each section: amber rule, title, one sentence, the shot.
  *
- * The title is *not* the app's own heading for that screen where the two would differ — "Automations"
- * rather than "Graphs" — because the caption is read by somebody who has not opened the app and the
- * heading is read by somebody who has.
+ * The title is *not* the app's own heading where the two would differ — "Automations" rather than
+ * "Graphs" — because the caption is read by somebody who has not opened the app and the heading is
+ * read by somebody who has.
  */
-export function captionPage(entry: Shot, imageHref: string, width = 1280): string {
+export function captionPage(entry: Shot, imageHref: string): string {
   return page(
-    `${entry.title} — vrc.zip`,
-    width,
-    `<div class="frame" style="padding:28px 28px 30px; gap:14px;">
-       <div class="rule" style="width:56px;"></div>
-       <div>
-         <div class="title" style="font-size:26px;">${escapeHtml(entry.title)}</div>
-         <div class="caption" style="font-size:15px; margin-top:6px; max-width:78ch;">${escapeHtml(entry.caption)}</div>
-       </div>
-       <img class="shot" src="${escapeHtml(imageHref)}" alt="">
+    `<div style="display:flex; flex-direction:column; height:100%; padding:26px 30px 30px; gap:12px;">
+       <div class="rule" style="width:52px;"></div>
+       <div class="title" style="font-size:25px;">${escapeHtml(entry.title)}</div>
+       <div class="caption" style="font-size:15px; max-width:96ch;">${escapeHtml(entry.caption)}</div>
+       <div class="shot" style="flex:1; min-height:0;"><img src="${escapeHtml(imageHref)}" alt=""></div>
      </div>`,
   );
 }
@@ -99,45 +154,43 @@ export function captionPage(entry: Shot, imageHref: string, width = 1280): strin
 /* -------------------------------------------------------------------------------------------- */
 
 /**
- * One tall image somebody can post on its own: a hero shot under the wordmark, then everything else
- * as a captioned grid.
+ * One image somebody can post on its own: the wordmark and a hero shot on the left, a captioned grid
+ * of everything else on the right.
  *
- * Two columns rather than three. A screenshot of a desktop app shrunk into a third of 1200px is a
- * grey rectangle with a suggestion of text in it, and a grid of those says less than the four words
- * under each one.
+ * Landscape rather than the tall poster it wanted to be — see the note at the top of this file about
+ * the capture being one viewport. The compromise is not all loss: this shape is the one that embeds
+ * in a README without a scroll, which is where it will mostly be seen.
  */
 export function posterPage(hero: string, imageHref: (id: string) => string): string {
   const heroShot = shot(hero);
   const panels = shotsFor("poster")
     .filter((entry) => entry.id !== hero)
+    .slice(0, 6)
     .map(
       (entry) => `
-      <div style="display:flex; flex-direction:column; gap:8px;">
-        <img class="shot" src="${escapeHtml(imageHref(entry.id))}" alt="">
-        <div class="rule" style="width:34px;"></div>
-        <div class="title" style="font-size:17px;">${escapeHtml(entry.title)}</div>
-        <div class="caption" style="font-size:13.5px;">${escapeHtml(entry.caption)}</div>
+      <div style="display:flex; flex-direction:column; gap:5px; min-width:0;">
+        <div class="shot" style="height:104px;"><img src="${escapeHtml(imageHref(entry.id))}" alt=""></div>
+        <div class="title" style="font-size:13px;">${escapeHtml(entry.title)}</div>
+        <div class="caption" style="font-size:11.5px;">${escapeHtml(entry.caption)}</div>
       </div>`,
     )
     .join("");
 
   return page(
-    "vrc.zip",
-    1240,
-    `<div class="frame" style="padding:40px 40px 44px; gap:26px;">
-       <div style="display:flex; align-items:baseline; gap:14px;">
-         <div class="mark" style="font-size:40px;">vrc.zip</div>
-         <div class="caption" style="font-size:16px;">A VRChat companion that runs on your own machine.</div>
+    `<div style="display:flex; height:100%; padding:32px; gap:28px;">
+       <div style="flex:0 0 46%; display:flex; flex-direction:column; gap:12px; min-width:0;">
+         <div class="mark" style="font-size:44px;">vrc.zip</div>
+         <div class="caption" style="font-size:15px;">A VRChat companion that runs on your own machine. Several accounts at once, a feed you can search, and automations you draw.</div>
+         <div class="rule" style="width:100%;"></div>
+         <div class="shot" style="flex:1; min-height:0;"><img src="${escapeHtml(imageHref(hero))}" alt=""></div>
+         <div class="caption" style="font-size:12.5px;">${escapeHtml(heroShot.caption)}</div>
        </div>
-       <div class="rule" style="width:100%;"></div>
-       <div style="display:flex; flex-direction:column; gap:10px;">
-         <img class="shot" src="${escapeHtml(imageHref(hero))}" alt="">
-         <div class="caption" style="font-size:14px;">${escapeHtml(heroShot.caption)}</div>
-       </div>
-       <div style="display:grid; grid-template-columns:1fr 1fr; gap:26px 24px;">${panels}</div>
-       <div style="display:flex; justify-content:space-between; align-items:center; gap:16px; border-top:1px solid #26262b; padding-top:18px;">
-         <div class="caption" style="font-size:14px;">Multi-account · local-only · extensible · 50–80&nbsp;MB idle</div>
-         <div class="unofficial">UNOFFICIAL — not affiliated with VRChat Inc.</div>
+       <div style="flex:1; display:flex; flex-direction:column; gap:14px; min-width:0;">
+         <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px 16px; flex:1; min-height:0;">${panels}</div>
+         <div style="display:flex; justify-content:space-between; align-items:center; gap:14px; border-top:1px solid #26262b; padding-top:12px;">
+           <div class="caption" style="font-size:12.5px;">Local-only · 50–80&nbsp;MB idle · plugins · one file</div>
+           <div class="unofficial" style="font-size:11.5px;">UNOFFICIAL — not affiliated with VRChat Inc.</div>
+         </div>
        </div>
      </div>`,
   );
@@ -147,89 +200,69 @@ export function posterPage(hero: string, imageHref: (id: string) => string): str
 /* GIF frames                                                                                     */
 /* -------------------------------------------------------------------------------------------- */
 
-/** 2:3 portrait, one screen per frame, three frames. Sized for a phone-shaped feed. */
-export const SHORT_SIZE = { width: 800, height: 1200 } as const;
-/** 16:9, the shape that embeds without letterboxing in a README, a chat and a timeline. */
-export const AD_SIZE = { width: 1280, height: 720 } as const;
-
-/**
- * One frame of the short GIF.
- *
- * The shot is anchored to the *top* and allowed to overflow rather than being fitted whole. A
- * desktop screen letterboxed into portrait is 60% background; cropping keeps the type legible, which
- * is the only thing three frames at one second each can communicate.
- */
+/** One frame of the short GIF: a wordmark, a claim, and the screen it is about. */
 export function shortFramePage(entry: Shot, imageHref: string): string {
-  return page(
-    entry.title,
-    SHORT_SIZE.width,
-    `<div class="frame" style="height:${String(SHORT_SIZE.height)}px; padding:34px; gap:18px;">
-       <div style="display:flex; align-items:baseline; gap:10px;">
-         <div class="mark" style="font-size:26px;">vrc.zip</div>
-       </div>
-       <div class="rule" style="width:48px;"></div>
-       <div class="title" style="font-size:30px;">${escapeHtml(entry.title)}</div>
-       <div class="caption" style="font-size:17px;">${escapeHtml(entry.caption)}</div>
-       <div class="fill"><img src="${escapeHtml(imageHref)}" alt=""></div>
+  return centred(
+    SHORT_ASPECT,
+    `<div style="display:flex; flex-direction:column; height:100%; padding:30px; gap:14px;">
+       <div class="mark" style="font-size:24px;">vrc.zip</div>
+       <div class="rule" style="width:44px;"></div>
+       <div class="title" style="font-size:27px;">${escapeHtml(entry.title)}</div>
+       <div class="caption" style="font-size:15px;">${escapeHtml(entry.caption)}</div>
+       <div class="shot" style="flex:1; min-height:0;"><img src="${escapeHtml(imageHref)}" alt=""></div>
      </div>`,
-    `body { height: ${String(SHORT_SIZE.height)}px; }`,
   );
 }
 
 /** A title card for the ad GIF: wordmark, one line, nothing else. */
 export function adTitlePage(headline: string, sub: string): string {
-  return page(
-    headline,
-    AD_SIZE.width,
-    `<div class="frame" style="height:${String(AD_SIZE.height)}px; padding:64px; justify-content:center; gap:22px;">
-       <div class="rule" style="width:72px;"></div>
-       <div class="mark" style="font-size:76px;">vrc.zip</div>
-       <div class="title" style="font-size:34px; max-width:22ch; line-height:1.2;">${escapeHtml(headline)}</div>
-       <div class="caption" style="font-size:20px; max-width:52ch;">${escapeHtml(sub)}</div>
+  return centred(
+    AD_ASPECT,
+    `<div style="display:flex; flex-direction:column; height:100%; padding:70px; justify-content:center; gap:20px;">
+       <div class="rule" style="width:68px;"></div>
+       <div class="mark" style="font-size:72px;">vrc.zip</div>
+       <div class="title" style="font-size:32px; max-width:24ch; line-height:1.2;">${escapeHtml(headline)}</div>
+       <div class="caption" style="font-size:19px; max-width:54ch;">${escapeHtml(sub)}</div>
      </div>`,
-    `body { height: ${String(AD_SIZE.height)}px; }`,
   );
 }
 
 /** A feature frame of the ad GIF: the shot large on the left, the claim on the right. */
 export function adFramePage(entry: Shot, imageHref: string): string {
-  return page(
-    entry.title,
-    AD_SIZE.width,
-    `<div style="display:flex; height:${String(AD_SIZE.height)}px; padding:44px; gap:34px; align-items:center;">
-       <div style="flex:1 1 62%; min-width:0;" class="fill"><img src="${escapeHtml(imageHref)}" alt=""></div>
-       <div style="flex:0 0 30%; display:flex; flex-direction:column; gap:14px;">
-         <div class="rule" style="width:44px;"></div>
-         <div class="title" style="font-size:32px; line-height:1.15;">${escapeHtml(entry.title)}</div>
-         <div class="caption" style="font-size:17px;">${escapeHtml(entry.caption)}</div>
-         <div class="mark" style="font-size:18px; margin-top:auto;">vrc.zip</div>
+  return centred(
+    AD_ASPECT,
+    `<div style="display:flex; height:100%; padding:40px; gap:30px; align-items:stretch;">
+       <div class="shot" style="flex:1 1 64%; min-width:0;"><img src="${escapeHtml(imageHref)}" alt=""></div>
+       <div style="flex:0 0 30%; display:flex; flex-direction:column; gap:12px;">
+         <div class="rule" style="width:42px;"></div>
+         <div class="title" style="font-size:29px; line-height:1.15;">${escapeHtml(entry.title)}</div>
+         <div class="caption" style="font-size:16px;">${escapeHtml(entry.caption)}</div>
+         <div class="mark" style="font-size:17px; margin-top:auto;">vrc.zip</div>
        </div>
      </div>`,
-    `body { height: ${String(AD_SIZE.height)}px; }`,
   );
 }
 
 /** The last frame: what it is and where to get it. A loop needs somewhere to land. */
 export function adEndPage(): string {
-  return page(
-    "vrc.zip",
-    AD_SIZE.width,
-    `<div class="frame" style="height:${String(AD_SIZE.height)}px; padding:64px; justify-content:center; gap:20px;">
-       <div class="rule" style="width:72px;"></div>
-       <div class="mark" style="font-size:68px;">vrc.zip</div>
-       <div class="title" style="font-size:28px;">One file. Nothing to install.</div>
-       <div class="caption" style="font-size:20px;">github.com/TheArmagan/vrc.zip</div>
-       <div class="unofficial" style="margin-top:18px;">UNOFFICIAL — not affiliated with, endorsed by, or operated by VRChat Inc.</div>
+  return centred(
+    AD_ASPECT,
+    `<div style="display:flex; flex-direction:column; height:100%; padding:70px; justify-content:center; gap:18px;">
+       <div class="rule" style="width:68px;"></div>
+       <div class="mark" style="font-size:64px;">vrc.zip</div>
+       <div class="title" style="font-size:27px;">One file. Nothing to install.</div>
+       <div class="caption" style="font-size:19px;">github.com/TheArmagan/vrc.zip</div>
+       <div class="unofficial" style="font-size:13px; margin-top:16px;">UNOFFICIAL — not affiliated with, endorsed by, or operated by VRChat Inc.</div>
      </div>`,
-    `body { height: ${String(AD_SIZE.height)}px; }`,
   );
 }
 
 /** Every page the pipeline writes, as `filename -> html`. Pure, so a test can read it. */
 export function allPages(imageHref: (id: string) => string): Map<string, string> {
   const pages = new Map<string, string>();
-  for (const entry of SHOTS)
+  for (const entry of SHOTS) {
     pages.set(`render-${entry.id}.html`, captionPage(entry, imageHref(entry.id)));
+  }
   pages.set("poster.html", posterPage("graph-editor", imageHref));
   return pages;
 }

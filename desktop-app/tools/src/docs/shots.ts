@@ -72,14 +72,6 @@ export const SHOTS: readonly Shot[] = [
     uses: ["poster", "ad"],
   },
   {
-    id: "graph-picker",
-    route: "/graphs",
-    title: "Drop a wire anywhere",
-    caption: "Let go over empty canvas and it offers only the nodes that would actually connect.",
-    hold: "Open a graph, drag from an output port and release over empty canvas.",
-    uses: ["ad"],
-  },
-  {
     id: "graph-stores",
     route: "/graphs",
     title: "Shared stores",
@@ -132,13 +124,6 @@ export const SHOTS: readonly Shot[] = [
     uses: ["poster"],
   },
   {
-    id: "plugin-consent",
-    route: "/plugins",
-    title: "Consent",
-    caption: "Every capability spelled out in plain language, and held down rather than clicked.",
-    hold: "Start an install so the consent sheet is open.",
-  },
-  {
     id: "forward-proxy",
     route: "",
     title: "Forward proxy",
@@ -146,21 +131,6 @@ export const SHOTS: readonly Shot[] = [
       "Point an app at one address and it reaches VRChat through vrc.zip's limits, not around them.",
     hold: "Open the forward proxy page on its own port.",
     uses: ["poster"],
-  },
-  {
-    id: "settings",
-    route: "/settings",
-    title: "Settings",
-    caption: "Contact address, retention, and how long each kind of event is kept.",
-    uses: ["poster"],
-  },
-  {
-    id: "command-palette",
-    route: "/feed",
-    title: "Command palette",
-    caption: "CTRL+SHIFT+P reaches every screen, every account, and whatever a plugin contributed.",
-    hold: "Press CTRL+SHIFT+P and type a couple of letters.",
-    uses: ["ad"],
   },
 ];
 

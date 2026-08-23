@@ -28,8 +28,14 @@ export interface BuiltinNode {
     config: NodeConfigValues,
     context: ExecuteContext,
   ): PortValues | Promise<PortValues>;
-  /** Triggers. Return a teardown, or register one through `onDisarm` on the request. */
-  arm?(request: BuiltinArmRequest): (() => void) | void | Promise<(() => void) | void>;
+  /**
+   * Triggers. Return a teardown, or `undefined` for one with nothing to tear down.
+   *
+   * `undefined` rather than `void` in the union: a `void` member says "ignore whatever comes back",
+   * which is the opposite of the contract here — the return value is the disarm, and dropping it
+   * would leave a bus subscription live for a graph the user switched off.
+   */
+  arm?(request: BuiltinArmRequest): (() => void) | undefined | Promise<(() => void) | undefined>;
 }
 
 /** A node's qualified id: `vrcz/<definition id>`. */

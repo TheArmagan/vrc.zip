@@ -16,10 +16,12 @@ import type { NodeConfigValues, NodeDefinition, PortValues } from "@vrcz/plugin-
 import type { EventBus } from "../../bus/event-bus.ts";
 import { BUILTIN_NAMESPACE, INTRINSIC_DEFINITIONS } from "../intrinsics.ts";
 import type { ExecuteContext } from "../types.ts";
+import { actionNodes, type GraphFetch, type GraphSocialActions } from "./actions.ts";
 import { shapingNodes } from "./shaping.ts";
 import { triggerNodes } from "./triggers.ts";
 import { type BuiltinArmRequest, type BuiltinNode, builtinId } from "./types.ts";
 
+export type { GraphInviteTarget, GraphSocialActions } from "./actions.ts";
 export type { BuiltinArmRequest, BuiltinNode } from "./types.ts";
 
 export class BuiltinNodes {
@@ -89,15 +91,31 @@ export interface BuiltinNodeDeps {
    */
   readonly bus?: EventBus | undefined;
   readonly now?: (() => number) | undefined;
+  /**
+   * The outbound social actions. Absent leaves the VRChat nodes in the palette but unable to send,
+   * which is the honest state for a daemon with no account manager behind it — and they say so
+   * rather than pretending.
+   */
+  readonly social?: GraphSocialActions | undefined;
+  /** Injected so a test can answer an outbound POST without a network. */
+  readonly fetch?: GraphFetch;
 }
 
 export function createBuiltinNodes(deps: BuiltinNodeDeps = {}): BuiltinNodes {
   const intrinsics: BuiltinNode[] = [...INTRINSIC_DEFINITIONS.values()].map((definition) => ({
     definition,
   }));
-  const triggers =
-    deps.bus === undefined
+  const bus = deps.bus;
+  const clock = deps.now === undefined ? {} : { now: deps.now };
+  const triggers = bus === undefined ? [] : triggerNodes({ bus, ...clock });
+  const actions =
+    bus === undefined
       ? []
-      : triggerNodes({ bus: deps.bus, ...(deps.now === undefined ? {} : { now: deps.now }) });
-  return new BuiltinNodes([...intrinsics, ...triggers, ...shapingNodes()]);
+      : actionNodes({
+          bus,
+          ...clock,
+          ...(deps.social === undefined ? {} : { social: deps.social }),
+          ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
+        });
+  return new BuiltinNodes([...intrinsics, ...triggers, ...shapingNodes(), ...actions]);
 }

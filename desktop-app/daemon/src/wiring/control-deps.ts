@@ -129,6 +129,7 @@ import type { GrantRow, GraphRow, GraphRunRow } from "../store/types.ts";
 import type { WebhookManager } from "../webhooks/index.ts";
 import { EPHEMERAL } from "./feed-writer.ts";
 import type { InstalledPluginView, PluginBudgetView, PluginHost } from "./plugin-host.ts";
+import { createSocialActions, type SocialActions } from "./social-actions.ts";
 import { webhookSummary } from "./webhook-summary.ts";
 
 /**
@@ -202,6 +203,14 @@ export interface ControlDepsOptions {
    * every existing test that constructs these deps needs.
    */
   readonly graphs?: GraphEngine | undefined;
+  /**
+   * The outbound social actions. Built here when absent.
+   *
+   * Injectable because `app.ts` hands the *same* object to the graph runtime's action nodes — two
+   * copies would be two places for a future rate budget or audit hook to be added to, and only one
+   * of them would get it.
+   */
+  readonly social?: SocialActions | undefined;
   readonly settings: Settings;
   readonly env?: NodeJS.ProcessEnv;
   readonly connectPipeline: (accountId: string) => void;
@@ -1074,72 +1083,11 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
   const images = new ImageCache(options.env === undefined ? {} : { env: options.env });
 
   /**
-   * The account named, if it can actually act right now.
-   *
-   * Distinct from `onlineAccount` below, which answers "whose eyes should read this?" and falls
-   * back to any signed-in account. This one never falls back: these routes act *as* a named person,
-   * so guessing which person would be the worst possible kind of helpful.
-   *
-   * Every "do a thing to another person" route needs the same two checks, and both are worth making
-   * *before* the call rather than letting `vrcFetch` discover them: an account sitting on a 2FA
-   * challenge has no auth cookie, and a 401 inside the request would trigger a re-auth into a
-   * challenge nobody is watching.
+   * The three outbound social actions, lifted into `wiring/social-actions.ts` so a graph's action
+   * nodes can reach them too. Constructed here rather than injected because these deps already own
+   * the account manager, and there is nothing to configure.
    */
-  function actingAccount(accountId: string, doing: string): Account {
-    const account = accounts.get(accountId);
-    if (!account) throw new ControlError(404, "unknown_account");
-    if (account.snapshot().state !== "online") {
-      throw new ControlError(
-        409,
-        "account_offline",
-        `That account is not signed in, so vrc.zip cannot ${doing}.`,
-      );
-    }
-    return account;
-  }
-
-  /**
-   * A POST made in the user's name, with the three upstream answers that mean different things kept
-   * apart.
-   *
-   * 403 and 404 are *outcomes*, not faults: the person has invites off, or they are not there any
-   * more. Collapsing them into one "it failed" is what makes an app feel broken when it is in fact
-   * working and the answer is simply no. Everything else is a 502, because it is VRChat's problem
-   * and the user can do nothing about it.
-   */
-  async function sendAsUser(
-    account: Account,
-    path: string,
-    body: Record<string, JsonValue>,
-    what: string,
-  ): Promise<void> {
-    const response = await vrcFetch(account.context(), path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-
-    // Drained either way: an undrained body holds the connection open, and the success signal here
-    // is the status rather than the notification object VRChat hands back.
-    const text = await response.text().catch(() => "");
-    if (response.ok) return;
-
-    if (response.status === 403) {
-      throw new ControlError(
-        403,
-        "send_forbidden",
-        `VRChat will not deliver that ${what}. They may not accept them from you.`,
-      );
-    }
-    if (response.status === 404) {
-      throw new ControlError(404, "unknown_target", "VRChat does not know that user any more.");
-    }
-    throw new ControlError(
-      502,
-      "send_failed",
-      `VRChat returned ${String(response.status)}${text === "" ? "" : `: ${text.slice(0, 200)}`}`,
-    );
-  }
+  const social = options.social ?? createSocialActions({ accounts, store });
 
   /**
    * Instance records, keyed `accountId\nlocation`, serving both the roster and the header.
@@ -1839,83 +1787,19 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
      * answers 403 when the account may not wear it. vrc.zip neither checks nor bypasses that.
      */
     async selectAvatar(avatarId, accountId): Promise<void> {
-      const account = accounts.get(accountId);
-      if (!account) throw new ControlError(404, "unknown_account");
-
-      if (account.snapshot().state !== "online") {
-        throw new ControlError(
-          409,
-          "account_offline",
-          "That account is not signed in, so VRChat has nobody to change the avatar for.",
-        );
-      }
-
-      // `PUT`, matching upstream. The control API exposes it as a POST because a POST is what a
-      // browser form and the app's own fetch wrapper do; the mapping stops here.
-      const response = await vrcFetch(account.context(), `/avatars/${avatarId}/select`, {
-        method: "PUT",
-      });
-
-      // Drained either way: an undrained body holds the connection open, and the caller wants the
-      // outcome rather than VRChat's copy of the user record back.
-      const body = await response.text().catch(() => "");
-      if (response.ok) {
-        // The worn avatar just changed, so the cached user record is stale in the one field this
-        // action exists to move. Dropping it is cheaper than patching it and cannot go stale wrong.
-        store.deleteUserCache(account.id, account.id);
-        return;
-      }
-
-      if (response.status === 404) {
-        throw new ControlError(
-          404,
-          "unknown_avatar",
-          "VRChat has no such avatar, or this account cannot see it.",
-        );
-      }
-      if (response.status === 403) {
-        throw new ControlError(
-          403,
-          "avatar_forbidden",
-          "VRChat will not let this account wear that avatar.",
-        );
-      }
-      throw new ControlError(
-        502,
-        "avatar_select_failed",
-        `VRChat returned ${String(response.status)}${body === "" ? "" : `: ${body.slice(0, 200)}`}`,
-      );
+      await social.selectAvatar(accountId, avatarId);
     },
 
     async inviteUserTo(accountId, userId, target, messageSlot): Promise<void> {
-      const account = actingAccount(accountId, "send the invite");
-      await sendAsUser(
-        account,
-        `/invite/${userId}`,
-        {
-          instanceId: `${target.worldId}:${target.instanceId}`,
-          ...(messageSlot === undefined ? {} : { messageSlot }),
-        },
-        "invite",
-      );
+      await social.invite(accountId, userId, target, messageSlot);
     },
 
     async requestInviteFrom(accountId, userId, requestSlot): Promise<void> {
-      const account = actingAccount(accountId, "ask for the invite");
-      await sendAsUser(
-        account,
-        `/requestInvite/${userId}`,
-        requestSlot === undefined ? {} : { requestSlot },
-        "invite request",
-      );
+      await social.requestInvite(accountId, userId, requestSlot);
     },
 
     async boop(accountId, userId): Promise<void> {
-      const account = actingAccount(accountId, "send the boop");
-      // An empty body on purpose: `emojiId` and `inventoryItemId` decorate a boop, and neither the
-      // palette nor anything else in the UI has a picker for one yet. Sending `{}` is the plain
-      // boop, which is the thing being asked for.
-      await sendAsUser(account, `/users/${userId}/boop`, {}, "boop");
+      await social.boop(accountId, userId);
     },
 
     async listInstanceUsers(target, accountId): Promise<InstanceRoster> {

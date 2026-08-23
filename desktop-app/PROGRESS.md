@@ -532,7 +532,7 @@ get an **error output port**; and the port lattice grows **`list<T>`**.
       reloaded from the control API on every save and switch.
       **Complete** with `foreach` (decision 209): the body is what `item` reaches minus what `done`
       reaches, iterations are sequential, and a `wait` inside a loop is refused with a sentence.
-- [ ] **4.3 Built-in nodes** — the reserved-`pluginId` registration path into the same `NodeRegistry`
+- [x] **4.3 Built-in nodes** — the reserved-`pluginId` registration path into the same `NodeRegistry`
       (exempt from the manifest-declaration check and nothing else). Triggers: generic bus event,
       the named convenience triggers with typed outputs, schedule, run-now. Conditions and shaping:
       compare, boolean logic, field extract from `json`, string template over the existing
@@ -542,6 +542,12 @@ get an **error output port**; and the port lattice grows **`list<T>`**.
       inside this step:** the social actions come out of the `wiring/control-deps.ts` closure into a
       reusable module, and `list<T>` joins the lattice as a real parameterised type with covariance
       plus `list<X> <: json`.
+      **Built** (decisions 210–212): `daemon/src/graphs/builtins/` holds twenty-six node types —
+      eight triggers, ten shaping, eight actions — plus the three intrinsics. Both prerequisites
+      landed: `wiring/social-actions.ts` and the third lattice rule. **One departure from the line
+      above, stated in decision 212:** the HTTP actions reuse the Phase 2 *hardening* but not its
+      delivery queue, because a graph run does not retry and a `webhooks` row per node would put
+      graph internals into the user's Connected-apps list.
 - [ ] **4.4 Dry-run, arming, secrets** — a new graph is in dry-run; outbound actions log what they
       would have done and an explicit **hold-to-confirm** arms it, with the dry-run log beside it as
       the evidence (decision 109's posture, applied to graphs). The acting account is per node,
@@ -3468,6 +3474,49 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 
      **A built-in set constructed without a bus has no triggers**, rather than triggers that never
      fire. A node in the palette that cannot work is worse than one that is not offered.
+
+212. **The actions, and the one place Phase 4 departs from what PLAN.md said it would do.** Eight
+     action nodes close 4.3: HTTP webhook, Discord, ntfy, OSC, XSOverlay, invite, request invite,
+     boop, wear avatar, and the feed note.
+
+     **The webhook queue is not reused, and that is a deliberate departure.** PLAN.md §Phase 4 said
+     these go "through the Phase 2 delivery path". They go through its **hardening** — the same
+     `validateWebhookUrl` SSRF check, a mandatory User-Agent, a hard timeout, a capped response — and
+     **not** its queue. Two structural reasons: a graph run does not retry (decision 206 — re-running
+     a chain that already sent an invite is worse than failing), and a `webhooks` row per action node
+     would put a graph's internals into the user's Connected-apps webhook list, which is a list of
+     *apps that registered a webhook*. There is also nothing to sign with: a URL typed into a node is
+     not a registration, so there is no shared secret to HMAC against.
+
+     **The User-Agent is not the VRChat one.** That one carries the user's contact address because
+     VRChat requires it of an API client; a graph posting to somebody's Discord webhook has no
+     business putting the user's email in a header on a third party's server.
+
+     **Dry-run writes a note rather than staying silent.** A rehearsing action emits `graph.note`
+     saying what it *would* have done, which gives the arming gesture its evidence without inventing
+     a second log — the note is an ordinary event, so it inherits the feed, retention and the stream.
+     The feed-note action is the one with **no** dry-run branch: suppressing it would make the
+     dry-run log emptier than the real run it is evidence for.
+
+     **OSC is forty lines rather than a dependency.** An address, a type tag string, padded
+     arguments; a library for that would be more configuration than code. An integral number encodes
+     as `i` and a fractional one as `f`, which is what every OSC sender does and what VRChat's own
+     float parameters need. `sent: true` means the datagram left, never that anything received it —
+     UDP cannot tell us more, and claiming otherwise would make a graph look like it worked when
+     nothing was listening. A socket per send, because a held one is a handle that keeps the process
+     alive at shutdown.
+
+     **The social actions came out of the `control-deps` closure with their behaviour unchanged.**
+     `wiring/social-actions.ts` now owns invite, request-invite, boop and select-avatar; the control
+     deps call it and so do the action nodes, through an interface `graphs/builtins/actions.ts`
+     declares itself so that `graphs/` still does not know `wiring/` exists. `app.ts` constructs one
+     instance for both — two copies would be two places for a future rate budget or audit hook to be
+     added to, and only one would get it. Not a single sentence in those errors was reworded: the UI
+     branches on them.
+
+     **The tests use a real `Bun.serve` and a real UDP socket**, for the same reason the VRChat
+     fixture is a real server: the bugs at this layer are wire-level, and a stub agrees with whatever
+     the code already believes.
 
 ---
 

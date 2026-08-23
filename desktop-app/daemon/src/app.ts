@@ -38,6 +38,7 @@ import { createLogSink } from "./wiring/log-bridge.ts";
 import { NotificationSink } from "./wiring/notification-sink.ts";
 import { publishPipelineEvent } from "./wiring/pipeline-bridge.ts";
 import { createPluginHost } from "./wiring/plugin-host.ts";
+import { createSocialActions } from "./wiring/social-actions.ts";
 import { UpdateDiffSet } from "./wiring/update-diff.ts";
 import { attachWebhookBridge } from "./wiring/webhook-bridge.ts";
 
@@ -365,7 +366,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
   // The engine is constructed here and started with the rest of the daemon, but it is *armed* from
   // the database: a graph the user switched off is not armed, and switching one on is a `reload`
   // from the control API rather than a restart.
-  const builtinNodes = createBuiltinNodes({ bus });
+  // One instance, handed to both the control deps and the graph action nodes: two copies would be
+  // two places for a future rate budget or audit hook to be added to, and only one would get it.
+  const social = createSocialActions({ accounts, store });
+  const builtinNodes = createBuiltinNodes({ bus, social });
   const nodeProvider = new PluginNodeProvider({ host: plugins, builtins: builtinNodes });
   const graphs = new GraphEngine({ store, bus, provider: nodeProvider });
   // Into the *same* registry a plugin's node types land in, so the palette and the type checker ask
@@ -465,6 +469,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     webhooks,
     plugins,
     graphs,
+    social,
     connectPipeline,
     ...(env !== undefined ? { env } : {}),
     onSettingsSaved: (next) => saveSettings(next, env),

@@ -526,6 +526,10 @@ get an **error output port**; and the port lattice grows **`list<T>`**.
       `maxFiresPerMinute` at the trigger (enforced for the first time), nodes-per-run, runs-per-hour;
       hitting one **disables the graph and says why**. This is where `dispatcher.call(…, "nodes.arm")`
       and the `onNodeFire` seam finally get a caller.
+      **Core built** (decision 208): `daemon/src/graphs/` — the walk, `wait` with persistence and
+      resume, the three concurrency modes, error ports, all three ceilings, and
+      `wiring/graph-provider.ts` bridging the plugin host. Started and stopped in `app.ts` and
+      reloaded from the control API on every save and switch. **Outstanding: `foreach`.**
 - [ ] **4.3 Built-in nodes** — the reserved-`pluginId` registration path into the same `NodeRegistry`
       (exempt from the manifest-declaration check and nothing else). Triggers: generic bus event,
       the named convenience triggers with typed outputs, schedule, run-now. Conditions and shaping:
@@ -3321,6 +3325,52 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      ports yet.** `checkEdge` needs the node registry, which is populated by running plugins, so the
      second half of "type checking happens twice" arrives with the runtime. Until then a document can
      be saved with edges that will not run.
+
+208. **The engine walks, parks and refuses — and one rule does the work of three features.** 4.2's
+     core: `daemon/src/graphs/` holds the runtime, and `app.ts` starts it after the plugin host and
+     stops it before. `foreach` is the piece still outstanding.
+
+     **A missing key is the entire gating mechanism.** A node records what it produced; a port with
+     no entry is dead, and any node with a dead input is skipped. That one rule is what implements a
+     false condition (records nothing), a branch (records the side it took), and a node that failed
+     onto its error port (records only `error`). Three features the plan lists separately, no second
+     kind of edge, and no special case in the walk for any of them. It is the shape worth keeping if
+     `foreach` tempts anyone to add a second.
+
+     **Waiting and branching are engine intrinsics, not node kinds.** `NodeDefinition` has three
+     kinds and that is right for what a node *does*; waiting and branching are things that happen to
+     a **run**. A `wait` implemented as an ordinary action would have to block inside a handler,
+     which is exactly what parking exists to avoid. They still carry real `NodeDefinition`s, because
+     the palette, `checkEdge` and the body template read the same object as every other node.
+
+     **The engine is written against a four-method `NodeProvider`, not against the plugin host.**
+     That is what made 4.2 testable before 4.3 exists: the fake provider in `engine.test.ts` is a
+     class with two maps, and the engine cannot tell it from the real one. `wiring/graph-provider.ts`
+     is the real one, and it closes the loop `nodes.fire` has been waiting on since 3.10 — the
+     `onNodeFire` seam had no consumer, so a plugin written against `fire()` did nothing. It works
+     now with no change to the plugin, which is what the seam was for.
+
+     **Ordering in `app.ts` is load-bearing in both directions.** Graphs start *after* plugins,
+     because arming a trigger is a call into a plugin and a graph armed against an unattached host is
+     armed against nothing; they stop *before* plugins, because disarming is also a call into one.
+
+     Four things the tests pin that are easy to get wrong later:
+
+     - **A parked run counts as live**, so a graph that waits five minutes cannot accumulate fifty
+       copies of itself.
+     - **`dry_run` is captured on the run**, so arming a graph mid-`wait` does not promote a
+       rehearsal already in flight. There is a test that arms the graph while a run is parked.
+     - **A trigger with an incoming edge is not a root** and is not armed, whatever its definition
+       says: nothing upstream can hand a trigger a value.
+     - **The queue actually pumps.** `#pumpQueue` is awaited rather than detached, so "the next
+       queued fire starts when this run ends" is something a caller observes rather than a race a
+       test has to sleep through.
+
+     **Every refusal is an event.** `graph.run.dropped` carries which ceiling or mode refused the
+     fire; the runs-per-hour ceiling is the only one that switches the graph **off**, with the reason
+     in the column and in the event, because a graph running two hundred times an hour is not going
+     to recover on the next fire and dropping quietly for the rest of the evening is
+     indistinguishable from being broken.
 
 ---
 

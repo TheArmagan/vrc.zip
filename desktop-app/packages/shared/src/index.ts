@@ -35,6 +35,7 @@ export {
   type FriendEventKind,
   familyOf,
   type GamelogEventKind,
+  type GraphEventKind,
   type GroupEventKind,
   type InstanceEventKind,
   isBusEventKind,

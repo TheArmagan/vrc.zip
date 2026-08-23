@@ -55,6 +55,7 @@ import type { EventBus } from "../bus/event-bus.ts";
 // halves of `listWorldInstances` are location strings, and a second parser here would be a second
 // opinion on what `~region(` means.
 import { parseLocation } from "../game-logs/index.ts";
+import type { GraphEngine } from "../graphs/index.ts";
 import { AvatarIdResolver } from "../net/avatar-ids.ts";
 import { ImageCache } from "../net/image-cache.ts";
 import type { RateBucketSnapshot, RateLimiter } from "../net/rate-limiter.ts";
@@ -193,6 +194,14 @@ export interface ControlDepsOptions {
    * The mutating routes refuse with a 503 rather than pretending they worked.
    */
   readonly plugins?: PluginHost | undefined;
+  /**
+   * The graph runtime, so a save or a switch takes effect now rather than at the next restart.
+   *
+   * Optional for the same reason as `plugins`. Absent means the CRUD routes still work and nothing
+   * is armed, which is the honest behaviour for a daemon built without an engine — and exactly what
+   * every existing test that constructs these deps needs.
+   */
+  readonly graphs?: GraphEngine | undefined;
   readonly settings: Settings;
   readonly env?: NodeJS.ProcessEnv;
   readonly connectPipeline: (accountId: string) => void;
@@ -2647,11 +2656,16 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         created_at: now,
         updated_at: now,
       });
+      // Nothing to arm — a new graph is off — but going through the same path keeps "the engine
+      // matches the table" a property of one method rather than of four call sites remembering.
+      await options.graphs?.reload(id);
       return toGraph(requireGraph(store, id));
     },
 
     async updateGraph(graphId, input): Promise<Graph> {
       const row = requireGraph(store, graphId);
+      // Re-armed after the write, below. A saved document may have moved a trigger's config, and an
+      // engine still holding the previous arming is subscribed to the wrong thing.
       store.updateGraph(graphId, {
         name: input.name ?? row.name,
         description: input.description ?? row.description,
@@ -2662,12 +2676,16 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         definition:
           input.definition === undefined ? row.definition : JSON.stringify(input.definition),
       });
+      await options.graphs?.reload(graphId);
       return toGraph(requireGraph(store, graphId));
     },
 
     async deleteGraph(graphId): Promise<void> {
       // Idempotent, like every other removal here. The runs go with it, by foreign key.
-      await Promise.resolve(store.deleteGraph(graphId));
+      store.deleteGraph(graphId);
+      // Disarms it: `reload` on a graph that no longer exists is the disarm path, which is why all
+      // four of these call the same method rather than each having its own idea of the state.
+      await options.graphs?.reload(graphId);
     },
 
     async setGraphEnabled(graphId, enabled): Promise<GraphSummary> {
@@ -2675,6 +2693,7 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       // Switching on clears `disabled_reason`: the sentence explains a state the graph is no longer
       // in, and leaving it behind would have the UI reporting a ceiling that has been dealt with.
       store.setGraphEnabled(graphId, enabled);
+      await options.graphs?.reload(graphId);
       return graphSummary(requireGraph(store, graphId));
     },
 

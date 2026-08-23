@@ -7,6 +7,7 @@ import { PresenceService } from "./accounts/presence.ts";
 import { EventBus } from "./bus/event-bus.ts";
 import { type ForwardProxy, forwardProxyBanner, startForwardProxy } from "./forward-proxy/index.ts";
 import { discoverLogDirectories, LogWatcher } from "./game-logs/index.ts";
+import { GraphEngine } from "./graphs/index.ts";
 import { RateLimiter } from "./net/rate-limiter.ts";
 import { RequestMeter } from "./net/request-meter.ts";
 import { buildUserAgent } from "./net/user-agent.ts";
@@ -31,6 +32,7 @@ import { createAppApiDeps } from "./wiring/app-api-deps.ts";
 import { attachConsentAlerts } from "./wiring/consent-alert.ts";
 import { createControlDeps } from "./wiring/control-deps.ts";
 import { FeedWriter } from "./wiring/feed-writer.ts";
+import { PluginNodeProvider } from "./wiring/graph-provider.ts";
 import { createLogSink } from "./wiring/log-bridge.ts";
 import { NotificationSink } from "./wiring/notification-sink.ts";
 import { publishPipelineEvent } from "./wiring/pipeline-bridge.ts";
@@ -351,7 +353,19 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     // ordering reason as the consent alert above.
     onPanelChange: (change) => publishPanelChange(change),
     onToast: (toast) => publishToast(toast),
+    // The other end of `nodes.fire`, wired to nothing until Phase 4 existed. The provider owns the
+    // instance table, so an id from a trigger that has since been disarmed starts nothing.
+    onNodeFire: (event) => {
+      nodeProvider.onFire(event);
+    },
   });
+
+  // --- graphs ---------------------------------------------------------------
+  // The engine is constructed here and started with the rest of the daemon, but it is *armed* from
+  // the database: a graph the user switched off is not armed, and switching one on is a `reload`
+  // from the control API rather than a restart.
+  const nodeProvider = new PluginNodeProvider({ host: plugins });
+  const graphs = new GraphEngine({ store, bus, provider: nodeProvider });
 
   // --- servers --------------------------------------------------------------
   // Must read `state.json` before `writeStateFile` below overwrites it. Fresh token by default;
@@ -445,6 +459,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     meter,
     webhooks,
     plugins,
+    graphs,
     connectPipeline,
     ...(env !== undefined ? { env } : {}),
     onSettingsSaved: (next) => saveSettings(next, env),
@@ -638,6 +653,16 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
    */
   await plugins.start();
 
+  /*
+   * After the plugins, and that order is load-bearing: arming a trigger is a call *into* a plugin,
+   * so a graph armed before its plugin was attached would be armed against nothing. A plugin that
+   * is still starting fails its arm and is recorded, not thrown — the same posture as above.
+   *
+   * This also picks up runs left parked on a `wait` by the previous process, which is the whole
+   * reason `graph_runs` is a table.
+   */
+  await graphs.start();
+
   return {
     bus,
     store,
@@ -653,6 +678,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
       // Order is the reverse of construction, and the first two lines are the ones that matter:
       // stop accepting work, then flush what is already queued, before anything closes.
       detachConsentAlerts();
+      // Before the plugins, for the mirror of the reason it starts after them: disarming a trigger
+      // is a call into a plugin, and a graph left armed against a stopped host would spend the
+      // shutdown logging failures about a process that is already gone.
+      await graphs.stop();
       // Early, and before the servers: a plugin is the one subsystem here that is a separate
       // process, so leaving it running while the daemon tears itself down means it makes calls into
       // a host that is half gone. Bounded — `stopAll` gives every plugin the same grace and then

@@ -48,7 +48,14 @@ import {
   parseManifest,
   type UiIntentDispatch,
 } from "@vrcz/plugin-api";
-import { isEventPatternString, isScope, type JsonValue, type Scope } from "@vrcz/shared";
+import type { NodeConfigValues, PortValues } from "@vrcz/plugin-api/nodes";
+import {
+  isEventPatternString,
+  isJsonObject,
+  isScope,
+  type JsonValue,
+  type Scope,
+} from "@vrcz/shared";
 import type { AccountManager } from "../accounts/manager.ts";
 import type { EventBus } from "../bus/event-bus.ts";
 import { pluginDataDir } from "../paths.ts";
@@ -59,7 +66,7 @@ import {
   type PendingPluginConsent,
   PluginConsentBroker,
 } from "../plugins/consent.ts";
-import { PluginDispatcher } from "../plugins/dispatcher.ts";
+import { DispatchError, PluginDispatcher } from "../plugins/dispatcher.ts";
 import { PluginEventsBridge } from "../plugins/events-bridge.ts";
 import {
   createSpawnResolver,
@@ -238,6 +245,24 @@ export interface PluginHost {
 
   /** Every node type registered right now, across every running plugin. */
   nodeTypes(): RegisteredNode[];
+  /** One node type by its qualified id, or null when its plugin is not running. */
+  nodeType(qualifiedId: string): RegisteredNode | null;
+
+  /*
+   * The three host→plugin node calls. Phase 4's engine is the only caller, and it reaches them
+   * through a `NodeProvider` rather than holding a `PluginHost` — see `wiring/graph-provider.ts`.
+   *
+   * Each is a thin forward onto the dispatcher, which already owns the absolute deadline, the
+   * `E_TIMEOUT` and the drop of a reply that arrives after it. The one thing they translate is the
+   * id: a graph stores `<pluginId>/<nodeId>` and a plugin only ever knew the second half.
+   */
+  armNode(qualifiedId: string, instanceId: string, config: NodeConfigValues): Promise<void>;
+  disarmNode(qualifiedId: string, instanceId: string): Promise<void>;
+  executeNode(
+    qualifiedId: string,
+    inputs: PortValues,
+    config: NodeConfigValues,
+  ): Promise<PortValues>;
 
   /** Every panel one plugin is currently drawing. Empty for a plugin that draws none. */
   panels(pluginId: string): PanelState[];
@@ -819,6 +844,26 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
 
     nodeTypes: () => nodes.list(),
 
+    nodeType: (qualifiedId) => nodes.get(qualifiedId),
+
+    async armNode(qualifiedId, instanceId, config) {
+      await dispatcher.call(...nodeCall(qualifiedId, "nodes.arm", { instanceId, config }));
+    },
+
+    async disarmNode(qualifiedId, instanceId) {
+      await dispatcher.call(...nodeCall(qualifiedId, "nodes.disarm", { instanceId }));
+    },
+
+    async executeNode(qualifiedId, inputs, config) {
+      const answer = await dispatcher.call(
+        ...nodeCall(qualifiedId, "nodes.execute", { inputs, config }),
+      );
+      // A plugin that answers with anything but an object produced no ports, which reads downstream
+      // as every edge from it being dead. That is the right shape for "it did nothing", and it beats
+      // throwing: the node ran, it just has nothing to hand on.
+      return isJsonObject(answer) ? answer : {};
+    },
+
     async runCommand(pluginId, commandId) {
       await dispatcher.call(pluginId, "ui.command", { commandId } as unknown as JsonValue);
     },
@@ -861,6 +906,29 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
       return Promise.resolve();
     },
   };
+}
+
+/**
+ * Splits a qualified node type into the dispatcher's arguments.
+ *
+ * A graph stores `<pluginId>/<nodeId>` because that is what makes a node type globally unique; a
+ * plugin only ever knew the second half, since the first is its own name. One place does the
+ * translation, so a call that reached the wrong plugin would have to be a bug in this function.
+ */
+function nodeCall(
+  qualifiedId: string,
+  method: "nodes.arm" | "nodes.disarm" | "nodes.execute",
+  params: Record<string, unknown>,
+): [string, string, JsonValue] {
+  const slash = qualifiedId.indexOf("/");
+  if (slash <= 0 || slash === qualifiedId.length - 1) {
+    throw new DispatchError("E_BAD_REQUEST", `${qualifiedId} is not a qualified node type id.`);
+  }
+  return [
+    qualifiedId.slice(0, slash),
+    method,
+    { nodeId: qualifiedId.slice(slash + 1), ...params } as JsonValue,
+  ];
 }
 
 /** A stored JSON array of strings, defensively. A row that cannot be read grants nothing. */

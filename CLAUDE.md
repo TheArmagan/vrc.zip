@@ -95,10 +95,11 @@ All three are read from `.env`, which Bun loads automatically and which is gitig
 `desktop-app/.env.example` documents them.
 
 Verification is `bun run test` + `bun run test:ui` + `bun run typecheck` + `bun run lint` +
-`cd ui && bun run check`. **Run all five locally — nothing runs them on a push.** The repository's
-only workflow is `.github/workflows/desktop-app-release.yml`, which is manual (`workflow_dispatch`)
-and runs the five as gates before it packages and publishes. So the first automated check a change
-gets is the release that ships it, which makes the local run the real gate rather than a courtesy.
+`cd ui && bun run check`. **Run all five locally. Nothing else ever runs them.** The repository's
+only workflow is `.github/workflows/desktop-app-release.yml`, which is manual
+(`workflow_dispatch`), and it builds and publishes without checking anything. So there is no
+automated check anywhere in this project: the local run is not a courtesy ahead of CI, it is the
+only verification a change gets before it ships to users.
 `.github/` is shared ground with `backend/`, a separate project, so anything added there stays
 scoped to `desktop-app/`.
 

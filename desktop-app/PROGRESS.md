@@ -4180,6 +4180,17 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
        so the failure it guards against is a machine that boots into a vrc.zip with no window, no
        icon and no way back short of Task Manager.
 
+237. **The release workflow no longer runs the five checks.** It installs, packages, and publishes;
+     `typecheck`, `lint`, `svelte-check` and both test runners are gone from it. Worth being plain
+     about what that costs, because the workflow's own header used to argue the opposite case and it
+     was not wrong: this is the only workflow in the repository, so those steps were the only time
+     anything ran in CI at all, and removing them means **no automated check exists anywhere in this
+     project**. A release now ships whatever is on the commit, verified or not.
+
+     The trade is a faster, simpler publish against a local run that is now genuinely the only gate
+     rather than a rehearsal for one. `CLAUDE.md` says so in those words now — the five are not a
+     courtesy ahead of CI, they are the whole of it.
+
 ---
 
 ## Gotchas

@@ -3,9 +3,9 @@
 # Manual because this workflow *publishes*: it writes to the repository's releases, moves a tag, and
 # hands strangers an executable. None of that should happen because somebody pushed a commit.
 #
-# It is also the only workflow in the repository, so the five checks below are not a second opinion
-# on a gate that already ran — they are the only time they run in CI at all. That is why none of
-# them are skippable.
+# It builds and publishes, and it checks nothing. `typecheck`, `lint`, `svelte-check` and both test
+# runners are the developer's to run before triggering this — see CLAUDE.md, where that list lives.
+# Nothing in CI runs them, so a release is only as verified as the local run that preceded it.
 #
 # ## Overwriting
 #
@@ -76,28 +76,6 @@ jobs:
           bun-version-file: desktop-app/.bun-version
 
       - run: bun install --frozen-lockfile
-
-      # All five checks, unconditionally. A release is the one build where "it compiled" is not
-      # enough, and nothing else in CI runs them — so a switch to skip them would only ever be
-      # reached on the build where being wrong is most expensive.
-      #
-      # Both runners, because the split is real: `bun test` owns daemon/packages/tools, and `ui/` is
-      # Vitest. Running one is not running the suite.
-      - name: typecheck
-        run: bun run typecheck
-
-      - name: lint
-        run: bun run lint
-
-      - name: svelte-check
-        run: bun run check
-        working-directory: desktop-app/ui
-
-      - name: test (daemon, packages, tools)
-        run: bun run test
-
-      - name: test (ui)
-        run: bun run test:ui
 
       # Inputs reach these scripts as environment variables, never as `${{ }}` interpolated into
       # the script text. A tag containing a quote and a semicolon would otherwise be *code* here —

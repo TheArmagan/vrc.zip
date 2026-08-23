@@ -1023,14 +1023,174 @@ a chart is the signal to build them properly. Decision 110.
 
 ## Phase 4 — Node-graph automation
 
-IFTTT-style event → condition → action graphs on Svelte Flow (`@xyflow/svelte`), executed in the daemon. Typed ports. Built-in action nodes include the push-out targets (Discord webhook, ntfy) and VR-overlay notifications (XSOverlay / OVR Toolkit / OSC). Plugins register additional node types. Runtime designed so it can grow toward general dataflow, but v1 ships triggers only.
+Event → condition → action graphs on Svelte Flow (`@xyflow/svelte`), executed in the daemon. Typed ports. Built-in action nodes include the push-out targets (Discord webhook, ntfy) and VR-overlay notifications (XSOverlay / OVR Toolkit / OSC). Plugins register additional node types.
 
-**Storage is the shared store, not a new one.** Graph definitions, run history, and node state live in
-the same SQLite DB behind the same query layer as everything else. Graph runs are `events` rows with a
-`graph.*` kind, so they inherit the per-type retention config, the feed UI, and the enriched event
-stream for free. Plugin-registered nodes keep their own state through the plugin `records` API — the
-same engine, a per-plugin file. No separate graph database, no second migration system, no second
-retention policy to forget about.
+**Scoped in full by the planning pass of 2026-08-23** — twenty-four questions, four at a time; the
+answers are PROGRESS.md decision 206, and the checklist there is the build order. Three of them
+enlarge the phase past what this paragraph used to promise, and they are called out where they land:
+a run can **wait**, which makes it a durable object rather than a walk; nodes get an **error output
+port**; and the port lattice grows **`list<T>`**. Phase 3 built two of the three consumers of
+`NodeDefinition` (§Node type registration). Phase 4 is the third, plus the thing that runs them.
+
+**What exists when this phase starts, and what does not.** `NodeDefinition`, the port lattice with
+`assignable()`, `validateNodeDefinition`, `nodeDefinitionHash`, the per-plugin `NodeRegistry`,
+`checkEdge`, and the plugin half of `nodes.arm` / `nodes.disarm` / `nodes.execute` are all built and
+tested. There is **no execution runtime at all**: no graph tables, no scheduler, no caller for
+`dispatcher.call(…, "nodes.arm")`, no consumer of the `onNodeFire` seam, and `maxFiresPerMinute` is
+declared and enforced nowhere. There are also **no built-in nodes** — the registry structurally
+requires a `pluginId` whose manifest declared the id — and no Discord, ntfy, OSC or overlay code of
+any kind. All of that is this phase.
+
+### The execution model
+
+A graph is a **DAG with many trigger roots**. Each trigger that fires starts its own run, and a run
+walks only the nodes reachable from *that* trigger, so "on friend online **or** on invite, do this"
+is one graph rather than two. Cycles are rejected on save. Beyond the plain DAG the runtime has
+branch and merge, `foreach` over a list port, and a `wait` node.
+
+**`foreach` and `wait` are what make this a runtime rather than a function.** `foreach` runs its
+subgraph once per element with scoped run-state, which is why the run-size ceiling below is not
+optional. `wait` parks the run, which means an in-flight run **outlives the process** and has to be
+written down: hence `graph_runs`, hence a resume policy.
+
+**Concurrency is the graph author's choice** — `parallel` (capped), `queue`, or `drop` — set per
+graph with `parallel` as the default. Instance joins arrive in bursts, so serializing everything by
+fiat would make a graph lag the event stream; dropping by fiat would lose events silently. A fire
+that cannot be honoured under the chosen mode is recorded, never swallowed.
+
+**A failure aborts the run and is recorded, and a node may route its own failure onward.** The run
+stops at the failing node, everything downstream is marked skipped, and a `graph.run.failed` event
+names the node and the error. There is no retry: re-running a chain that already sent an invite is
+worse than failing. Nodes carry an **error output port** so an author can wire "tell me when this
+breaks" explicitly, which is the same instinct as `checkEdge` answering with a sentence — the person
+who can fix it is the person holding the mouse.
+
+**Type checking happens twice, as §Node type registration says.** In the editor for red-edge
+feedback, and again in the daemon on save and at each execution boundary, because the frontend is a
+client and clients lie.
+
+### Storage
+
+**The shared store, not a new one.** Graph definitions, run state and run history live in the same
+SQLite DB behind the same query layer as everything else. No separate graph database, no second
+migration system, no second retention policy to forget about.
+
+- **A graph is one row with a JSON blob.** Nodes, edges, positions and config live in the blob,
+  alongside the `nodeDefinitionHash` of every node type it uses. The editor saves whole documents and
+  nothing queries an individual edge, so normalising into `graph_nodes` / `graph_edges` would buy a
+  join nobody needs and cost a real write path on every canvas save.
+- **`graph_runs` is live state, not history.** It holds in-flight and parked runs, written at every
+  node boundary and every `wait`, and it is pruned when a run completes. It exists so a restart can
+  resume, not so the UI can page through last month.
+- **History is `events` rows with a `graph.*` kind**, which is the promise this section always made:
+  runs inherit the per-type retention config, the feed UI, the enriched stream and outbound webhooks
+  for free. `graph` becomes a real `EventFamily` in `packages/shared/src/events.ts` — the kind union
+  is closed and exhaustiveness-checked, so this is a compile error until it is done, and without it
+  the feed's filter chips bucket every run under `other`.
+- **Plugin-registered nodes keep their own state through the plugin `records` API** — the same
+  engine, a per-plugin file.
+
+**A parked run's resume policy is the wait node's own config.** Resume when the daemon comes back, or
+skip as missed. A machine that slept for a week must not wake up and send a pile of invites about a
+world the user left, and a graph that genuinely wants "whenever I next start, do this" must be able
+to say so. Either way the outcome is an event: resumed, or `graph.run.expired`.
+
+### The node catalogue
+
+**Built-ins register under a reserved `pluginId` into the same `NodeRegistry`**, exempt from the
+manifest-declaration check and nothing else. One registry, one lookup, one type checker, ids stay
+qualified. The alternative of a second registry means every consumer — palette, `checkEdge`, run
+loader — has to ask two places, and shipping the built-ins as a real bundled plugin would make core
+features uninstallable and burn a grant on the app's own behaviour.
+
+- **Triggers:** one generic **bus event** node (a `kind` or `kind.*` pattern plus an optional account
+  filter) which covers everything the EventBus emits including kinds that do not exist yet; **named
+  convenience triggers** over it (friend online/offline, player joined/left my instance, notification
+  received, world changed) whose value is *typed outputs* — a `friend` port rather than a `json`
+  blob, so the edges downstream type-check properly; **schedule**, which brings the daemon's first
+  piece of timed work and therefore its own missed-fire answer; and **run now**, which is how a graph
+  gets tried without waiting for the world to cooperate.
+- **Conditions and shaping:** compare (equals / contains / matches / ordering) and boolean and/or/not;
+  **field extract** from a `json` port into a typed port, without which the generic trigger is close
+  to unusable; **string template**, which reuses the `NodeBodyTemplate` evaluator that already exists;
+  and list **filter / count / first**.
+- **Actions:** **HTTP webhook** through the Phase 2 delivery path (SSRF-validated URL, HMAC
+  signature, retry queue, dead-lettering, all of it already built and hardened); **Discord and ntfy**
+  as presets over that same path; **VR overlay** via XSOverlay / OVR Toolkit / OSC, which is outbound
+  UDP to a local port and is entirely greenfield; and the **VRChat social actions** (invite, request
+  invite, boop, select avatar) plus a node that writes a `graph.note` into the feed.
+
+**The social actions have to be lifted out of `wiring/control-deps.ts` first.** They live inside that
+closure today and are reachable only from their routes; a graph action node calling them means a
+reusable social-actions module, not `ControlDeps` smuggled into the runtime.
+
+**`list<T>` joins the port lattice.** `foreach` and the list nodes need it, and the honest version is
+a parameterised type with covariance (`list<friend>` assignable to `list<user>`) plus `list<X> <: json`
+— not a flat enumeration of `friendList` / `userList` that grows forever, and certainly not "a list is
+`json`", which would hand back exactly the property the lattice exists to hold. It stays a small
+closed set with rules a refusal message can explain in one sentence.
+
+### Safety
+
+- **A new graph is in dry-run, and an explicit hold-to-confirm arms it.** Outbound actions log what
+  they would have done, with that log beside the control as the evidence for arming it. This is
+  decision 109's posture for plugins applied to graphs: an explicit per-graph gesture, **never** a
+  timer.
+- **Three ceilings, because an explosion can start in three places.** `maxFiresPerMinute` at the
+  trigger (coalesce, then drop with an event, which is the first time that declared field is
+  enforced at all); a cap on nodes executed per run, so a `foreach` cannot expand without bound; and
+  runs per graph per hour. A graph that hits a ceiling is **disabled and says why** — the existing
+  rate limiter covers the VRChat direction and nothing else, not webhooks, not UDP, not CPU.
+- **The acting account is chosen per node**, defaulting to the graph's. It has to be explicit
+  somewhere: `events.account_id` is nullable by design (log-derived events, unlinked sessions), so
+  "act as whoever the event was about" has no answer for a large class of triggers. Per node rather
+  than per graph because "the alt invites the main" is one graph, not two.
+- **A stopped or uninstalled plugin pauses the graphs that use its nodes**, marked unavailable and
+  never deleted, and a **changed `nodeDefinitionHash` blocks that graph until the user migrates it in
+  the editor.** Running half an automation is worse than not running it, and silently adopting a
+  redefined node means a plugin update can change behaviour under a graph the user already armed.
+- **Secrets are a `secret` config-field kind stored in `secrets.enc`**, referenced from the graph
+  blob, write-only in the UI and absent from exports. Plugins get the same field kind.
+
+### The editor and the surface
+
+Svelte Flow (`@xyflow/svelte`, a net-new dependency), a palette grouped by source, red edges from
+`checkEdge` as you wire, an **explicit save** that revalidates server-side, session-local undo/redo,
+and a **run inspector** showing recent runs with the failing node highlighted. Node bodies render
+from the host-evaluated template, never an RPC into the plugin — Svelte Flow re-renders on every pan
+and zoom and per-frame RPC at 60Hz is not viable.
+
+Graphs **export and import as JSON** (secrets stripped, plugin node ids and definition hashes
+recorded, a report of what is missing on import), and a small set of **starter templates** ships so
+the first graph is an edit rather than a blank canvas.
+
+**Graphs are a first-party feature: session-token routes only in v1.** No `/app` scope, no
+`ctx.graphs` for plugins. `graph.*` events still reach the enriched stream and outbound webhooks, so
+an app can *observe* runs without being able to rewrite the user's automations; opening that surface
+is a decision to make once, later, with its own consent copy.
+
+### Build order
+
+Runtime first, editor last, so that every layer is testable before the canvas draws it and the canvas
+draws something that already runs.
+
+1. **4.1 Graph store and CRUD** — migration 012 (`graphs`, `graph_runs`), the `graph` event family,
+   routes, no execution.
+2. **4.2 The engine** — topological walk, branch/merge, `foreach`, `wait` with persistence and
+   resume, the three concurrency modes, error ports, the three ceilings.
+3. **4.3 Built-in nodes** — the reserved registration path, then triggers, conditions and actions;
+   the social-actions module lifted out of `control-deps.ts`; `list<T>` in the lattice.
+4. **4.4 Dry-run, arming, secrets** — the gesture, the dry-run log, the `secret` field kind.
+5. **4.5 The canvas** — Svelte Flow, palette, live type checking, save, run inspector, plugin-node
+   pause and migration prompts.
+6. **4.6 Export, import, templates.**
+
+**Verification:** `bun test` covers the engine hard (topological order, a `wait` across a simulated
+restart, all three concurrency modes, error ports, every ceiling); webhook, ntfy and OSC actions are
+tested against a real local `Bun.serve` and a real UDP socket rather than a stub, for the same reason
+the VRChat fixture is a real server; VRChat actions are asserted **in dry-run only**; and the editor
+is verified by clicking, because decisions 191 through 193 each found defects that were invisible to
+the suite and obvious in a browser.
 
 ## Phase 5 — Packaging & polish
 

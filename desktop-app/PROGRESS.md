@@ -6,7 +6,11 @@ was decided along the way.
 
 **Last updated:** 2026-08-23
 **Current phase:** Phase 3 is **complete** — 3.0 through 3.11. Next is Phase 4, the node graph
-(decision 182), which 3.10 leaves needing mostly the canvas. Shipping is wired up ahead of it:
+(decision 182), and it is now **scoped rather than started**: a planning pass on 2026-08-23 put
+twenty-four questions to the user four at a time, rewrote `PLAN.md` §Phase 4 from one paragraph into
+a spec, and left the Phase 4 checklist below as the build order (decision 206). It is a larger phase
+than 3.10 implied — a run can `wait`, so it is a durable object rather than a walk, and the canvas is
+step 4.5 of six rather than the bulk of the work. Shipping is wired up ahead of it:
 `desktop-app-release.yml` packages the executable and publishes it to a GitHub Release on a manual
 trigger (decision 200).
 **Status: Phases 1 and 2 are both built.** Phase 1 was confirmed by hand on 2026-08-22 (1.10 and the
@@ -487,6 +491,65 @@ for the life of the product.
       the protocol major; and the reference pages are generated and committed **without** a CI drift
       check — the `packages/api` posture was declined because these are docs, not a client whose
       staleness ships wrong requests.
+
+---
+
+## Phase 4 checklist
+
+Scoped in full by the planning pass of 2026-08-23 — twenty-four questions, four at a time, answered
+in **decision 206**. `PLAN.md` §Phase 4 was rewritten from one paragraph into the spec; this is the
+order it gets built in. **Nothing here is started.**
+
+Three answers enlarge the phase beyond what PLAN.md used to promise, and they are the reason 4.2 is
+the big step rather than 4.5: a run can **wait**, so it is a durable object rather than a walk; nodes
+get an **error output port**; and the port lattice grows **`list<T>`**.
+
+- [ ] **4.1 Graph store and CRUD** — migration 012: `graphs` (one row, JSON blob holding nodes, edges,
+      positions, config and the `nodeDefinitionHash` of every node type used) and `graph_runs` (live
+      state only, pruned on completion). The `graph` **`EventFamily`** in `packages/shared/src/events.ts`
+      with its kind union members — the union is closed and exhaustiveness-checked, so this is a
+      compile error until it is done, and skipping it buckets every run under `other` in the feed's
+      filter chips. Session-token routes; no execution yet.
+- [ ] **4.2 The engine** — DAG with many trigger roots, one run per fire walking only what that
+      trigger reaches; cycles refused on save; branch and merge; `foreach` with scoped run-state;
+      `wait` that persists the run and resumes per the wait node's own policy (resume / skip as
+      missed), answering with `graph.run.expired` when it skips. Per-graph concurrency mode
+      (`parallel` capped, `queue`, `drop`), default `parallel`. A failure aborts the run, marks
+      downstream skipped, emits `graph.run.failed` naming the node, and **never retries**; nodes carry
+      an **error output port** so an author can wire the failure onward. The three ceilings:
+      `maxFiresPerMinute` at the trigger (enforced for the first time), nodes-per-run, runs-per-hour;
+      hitting one **disables the graph and says why**. This is where `dispatcher.call(…, "nodes.arm")`
+      and the `onNodeFire` seam finally get a caller.
+- [ ] **4.3 Built-in nodes** — the reserved-`pluginId` registration path into the same `NodeRegistry`
+      (exempt from the manifest-declaration check and nothing else). Triggers: generic bus event,
+      the named convenience triggers with typed outputs, schedule, run-now. Conditions and shaping:
+      compare, boolean logic, field extract from `json`, string template over the existing
+      `NodeBodyTemplate` evaluator, list filter/count/first. Actions: HTTP webhook through the Phase 2
+      delivery path, Discord and ntfy presets over it, XSOverlay / OVR Toolkit / OSC over local UDP
+      (greenfield), the four VRChat social actions, and a `graph.note` feed writer. **Two prerequisites
+      inside this step:** the social actions come out of the `wiring/control-deps.ts` closure into a
+      reusable module, and `list<T>` joins the lattice as a real parameterised type with covariance
+      plus `list<X> <: json`.
+- [ ] **4.4 Dry-run, arming, secrets** — a new graph is in dry-run; outbound actions log what they
+      would have done and an explicit **hold-to-confirm** arms it, with the dry-run log beside it as
+      the evidence (decision 109's posture, applied to graphs). The acting account is per node,
+      defaulting to the graph's. A `secret` config-field kind stored in `secrets.enc`, referenced from
+      the blob, write-only in the UI, absent from exports; plugins get the same field kind.
+- [ ] **4.5 The canvas** — `@xyflow/svelte` (net-new dependency; Svelte is pinned at 5.56.10), palette
+      grouped by source, red edges from `checkEdge` live, explicit save that revalidates server-side,
+      session-local undo/redo, run inspector highlighting the failing node. A stopped or uninstalled
+      plugin **pauses** the graphs using its nodes, marked unavailable and never deleted; a changed
+      `nodeDefinitionHash` **blocks** the graph until the user migrates it here. Node bodies render
+      from the host-evaluated template, never an RPC.
+- [ ] **4.6 Export, import, templates** — JSON export with secrets stripped and node ids plus
+      definition hashes recorded, import with a report of what is missing, and a small set of starter
+      templates so the first graph is an edit rather than a blank canvas.
+
+**Verification bar:** `bun test` over the engine (topological order, a `wait` across a simulated
+restart, all three concurrency modes, error ports, every ceiling); webhook, ntfy and OSC actions
+against a real local `Bun.serve` and a real UDP socket, not a stub; VRChat actions asserted **in
+dry-run only**; the editor verified by clicking, because decisions 191–193 each found defects the
+suite could not see.
 
 ---
 
@@ -3137,6 +3200,69 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      image that renders as nothing. The file stays in `docs/` for a later attempt; nothing in this
      repository can fix it, and the diagnosis is here so it is not made twice.
 
+206. **Phase 4 is scoped: twenty-four questions, and three of the answers make it bigger than the
+     paragraph promised.** `PLAN.md` §Phase 4 was one paragraph and a storage note. It is now a spec,
+     and the Phase 4 checklist above is the build order. The pass followed the same shape as the three
+     that scoped Phase 3 — four questions at a time, every answer written down, including the ones
+     that enlarge the work.
+
+     **What was already built, and what was not, decided how the questions were framed.** Phase 3
+     shipped two of `NodeDefinition`'s three consumers: the registry, `validateNodeDefinition`,
+     `nodeDefinitionHash`, `assignable()`, `checkEdge`, and the plugin side of
+     `nodes.arm` / `nodes.disarm` / `nodes.execute`. What does **not** exist is everything that runs
+     a graph: no tables, no scheduler, no caller for `dispatcher.call(…, "nodes.arm")`, no consumer of
+     the `onNodeFire` seam, `maxFiresPerMinute` declared and enforced nowhere, no built-in nodes at
+     all (the registry structurally demands a `pluginId` whose manifest declared the id), and not one
+     line of Discord, ntfy, OSC or overlay code. Phase 4 is the third consumer plus the runtime.
+
+     **Three answers enlarge the phase, and they are worth naming because each one changes a
+     shape rather than adding an item.**
+
+     - **A run can `wait`, so a run is a durable object.** This is the big one. An in-flight run
+       outlives the process, which is what forces `graph_runs` to be a real table written at every
+       node boundary, forces a resume policy, and turns the engine from a topological walk into a
+       state machine. `foreach` lands with it, which is why the nodes-per-run ceiling is not optional.
+     - **Nodes get an error output port.** Same instinct as `checkEdge` answering with a sentence:
+       the person who can fix a broken automation is the author, so the failure is routable rather
+       than only loggable. Every node gains a port and the type checker gains a case.
+     - **`list<T>` is a real parameterised port type**, with covariance and `list<X> <: json`. The
+       lattice was deliberately a small closed set with two widening rules; a flat enumeration of
+       `friendList` / `userList` grows forever, and "a list is `json`" would hand back exactly the
+       property the lattice exists to hold. One rule bought several nodes.
+
+     **Where an answer went against the obvious cheap option, the reason is the same each time:
+     silence is the failure mode.** A stopped plugin **pauses** its graphs rather than letting them
+     run without that node, because half an automation is worse than none. A changed
+     `nodeDefinitionHash` **blocks** rather than auto-adopting, because otherwise a plugin update
+     changes behaviour under a graph the user already armed. A fire that cannot be honoured under the
+     graph's concurrency mode is **recorded**, never swallowed. A graph that hits a ceiling is
+     **disabled and says why**. And the existing rate limiter was explicitly *not* accepted as
+     runaway protection: it covers the VRChat direction and says nothing about webhooks, UDP, or a
+     `foreach` expanding without bound.
+
+     **Two answers are re-applications of decisions already made rather than new ones.** Dry-run
+     until an explicit hold-to-confirm is decision 109's posture for plugins, applied to graphs, with
+     the dry-run log beside the control as the evidence — never a timer. And run history staying
+     `events` rows with a `graph.*` kind keeps `PLAN.md`'s own promise: one retention policy, the feed
+     and the enriched stream and outbound webhooks all working without new code. `graph_runs` is live
+     state that gets pruned, not a second history with a second retention policy to forget about.
+
+     **The acting account is per node, and the reason is a schema fact rather than a preference.**
+     `events.account_id` is nullable by design — log-derived events, unlinked sessions — so "act as
+     whoever the event was about" has no answer for a large class of triggers. Per node rather than
+     per graph because "the alt invites the main" should be one graph.
+
+     **Graphs stay session-token only in v1.** No `/app` scope, no `ctx.graphs`. `graph.*` events
+     already reach the stream and webhooks, so a third-party app can observe runs without being able
+     to rewrite the user's automations. Opening that surface is one decision to make later, with its
+     own consent copy, rather than a scope added in passing.
+
+     Two prerequisites hide inside 4.3 and will bite whoever starts there without reading this: the
+     three social actions live inside the `wiring/control-deps.ts` closure and are reachable only from
+     their routes, so they have to be lifted into a reusable module; and `graph` is not an
+     `EventFamily`, so emitting `graph.*` is a **compile error** until `packages/shared/src/events.ts`
+     grows the family and the kind union members.
+
 ---
 
 ## Gotchas
@@ -3892,7 +4018,13 @@ the per-plugin budget, how much of `ctx.vrchat` ships first, the two Windows lim
 hostile suite runs in CI, and what counts as verification. It also **dropped the `EAGER_FILL_LIMIT`
 measurement** outright rather than leaving it open (decision 164).
 
-**A third pass the same day scoped the back half of Phase 3** — twenty-eight questions, four at a
+**A fourth pass on 2026-08-23 scoped the whole of Phase 4** — twenty-four questions, four at a time,
+all answered in decision 206 and listed at the bottom of this section. `PLAN.md` §Phase 4 went from
+one paragraph to a spec and the Phase 4 checklist is the build order. Unlike the third pass, this one
+**opened more than it closed**: three answers (a `wait` node, error output ports, `list<T>`) enlarge
+the phase past what the paragraph promised.
+
+**A third pass on 2026-08-22 scoped the back half of Phase 3** — twenty-eight questions, four at a
 time, all of them answered in decision 182 and listed at the bottom of this section. Two of them are
 **cuts rather than answers**, which is why this pass closed more work than it opened: OS-level
 plugin sandboxing and Ed25519 signing are both out of the plan entirely, and the docs that describe
@@ -3988,3 +4120,38 @@ All of these are decision 182; one line each so a closed question leaves a trace
 - When Phase 2's end-to-end pass happens → **not scheduled**; it needs a real third-party client to
   mean anything, so it stays open rather than being ticked by a test impersonating one.
 - What follows Phase 3 → Phase 4, the node graph.
+
+### Closed by the 2026-08-23 planning pass (Phase 4)
+
+All of these are decision 206; one line each so a closed question leaves a trace.
+
+- Build order for Phase 4 → runtime first, editor last.
+- How a graph is stored → one row, JSON blob; no `graph_nodes` / `graph_edges`.
+- Where built-in nodes come from → the daemon registers under a reserved `pluginId` into the same
+  registry, exempt from the manifest check and nothing else.
+- Execution shape → a DAG, cycles refused on save.
+- How expressive beyond a DAG → branch and merge, **plus `foreach` and `wait`**.
+- How many triggers arm one graph → many roots, one run per fire, walking only what that trigger
+  reaches.
+- A trigger fires mid-run → the graph author picks: `parallel` (capped), `queue`, or `drop`.
+- A node throws → abort the run, record it, no retry, **plus an error output port** on nodes.
+- Where an in-flight run lives → a `graph_runs` table, persisted at every boundary.
+- A restart with a run parked on a `wait` → the wait node's own policy: resume, or skip as missed.
+- Run history vs the table → table is live state and is pruned; history is `events` rows with a
+  `graph.*` kind.
+- What gates outbound actions → new graphs are in dry-run; an explicit hold arms them.
+- Built-in triggers → generic bus event, named convenience triggers, schedule, run-now (all four).
+- Built-in actions → HTTP webhook, Discord + ntfy presets, XSOverlay / OVR Toolkit / OSC, the VRChat
+  social actions and a feed note (all four).
+- Runaway protection → all three ceilings: fire rate, nodes per run, runs per hour.
+- Which account an action acts as → per node, defaulting to the graph's.
+- Built-in conditions and shaping → compare + boolean logic, field extract, string template, list
+  filter/count/first (all four).
+- A graph's plugin is stopped or its node definition changed → stopped pauses the graph, a hash
+  mismatch prompts to migrate.
+- What the canvas ships with → explicit save, live type checking, run inspector.
+- Where node-config secrets live → a `secret` config-field kind in `secrets.enc`.
+- How lists are typed → `list<T>` as a real parameterised port type with covariance.
+- Who can drive graphs besides the UI → session-token routes only in v1.
+- Export and templates → JSON export/import **and** a few starter templates.
+- What counts as done → engine tested hard, actions against local receivers, canvas by hand.

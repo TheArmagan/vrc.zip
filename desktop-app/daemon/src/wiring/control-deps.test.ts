@@ -9,6 +9,7 @@ import type { SecretsStore } from "../security/secrets.ts";
 import { DEFAULT_SETTINGS, type Settings } from "../settings.ts";
 import { MEMORY, Store } from "../store/index.ts";
 import { createControlDeps } from "./control-deps.ts";
+import type { PluginHost } from "./plugin-host.ts";
 
 /**
  * The user routes and the feed selectors, against a real `Store` and real `Account`s with a
@@ -197,6 +198,8 @@ function harness(
     instance?: (call: number) => Response;
     /** User ids the presence service reports as this account's friends. */
     friends?: string[];
+    /** A stand-in plugin host, for the graph save path's type check. */
+    plugins?: PluginHost;
     /**
      * Full presence records, for the tests that care about *where* a friend is rather than only
      * that they are one. Answers both `list` and `listAll`, since the derivation reads whichever
@@ -373,6 +376,7 @@ function harness(
       observe: () => false,
     } as unknown as PresenceService,
     settings: options.settings ?? DEFAULT_SETTINGS,
+    ...(options.plugins === undefined ? {} : { plugins: options.plugins }),
     ...(options.avatarIds === undefined ? {} : { avatarIds: options.avatarIds }),
     connectPipeline: () => {},
     onSettingsSaved: async () => {},
@@ -2682,6 +2686,66 @@ describe("control deps: avatars", () => {
     ]);
     expect(results.map((r) => r.id)).toEqual([AVATAR_ID, AVATAR_ID, AVATAR_ID]);
     expect(h.requests.filter((path) => path.includes("/avatars/"))).toHaveLength(1);
+    h.stop();
+  });
+});
+
+/* -------------------------------------------------------------------------------------------- */
+/* Graphs                                                                                         */
+/* -------------------------------------------------------------------------------------------- */
+
+/** The two methods the graph save path asks a plugin host for, and nothing else. */
+function nodeHost(refusal: string | null): PluginHost {
+  return {
+    nodeType: (qualifiedId: string) =>
+      qualifiedId === "vrcz/known" ? ({ qualifiedId } as never) : null,
+    checkNodeEdge: () => refusal,
+  } as unknown as PluginHost;
+}
+
+function document(fromType: string, toType: string) {
+  return {
+    nodes: [
+      { id: "n1", type: fromType, position: { x: 0, y: 0 }, config: {} },
+      { id: "n2", type: toType, position: { x: 0, y: 0 }, config: {} },
+    ],
+    edges: [{ id: "e1", from: { node: "n1", port: "out" }, to: { node: "n2", port: "in" } }],
+  };
+}
+
+describe("the graph save path", () => {
+  test("refuses an edge the type checker rejects, naming the edge", async () => {
+    // Type checking happens twice on purpose: the editor checks as you wire, and this runs on save,
+    // because the frontend is a client and clients lie.
+    const h = harness({ plugins: nodeHost("A user cannot flow into a number.") });
+    const graph = await h.deps.createGraph({ name: "g" });
+
+    await expect(
+      h.deps.updateGraph(graph.id, { definition: document("vrcz/known", "vrcz/known") }),
+    ).rejects.toThrow(/e1: A user cannot flow into a number\./);
+    h.stop();
+  });
+
+  test("does not refuse an edge whose node types are not registered", async () => {
+    // A graph naming a stopped plugin's node is a normal state. A save that failed on it would mean
+    // the user could not fix the graph without first restarting the plugin that broke it.
+    const h = harness({ plugins: nodeHost("this would be a refusal") });
+    const graph = await h.deps.createGraph({ name: "g" });
+
+    const saved = await h.deps.updateGraph(graph.id, {
+      definition: document("acme.gone/node", "acme.gone/other"),
+    });
+    expect(saved.definition.edges).toHaveLength(1);
+    h.stop();
+  });
+
+  test("accepts a legal edge", async () => {
+    const h = harness({ plugins: nodeHost(null) });
+    const graph = await h.deps.createGraph({ name: "g" });
+    const saved = await h.deps.updateGraph(graph.id, {
+      definition: document("vrcz/known", "vrcz/known"),
+    });
+    expect(saved.definition.nodes).toHaveLength(2);
     h.stop();
   });
 });

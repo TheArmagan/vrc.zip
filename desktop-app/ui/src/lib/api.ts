@@ -33,6 +33,11 @@ import {
   familyOf,
   fileIdFromImageUrl,
   type GameSession,
+  type Graph,
+  type GraphCreate,
+  type GraphRunSummary,
+  type GraphSummary,
+  type GraphUpdate,
   type GroupGalleryImagePage,
   type GroupGalleryImageSummary,
   type GroupGallerySummary,
@@ -44,6 +49,7 @@ import {
   type GroupPostSummary,
   type KnownEventKind,
   type LoginResult,
+  type NodeTypeSummary,
   type RateLimitSnapshot,
   type RateSeries,
   type RetentionKindStat,
@@ -62,7 +68,18 @@ import {
 } from "@vrcz/shared";
 import { API_BASE } from "./config.ts";
 
-export type { RateSeries };
+export type {
+  Graph,
+  GraphCreate,
+  GraphDocument,
+  GraphEdge,
+  GraphNode,
+  GraphRunSummary,
+  GraphSummary,
+  GraphUpdate,
+  NodeTypeSummary,
+  RateSeries,
+} from "@vrcz/shared";
 
 import { getToken } from "./session.ts";
 
@@ -1440,6 +1457,73 @@ export const api = {
 
     deny: (id: string): Promise<void> =>
       request<void>(`/plugins/pending/${encodeURIComponent(id)}/deny`, { method: "POST" }),
+  },
+
+  /**
+   * Node graphs. See `PLAN.md` §Phase 4.
+   *
+   * The two switches are separate calls because they are separate gestures: `enable` says the graph
+   * should run, `arm` says its outbound actions are real. Saving a document can do neither, which is
+   * enforced in SQL rather than here — this shape only mirrors it.
+   */
+  graphs: {
+    /** Every node type the palette can offer, built-in and plugin-contributed alike. */
+    nodeTypes: (signal?: AbortSignal): Promise<NodeTypeSummary[]> =>
+      request<NodeTypeSummary[]>("/nodes", withSignal(signal)),
+
+    list: (signal?: AbortSignal): Promise<GraphSummary[]> =>
+      request<GraphSummary[]>("/graphs", withSignal(signal)),
+
+    get: (graphId: string, signal?: AbortSignal): Promise<Graph> =>
+      request<Graph>(`/graphs/${encodeURIComponent(graphId)}`, withSignal(signal)),
+
+    create: (input: GraphCreate): Promise<Graph> =>
+      request<Graph>("/graphs", { method: "POST", body: { ...input } }),
+
+    /**
+     * Saves the editable half. Rejects with `invalid_graph` and every broken edge named, rather
+     * than the first — a canvas that reports one problem per save is a canvas nobody finishes.
+     */
+    update: (graphId: string, input: GraphUpdate): Promise<Graph> =>
+      request<Graph>(`/graphs/${encodeURIComponent(graphId)}`, {
+        method: "PUT",
+        body: { ...input },
+      }),
+
+    remove: (graphId: string): Promise<void> =>
+      request<void>(`/graphs/${encodeURIComponent(graphId)}`, { method: "DELETE" }),
+
+    setEnabled: (graphId: string, enabled: boolean): Promise<GraphSummary> =>
+      request<GraphSummary>(
+        `/graphs/${encodeURIComponent(graphId)}/${enabled ? "enable" : "disable"}`,
+        { method: "POST" },
+      ),
+
+    /** Lifts or restores dry-run. The gesture behind it is a hold, never a timer. */
+    setArmed: (graphId: string, armed: boolean): Promise<GraphSummary> =>
+      request<GraphSummary>(`/graphs/${encodeURIComponent(graphId)}/armed`, {
+        method: "PUT",
+        body: { armed },
+      }),
+
+    /** Runs that have not finished. A completed run is a `graph.*` event in the feed, not a row. */
+    runs: (graphId: string, signal?: AbortSignal): Promise<GraphRunSummary[]> =>
+      request<GraphRunSummary[]>(`/graphs/${encodeURIComponent(graphId)}/runs`, withSignal(signal)),
+
+    /** Fires the manual trigger. Rejects `no_manual_trigger` when the graph has no such node. */
+    runNow: (graphId: string): Promise<void> =>
+      request<void>(`/graphs/${encodeURIComponent(graphId)}/run`, { method: "POST" }),
+
+    /**
+     * Stores one node's secret field. Write-only: nothing reads it back, here or anywhere.
+     *
+     * An empty value clears it, which is why this is one call rather than a set and a delete.
+     */
+    setSecret: (graphId: string, nodeId: string, fieldId: string, value: string): Promise<void> =>
+      request<void>(
+        `/graphs/${encodeURIComponent(graphId)}/secrets/${encodeURIComponent(nodeId)}/${encodeURIComponent(fieldId)}`,
+        { method: "PUT", body: { value } },
+      ),
   },
 
   /*

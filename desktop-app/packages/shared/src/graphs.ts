@@ -169,6 +169,25 @@ export interface GraphUpdate {
   readonly definition?: GraphDocument;
 }
 
+/**
+ * One node type as the palette sees it.
+ *
+ * `definition` is deliberately untyped here: `NodeDefinition` lives in `@vrcz/plugin-api`, which
+ * imports this package, so naming it would be a cycle. Every consumer that needs the shape already
+ * depends on that package and casts once — the daemon when it registers, the editor when it draws.
+ *
+ * `owner` is `vrcz` for a built-in and a plugin id otherwise; `available` says whether the type is
+ * registered *right now*. A graph referencing an unavailable type is paused rather than broken, and
+ * the palette greys it rather than hiding it — a node that vanished would hide the one fact that
+ * explains why a graph stopped.
+ */
+export interface NodeTypeSummary {
+  readonly qualifiedId: string;
+  readonly owner: string;
+  readonly available: boolean;
+  readonly definition: unknown;
+}
+
 /* -------------------------------------------------------------------------------------------- */
 /* Validation                                                                                     */
 /* -------------------------------------------------------------------------------------------- */

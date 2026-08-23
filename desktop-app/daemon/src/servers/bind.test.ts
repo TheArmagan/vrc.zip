@@ -48,6 +48,7 @@ const deps: ControlDeps = {
     throw new Error("unused");
   },
   uninstallPlugin: async () => {},
+  listNodeTypes: async () => [],
   listGraphs: async () => [],
   getGraph: async () => {
     throw new Error("unused");

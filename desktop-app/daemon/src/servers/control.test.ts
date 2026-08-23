@@ -674,6 +674,14 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     uninstallPlugin: async (pluginId) => {
       seen.pluginsUninstalled.push(pluginId);
     },
+    listNodeTypes: async () => [
+      {
+        qualifiedId: "vrcz/note",
+        owner: "vrcz",
+        available: true,
+        definition: { id: "note", kind: "action", title: "Write to the feed" },
+      },
+    ],
     listGraphs: async () => graphs.map(({ definition: _definition, ...summary }) => summary),
     getGraph: async (graphId) => findGraph(graphId),
     createGraph: async (input) => {
@@ -2955,6 +2963,22 @@ describe("graph routes", () => {
     });
     expect((await call(deps, "/api/graphs/graph-1/run", { method: "POST" })).status).toBe(202);
     expect(seen.graphRuns).toEqual(["graph-1", "graph-1"]);
+  });
+
+  test("the node catalogue is one list, whoever owns the type", async () => {
+    // One registry is the whole reason built-ins register rather than living in a second map: an
+    // editor that had to ask two places would eventually ask one.
+    const { deps } = fakeDeps();
+    const res = await call(deps, "/api/nodes");
+    expect(res.status).toBe(200);
+    expect((await res.json()) as unknown[]).toEqual([
+      {
+        qualifiedId: "vrcz/note",
+        owner: "vrcz",
+        available: true,
+        definition: { id: "note", kind: "action", title: "Write to the feed" },
+      },
+    ]);
   });
 
   test("a secret is written through its own route and answered with nothing", async () => {

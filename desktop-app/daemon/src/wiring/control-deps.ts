@@ -28,6 +28,7 @@ import {
   isGraphConcurrency,
   isScope,
   type JsonValue,
+  type NodeTypeSummary,
   type PluginPanelFrame,
   type PluginToastFrame,
   type RateCeilingSnapshot,
@@ -935,6 +936,37 @@ function parseGraphDocument(definition: string): GraphDocument {
     return result.ok ? (parsed as GraphDocument) : EMPTY_GRAPH;
   } catch {
     return EMPTY_GRAPH;
+  }
+}
+
+/**
+ * The second half of "type checking happens twice on purpose".
+ *
+ * The editor checks every edge as it is drawn, against the same `assignable`; this runs on save,
+ * because the frontend is a client and clients lie. What it does **not** do is refuse an edge whose
+ * node types are not registered — a graph naming a stopped plugin's node is a normal state, and a
+ * save that failed on it would mean a user could not fix a graph without first restarting the plugin
+ * that broke it.
+ */
+function checkGraphEdges(document: GraphDocument, host: PluginHost | undefined): void {
+  if (host === undefined) return;
+  const types = new Map(document.nodes.map((node) => [node.id, node.type]));
+  const issues: string[] = [];
+  for (const edge of document.edges) {
+    const from = types.get(edge.from.node);
+    const to = types.get(edge.to.node);
+    if (from === undefined || to === undefined) continue;
+    if (host.nodeType(from) === null || host.nodeType(to) === null) continue;
+    const refusal = host.checkNodeEdge(
+      { nodeType: from, portId: edge.from.port },
+      { nodeType: to, portId: edge.to.port },
+    );
+    if (refusal !== null) issues.push(`${edge.id}: ${refusal}`);
+  }
+  if (issues.length > 0) {
+    // Every issue, like the document validator: a canvas that reports one broken edge per save is a
+    // canvas nobody finishes fixing.
+    throw new ControlError(400, "invalid_graph", issues.join("; "));
   }
 }
 
@@ -2516,6 +2548,22 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
      * store: that the id exists, and that the two switches move only through their own calls.
      */
 
+    async listNodeTypes(): Promise<NodeTypeSummary[]> {
+      const registered = options.plugins?.nodeTypes() ?? [];
+      return await Promise.resolve(
+        registered.map((entry) => ({
+          qualifiedId: entry.qualifiedId,
+          owner: entry.pluginId,
+          // Everything in the registry is registered, so this is true by construction today. It is
+          // in the shape anyway because the *palette* has to be able to say "this node's plugin is
+          // stopped" the day it draws a saved graph that names one, and a field the client already
+          // reads is cheaper to start populating than one it has to learn about later.
+          available: true,
+          definition: entry.definition,
+        })),
+      );
+    },
+
     async listGraphs(): Promise<GraphSummary[]> {
       return await Promise.resolve(store.listGraphs().map(graphSummary));
     },
@@ -2548,6 +2596,7 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
 
     async updateGraph(graphId, input): Promise<Graph> {
       const row = requireGraph(store, graphId);
+      if (input.definition !== undefined) checkGraphEdges(input.definition, options.plugins);
       // Re-armed after the write, below. A saved document may have moved a trigger's config, and an
       // engine still holding the previous arming is subscribed to the wrong thing.
       store.updateGraph(graphId, {

@@ -20,6 +20,7 @@ import { Input } from "$lib/components/ui/input/index.js";
 import { Separator } from "$lib/components/ui/separator/index.js";
 import KeyRoundIcon from "@lucide/svelte/icons/key-round";
 import PlugIcon from "@lucide/svelte/icons/plug";
+import WorkflowIcon from "@lucide/svelte/icons/workflow";
 import PlugZapIcon from "@lucide/svelte/icons/plug-zap";
 import { hrefFor, type RouteId } from "$lib/router.ts";
 import { app } from "$lib/state/app.svelte.ts";
@@ -81,6 +82,7 @@ const allItems: readonly NavItem[] = [
   },
   { id: "apps", label: "Connected apps", icon: KeyRoundIcon },
   { id: "plugins", label: "Plugins", icon: PlugIcon },
+  { id: "graphs", label: "Graphs", icon: WorkflowIcon },
   { id: "settings", label: "Settings", icon: SettingsIcon },
 ];
 

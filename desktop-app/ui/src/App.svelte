@@ -176,7 +176,10 @@ const screenProps = $derived<Record<string, unknown>>(
         : // The one two-parameter route: a panel is a plugin *and* a panel id.
           route.id === "plugin"
           ? { pluginId: route.param ?? "", panelId: route.subParam ?? "" }
-          : {},
+          : // `#/graphs` is the list and `#/graphs/<id>` is the editor, so the param is optional.
+            route.id === "graphs"
+            ? { graphId: route.param }
+            : {},
 );
 </script>
 

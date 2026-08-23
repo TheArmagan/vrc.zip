@@ -32,6 +32,7 @@ import {
   type LoginResult,
   MAX_GRAPH_DESCRIPTION,
   MAX_GRAPH_NAME,
+  type NodeTypeSummary,
   type PluginPanelFrame,
   type PluginToastFrame,
   type RateLimitSnapshot,
@@ -1181,6 +1182,14 @@ export interface ControlDeps {
    * is no `/app` scope for them (decision 206). An app can still *observe* runs, because those are
    * `graph.*` events on the enriched stream, but it cannot rewrite the user's automations.
    */
+
+  /**
+   * Every node type the palette can offer, built-in and plugin-contributed alike.
+   *
+   * One list from one registry, which is the whole reason built-ins register rather than living in
+   * a second map: an editor that had to ask two places would eventually ask one.
+   */
+  listNodeTypes(): Promise<NodeTypeSummary[]>;
 
   /** Every graph, newest edit first. Summaries — the document is only sent for one graph. */
   listGraphs(): Promise<GraphSummary[]>;
@@ -2567,6 +2576,8 @@ export function createControlApp({ port, deps, appApi, token }: ControlAppOption
      * layer cannot check is port types and whether a node type exists: both need the node registry,
      * so `checkEdge` runs where the registry lives.
      */
+    .get("/api/nodes", async (c) => c.json(await deps.listNodeTypes()))
+
     .get("/api/graphs", async (c) => c.json(await deps.listGraphs()))
 
     .post("/api/graphs", async (c) => {

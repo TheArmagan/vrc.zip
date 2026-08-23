@@ -48,6 +48,7 @@ const loaders = {
   apps: () => import("./ConnectedAppsScreen.svelte"),
   plugins: () => import("./PluginsScreen.svelte"),
   plugin: () => import("./PluginPanelScreen.svelte"),
+  graphs: () => import("./GraphsScreen.svelte"),
   settings: () => import("./SettingsScreen.svelte"),
 } satisfies Record<RouteId, () => Promise<{ default: unknown }>>;
 

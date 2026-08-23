@@ -72,6 +72,7 @@ export {
   MAX_GRAPH_EDGES,
   MAX_GRAPH_NAME,
   MAX_GRAPH_NODES,
+  type NodeTypeSummary,
   reachableFrom,
   validateGraphDocument,
 } from "./graphs.ts";

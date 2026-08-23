@@ -75,7 +75,12 @@ import {
   pruneArtifacts,
   removeArtifacts,
 } from "../plugins/install/index.ts";
-import { createNodeMethods, NodeRegistry, type RegisteredNode } from "../plugins/node-registry.ts";
+import {
+  checkEdge,
+  createNodeMethods,
+  NodeRegistry,
+  type RegisteredNode,
+} from "../plugins/node-registry.ts";
 import { createVrchatMethods, type PluginAccountInfo } from "../plugins/plugin-vrchat.ts";
 import { makeProcessTransportFactory } from "../plugins/process-transport.ts";
 import { PluginRegistry, type PluginStatus } from "../plugins/registry.ts";
@@ -256,6 +261,17 @@ export interface PluginHost {
    * replaces it.
    */
   registerBuiltinNodes(definitions: readonly NodeDefinition[]): void;
+  /**
+   * Type-checks one edge between two registered node types.
+   *
+   * Answers a sentence a user reads while wiring a graph, or null when the edge is legal. The
+   * editor runs the same check locally against the same `assignable` for instant feedback; this is
+   * the second pass, on save, because the frontend is a client and clients lie.
+   */
+  checkNodeEdge(
+    from: { readonly nodeType: string; readonly portId: string },
+    to: { readonly nodeType: string; readonly portId: string },
+  ): string | null;
 
   /*
    * The three host→plugin node calls. Phase 4's engine is the only caller, and it reaches them
@@ -858,6 +874,8 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
     registerBuiltinNodes(definitions) {
       for (const definition of definitions) nodes.registerBuiltin(definition);
     },
+
+    checkNodeEdge: (from, to) => checkEdge(nodes, from, to),
 
     async armNode(qualifiedId, instanceId, config) {
       await dispatcher.call(...nodeCall(qualifiedId, "nodes.arm", { instanceId, config }));

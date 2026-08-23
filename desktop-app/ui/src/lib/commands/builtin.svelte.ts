@@ -49,6 +49,7 @@ const NAV_TITLES: Record<RouteId, string> = {
   consent: "Go to App access",
   apps: "Go to Connected apps",
   plugins: "Go to Plugins",
+  graphs: "Go to Graphs",
   // Never listed: a plugin panel is reached from its own sidebar entry, and the palette lists the
   // plugin's *commands* instead. A "Go to plugin" with no plugin named would mean nothing.
   plugin: "Go to a plugin panel",
@@ -67,6 +68,7 @@ const NAV_SUBTITLES: Record<RouteId, string> = {
   apps: "Standing app access, and the switch that cuts it off",
   plugins: "Installs waiting to be approved, and what is installed",
   plugin: "One plugin's panel",
+  graphs: "Automations: when this happens, do that",
   settings: "Contact address, log directories, ports",
 };
 

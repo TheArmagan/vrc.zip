@@ -28,6 +28,9 @@ export const ROUTE_IDS = [
   // `#/plugin/<pluginId>/<panelId>` — one plugin's panel, as a page of its own. The only route
   // with two parameters, which is why `subParam` exists.
   "plugin",
+  // `#/graphs` is the list, `#/graphs/<graphId>` is the editor. One route rather than two, because
+  // the second is the first with something selected — same as `#/gamelog/<sessionId>`.
+  "graphs",
   "settings",
 ] as const;
 

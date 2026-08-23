@@ -559,12 +559,18 @@ get an **error output port**; and the port lattice grows **`list<T>`**.
       kind, `secrets.enc` storage keyed per graph, `PUT /api/graphs/:id/secrets/:node/:field`, and
       deletion that takes a graph's secrets with it. **The hold-to-confirm gesture is UI** and lands
       with 4.5; `PUT /api/graphs/:id/armed` is what it will call.
-- [ ] **4.5 The canvas** — `@xyflow/svelte` (net-new dependency; Svelte is pinned at 5.56.10), palette
+- [x] **4.5 The canvas** — `@xyflow/svelte` (net-new dependency; Svelte is pinned at 5.56.10), palette
       grouped by source, red edges from `checkEdge` live, explicit save that revalidates server-side,
       session-local undo/redo, run inspector highlighting the failing node. A stopped or uninstalled
       plugin **pauses** the graphs using its nodes, marked unavailable and never deleted; a changed
       `nodeDefinitionHash` **blocks** the graph until the user migrates it here. Node bodies render
       from the host-evaluated template, never an RPC.
+      **Built** (decision 214): `#/graphs` lists and `#/graphs/<id>` edits, `GET /api/nodes` is the
+      palette's one source, and the daemon now type-checks edges on save — the second half of
+      "twice on purpose", which 4.1 had left as a stated gap. Verified by clicking, which is where
+      both of its defects were found. **Outstanding:** the `nodeDefinitionHash` migration prompt.
+      A stopped plugin's node already draws greyed and named rather than blocking the graph, but
+      nothing yet compares the saved hash against the registered one.
 - [ ] **4.6 Export, import, templates** — JSON export with secrets stripped and node ids plus
       definition hashes recorded, import with a report of what is missing, and a small set of starter
       templates so the first graph is an edit rather than a blank canvas.
@@ -3551,6 +3557,40 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      node type was step 3.10 and unavailable. Both were false as of 3.9–3.11 and doubly so now. Fixed
      here, and worth checking the other pages under `docs/` for the same shape of rot — decision 183
      rewrote the banner once for exactly this reason, and one page evidently kept its old copy.
+
+214. **The canvas, and two defects only a browser could show.** `@xyflow/svelte` 1.6.3 is the one
+     net-new dependency. `#/graphs` is the list and `#/graphs/<id>` is the editor — one route, the
+     same shape `#/gamelog/<sessionId>` uses. The list's two switches are deliberately different
+     controls: **enable** is a click because a graph in dry-run cannot reach anybody, **arm** is a
+     hold because after it a wrongly-wired graph sends real invites. Same primitive as a plugin
+     install, and the same reasoning.
+
+     **`GET /api/nodes` is the palette's one source**, which is what the single-registry decision was
+     for: the editor asks one place and cannot tell a built-in from a plugin's node.
+
+     **The save-time type check landed here, closing 4.1's stated gap.** The editor runs `assignable`
+     as the wire is dragged; `PUT /api/graphs/:id` runs `checkEdge` again through the registry.
+     Neither refuses an edge whose node types are *unregistered* — a graph naming a stopped plugin's
+     node is a normal state, and a save that failed on it would mean the user cannot repair a graph
+     without first restarting the plugin that broke it.
+
+     **Two defects, both found by clicking, neither visible to any test:**
+
+     - **Every node drew as "Unavailable".** The editor snapshotted the node catalogue into
+       `node.data` at load time, and the catalogue usually arrived *after* the graph did — so the
+       cards resolved `null` and stayed that way. The card now looks its definition up live through
+       the state module, which also means a plugin starting later fixes its own nodes on screen.
+       This is the resolver contract the UI notes already state, arrived at the hard way.
+     - **Every label looked enormous.** Not the type scale: `fitView` scales *up* to fill the pane,
+       so a three-node graph opened at roughly 2x. `fitViewOptions={{ maxZoom: 1 }}` caps it, and a
+       small graph now sits in the middle of the canvas at the size it was designed at.
+
+     Svelte Flow's `colorMode` takes the app's theme — without it the controls and the selection
+     ring render white on a dark canvas, since it ships its own palettes rather than inheriting.
+
+     **Verified against a running daemon:** 32 node types in the palette, a graph saved from the
+     canvas, `number -> string` refused on save with the edge named, a manual run firing through the
+     engine, and the resulting `graph.note` arriving in the feed marked `dryRun: true`.
 
 ---
 

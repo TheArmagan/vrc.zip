@@ -17,7 +17,7 @@
  */
 
 import type { NodeConfigValues, NodeDefinition, PortValues } from "@vrcz/plugin-api/nodes";
-import { isEventPatternString } from "@vrcz/shared";
+import { BUS_EVENT_KINDS, EVENT_FAMILIES, isEventPatternString } from "@vrcz/shared";
 import type { BusEvent, EventBus } from "../../bus/event-bus.ts";
 import type { BuiltinArmRequest, BuiltinNode } from "./types.ts";
 
@@ -75,6 +75,21 @@ function busTrigger(
 /* The generic one                                                                                */
 /* -------------------------------------------------------------------------------------------- */
 
+/**
+ * Every family and every kind this build knows, as a picker.
+ *
+ * Families first and each marked, because `friend.*` is almost always the answer somebody wants and
+ * an exact kind is the narrower, more fragile choice. The list is generated from the shared
+ * vocabulary rather than typed out, so a kind added to `@vrcz/shared` appears here with no edit.
+ */
+const EVENT_KIND_OPTIONS = [
+  ...EVENT_FAMILIES.filter((family) => family !== "other").map((family) => ({
+    value: `${family}.*`,
+    label: `${family}.* — anything in ${family}`,
+  })),
+  ...[...BUS_EVENT_KINDS].sort().map((kind) => ({ value: kind, label: kind })),
+];
+
 const ON_EVENT: NodeDefinition = {
   id: "on-event",
   kind: "trigger",
@@ -87,13 +102,28 @@ const ON_EVENT: NodeDefinition = {
     { id: "at", label: "At", type: "number" },
   ],
   config: [
+    /*
+     * A picker *and* a free-text field, which is one more control than it looks like it needs.
+     *
+     * The picker is how anybody finds `instance.queue_ready` without reading the event catalog —
+     * there are seventy-odd kinds and nobody remembers their spelling. The text field stays because
+     * a picker cannot express two kinds at once, and cannot name a kind a newer daemon added that
+     * this build has never heard of. The text field wins when both are set, since typing something
+     * is the more deliberate act.
+     */
+    {
+      kind: "select",
+      id: "kind",
+      label: "When",
+      options: EVENT_KIND_OPTIONS,
+      default: "friend.*",
+    },
     {
       kind: "text",
       id: "kinds",
-      label: "Kinds",
-      placeholder: "friend.*",
-      description: "One or more, separated by commas. A family pattern also matches future kinds.",
-      required: true,
+      label: "Or these, comma separated",
+      placeholder: "friend.online, group.*",
+      description: "Overrides the picker. A family pattern also matches kinds added later.",
     },
     ACCOUNT_FIELD,
   ],
@@ -293,6 +323,72 @@ function presetDefinition(preset: Preset): NodeDefinition {
 }
 
 /* -------------------------------------------------------------------------------------------- */
+/* The game log                                                                                   */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * One trigger for the whole game log, with a picker.
+ *
+ * `on-player-join` and `on-world-enter` are presets over two of these kinds and stay, because their
+ * *typed* outputs are what make a graph downstream check. This node is the other half: everything
+ * the log can say, including the lines nobody has written a preset for — a portal dropped, a join
+ * refused, a screenshot taken.
+ *
+ * Its outputs are deliberately plain. A `displayName` is a `string` here rather than a `user`,
+ * because most game-log lines carry a name and only some carry an id, and a port that is sometimes
+ * a real user id and sometimes empty is worse than one that says what it is.
+ */
+const ON_GAMELOG: NodeDefinition = {
+  id: "on-gamelog",
+  kind: "trigger",
+  title: "When the game log says something",
+  description: "Fires on one kind of line from a running VRChat client.",
+  category: "Triggers",
+  outputs: [
+    { id: "kind", label: "Kind", type: "string" },
+    { id: "name", label: "Who", type: "string", description: "Empty for lines about nobody." },
+    { id: "user", label: "User", type: "user", description: "Only when the log named an id." },
+    { id: "location", label: "Instance", type: "instance" },
+    { id: "at", label: "At", type: "number" },
+    { id: "event", label: "Everything", type: "json" },
+  ],
+  config: [
+    {
+      kind: "select",
+      id: "kind",
+      label: "Line",
+      options: [
+        { value: "gamelog.*", label: "anything in the log" },
+        ...BUS_EVENT_KINDS.filter((kind) => kind.startsWith("gamelog.")).map((kind) => ({
+          value: kind,
+          label: kind.slice("gamelog.".length).replaceAll("_", " "),
+        })),
+      ],
+      default: "gamelog.*",
+    },
+    ACCOUNT_FIELD,
+  ],
+  maxFiresPerMinute: 120,
+};
+
+function gamelogKinds(config: NodeConfigValues): readonly string[] {
+  const chosen = typeof config.kind === "string" ? config.kind : "gamelog.*";
+  return isEventPatternString(chosen) && chosen.startsWith("gamelog.") ? [chosen] : ["gamelog.*"];
+}
+
+function gamelogOutputs(event: BusEvent): PortValues {
+  const payload = payloadOf(event);
+  return {
+    kind: event.kind,
+    name: text(payload.displayName) ?? "",
+    ...(text(event.subjectId) === null ? {} : { user: event.subjectId }),
+    ...(text(event.location) === null ? {} : { location: event.location }),
+    at: event.ts,
+    event: event.payload ?? null,
+  };
+}
+
+/* -------------------------------------------------------------------------------------------- */
 /* Schedule and run-now                                                                           */
 /* -------------------------------------------------------------------------------------------- */
 
@@ -371,7 +467,19 @@ function runNowTrigger(): BuiltinNode {
 
 export function triggerNodes(deps: TriggerDeps): BuiltinNode[] {
   return [
-    busTrigger(deps, ON_EVENT, (config) => parsePatterns(config.kinds), baseOutputs),
+    busTrigger(
+      deps,
+      ON_EVENT,
+      (config) => {
+        const typed = parsePatterns(config.kinds);
+        if (typed.length > 0) return typed;
+        return typeof config.kind === "string" && isEventPatternString(config.kind)
+          ? [config.kind]
+          : [];
+      },
+      baseOutputs,
+    ),
+    busTrigger(deps, ON_GAMELOG, (config) => gamelogKinds(config), gamelogOutputs),
     ...PRESETS.map((preset) =>
       busTrigger(deps, presetDefinition(preset), () => preset.kinds, preset.map),
     ),

@@ -332,6 +332,16 @@ export class Store {
   }
 
   /** Row count per event kind — the number Settings shows next to each retention window. */
+  /**
+   * Join and leave rows since this session last changed instance, oldest first.
+   *
+   * Deliberately not folded here: the store answers with rows, and who counts as present is a
+   * question about the log's grammar rather than about SQLite. See `graph-reads.ts`.
+   */
+  listSessionPresence(sessionId: number): { kind: string; ts: number; payload: string | null }[] {
+    return this.stmts.listSessionPresence.all(sessionId, sessionId);
+  }
+
   countEventsByKind(): KindCount[] {
     return this.stmts.countEventsByKind.all();
   }
@@ -1094,6 +1104,31 @@ export class Store {
     this.stmts.deleteGraphRun.run(id);
   }
 
+  /** What a stateful node remembered, or null. `value` is opaque to everything but that node. */
+  getGraphState(
+    graphId: string,
+    nodeId: string,
+    key: string,
+  ): { value: string; updatedAt: number } | null {
+    const row = this.stmts.getGraphState.get(graphId, nodeId, key);
+    return row === null ? null : { value: row.value, updatedAt: row.updated_at };
+  }
+
+  putGraphState(
+    graphId: string,
+    nodeId: string,
+    key: string,
+    value: string,
+    now = Date.now(),
+  ): void {
+    this.stmts.putGraphState.run(graphId, nodeId, key, value, now);
+  }
+
+  /** Forgets everything one node remembered. For a node removed from the document. */
+  clearGraphNodeState(graphId: string, nodeId: string): void {
+    this.stmts.clearGraphNodeState.run(graphId, nodeId);
+  }
+
   /**
    * Reclaims up to `pages` freelist pages. Only does anything with
    * `auto_vacuum = INCREMENTAL`, which {@link applyPragmas} sets before the first table exists.
@@ -1170,6 +1205,9 @@ function prepareAll(db: Database) {
     listEventsBySubject: q<EventRow, [string, number, number]>(SQL.listEventsBySubject),
     listEventsBySubjectOfKind: q<EventRow, [string, string, number, number]>(
       SQL.listEventsBySubjectOfKind,
+    ),
+    listSessionPresence: q<{ kind: string; ts: number; payload: string | null }, [number, number]>(
+      SQL.listSessionPresence,
     ),
     countEventsByKind: q<KindCount, []>(SQL.countEventsByKind),
     distinctEventKinds: q<{ kind: string }, []>(SQL.distinctEventKinds),
@@ -1378,6 +1416,12 @@ function prepareAll(db: Database) {
     parkGraphRun: q<void, [string, number, string, number, string]>(SQL.parkGraphRun),
     listDueGraphRuns: q<GraphRunRow, [number, number]>(SQL.listDueGraphRuns),
     deleteGraphRun: q<void, [string]>(SQL.deleteGraphRun),
+
+    getGraphState: q<{ value: string; updated_at: number }, [string, string, string]>(
+      SQL.getGraphState,
+    ),
+    putGraphState: q<void, [string, string, string, string, number]>(SQL.putGraphState),
+    clearGraphNodeState: q<void, [string, string]>(SQL.clearGraphNodeState),
     countPendingWebhookDeliveries: q<{ n: number }, [string]>(SQL.countPendingWebhookDeliveries),
     countSettledWebhookDeliveries: q<{ count: number }, [number]>(
       SQL.countSettledWebhookDeliveries,

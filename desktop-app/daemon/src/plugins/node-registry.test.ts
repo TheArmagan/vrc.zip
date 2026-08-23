@@ -144,6 +144,52 @@ describe("registering", () => {
     expect(h.nodes.list()).toHaveLength(1);
   });
 
+  test("the two implicit ports are legal on every node", () => {
+    // The engine has supported both since the walk was written. A save-time check that did not
+    // know about them refused graphs the runtime would have run perfectly — which it did, until
+    // this test existed.
+    const h = harness(["note-added", "write-note"]);
+    h.nodes.register(PLUGIN, TRIGGER);
+    h.nodes.register(PLUGIN, ACTION);
+
+    // `error` carries the message a throw produced, which is a string.
+    expect(
+      checkEdge(
+        h.nodes,
+        { nodeType: `${PLUGIN}/write-note`, portId: "error" },
+        { nodeType: `${PLUGIN}/write-note`, portId: "who" },
+      ),
+    ).toBe("A string cannot flow into a user.");
+
+    // `after` carries no value, so anything may be wired into it.
+    expect(
+      checkEdge(
+        h.nodes,
+        { nodeType: `${PLUGIN}/write-note`, portId: "ok" },
+        { nodeType: `${PLUGIN}/write-note`, portId: "after" },
+      ),
+    ).toBeNull();
+    expect(
+      checkEdge(
+        h.nodes,
+        { nodeType: `${PLUGIN}/note-added`, portId: "user" },
+        { nodeType: `${PLUGIN}/write-note`, portId: "after" },
+      ),
+    ).toBeNull();
+  });
+
+  test("a definition may not declare a port the host already owns", async () => {
+    const h = harness(["write-note"]);
+    await expect(
+      h.call("nodes.register", {
+        definition: {
+          ...(ACTION as object),
+          outputs: [{ id: "error", label: "Mine", type: "string" }],
+        },
+      }),
+    ).rejects.toThrow(/reserved/);
+  });
+
   test("a built-in and a plugin node type-check against each other", () => {
     const h = harness(["note-added"]);
     h.nodes.registerBuiltin(ACTION);

@@ -12,7 +12,7 @@
 -->
 <script lang="ts">
 import { Handle, type NodeProps, Position } from "@xyflow/svelte";
-import { evaluateNodeBody } from "@vrcz/plugin-api/nodes";
+import { AFTER_PORT, ERROR_PORT, evaluateNodeBody } from "@vrcz/plugin-api/nodes";
 import { graphs } from "$lib/state/graphs.svelte.ts";
 
 /**
@@ -70,6 +70,22 @@ const body = $derived(
 
   <div class="flex justify-between gap-3 px-3 py-2 text-[11px]">
     <div class="flex flex-col gap-1">
+      <!--
+        The input every node has and none declares. It carries no value: an edge into it says
+        "not until that one has run", which is the only way to sequence a node whose inputs all
+        come from value literals — those have no path from the trigger otherwise.
+      -->
+      {#if definition !== null && definition.kind !== "trigger"}
+        <div class="relative flex items-center gap-1 text-muted-foreground">
+          <Handle
+            type="target"
+            position={Position.Left}
+            id={AFTER_PORT}
+            style="position:absolute;left:-16px;"
+          />
+          <span>after</span>
+        </div>
+      {/if}
       {#each inputs as port (port.id)}
         <div class="relative flex items-center gap-1">
           <Handle
@@ -107,7 +123,7 @@ const body = $derived(
           <Handle
             type="source"
             position={Position.Right}
-            id="error"
+            id={ERROR_PORT}
             style="position:absolute;right:-16px;"
           />
         </div>

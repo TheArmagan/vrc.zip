@@ -7,7 +7,7 @@ import { PresenceService } from "./accounts/presence.ts";
 import { EventBus } from "./bus/event-bus.ts";
 import { type ForwardProxy, forwardProxyBanner, startForwardProxy } from "./forward-proxy/index.ts";
 import { discoverLogDirectories, LogWatcher } from "./game-logs/index.ts";
-import { createBuiltinNodes } from "./graphs/builtins/index.ts";
+import { createBuiltinNodes, type GraphReads } from "./graphs/builtins/index.ts";
 import { GraphEngine } from "./graphs/index.ts";
 import { RateLimiter } from "./net/rate-limiter.ts";
 import { RequestMeter } from "./net/request-meter.ts";
@@ -34,6 +34,7 @@ import { attachConsentAlerts } from "./wiring/consent-alert.ts";
 import { createControlDeps } from "./wiring/control-deps.ts";
 import { FeedWriter } from "./wiring/feed-writer.ts";
 import { PluginNodeProvider } from "./wiring/graph-provider.ts";
+import { createGraphReads } from "./wiring/graph-reads.ts";
 import { createLogSink } from "./wiring/log-bridge.ts";
 import { NotificationSink } from "./wiring/notification-sink.ts";
 import { publishPipelineEvent } from "./wiring/pipeline-bridge.ts";
@@ -369,7 +370,41 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
   // One instance, handed to both the control deps and the graph action nodes: two copies would be
   // two places for a future rate budget or audit hook to be added to, and only one would get it.
   const social = createSocialActions({ accounts, store });
-  const builtinNodes = createBuiltinNodes({ bus, social });
+  /*
+   * The resolver nodes read through the control deps, which do not exist yet — they are built below
+   * and need the plugin host, which needs this. A holder rather than a forward reference, the same
+   * shape (and the same reason) as `publishToast` above: the ordering is stated rather than relied
+   * on, and a resolver that somehow ran first fails with a sentence instead of a null dereference.
+   */
+  let graphReads: GraphReads | undefined;
+  const builtinNodes = createBuiltinNodes({
+    bus,
+    social,
+    reads: {
+      user: async (accountId, userId) => await requireReads().user(accountId, userId),
+      world: async (accountId, worldId) => await requireReads().world(accountId, worldId),
+      instance: async (accountId, location) => await requireReads().instance(accountId, location),
+      avatar: async (accountId, avatarId) => await requireReads().avatar(accountId, avatarId),
+      group: async (accountId, groupId) => await requireReads().group(accountId, groupId),
+      friends: async (accountId) => await requireReads().friends(accountId),
+      instancePlayers: (accountId) => requireReads().instancePlayers(accountId),
+    },
+    // The cooldown and counter nodes. Four SQL statements behind a two-method seam, so the graph
+    // runtime never learns that SQLite is under there.
+    state: {
+      get: (graphId, nodeId, key) => store.getGraphState(graphId, nodeId, key),
+      put: (graphId, nodeId, key, value, at) => {
+        store.putGraphState(graphId, nodeId, key, value, at);
+      },
+    },
+  });
+
+  function requireReads(): GraphReads {
+    if (graphReads === undefined) {
+      throw new Error("vrc.zip is still starting up. Try this graph again in a moment.");
+    }
+    return graphReads;
+  }
   const nodeProvider = new PluginNodeProvider({ host: plugins, builtins: builtinNodes });
   const graphs = new GraphEngine({
     store,
@@ -481,6 +516,9 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     ...(env !== undefined ? { env } : {}),
     onSettingsSaved: (next) => saveSettings(next, env),
   });
+
+  // The holder above, filled in now that the deps exist.
+  graphReads = createGraphReads(deps, store);
 
   /*
    * The third-party surface at `/app` on the control port, and the reason it is built here rather

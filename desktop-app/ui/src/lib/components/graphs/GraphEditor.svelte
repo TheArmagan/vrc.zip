@@ -21,7 +21,13 @@
 import ArrowLeftIcon from "@lucide/svelte/icons/arrow-left";
 import SaveIcon from "@lucide/svelte/icons/save";
 import TrashIcon from "@lucide/svelte/icons/trash-2";
-import { assignable, isPortType, type NodeDefinition } from "@vrcz/plugin-api/nodes";
+import {
+  AFTER_PORT,
+  assignable,
+  ERROR_PORT,
+  isPortType,
+  type NodeDefinition,
+} from "@vrcz/plugin-api/nodes";
 import type { GraphDocument, GraphEdge as WireEdge, GraphNode as WireNode } from "@vrcz/shared";
 import {
   Background,
@@ -56,6 +62,8 @@ let dirty = $state(false);
 let selectedId = $state<string | null>(null);
 /** Which node's secret field is being typed into, and what. Never read back from the daemon. */
 let secretDraft = $state<Record<string, string>>({});
+/** What is typed in the palette's search box. */
+let paletteQuery = $state("");
 
 const nodeTypes = { vrcz: GraphNodeCard };
 
@@ -75,6 +83,32 @@ $effect(() => {
 
 $effect(() => {
   void load(graphId);
+});
+
+/**
+ * The palette, narrowed by what is typed.
+ *
+ * Matches the title, the description **and** the qualified id, because the three answer different
+ * questions: somebody looking for "discord" reads the title, somebody looking for "webhook" is
+ * describing what it does, and somebody who saw `vrcz/on-player-join` in an exported graph is
+ * looking for a literal id. Groups with nothing left are dropped rather than shown empty.
+ */
+const palette = $derived.by(() => {
+  const query = paletteQuery.trim().toLowerCase();
+  if (query === "") return graphs.palette;
+  const terms = query.split(/\s+/);
+  return graphs.palette
+    .map((group) => ({
+      owner: group.owner,
+      types: group.types.filter((type) => {
+        const haystack =
+          `${type.definition.title} ${type.definition.description ?? ""} ${type.qualifiedId} ${type.definition.category ?? ""}`.toLowerCase();
+        // Every word has to appear somewhere, so "send discord" finds the Discord action and
+        // typing more words narrows rather than widens.
+        return terms.every((term) => haystack.includes(term));
+      }),
+    }))
+    .filter((group) => group.types.length > 0);
 });
 
 const selected = $derived(nodes.find((node) => node.id === selectedId) ?? null);
@@ -129,10 +163,12 @@ function portType(nodeId: string, portId: string, side: "source" | "target"): st
   if (definition === null) return null;
   if (side === "source") {
     // The implicit error port, which no definition declares and every executable node has.
-    if (portId === "error") return "string";
+    if (portId === ERROR_PORT) return "string";
     return definition.outputs.find((port) => port.id === portId)?.type ?? null;
   }
   if (definition.kind === "trigger") return null;
+  // `after` carries no value, so it accepts anything: `json` is exactly that in this lattice.
+  if (portId === AFTER_PORT) return "json";
   return definition.inputs.find((port) => port.id === portId)?.type ?? null;
 }
 
@@ -308,8 +344,21 @@ async function saveSecret(fieldId: string): Promise<void> {
   <div class="flex min-h-0 flex-1">
     <!-- The palette. Grouped by owner, built-ins first: two plugins both contributing a "Send"
          node is a flat list where nobody can tell whose is whose. -->
-    <aside class="w-56 shrink-0 overflow-y-auto border-r border-border p-2">
-      {#each graphs.palette as group (group.owner)}
+    <aside class="flex w-56 shrink-0 flex-col border-r border-border">
+      <div class="border-b border-border p-2">
+        <Input
+          bind:value={paletteQuery}
+          placeholder="Search nodes"
+          aria-label="Search nodes"
+          onkeydown={(event: KeyboardEvent) => {
+            // Escape clears rather than blurs: the box is the only thing between the user and a
+            // palette they were reading, and clearing it puts that back in one key.
+            if (event.key === "Escape") paletteQuery = "";
+          }}
+        />
+      </div>
+      <div class="flex-1 overflow-y-auto p-2">
+      {#each palette as group (group.owner)}
         <div class="mb-3">
           <div class="px-2 py-1 text-xs font-medium text-muted-foreground">
             {group.owner === "vrcz" ? "Built in" : group.owner}
@@ -323,7 +372,12 @@ async function saveSecret(fieldId: string): Promise<void> {
             </button>
           {/each}
         </div>
+      {:else}
+        <p class="px-2 py-4 text-xs text-muted-foreground">
+          Nothing matches "{paletteQuery}".
+        </p>
       {/each}
+      </div>
     </aside>
 
     <!--

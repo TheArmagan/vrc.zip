@@ -234,10 +234,12 @@ export {
 // ---------------------------------------------------------------------------
 
 export {
+  AFTER_PORT,
   assignable,
   BASE_PORT_TYPES,
   type BasePortType,
   canonicalNodeDefinition,
+  ERROR_PORT,
   type ExecutableNodeDefinition,
   type ExecutableRegistration,
   evaluateNodeBody,

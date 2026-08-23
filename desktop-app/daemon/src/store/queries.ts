@@ -131,6 +131,26 @@ export const SQL = {
     WHERE subject_id = ? AND kind = ? AND ts < ?
     ORDER BY ts DESC, id DESC
     LIMIT ?`,
+  /*
+   * Who is in one game client's instance right now, as the log knows it.
+   *
+   * Joins and leaves **since that session last changed instance**, oldest first, for a caller to
+   * fold into a present set. The floor matters more than it looks: without it a session that has
+   * been through six worlds this evening returns every name it ever saw, and folding those gives a
+   * roster of people who left hours ago.
+   *
+   * `COALESCE(..., 0)` covers the session that has not logged an instance change at all — a client
+   * that started in a world and stayed there — where every join it has is still current.
+   */
+  listSessionPresence: `
+    SELECT kind, ts, payload FROM events
+    WHERE session_id = ?
+      AND kind IN ('gamelog.player_join', 'gamelog.player_leave')
+      AND ts >= COALESCE(
+        (SELECT MAX(ts) FROM events
+         WHERE session_id = ? AND kind IN ('gamelog.location_join', 'gamelog.left_room')),
+        0)
+    ORDER BY ts ASC, id ASC`,
   countEventsByKind: `SELECT kind, COUNT(*) AS count FROM events GROUP BY kind ORDER BY count DESC`,
   distinctEventKinds: `SELECT DISTINCT kind FROM events`,
 
@@ -640,6 +660,18 @@ export const SQL = {
     WHERE status = 'waiting' AND resume_at IS NOT NULL AND resume_at <= ?
     ORDER BY resume_at LIMIT ?`,
   deleteGraphRun: `DELETE FROM graph_runs WHERE id = ?`,
+
+  /*
+   * The memory a cooldown or a counter node keeps. One value per (graph, node, key); the node that
+   * wrote it is the only thing that reads it, so nothing here interprets `value`.
+   */
+  getGraphState: `SELECT value, updated_at FROM graph_state WHERE graph_id = ? AND node_id = ? AND key = ?`,
+  putGraphState: `
+    INSERT INTO graph_state (graph_id, node_id, key, value, updated_at) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(graph_id, node_id, key) DO UPDATE SET
+      value      = excluded.value,
+      updated_at = excluded.updated_at`,
+  clearGraphNodeState: `DELETE FROM graph_state WHERE graph_id = ? AND node_id = ?`,
 } as const;
 
 // ---------------------------------------------------------------------------

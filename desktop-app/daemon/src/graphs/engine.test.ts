@@ -48,6 +48,19 @@ class FakeProvider implements NodeProvider {
     return this;
   }
 
+  /** A node with no inputs — a literal, a clock, a friend list. The engine calls these sources. */
+  source(type: string, handler: Handler, outputs = ["out"]): this {
+    this.definitions.set(type, {
+      id: type,
+      kind: "action",
+      title: type,
+      inputs: [],
+      outputs: outputs.map((id) => ({ id, label: id, type: "json" as const })),
+    });
+    this.handlers.set(type, handler);
+    return this;
+  }
+
   node(type: string, kind: "action" | "condition", handler: Handler, outputs = ["out"]): this {
     this.definitions.set(type, {
       id: type,
@@ -505,6 +518,102 @@ describe("foreach", () => {
     });
 
     expect(h.provider.executed.map((entry) => entry.inputs.in)).toEqual(["a", "b", "c", "d", "e"]);
+  });
+});
+
+/* -------------------------------------------------------------------------------------------- */
+/* Sources                                                                                        */
+/* -------------------------------------------------------------------------------------------- */
+
+describe("source nodes", () => {
+  test("a node with no inputs runs when something reachable consumes it", async () => {
+    // Reachability is the right rule for a node that takes input. A value literal takes none, so
+    // without this it would never run and everything downstream of it would skip.
+    const h = harness();
+    h.provider
+      .trigger("t")
+      .source("value", () => ({ out: "from the literal" }))
+      .node("use", "action", (inputs) => ({ out: inputs.in }));
+    const id = h.graph({
+      nodes: [node("n1", "t"), node("n2", "value"), node("n3", "use")],
+      edges: [edge("e1", "n1", "n3", "out", "trigger"), edge("e2", "n2", "n3", "out", "in")],
+    });
+
+    await h.engine.fire(id, "n1", { out: null });
+
+    expect(h.provider.order).toEqual(["value", "use"]);
+    expect(h.provider.executed[1]?.inputs.in).toBe("from the literal");
+  });
+
+  test("a source nothing reachable consumes does not run", async () => {
+    // One of these performs a VRChat read. Running it for a branch this fire never took would
+    // spend the user's rate budget on nothing.
+    const h = harness();
+    h.provider
+      .trigger("t")
+      .source("value", () => ({ out: 1 }))
+      .node("mine", "action", () => ({ out: 1 }))
+      .node("theirs", "action", (inputs) => ({ out: inputs.in }));
+    const id = h.graph({
+      nodes: [
+        node("n1", "t"),
+        node("n2", "t"),
+        node("n3", "mine"),
+        node("n4", "theirs"),
+        node("n5", "value"),
+      ],
+      edges: [
+        edge("e1", "n1", "n3"),
+        edge("e2", "n2", "n4"),
+        // The source only feeds the *other* trigger's branch.
+        edge("e3", "n5", "n4", "out", "extra"),
+      ],
+    });
+
+    await h.engine.fire(id, "n1", { out: null });
+
+    expect(h.provider.order).toEqual(["mine"]);
+  });
+
+  test("an unfired trigger is never treated as a source", async () => {
+    // A trigger has no inputs either. Treating one as a source would run the other root's branch
+    // on every fire, which is the whole thing many-trigger graphs exist to avoid.
+    const h = harness();
+    h.provider.trigger("t").node("after", "action", () => ({ out: 1 }));
+    const id = h.graph({
+      nodes: [node("n1", "t"), node("n2", "t"), node("n3", "after")],
+      edges: [edge("e1", "n2", "n3")],
+    });
+
+    await h.engine.fire(id, "n1", { out: null });
+
+    expect(h.provider.order).toEqual([]);
+  });
+
+  test("a source inside a loop is asked again for each item", async () => {
+    // Which is what an author drawing a random number inside a `for each` means by it.
+    const h = harness();
+    let calls = 0;
+    h.provider
+      .trigger("t")
+      .source("value", () => {
+        calls += 1;
+        return { out: calls };
+      })
+      .node("body", "action", (inputs) => ({ out: inputs.extra }));
+    const id = h.graph({
+      nodes: [node("n1", "t"), node("n2", FOREACH_TYPE), node("n3", "body"), node("n4", "value")],
+      edges: [
+        edge("e1", "n1", "n2", "out", "list"),
+        edge("e2", "n2", "n3", "item"),
+        edge("e3", "n4", "n3", "out", "extra"),
+      ],
+    });
+
+    await h.engine.fire(id, "n1", { out: ["a", "b", "c"] });
+
+    expect(calls).toBe(3);
+    expect(h.provider.executed.filter((entry) => entry.type === "body")).toHaveLength(3);
   });
 });
 

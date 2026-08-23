@@ -3636,6 +3636,56 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      fetching first also means a failure is an error in the UI rather than a downloaded file full of
      JSON error text.
 
+216. **Twenty-nine more node types, a palette search box, and the two implicit ports.** Asked for
+     after Phase 4 closed: value literals, resolvers that turn an id into the thing it names, more
+     shaping, memory between runs, and a way to search the palette. Sixty-one built-in node types now.
+
+     **The enabling change was in the engine, not in the nodes.** A value literal has no inputs, so
+     nothing reachable from a trigger reaches it, so it would never run and everything downstream of
+     it would skip. Reachability is the right rule for a node that takes input; a node that takes
+     none has nothing to wait for and belongs to whatever consumes it. `#withSources` adds those —
+     **only when something in the scope actually consumes them**, which matters because one of them
+     performs a VRChat read and doing it for a branch nobody took would spend the user's rate budget
+     on nothing. An unfired trigger is never a source, however few inputs it has.
+
+     **Then `after`, which is what makes sources usable.** A graph whose whole body hangs off value
+     nodes still has no path from the trigger, and the first real graph built with these hit exactly
+     that. So every node now has an implicit `after` input carrying no value: an edge into it says
+     "not until that one has run". It is an ordinary edge otherwise — if the upstream port produced
+     nothing, the edge is dead and the node skips, which reads exactly as "only after that
+     succeeded". It also gives an action with no useful output (a webhook, a note) a way to be
+     sequenced before the next one.
+
+     **`error` was already implicit, and the save check did not know.** Wiring one was refused with
+     "has no output called error" — the engine has supported error ports since the walk was written,
+     the canvas drew the handle, and `checkEdge` rejected the edge. A graph using the feature could
+     never be saved. Both ports are now declared in `@vrcz/plugin-api` beside the reserved namespace,
+     `checkEdge` knows them, and `validateNodeDefinition` refuses a definition that declares either —
+     a shadowed port would leave an author wondering why theirs never fired.
+
+     **What the new nodes are, and the one rule they all follow.** Nine typed literals plus JSON,
+     `now` and a random number; six resolvers (user, world, instance, avatar, group, friends) and
+     `Who is here`; maths, text operations, split, join, format-a-time, a clock window, pick-at-
+     random and a list search whose **query is a port** rather than config; a cooldown and a running
+     total. Every one produces **nothing** rather than a plausible wrong answer when it cannot do its
+     job: a division by zero, an unparseable JSON literal, a clock window with a typo in it, a search
+     that matched nobody. An unproduced port stops the run; a wrong answer travels.
+
+     **`Who is here` reads the game log, not VRChat.** `GET /instances/:id` answers with a user list
+     only for an instance the account *created*, which is almost never the one somebody is sitting
+     in. Folding join and leave rows out of `events` is free, survives a restart, and is the only
+     honest source. The floor in that query matters: without "since this session last changed
+     instance", a client that has been through six worlds tonight returns everybody it ever saw.
+
+     **The palette search matches title, description and qualified id**, because the three answer
+     different questions — "discord" is a title, "webhook" is what it does, and `vrcz/on-player-join`
+     is what somebody read in an exported graph. Every word must match, so typing more narrows.
+
+     **A defect the search box created and a test now prevents:** with sixty-one nodes, `list-count`
+     and `counter` were both titled "Count". A palette where two entries read the same is one nobody
+     can choose from, and titles are now the primary way a node is found. `extras.test.ts` asserts no
+     two built-ins share a title, and that every one has a category.
+
 ---
 
 ## Gotchas

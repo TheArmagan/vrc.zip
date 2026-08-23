@@ -233,7 +233,7 @@ const FIELD: NodeDefinition = {
       id: "path",
       label: "Path",
       placeholder: "user.displayName",
-      description: "Dotted. Numbers index into a list.",
+      description: "Dotted or bracketed: user.tags[0] and $.user.tags.0 both work.",
       required: true,
     },
   ],
@@ -244,15 +244,23 @@ const FIELD: NodeDefinition = {
 };
 
 /**
- * A dotted path into JSON. A path that finds nothing produces **nothing**, which gates the run.
+ * A path into JSON. A path that finds nothing produces **nothing**, which gates the run.
  *
  * That is deliberate and it is the more useful of the two options: a graph that reads
  * `user.displayName` off an event that has no user should not carry on with `null` and send a
  * message addressed to nobody.
+ *
+ * Dots and brackets both work — `tags.0`, `tags[0]`, and a leading `$` — because people write paths
+ * the way they have seen them written, and refusing `$.user.tags[0]` over punctuation would be a
+ * lesson nobody wanted. Everything normalises to dotted segments before the walk.
  */
 export function readPath(value: unknown, path: string): unknown {
+  const normalised = path
+    .trim()
+    .replace(/^\$\.?/, "")
+    .replaceAll(/\[["']?(.*?)["']?\]/g, ".$1");
   let current = value;
-  for (const segment of path.split(".")) {
+  for (const segment of normalised.split(".")) {
     if (segment === "") continue;
     if (Array.isArray(current)) {
       const index = Number(segment);
@@ -348,7 +356,9 @@ const LIST_FILTER: NodeDefinition = {
 const LIST_COUNT: NodeDefinition = {
   id: "list-count",
   kind: "action",
-  title: "Count",
+  // "Count items", not "Count": the stateful `counter` node is also about counting, and two
+  // palette entries reading "Count" is a palette nobody can choose from.
+  title: "Count items",
   description: "How many items are in a list.",
   category: "Lists",
   inputs: [{ id: "list", label: "List", type: "list<json>", required: true }],

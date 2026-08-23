@@ -27,6 +27,31 @@
  */
 export const RESERVED_NODE_NAMESPACE = "vrcz";
 
+/**
+ * The output port every node has and no definition declares.
+ *
+ * Produced **only** when the node throws, carrying the message. Wiring it is how an author says
+ * "tell me when this breaks"; leaving it unwired is how they say "stop the run", which is the
+ * default. A definition may not declare a port with this id, because the host's one would shadow it
+ * and the author would never find out why their port never fired.
+ */
+export const ERROR_PORT = "error";
+
+/**
+ * The input port every node has and no definition declares.
+ *
+ * It carries no value and exists purely for **order**: an edge into `after` says "not until that
+ * one has run". Two things need it. A node whose inputs all come from value literals has no path
+ * from the trigger, and a run walks only what its trigger reaches — so without a sequencing edge
+ * that whole chain would sit there. And an action with nothing to hand on (a webhook, a note) has
+ * no output anybody wants, yet still has to be able to come *before* the next one.
+ *
+ * It is an ordinary edge in every other respect: if the node upstream produced nothing on the port
+ * it was wired from, the edge is dead and this node skips — which reads exactly as "only after that
+ * succeeded".
+ */
+export const AFTER_PORT = "after";
+
 /* -------------------------------------------------------------------------------------------- */
 /* The port-type lattice                                                                          */
 /* -------------------------------------------------------------------------------------------- */
@@ -526,6 +551,15 @@ function checkPorts(issues: NodeIssue[], path: string, value: unknown): void {
       // Duplicate port ids are the failure that silently loses an edge: a saved graph references a
       // port by id, and two ports answering to one id means the wrong one may resolve.
       if (seen.has(port.id)) issues.push({ path: at, message: `duplicates port id "${port.id}"` });
+      // The host puts an `error` output and an `after` input on every node. A definition that
+      // declared one would be shadowed by the host's, and the author would be left wondering why
+      // their port never carried anything.
+      if (port.id === ERROR_PORT || port.id === AFTER_PORT) {
+        issues.push({
+          path: `${at}.id`,
+          message: `"${port.id}" is reserved: every node already has it.`,
+        });
+      }
       seen.add(port.id);
     }
     if (!isPortType(port.type)) {

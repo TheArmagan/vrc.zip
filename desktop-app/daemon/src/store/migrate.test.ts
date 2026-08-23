@@ -42,6 +42,7 @@ describe("migrate", () => {
       "grant_budgets",
       "grants",
       "graph_runs",
+      "graph_state",
       "graphs",
       "log_offsets",
       "meta",

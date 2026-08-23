@@ -32,8 +32,10 @@
  */
 
 import {
+  AFTER_PORT,
   assignable,
   defineMethod,
+  ERROR_PORT,
   type ErasedMethod,
   isPortType,
   isTriggerDefinition,
@@ -190,7 +192,22 @@ export function checkEdge(
   if (source === null) return `${from.nodeType} is not a registered node type.`;
   if (target === null) return `${to.nodeType} is not a registered node type.`;
 
-  const output = source.definition.outputs.find((port) => port.id === from.portId);
+  /*
+   * The two implicit ports, which no definition declares and every node has.
+   *
+   * `after` accepts anything, because it carries no value — it exists so a node can be ordered
+   * behind another one. `error` carries the message a throw produced, which is a `string`.
+   *
+   * Handling them here rather than in each caller is the point: the engine has supported both since
+   * the walk was written, and a save-time check that did not know about them refused graphs the
+   * runtime would have run perfectly. That is precisely the drift `checkEdge` exists to prevent.
+   */
+  if (to.portId === AFTER_PORT) return null;
+
+  const output =
+    from.portId === ERROR_PORT
+      ? { id: ERROR_PORT, label: "on error", type: "string" as const }
+      : source.definition.outputs.find((port) => port.id === from.portId);
   if (output === undefined) return `${from.nodeType} has no output called "${from.portId}".`;
 
   const inputs = isTriggerDefinition(target.definition) ? [] : target.definition.inputs;

@@ -363,7 +363,35 @@ export class GraphEngine {
     const outer = new Set(
       [...reachableFrom(document, run.trigger_node)].filter((id) => !inBody.has(id)),
     );
-    return await this.#walkScope(scope, state, outer, false);
+    return await this.#walkScope(scope, state, this.#withSources(scope, outer), false);
+  }
+
+  /**
+   * Adds the **source** nodes that feed a scope: node types with no inputs at all.
+   *
+   * A value literal, "now", a random number, the friend list — none of them has an incoming edge, so
+   * none of them is reachable from a trigger, so without this they would never run and everything
+   * downstream of one would skip. Reachability is the right rule for nodes that take input; a node
+   * that takes none has nothing to wait for and belongs to whatever consumes it.
+   *
+   * **Only when something in the scope actually consumes it.** A source wired into a branch that
+   * this run never reaches stays out — which matters because one of these performs a VRChat read,
+   * and doing it for a branch nobody took would spend the user's rate budget on nothing.
+   *
+   * An unfired **trigger** is never a source, however few inputs it has: a graph with two trigger
+   * roots must not run the other one's branch.
+   */
+  #withSources(scope: Scope, allowed: ReadonlySet<string>): Set<string> {
+    const out = new Set(allowed);
+    for (const node of scope.document.nodes) {
+      if (out.has(node.id)) continue;
+      const definition = this.#definition(node.type);
+      if (definition === null || definition.kind === "trigger") continue;
+      if (definition.inputs.length > 0) continue;
+      const feeds = (scope.outgoing.get(node.id) ?? []).some((edge) => out.has(edge.to.node));
+      if (feeds) out.add(node.id);
+    }
+    return out;
   }
 
   /**
@@ -497,10 +525,14 @@ export class GraphEngine {
     }
     const body = scope.bodies.get(nodeId) ?? new Set<string>();
 
+    // Sources are resolved per body, not per run: a `now` or a random number inside a loop is asked
+    // again for each item, which is what an author drawing it there means.
+    const scoped = this.#withSources(scope, body);
+
     for (const [index, item] of list.entries()) {
       state.outputs[nodeId] = { item: item ?? null, index };
-      clearScope(state, body);
-      const outcome = await this.#walkScope(scope, state, body, true);
+      clearScope(state, scoped);
+      const outcome = await this.#walkScope(scope, state, scoped, true);
       if (outcome.kind !== "finished") return outcome;
     }
 

@@ -17,11 +17,17 @@ import type { EventBus } from "../../bus/event-bus.ts";
 import { BUILTIN_NAMESPACE, INTRINSIC_DEFINITIONS } from "../intrinsics.ts";
 import type { ExecuteContext } from "../types.ts";
 import { actionNodes, type GraphFetch, type GraphSocialActions } from "./actions.ts";
+import { operatorNodes } from "./operators.ts";
+import { type GraphReads, resolverNodes } from "./resolvers.ts";
 import { shapingNodes } from "./shaping.ts";
+import { type GraphStateStore, statefulNodes } from "./stateful.ts";
 import { triggerNodes } from "./triggers.ts";
 import { type BuiltinArmRequest, type BuiltinNode, builtinId } from "./types.ts";
+import { valueNodes } from "./values.ts";
 
 export type { GraphInviteTarget, GraphSocialActions } from "./actions.ts";
+export type { GraphReads } from "./resolvers.ts";
+export type { GraphStateStore } from "./stateful.ts";
 export type { BuiltinArmRequest, BuiltinNode } from "./types.ts";
 
 export class BuiltinNodes {
@@ -99,6 +105,18 @@ export interface BuiltinNodeDeps {
   readonly social?: GraphSocialActions | undefined;
   /** Injected so a test can answer an outbound POST without a network. */
   readonly fetch?: GraphFetch;
+  /**
+   * VRChat reads and the game log, for the resolver nodes.
+   *
+   * Absent leaves them in the palette and failing with a sentence. That is better than hiding them:
+   * a node that vanished would make a saved graph draw a hole with no explanation.
+   */
+  readonly reads?: GraphReads | undefined;
+  /**
+   * Where the cooldown and counter nodes remember things. Absent drops both from the set — unlike
+   * the resolvers, a stateful node with nowhere to write cannot even fail usefully.
+   */
+  readonly state?: GraphStateStore | undefined;
 }
 
 export function createBuiltinNodes(deps: BuiltinNodeDeps = {}): BuiltinNodes {
@@ -117,5 +135,16 @@ export function createBuiltinNodes(deps: BuiltinNodeDeps = {}): BuiltinNodes {
           ...(deps.social === undefined ? {} : { social: deps.social }),
           ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
         });
-  return new BuiltinNodes([...intrinsics, ...triggers, ...shapingNodes(), ...actions]);
+  const clockFn = deps.now ?? Date.now;
+  const stateful = deps.state === undefined ? [] : statefulNodes(deps.state, clockFn);
+  return new BuiltinNodes([
+    ...intrinsics,
+    ...triggers,
+    ...shapingNodes(),
+    ...operatorNodes(clockFn),
+    ...valueNodes(clockFn),
+    ...resolverNodes(deps.reads),
+    ...stateful,
+    ...actions,
+  ]);
 }

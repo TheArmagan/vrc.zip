@@ -3686,6 +3686,85 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      can choose from, and titles are now the primary way a node is found. `extras.test.ts` asserts no
      two built-ins share a title, and that every one has a category.
 
+217. **Every VRChat operation is a node, and the palette had to grow up to hold them.** 376 built-in
+     node types now: 286 generated from the pinned spec, 28 generated per pipeline frame, and the
+     62 hand-written ones. Asked for as "nodes for anything the VRChat API can do", answered in a
+     four-question pass.
+
+     **Generated, not curated, and the catalogue is generated too.** `tools/src/codegen.ts` — the
+     step that already builds the client from the spec — now also emits
+     `packages/api/src/generated/operations.ts`: operation id, method, path, tag, summary and the
+     parameters, resolved through `$ref` and merged with the path-level ones. A spec bump regenerates
+     it and the palette grows on its own. The alternative was a few dozen hand-written nodes, and
+     the cost of that is a palette which is permanently, invisibly incomplete: the endpoint somebody
+     needs is the one nobody wrote. The curated nodes stay and are better where they overlap, because
+     they hand back **typed** ports rather than a blob.
+
+     **11 of the 297 operations are not nodes, and the exclusions are the interesting part.** The
+     hard-denied three (`deleteUser`, `disable2FA`, `registerUserAccount`) by definition. Everything
+     scoped `account:credentials` or `account:destroy`, because credentials are the daemon's business
+     with the user. And **`logout`**, which is an invariant rather than a preference: every sign-in
+     mints a session against an undisclosed cap, so nothing in this app logs out — least of all an
+     automation. Those are decided in the generator, so nothing downstream can re-admit them.
+
+     **Path parameters are inputs, query parameters are config.** An id arrives from a trigger or a
+     value node, so `userId` is an input typed `user` rather than a string — the difference between
+     an edge the lattice checks and one it waves through. A page size is something somebody types
+     once. Paging is one page, exactly what the endpoint does; a node that quietly made twelve
+     requests would hide the cost of the thing it is doing.
+
+     **A read runs in a rehearsal; a write does not.** Dry-run exists to stop a graph reaching other
+     people before its author has armed it. A GET reaches nobody, and suppressing it would leave
+     every node downstream with no data — turning the rehearsal into a test of a different graph
+     than the one being armed.
+
+     **The palette regrouped, twice.** It grouped by *owner*, which stopped meaning anything the
+     moment everything vrc.zip ships had one owner: one group called "Built in" with three hundred
+     entries. It groups by `category` now — Triggers, Logic, Control, Data, Lists, Values, Send,
+     VRChat in the order somebody works, then the nineteen API groups, then plugins. Groups collapse,
+     carry a count, and the generated ones start **closed**; a search forces every group open,
+     because a hit inside a collapsed group that stayed collapsed reads as "no results".
+
+     **Plugins name their own groups.** `category` always meant "groups the node in the editor's
+     palette" and the palette was not reading it for plugin nodes. A plugin's nodes now group as
+     `acme.notes — Reading`. The owner stays in the key whatever the plugin calls the group, for the
+     same reason panels sit under a `Plugins` heading (decision 193): a group called "Reading" with
+     no owner attached would read as a feature of vrc.zip.
+
+     **Two node-id rules were learned the hard way, both by tests written minutes earlier.** All 286
+     definitions failed validation at once because `api-getUser` has capitals and a node id must be
+     lowercase and hyphenated — hence `api-get-user`, prefixed because `get-user` is already a
+     curated node. And the duplicate-title test caught `boop` colliding with `Boop` on its first
+     real workout, which is why every generated title carries an `(API)` suffix.
+
+     **The pipeline nodes mirror the API ones.** One trigger per frame — `friend-location
+     (pipeline)`, `notification-v2 (pipeline)` — titled with VRChat's own name, because somebody
+     reaching for these is reading VRChat's documentation and translating would make them guess. The
+     picker version stays for the case where the frame is chosen by config. Their table of frame →
+     bus kind is a **copy** of the bridge's, so `graphs/` does not import `wiring/`, and a test
+     asserts the two agree exactly. Each subscribes to the kind **and** its children: the bridge
+     refines `friend-update` into `friend.updated.avatar` when it can tell what moved, so the exact
+     kind alone would miss every frame the daemon understood well enough to describe.
+
+218. **The spec pin has never matched the committed spec, and `bun run codegen` has been unrunnable
+     since Phase 1.1.** Found by running it for the first time since — the whole point of a manual
+     step is that nobody runs it until they need it.
+
+     `SPEC_SHA256` was `8061fbe4…`; the file hashes to `ba22c036…`, and no trivial normalisation
+     bridges them — not line endings, not a trailing newline, not re-serialised JSON at two indent
+     levels. The file itself is untouched: one commit in its history, and a clean working tree
+     against it.
+
+     **The artifact is demonstrably the right one.** Its `info.version` is the pinned 1.20.8, it
+     holds 297 operation ids against the route table's 297 routes, and regenerating the client from
+     it produced a **byte-identical** `sdk.gen.ts`, `types.gen.ts` and `client/` to what was
+     committed. So the spec is what the shipped client was built from; the constant was simply wrong.
+
+     The pin is corrected to the committed artifact's hash, and the comment above it now claims only
+     what is true: **the artifact has not changed since it was reviewed**, which is what protects a
+     regeneration from a silent edit. It does *not* claim a byte match against the upstream release —
+     that has not been re-verified, and whoever next bumps the version should confirm both.
+
 ---
 
 ## Gotchas

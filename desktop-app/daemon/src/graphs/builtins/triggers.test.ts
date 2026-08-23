@@ -2,8 +2,10 @@ import { describe, expect, test } from "bun:test";
 import type { NodeConfigValues, PortValues } from "@vrcz/plugin-api/nodes";
 import type { BusEvent } from "../../bus/event-bus.ts";
 import { EventBus } from "../../bus/event-bus.ts";
+import { PIPELINE_EVENT_TYPES } from "../../pipeline/index.ts";
+import { busKindFor } from "../../wiring/pipeline-bridge.ts";
 import { createBuiltinNodes } from "./index.ts";
-import { MIN_SCHEDULE_MS, parsePatterns } from "./triggers.ts";
+import { MIN_SCHEDULE_MS, PIPELINE_EVENT_KINDS, parsePatterns } from "./triggers.ts";
 
 const T0 = 1_700_000_000_000;
 
@@ -173,5 +175,77 @@ describe("a set built without a bus", () => {
       .map((definition) => definition.id);
     expect(ids).not.toContain("on-event");
     expect(ids).toContain("compare");
+  });
+});
+
+describe("the pipeline trigger", () => {
+  test("its table agrees with the bridge's, exactly", () => {
+    // The copy exists so `graphs/` does not import `wiring/`. This is what stops it drifting: if
+    // the bridge learns a new pipeline frame, or renames a bus kind, this fails rather than the
+    // trigger silently subscribing to nothing.
+    const mine = Object.entries(PIPELINE_EVENT_KINDS).sort();
+    const theirs = PIPELINE_EVENT_TYPES.map((type) => [type, busKindFor(type)] as const).sort();
+    expect(mine).toEqual(theirs as unknown as [string, string][]);
+  });
+
+  test("fires on VRChat's own name for a frame", async () => {
+    const h = await armed("on-pipeline", { type: "friend-location" });
+    h.emit({ kind: "friend.location", subjectId: "usr_a", ts: T0 + 3 });
+    expect(h.fired[0]?.outputs).toMatchObject({
+      type: "friend-location",
+      kind: "friend.location",
+      subject: "usr_a",
+      user: "usr_a",
+      at: T0 + 3,
+    });
+  });
+
+  test("a refined update still reaches the frame it came from", async () => {
+    // The bridge turns `friend-update` into `friend.updated.avatar` when it can tell what moved,
+    // and plain `friend.updated` only when it cannot. Subscribing to the exact kind alone would
+    // miss every frame the daemon understood well enough to describe.
+    const h = await armed("on-pipeline", { type: "friend-update" });
+    h.emit({ kind: "friend.updated", subjectId: "usr_a" });
+    h.emit({ kind: "friend.updated.avatar", subjectId: "usr_a" });
+    expect(h.fired).toHaveLength(2);
+    expect(h.fired[1]?.outputs).toMatchObject({
+      type: "friend-update",
+      kind: "friend.updated.avatar",
+    });
+  });
+
+  test("there is one node per frame, and each fires only on its own", async () => {
+    // Same shape as the VRChat API nodes: with a searchable palette the node *is* the picker, and
+    // a dropdown is one more step between wanting `friend-location` and having it on the canvas.
+    const online = await armed("on-pipeline-friend-online");
+    online.emit({ kind: "friend.online", subjectId: "usr_a" });
+    online.emit({ kind: "friend.offline", subjectId: "usr_a" });
+    expect(online.fired).toHaveLength(1);
+    expect(online.fired[0]?.outputs).toMatchObject({ type: "friend-online" });
+
+    const joined = await armed("on-pipeline-group-joined");
+    joined.emit({ kind: "group.joined", subjectId: "grp_1" });
+    expect(joined.fired).toHaveLength(1);
+  });
+
+  test("every frame in the table has a node, and they share one output shape", () => {
+    const nodes = createBuiltinNodes({ bus: new EventBus() });
+    const picker = nodes.definition("vrcz/on-pipeline");
+    for (const type of Object.keys(PIPELINE_EVENT_KINDS)) {
+      const definition = nodes.definition(`vrcz/on-pipeline-${type}`);
+      expect(definition, type).not.toBeNull();
+      expect(definition?.category).toBe("Pipeline");
+      // The picker and the generated ones must not describe different ports for the same frame.
+      expect(definition?.outputs).toEqual(picker?.outputs ?? []);
+    }
+  });
+
+  test("a world or group subject does not become a user port", async () => {
+    // It would flow straight into an invite node and produce a request about nobody.
+    const h = await armed("on-pipeline", { type: "group-joined" });
+    h.emit({ kind: "group.joined", subjectId: "grp_1" });
+    const outputs = h.fired[0]?.outputs ?? {};
+    expect(outputs.subject).toBe("grp_1");
+    expect("user" in outputs).toBe(false);
   });
 });

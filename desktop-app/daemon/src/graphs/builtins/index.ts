@@ -17,6 +17,7 @@ import type { EventBus } from "../../bus/event-bus.ts";
 import { BUILTIN_NAMESPACE, INTRINSIC_DEFINITIONS } from "../intrinsics.ts";
 import type { ExecuteContext } from "../types.ts";
 import { actionNodes, type GraphFetch, type GraphSocialActions } from "./actions.ts";
+import { apiNodes, type GraphApiCall } from "./api.ts";
 import { operatorNodes } from "./operators.ts";
 import { type GraphReads, resolverNodes } from "./resolvers.ts";
 import { shapingNodes } from "./shaping.ts";
@@ -26,6 +27,7 @@ import { type BuiltinArmRequest, type BuiltinNode, builtinId } from "./types.ts"
 import { valueNodes } from "./values.ts";
 
 export type { GraphInviteTarget, GraphSocialActions } from "./actions.ts";
+export type { GraphApiCall, GraphApiRequest, GraphApiResponse } from "./api.ts";
 export type { GraphReads } from "./resolvers.ts";
 export type { GraphStateStore } from "./stateful.ts";
 export type { BuiltinArmRequest, BuiltinNode } from "./types.ts";
@@ -117,6 +119,13 @@ export interface BuiltinNodeDeps {
    * the resolvers, a stateful node with nowhere to write cannot even fail usefully.
    */
   readonly state?: GraphStateStore | undefined;
+  /**
+   * Calls one VRChat operation, for the generated API nodes.
+   *
+   * Absent leaves all 286 of them in the palette, each failing with a sentence. Hiding them would
+   * be worse: a saved graph naming one would draw a hole with no explanation.
+   */
+  readonly api?: GraphApiCall | undefined;
 }
 
 export function createBuiltinNodes(deps: BuiltinNodeDeps = {}): BuiltinNodes {
@@ -146,5 +155,8 @@ export function createBuiltinNodes(deps: BuiltinNodeDeps = {}): BuiltinNodes {
     ...resolverNodes(deps.reads),
     ...stateful,
     ...actions,
+    // Last, so a hand-written node with the same id would win the map. None does today — the
+    // generated ids are all `api-` prefixed — but the ordering states which is the floor.
+    ...apiNodes(deps.api),
   ]);
 }

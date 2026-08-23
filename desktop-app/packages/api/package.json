@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./types": "./src/generated/types.gen.ts"
+    "./types": "./src/generated/types.gen.ts",
+    "./operations": "./src/generated/operations.ts"
   },
   "private": true,
   "scripts": {

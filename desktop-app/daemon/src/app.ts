@@ -33,6 +33,7 @@ import { createAppApiDeps } from "./wiring/app-api-deps.ts";
 import { attachConsentAlerts } from "./wiring/consent-alert.ts";
 import { createControlDeps } from "./wiring/control-deps.ts";
 import { FeedWriter } from "./wiring/feed-writer.ts";
+import { createGraphApi } from "./wiring/graph-api.ts";
 import { PluginNodeProvider } from "./wiring/graph-provider.ts";
 import { createGraphReads } from "./wiring/graph-reads.ts";
 import { createLogSink } from "./wiring/log-bridge.ts";
@@ -389,6 +390,9 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
       friends: async (accountId) => await requireReads().friends(accountId),
       instancePlayers: (accountId) => requireReads().instancePlayers(accountId),
     },
+    // Every VRChat operation the spec describes, as a node. Through the account, the limiter and
+    // the User-Agent like everything else — see `wiring/graph-api.ts`.
+    api: createGraphApi({ accounts }),
     // The cooldown and counter nodes. Four SQL statements behind a two-method seam, so the graph
     // runtime never learns that SQLite is under there.
     state: {

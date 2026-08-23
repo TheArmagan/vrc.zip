@@ -28,32 +28,54 @@ function summary(id: string, name: string): GraphSummary {
   };
 }
 
-function seedTypes(owners: readonly [string, string, string][]): void {
+function seedTypes(owners: readonly (readonly [string, string, string, string?])[]): void {
   graphs.nodeTypes.clear();
-  for (const [owner, id, title] of owners) {
+  for (const [owner, id, title, category] of owners) {
     graphs.nodeTypes.set(`${owner}/${id}`, {
       qualifiedId: `${owner}/${id}`,
       owner,
       available: true,
-      definition: definition(id, title),
+      definition: { ...definition(id, title), ...(category === undefined ? {} : { category }) },
     });
   }
 }
 
 describe("the palette", () => {
-  test("groups by owner with the built-ins first", () => {
-    // Two plugins both contributing a node called "Send" is a flat list where nobody can tell
-    // whose is whose, which is why this groups at all.
+  test("groups built-ins by category, in working order", () => {
+    // Owner was the first grouping and it stopped working the moment the built-in set passed three
+    // hundred: everything vrc.zip ships has one owner, so the palette was one enormous group.
     seedTypes([
-      ["zeta.plugin", "send", "Send"],
-      ["vrcz", "note", "Write to the feed"],
-      ["acme.notes", "send", "Send"],
+      ["vrcz", "note", "Write to the feed", "Send"],
+      ["vrcz", "on-event", "When something happens", "Triggers"],
+      ["vrcz", "api-get-user", "Get user (API)", "API: users"],
+      ["vrcz", "gate", "Only if", "Logic"],
     ]);
 
     expect(graphs.palette.map((group) => group.owner)).toEqual([
-      "vrcz",
-      "acme.notes",
-      "zeta.plugin",
+      "Triggers",
+      "Logic",
+      "Send",
+      // The generated API groups come after everything an ordinary graph is built from.
+      "API: users",
+    ]);
+  });
+
+  test("a plugin's nodes group under the plugin, and under its own categories", () => {
+    // `category` always meant "groups the node in the editor's palette"; the palette simply was
+    // not reading it for plugin nodes. The owner stays in the key whatever the plugin calls its
+    // group — "Reading" with no owner attached would read as a feature of vrc.zip.
+    seedTypes([
+      ["vrcz", "note", "Write to the feed", "Send"],
+      ["acme.notes", "read", "Read a note", "Reading"],
+      ["acme.notes", "write", "Write a note", "Writing"],
+      ["zeta.plugin", "send", "Send"],
+    ]);
+
+    expect(graphs.palette.map((group) => group.owner)).toEqual([
+      "Send",
+      "acme.notes — Reading",
+      "acme.notes — Writing",
+      "zeta.plugin (plugin)",
     ]);
   });
 

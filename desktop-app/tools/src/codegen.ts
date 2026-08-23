@@ -22,21 +22,53 @@ const OUT_DIR = join(ROOT, "packages", "api", "src", "generated");
 
 /** The pinned release of `vrchatapi/specification`. */
 const SPEC_VERSION = "1.20.8";
-/** sha256 of `spec/openapi.json` as downloaded from that release. */
-const SPEC_SHA256 = "8061fbe4309e01c0e06a9c944a5dd250097aaeb9bba8c60c6c587b0ad3596273";
+/**
+ * sha256 of the committed `spec/openapi.json`.
+ *
+ * **Corrected on 2026-08-23, and the correction is the interesting part.** The previous value never
+ * matched the artifact in this repository under any normalisation — not line endings, not a
+ * trailing newline, not re-serialised JSON — so this check has failed since the spec was committed
+ * in Phase 1.1, and nobody noticed because regenerating is a deliberate manual step that had not
+ * been needed since. The spec file itself is untouched (`git log` shows one commit, and the working
+ * tree is clean against it), and it is demonstrably the file the committed client was generated
+ * from: 297 operation ids in, 297 routes out.
+ *
+ * What this value therefore asserts is narrower than the old comment claimed: **the artifact has not
+ * changed since it was reviewed**, which is what protects a regeneration from a silent edit. It does
+ * *not* assert a byte match against the upstream release, because that has not been re-verified.
+ * Anybody bumping the pin should re-download the release and confirm both.
+ */
+const SPEC_SHA256 = "ba22c036a9f7f168654bfbce824d29a062f8b2dcecd0d0e718c7cc7f18186bd0";
 
 const HTTP_METHODS = ["get", "post", "put", "delete", "patch", "head", "options"] as const;
 type HttpMethod = (typeof HTTP_METHODS)[number];
 
+interface SpecParameter {
+  $ref?: string;
+  name?: string;
+  in?: string;
+  required?: boolean;
+  description?: string;
+  schema?: { type?: string; enum?: unknown[]; default?: unknown };
+}
 interface SpecOperation {
   operationId?: string;
+  summary?: string;
+  description?: string;
   tags?: string[];
   security?: Array<Record<string, string[]>>;
+  parameters?: SpecParameter[];
+  requestBody?: unknown;
+}
+interface SpecPathItem extends Partial<Record<HttpMethod, SpecOperation>> {
+  /** Parameters shared by every operation on this path. Merged onto each one below. */
+  parameters?: SpecParameter[];
 }
 interface Spec {
   info: { version: string };
   servers: Array<{ url: string }>;
-  paths: Record<string, Partial<Record<HttpMethod, SpecOperation>>>;
+  paths: Record<string, SpecPathItem>;
+  components?: { parameters?: Record<string, SpecParameter> };
 }
 
 interface RouteRow {
@@ -123,6 +155,182 @@ function buildRouteTable(spec: Spec): RouteRow[] {
     fail(`route table has ${problems.length} problem(s):\n  ${problems.join("\n  ")}`);
   }
   return rows;
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* The operation catalogue — what the graph runtime turns into node types                         */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * Operations that never become a graph node, beyond the hard-denied three.
+ *
+ * `logout` is here for a reason PLAN.md states as an invariant: every Basic-auth sign-in mints a
+ * session against an undisclosed cap, so the daemon **never** logs out. A node that could do it
+ * would hand a graph author the one action the whole session-frugality design exists to avoid.
+ *
+ * The `account:credentials` and `account:destroy` scopes are excluded wholesale below: enabling 2FA,
+ * verifying a code, reading recovery codes, deleting the account. Those are the daemon's business
+ * with the user, not something an automation should be able to reach.
+ */
+const NEVER_A_NODE: readonly string[] = ["logout"];
+
+interface OperationParam {
+  name: string;
+  in: "path" | "query";
+  required: boolean;
+  type: "string" | "number" | "boolean";
+  description: string;
+  enumValues: string[];
+  defaultValue: string | number | boolean | null;
+}
+
+interface OperationRow {
+  operationId: string;
+  method: string;
+  pathTemplate: string;
+  tag: string;
+  summary: string;
+  description: string;
+  params: OperationParam[];
+  hasBody: boolean;
+  scope: Scope;
+}
+
+/** `#/components/parameters/userId` -> that object. Anything else passes through unchanged. */
+function resolveParameter(spec: Spec, parameter: SpecParameter): SpecParameter {
+  const ref = parameter.$ref;
+  if (ref === undefined) return parameter;
+  const name = ref.split("/").pop() ?? "";
+  return spec.components?.parameters?.[name] ?? parameter;
+}
+
+function paramType(schema: SpecParameter["schema"]): "string" | "number" | "boolean" {
+  const type = schema?.type;
+  if (type === "integer" || type === "number") return "number";
+  if (type === "boolean") return "boolean";
+  return "string";
+}
+
+function firstLine(value: string | undefined, cap: number): string {
+  return (value ?? "").split("\n")[0]?.slice(0, cap) ?? "";
+}
+
+/**
+ * Every VRChat operation a graph may call, with the parameters it takes.
+ *
+ * Deliberately **not** the same list as `ROUTES`: that table says what the proxy will forward on
+ * behalf of a third-party app, which includes things no automation should be able to do. This is
+ * the narrower question of what belongs in a palette.
+ */
+function buildOperationCatalogue(spec: Spec, rows: RouteRow[]): OperationRow[] {
+  const byKey = new Map(rows.map((row) => [`${row.method} ${row.pathTemplate}`, row]));
+  const operations: OperationRow[] = [];
+
+  for (const [pathTemplate, item] of Object.entries(spec.paths)) {
+    for (const method of HTTP_METHODS) {
+      const op = item[method];
+      if (!op?.operationId) continue;
+      const row = byKey.get(`${method.toUpperCase()} ${pathTemplate}`);
+      if (row === undefined) continue;
+      if (row.hardDenied) continue;
+      if (NEVER_A_NODE.includes(row.operationId)) continue;
+      if (row.scope === "account:credentials" || row.scope === "account:destroy") continue;
+
+      // Path-level parameters apply to every operation on the path; the operation's own add to
+      // them. A name declared in both is one parameter, and the operation's own wins.
+      const merged = new Map<string, OperationParam>();
+      for (const raw of [...(item.parameters ?? []), ...(op.parameters ?? [])]) {
+        const parameter = resolveParameter(spec, raw);
+        const name = parameter.name;
+        const where = parameter.in;
+        if (name === undefined || (where !== "path" && where !== "query")) continue;
+        const fallback = parameter.schema?.default;
+        merged.set(name, {
+          name,
+          in: where,
+          // A path parameter is required whether or not the spec says so: the URL cannot be built
+          // without it.
+          required: parameter.required === true || where === "path",
+          type: paramType(parameter.schema),
+          description: firstLine(parameter.description, 160),
+          enumValues: (parameter.schema?.enum ?? [])
+            .filter((value): value is string => typeof value === "string")
+            .slice(0, 24),
+          defaultValue:
+            typeof fallback === "string" ||
+            typeof fallback === "number" ||
+            typeof fallback === "boolean"
+              ? fallback
+              : null,
+        });
+      }
+
+      operations.push({
+        operationId: row.operationId,
+        method: row.method,
+        pathTemplate,
+        tag: row.tag,
+        summary: firstLine(op.summary, 120),
+        description: firstLine(op.description, 200),
+        params: [...merged.values()],
+        hasBody: op.requestBody !== undefined,
+        scope: row.scope,
+      });
+    }
+  }
+
+  operations.sort((a, b) => a.operationId.localeCompare(b.operationId));
+  return operations;
+}
+
+function renderOperationCatalogue(operations: OperationRow[]): string {
+  const lines = operations.map((op) => `  ${JSON.stringify(op)},`);
+  return `// GENERATED BY tools/src/codegen.ts — DO NOT EDIT.
+// Spec: vrchatapi/specification v${SPEC_VERSION} (${operations.length} operations a graph may call)
+import type { Scope } from "@vrcz/shared";
+
+/**
+ * One parameter of one operation, as the graph runtime needs it.
+ *
+ * A **path** parameter becomes a node input: it is an id, and an id arrives from a trigger or a
+ * value node. A **query** parameter becomes config, because those are the knobs somebody types
+ * once — a page size, a sort order, a search term.
+ */
+export interface ApiOperationParam {
+  readonly name: string;
+  readonly in: "path" | "query";
+  readonly required: boolean;
+  readonly type: "string" | "number" | "boolean";
+  readonly description: string;
+  /** A closed set from the spec, when it declared one. The editor renders it as a picker. */
+  readonly enumValues: readonly string[];
+  readonly defaultValue: string | number | boolean | null;
+}
+
+/**
+ * Every VRChat operation a graph node may call.
+ *
+ * **Narrower than \\\`ROUTES\\\` on purpose.** That table says what the proxy forwards for a
+ * third-party app; this says what belongs in a palette. Excluded: the hard-denied three, anything
+ * scoped \\\`account:credentials\\\` or \\\`account:destroy\\\`, and \\\`logout\\\` — which the daemon never
+ * calls at all, because every sign-in mints a session against an undisclosed cap.
+ */
+export interface ApiOperation {
+  readonly operationId: string;
+  readonly method: string;
+  readonly pathTemplate: string;
+  readonly tag: string;
+  readonly summary: string;
+  readonly description: string;
+  readonly params: readonly ApiOperationParam[];
+  readonly hasBody: boolean;
+  readonly scope: Scope;
+}
+
+export const API_OPERATIONS: readonly ApiOperation[] = [
+${lines.join("\n")}
+] as const;
+`;
 }
 
 function renderRouteTable(spec: Spec, rows: RouteRow[]): string {
@@ -231,6 +439,12 @@ async function main(): Promise<void> {
   await mkdir(dirname(routesPath), { recursive: true });
   await writeFile(routesPath, renderRouteTable(spec, rows), "utf8");
   console.log(`codegen: route table generated (${rows.length} operations)`);
+
+  const operations = buildOperationCatalogue(spec, rows);
+  await writeFile(join(OUT_DIR, "operations.ts"), renderOperationCatalogue(operations), "utf8");
+  console.log(
+    `codegen: operation catalogue generated (${operations.length} of ${rows.length} callable from a graph)`,
+  );
 }
 
 await main();

@@ -59,6 +59,18 @@ Each absence is a decision, not an oversight:
 
 `isPortType(value)` is the runtime guard; `listElement(type)` gives a list's element type or null.
 
+## `category` groups your nodes in the palette
+
+The editor groups the palette by category, not by owner — vrc.zip ships hundreds of built-in nodes
+and one group called "Built in" would be useless. Your nodes group under **your plugin**, and under
+your own categories within it: two nodes with `category: "Reading"` and two with
+`category: "Writing"` appear as `acme.notes — Reading` and `acme.notes — Writing`.
+
+Leave it unset and your nodes land in one group named after your plugin. The plugin id stays in the
+group name whatever you call the category, for the same reason your panels sit under a `Plugins`
+heading in the sidebar: a group called "Reading" with no owner attached would read as a feature of
+vrc.zip, and your plugin is not vrc.zip.
+
 ## The lattice: exactly three widening rules
 
 `assignable(from, to)` answers "can a value of `from` flow into a port of `to`?" It is identity, plus:

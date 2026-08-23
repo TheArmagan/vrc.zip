@@ -389,6 +389,154 @@ function gamelogOutputs(event: BusEvent): PortValues {
 }
 
 /* -------------------------------------------------------------------------------------------- */
+/* The pipeline                                                                                   */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * VRChat's own event vocabulary, and the bus kind each one becomes.
+ *
+ * The pipeline is the WebSocket VRChat pushes friend presence, notifications and group changes down.
+ * `wiring/pipeline-bridge.ts` normalises every frame onto the bus, so a graph could already react to
+ * all of this through `on-event` — but only by knowing vrc.zip's names for things. Somebody who has
+ * read VRChat's documentation, or watched the socket, thinks in `friend-location` and
+ * `notification-v2`, and this trigger lets them say that.
+ *
+ * **Kept here rather than imported from the bridge**, which would point `graphs/` at `wiring/` — the
+ * dependency direction the whole layout exists to avoid. `triggers.test.ts` asserts this table
+ * agrees with `busKindFor` exactly, so the copy cannot drift without a failing test.
+ */
+export const PIPELINE_EVENT_KINDS: Readonly<Record<string, string>> = {
+  notification: "notification.received",
+  "notification-v2": "notification.received_v2",
+  "notification-v2-update": "notification.updated",
+  "notification-v2-delete": "notification.deleted",
+  "response-notification": "notification.responded",
+  "see-notification": "notification.seen",
+  "hide-notification": "notification.hidden",
+  "clear-notification": "notification.cleared",
+  "friend-add": "friend.added",
+  "friend-delete": "friend.removed",
+  "friend-online": "friend.online",
+  "friend-active": "friend.active",
+  "friend-offline": "friend.offline",
+  "friend-update": "friend.updated",
+  "friend-location": "friend.location",
+  "user-update": "user.updated",
+  "user-location": "user.location",
+  "user-badge-assigned": "user.badge_assigned",
+  "user-badge-unassigned": "user.badge_unassigned",
+  "content-refresh": "content.refresh",
+  "economy-update": "economy.update",
+  "modified-image-update": "content.image_updated",
+  "instance-queue-joined": "instance.queue_joined",
+  "instance-queue-ready": "instance.queue_ready",
+  "group-joined": "group.joined",
+  "group-left": "group.left",
+  "group-member-updated": "group.member_updated",
+  "group-role-updated": "group.role_updated",
+};
+
+/** Shared by the picker node and the twenty-eight generated ones, so they cannot describe
+ * different ports for the same frame. */
+const PIPELINE_OUTPUTS: NodeDefinition["outputs"] = [
+  { id: "type", label: "Type", type: "string", description: "VRChat's name for the frame." },
+  { id: "kind", label: "Kind", type: "string", description: "vrc.zip's name for it." },
+  { id: "subject", label: "About", type: "string", description: "The user, world or group." },
+  { id: "user", label: "User", type: "user", description: "When the subject is a person." },
+  { id: "at", label: "At", type: "number" },
+  { id: "event", label: "Everything", type: "json" },
+];
+
+const ON_PIPELINE: NodeDefinition = {
+  id: "on-pipeline",
+  kind: "trigger",
+  title: "When VRChat pushes an event",
+  description: "Fires on one kind of frame from VRChat's live socket, by its own name for it.",
+  category: "Triggers",
+  outputs: PIPELINE_OUTPUTS,
+  config: [
+    {
+      kind: "select",
+      id: "type",
+      label: "Frame",
+      options: Object.keys(PIPELINE_EVENT_KINDS)
+        .sort()
+        .map((type) => ({ value: type, label: type })),
+      default: "friend-online",
+    },
+    ACCOUNT_FIELD,
+  ],
+  // Same ceiling as the game-log trigger: `friend-location` fires for every friend who moves, and a
+  // busy evening is hundreds of frames.
+  maxFiresPerMinute: 120,
+  body: [{ kind: "config", field: "type", fallback: "friend-online" }],
+};
+
+/**
+ * The bus kinds one pipeline frame can arrive as.
+ *
+ * Two, not one, and the second is the reason this is a function. The bridge *refines* three of the
+ * update frames — `friend-update` becomes `friend.updated.avatar` when it can tell what moved, and
+ * plain `friend.updated` only when it cannot. Subscribing to the exact kind alone would miss every
+ * frame the daemon understood well enough to describe, which is precisely the useful ones.
+ */
+function pipelineKinds(config: NodeConfigValues): readonly string[] {
+  const chosen = typeof config.type === "string" ? config.type : "friend-online";
+  const kind = PIPELINE_EVENT_KINDS[chosen];
+  if (kind === undefined) return [];
+  return [kind, `${kind}.*`];
+}
+
+function pipelineOutputs(event: BusEvent): PortValues {
+  const type =
+    Object.entries(PIPELINE_EVENT_KINDS).find(
+      ([, kind]) => kind === event.kind || event.kind.startsWith(`${kind}.`),
+    )?.[0] ?? "";
+  const subject = text(event.subjectId);
+  return {
+    type,
+    kind: event.kind,
+    subject: subject ?? "",
+    // A `user` port only when the subject really is a person. A world or group id in a `user` port
+    // would flow straight into an invite node and produce a request about nobody.
+    ...(subject?.startsWith("usr_") === true ? { user: subject } : {}),
+    at: event.ts,
+    event: event.payload ?? null,
+  };
+}
+
+/**
+ * One trigger per pipeline frame, generated from the table above.
+ *
+ * The same shape the VRChat API nodes take, and for the same reason: a picker is one more step
+ * between "I want to react to `friend-location`" and a node on the canvas, and with a searchable
+ * palette the node itself *is* the picker. Twenty-eight of them, in their own group.
+ *
+ * `on-pipeline` stays. It is the one to reach for when the frame is chosen by config rather than by
+ * which node you dragged — and it is the only one that still works if VRChat ships a frame type
+ * this build has never heard of, since its picker is data rather than a node per value.
+ */
+function pipelineEventNodes(deps: TriggerDeps): BuiltinNode[] {
+  return Object.entries(PIPELINE_EVENT_KINDS).map(([type, kind]) => {
+    const definition: NodeDefinition = {
+      // The type is already lowercase and hyphenated, which is exactly what a node id must be.
+      id: `on-pipeline-${type}`,
+      kind: "trigger",
+      // VRChat's own name, not a humanised one: somebody reaching for these is reading VRChat's
+      // documentation or watching the socket, and translating would make them guess.
+      title: `${type} (pipeline)`,
+      description: `Fires when VRChat pushes a ${type} frame. Arrives as ${kind}.`,
+      category: "Pipeline",
+      outputs: PIPELINE_OUTPUTS,
+      config: [ACCOUNT_FIELD],
+      maxFiresPerMinute: 120,
+      body: [{ kind: "literal", text: type }],
+    };
+    return busTrigger(deps, definition, () => [kind, `${kind}.*`], pipelineOutputs);
+  });
+}
+
+/* -------------------------------------------------------------------------------------------- */
 /* Schedule and run-now                                                                           */
 /* -------------------------------------------------------------------------------------------- */
 
@@ -480,6 +628,8 @@ export function triggerNodes(deps: TriggerDeps): BuiltinNode[] {
       baseOutputs,
     ),
     busTrigger(deps, ON_GAMELOG, (config) => gamelogKinds(config), gamelogOutputs),
+    busTrigger(deps, ON_PIPELINE, (config) => pipelineKinds(config), pipelineOutputs),
+    ...pipelineEventNodes(deps),
     ...PRESETS.map((preset) =>
       busTrigger(deps, presetDefinition(preset), () => preset.kinds, preset.map),
     ),

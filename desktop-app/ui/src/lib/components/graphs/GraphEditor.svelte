@@ -19,6 +19,7 @@
 -->
 <script lang="ts">
 import ArrowLeftIcon from "@lucide/svelte/icons/arrow-left";
+import ChevronRightIcon from "@lucide/svelte/icons/chevron-right";
 import SaveIcon from "@lucide/svelte/icons/save";
 import TrashIcon from "@lucide/svelte/icons/trash-2";
 import {
@@ -64,6 +65,25 @@ let selectedId = $state<string | null>(null);
 let secretDraft = $state<Record<string, string>>({});
 /** What is typed in the palette's search box. */
 let paletteQuery = $state("");
+/**
+ * Palette groups the user has collapsed, and the ones that start that way.
+ *
+ * The API groups are hundreds of nodes across nineteen tags, so they start **closed**: a sidebar
+ * that opens on two thousand pixels of endpoint names buries the eight categories an ordinary graph
+ * is built from. Everything else starts open, because it is short and it is what people came for.
+ */
+let collapsed = $state<Record<string, boolean>>({});
+
+function startsClosed(group: string): boolean {
+  // A plugin's own groups start **open**: somebody who installed a plugin for its nodes should see
+  // them. The generated API groups start closed because there are nineteen of them and hundreds of
+  // entries, which would bury everything else.
+  return group.startsWith("API: ") || group === "Pipeline";
+}
+
+function isCollapsed(group: string): boolean {
+  return collapsed[group] ?? startsClosed(group);
+}
 
 const nodeTypes = { vrcz: GraphNodeCard };
 
@@ -93,6 +113,8 @@ $effect(() => {
  * describing what it does, and somebody who saw `vrcz/on-player-join` in an exported graph is
  * looking for a literal id. Groups with nothing left are dropped rather than shown empty.
  */
+const searching = $derived(paletteQuery.trim() !== "");
+
 const palette = $derived.by(() => {
   const query = paletteQuery.trim().toLowerCase();
   if (query === "") return graphs.palette;
@@ -359,18 +381,32 @@ async function saveSecret(fieldId: string): Promise<void> {
       </div>
       <div class="flex-1 overflow-y-auto p-2">
       {#each palette as group (group.owner)}
-        <div class="mb-3">
-          <div class="px-2 py-1 text-xs font-medium text-muted-foreground">
-            {group.owner === "vrcz" ? "Built in" : group.owner}
-          </div>
-          {#each group.types as type (type.qualifiedId)}
-            <button
-              class="w-full rounded px-2 py-1 text-left text-sm hover:bg-accent"
-              onclick={() => addNode(type.qualifiedId, type.definition)}
-            >
-              {type.definition.title}
-            </button>
-          {/each}
+        {@const shut = searching ? false : isCollapsed(group.owner)}
+        <div class="mb-2">
+          <!--
+            A group header is a button, and searching forces every group open: a hit inside a
+            collapsed group that stayed collapsed would read as "no results".
+          -->
+          <button
+            class="flex w-full items-center gap-1 rounded px-2 py-1 text-left text-xs font-medium text-muted-foreground hover:bg-accent"
+            aria-expanded={!shut}
+            onclick={() => (collapsed = { ...collapsed, [group.owner]: !shut })}
+          >
+            <ChevronRightIcon class="size-3 transition-transform {shut ? '' : 'rotate-90'}" />
+            <span class="truncate">{group.owner}</span>
+            <span class="ml-auto tabular-nums opacity-60">{group.types.length}</span>
+          </button>
+          {#if !shut}
+            {#each group.types as type (type.qualifiedId)}
+              <button
+                class="w-full rounded px-2 py-1 pl-6 text-left text-sm hover:bg-accent"
+                title={type.definition.description ?? type.qualifiedId}
+                onclick={() => addNode(type.qualifiedId, type.definition)}
+              >
+                {type.definition.title}
+              </button>
+            {/each}
+          {/if}
         </div>
       {:else}
         <p class="px-2 py-4 text-xs text-muted-foreground">

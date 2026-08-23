@@ -13,7 +13,9 @@ import { RateLimiter } from "./net/rate-limiter.ts";
 import { RequestMeter } from "./net/request-meter.ts";
 import { buildUserAgent } from "./net/user-agent.ts";
 import { notifyDesktop } from "./os/desktop-notification.ts";
+import { installLocally, installTarget, isInstalled } from "./os/install.ts";
 import { openUrl } from "./os/open-url.ts";
+import { createStartupControl } from "./os/startup.ts";
 import { databasePath, ensureStateDir } from "./paths.ts";
 import { PipelineClient } from "./pipeline/index.ts";
 import type { PendingPluginConsent } from "./plugins/consent.ts";
@@ -25,6 +27,7 @@ import { loadOrCreateMasterKey } from "./security/keychain.ts";
 import { SecretsStore } from "./security/secrets.ts";
 import { resolveSessionToken } from "./security/session-token.ts";
 import { readStateFile, removeStateFile, writeStateFile } from "./security/state-file.ts";
+import { isPackaged } from "./servers/embedded-ui.ts";
 import { type BoundServers, bindServers, createAppApi } from "./servers/index.ts";
 import { loadSettings, needsFirstRun, type Settings, saveSettings } from "./settings.ts";
 import { type RetentionScheduler, Store, startRetentionScheduler } from "./store/index.ts";
@@ -577,6 +580,21 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     connectPipeline,
     ...(env !== undefined ? { env } : {}),
     onSettingsSaved: (next) => saveSettings(next, env),
+    // "Start with Windows" lives in the registry rather than in `settings.json`, and is injected so
+    // nothing under `wiring/` can reach it directly. The same object the tray gets; see
+    // `os/startup.ts` for why one factory builds both.
+    startup: createStartupControl(process.platform, isPackaged()),
+    // Same posture: the settings screen's Install button reaches the filesystem and the registry
+    // through here, and only on a packaged Windows build. Everywhere else the route reports that
+    // the platform cannot do it, rather than the route not existing.
+    ...(process.platform === "win32" && isPackaged()
+      ? {
+          install: {
+            run: (request: Parameters<typeof installLocally>[0]) => installLocally(request),
+            status: () => ({ installed: isInstalled(), path: installTarget() }),
+          },
+        }
+      : {}),
   });
 
   // The holder above, filled in now that the deps exist.

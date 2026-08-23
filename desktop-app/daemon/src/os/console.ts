@@ -504,3 +504,88 @@ export function applyWindowIcon(): boolean {
     return false;
   }
 }
+
+/**
+ * Hides or shows the console window: what `--hidden` does at startup, and the same window the tray
+ * menu's Show/Hide item toggles.
+ *
+ * Deliberately *not* shared with the tray's own copy of this. `tray.ts` reaches `ShowWindow` through
+ * the library handle it already holds for the icon and the menu, and threading a callback down into
+ * it to save four lines of `dlopen` would put a JavaScript hop inside the modal menu handler for no
+ * benefit. They are four lines that cannot drift: `ShowWindow(GetConsoleWindow(), SW_HIDE)` has one
+ * spelling.
+ *
+ * Best-effort like everything else here. Returns whether it did anything.
+ */
+export function setConsoleVisible(visible: boolean): boolean {
+  const lib = load();
+  if (lib === null) return false;
+  try {
+    const hwnd = lib.GetConsoleWindow();
+    if (hwnd === null || hwnd === 0) return false;
+    const user32 = dlopen(`user32.${suffix}`, {
+      ShowWindow: { args: [FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+    }).symbols as unknown as { ShowWindow: (hwnd: unknown, command: number) => number };
+    // SW_HIDE / SW_SHOW.
+    user32.ShowWindow(hwnd, visible ? 5 : 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether to start with the console window hidden: `--hidden`, which is what the "start with
+ * Windows" registry entry passes.
+ *
+ * `hasTray` is not a courtesy. A hidden console, no browser tab and no tray icon is a process with
+ * no way back to it short of Task Manager — so the flag is refused rather than honoured when there
+ * is nothing to restore it from, and the caller says so on stdout while there is still a console to
+ * say it in.
+ */
+export function shouldStartHidden(argv: readonly string[], hasTray: boolean): boolean {
+  return hasTray && argv.includes("--hidden");
+}
+
+/**
+ * Asks a yes/no question in our console and waits for one keypress.
+ *
+ * Resolves null when there is nobody to ask — no console of ours, or output redirected — and the
+ * caller must treat that as "did not ask" rather than as "no". The difference matters for the
+ * first-run install prompt: a daemon started by Windows at sign-in has no console, and a silent
+ * "no" recorded as the user's answer would mean it never offered again.
+ *
+ * Enter takes the default so the common answer is one key. Anything else is ignored rather than
+ * treated as no, because a stray keypress should not decide something on the user's behalf.
+ */
+export function askConsoleYesNo(question: string, defaultYes = true): Promise<boolean | null> {
+  /*
+   * `console.log`, not `process.stdout.write`, and it costs a trailing newline to be correct.
+   *
+   * `claimConsole` patches `console.*` to write into the window it allocated, because Bun bound its
+   * own streams before that window existed. Writing to `process.stdout` directly on that path goes
+   * to the handle nobody is looking at, so the question would be invisible and the daemon would
+   * appear to hang waiting for an answer to a prompt that was never shown.
+   */
+  console.log(`${question} ${defaultYes ? "[Y/n]" : "[y/N]"}`);
+
+  return new Promise<boolean | null>((resolve) => {
+    const stop = onConsoleKey((key) => {
+      const pressed = key.toLowerCase();
+      let answer: boolean | null = null;
+      if (pressed === "y") answer = true;
+      else if (pressed === "n") answer = false;
+      // Carriage return is what the console hands back for Enter, not "\n".
+      else if (pressed === "\r" || pressed === "\n") answer = defaultYes;
+      if (answer === null) return;
+
+      stop?.();
+      console.log(answer ? "yes" : "no");
+      resolve(answer);
+    });
+
+    // Nobody to ask. The question is already on screen, which is untidy and harmless — this only
+    // happens with output redirected, where nothing is reading it anyway.
+    if (stop === null) resolve(null);
+  });
+}

@@ -776,6 +776,38 @@ export interface Settings {
    * row can say "switched avatar" and nothing more. See `daemon/src/net/avatar-ids.ts`.
    */
   readonly resolveAvatarIds: boolean;
+  /**
+   * Whether vrc.zip is registered to start when Windows does.
+   *
+   * Not stored in `settings.json` like the rest of this object, and the difference shows here: it
+   * is a registry value the user can clear from Task Manager's Startup tab, so the daemon reads it
+   * live on every `GET` rather than remembering what it last wrote.
+   */
+  readonly startWithWindows: boolean;
+  /** False from a source checkout and everywhere that is not Windows. */
+  readonly startWithWindowsSupported: boolean;
+  /**
+   * Why the switch will not move, in a sentence meant to be shown.
+   *
+   * Covers two different situations on purpose: a build that can never do this (running from
+   * source), and a build that could but just refused, which is what running from Downloads gets.
+   * Null when there is nothing to say.
+   */
+  readonly startWithWindowsReason: string | null;
+  /** Whether this build can copy itself somewhere permanent. Packaged Windows builds only. */
+  readonly installSupported: boolean;
+  /** Whether the running process *is* the copy under `%LOCALAPPDATA%`. */
+  readonly installed: boolean;
+  /** Where an installed copy would live, so the screen can name it before installing. */
+  readonly installPath: string | null;
+}
+
+/** What `POST /api/settings/install` answers with. */
+export interface InstallReport {
+  readonly ok: boolean;
+  /** What went wrong, or what is still not done. Null when it all worked. */
+  readonly reason: string | null;
+  readonly path: string | null;
 }
 
 /** The subset of `Settings` that `PUT /api/settings` accepts. Ports are read-only over the wire. */
@@ -784,6 +816,7 @@ export interface SettingsPatch {
   readonly logDirectories?: readonly string[];
   readonly openBrowserOnStart?: boolean;
   readonly resolveAvatarIds?: boolean;
+  readonly startWithWindows?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -2028,6 +2061,20 @@ export const api = {
 
     update: (patch: SettingsPatch): Promise<Settings> =>
       request<Settings>("/settings", { method: "PUT", body: patch }),
+
+    /**
+     * Copies vrc.zip somewhere permanent, adds its shortcuts, and registers the autostart there.
+     *
+     * A `POST` rather than a settings field, because it is an action with a result to report and
+     * the thing it changes is the filesystem. The answer's `reason` is worth showing even when `ok`
+     * is true: a copy that landed with a shortcut that did not is a partial success, and saying so
+     * beats claiming either outcome.
+     */
+    install: (options: {
+      desktopShortcut: boolean;
+      startMenuShortcut: boolean;
+    }): Promise<InstallReport> =>
+      request<InstallReport>("/settings/install", { method: "POST", body: options }),
   },
 
   /*

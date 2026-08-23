@@ -14,6 +14,7 @@
 -->
 <script lang="ts">
 import ChevronIcon from "@lucide/svelte/icons/chevron-down";
+import DownloadIcon from "@lucide/svelte/icons/download";
 import FolderOpenIcon from "@lucide/svelte/icons/folder-open";
 import PlusIcon from "@lucide/svelte/icons/plus";
 import ShieldCheckIcon from "@lucide/svelte/icons/shield-check";
@@ -90,6 +91,68 @@ async function save(patch: SettingsPatch): Promise<void> {
   } catch (cause) {
     error = describeError(cause);
     throw cause;
+  }
+}
+
+/*
+ * "Start with Windows" and the install action.
+ *
+ * The switch and the button are one group because they are one decision seen from two sides: the
+ * daemon refuses to register an autostart from Downloads or a temp folder, so for the people most
+ * likely to want the switch, the button is the thing that makes it possible. Showing the refusal
+ * without the fix next to it would be a dead end.
+ */
+const startupSupported = $derived(app.settings?.startWithWindowsSupported ?? false);
+const startupReason = $derived(app.settings?.startWithWindowsReason ?? null);
+const installSupported = $derived(app.settings?.installSupported ?? false);
+const installed = $derived(app.settings?.installed ?? false);
+const installPath = $derived(app.settings?.installPath ?? null);
+
+let installing = $state(false);
+let desktopShortcut = $state(true);
+
+async function setStartWithWindows(checked: boolean): Promise<void> {
+  try {
+    await save({ startWithWindows: checked });
+    // The daemon answers with what the registry now says rather than with what was asked for, so a
+    // refusal arrives as a switch that did not move plus a reason. Surfacing it is the whole point:
+    // a switch that silently springs back is the worst version of this.
+    const settings = app.settings;
+    if (settings !== null && settings.startWithWindows !== checked) {
+      toast.error(settings.startWithWindowsReason ?? "Windows would not accept that change.");
+    }
+  } catch {
+    /* `error` already carries it */
+  }
+}
+
+async function install(): Promise<void> {
+  installing = true;
+  error = null;
+  try {
+    const report = await api.settings.install({
+      desktopShortcut,
+      // Never optional here. This is what makes vrc.zip come up when somebody types its name, which
+      // is most of what "install it properly" means.
+      startMenuShortcut: true,
+    });
+    if (!report.ok) {
+      toast.error(report.reason ?? "Could not install vrc.zip.");
+    } else if (report.reason !== null) {
+      // Success *and* a reason means a partial: the copy landed and something after it did not,
+      // usually a shortcut or the autostart entry. Showing that as a success toast would claim the
+      // whole thing worked, and showing it as an error would send them to redo the part that did.
+      toast.warning(report.reason);
+    } else {
+      toast.success(`Installed to ${report.path ?? "your local app data folder"}.`);
+    }
+    // Re-read rather than trusting the report: the switch above is drawn from the settings payload,
+    // and the install has just changed what that payload says.
+    app.settings = await api.settings.get();
+  } catch (cause) {
+    error = describeError(cause);
+  } finally {
+    installing = false;
   }
 }
 
@@ -270,6 +333,67 @@ async function askForNotifications(): Promise<void> {
 
       <Card.Root class="py-0">
         <div class="divide-y divide-border">
+          {#if installSupported || startupSupported}
+            <SettingSwitchRow
+              label="Start with Windows"
+              description="Signs vrc.zip in and starts collecting your feed as soon as you log in, with its console hidden and no browser tab. Registered against your account only, and removable from Task Manager's Startup tab like anything else."
+              checked={app.settings?.startWithWindows ?? false}
+              disabled={app.settings === null || !startupSupported}
+              onChange={(checked) => void setStartWithWindows(checked)}
+            />
+          {/if}
+
+          <!--
+            The install offer, and the reason it sits directly under that switch rather than in a
+            section of its own: for anybody running vrc.zip out of Downloads, this *is* the switch.
+            The daemon refuses to point an autostart entry at a folder Windows cleans up, so the
+            reason it gives is shown here with the fix next to it.
+          -->
+          {#if installSupported && !installed}
+            <div class="space-y-3 px-4 py-3">
+              <div class="space-y-1">
+                <p class="text-sm font-medium">Install vrc.zip properly</p>
+                <p class="text-sm text-muted-foreground">
+                  Copies vrc.zip to
+                  <span class="font-mono text-xs">{installPath ?? "your local app data folder"}</span>
+                  and adds it to the Start menu, so you can search for it by name and it survives a
+                  disk cleanup. No administrator rights, and nothing outside your own user folder.
+                </p>
+                {#if startupReason !== null}
+                  <p class="text-sm text-amber-600 dark:text-amber-500">{startupReason}</p>
+                {/if}
+              </div>
+
+              <label class="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  class="size-4 accent-primary"
+                  bind:checked={desktopShortcut}
+                  disabled={installing}
+                />
+                Also add a desktop shortcut
+              </label>
+
+              <Button size="sm" disabled={installing} onclick={() => void install()}>
+                <DownloadIcon class="size-4" />
+                {installing ? "Installing…" : "Install"}
+              </Button>
+            </div>
+          {/if}
+
+          {#if installed}
+            <div class="px-4 py-3">
+              <p class="text-sm font-medium">Installed</p>
+              <p class="text-sm text-muted-foreground">
+                Running from
+                <span class="font-mono text-xs">{installPath}</span>. Remove it from Settings →
+                Installed apps, or run
+                <span class="font-mono text-xs">vrc.zip --uninstall</span>. Your accounts, settings
+                and feed are kept either way.
+              </p>
+            </div>
+          {/if}
+
           <SettingSwitchRow
             label="Open the browser at startup"
             description="Launches this window when the daemon starts. Turn it off if you run vrc.zip headless and open it yourself from the tray."

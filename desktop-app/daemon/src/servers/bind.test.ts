@@ -165,6 +165,7 @@ const deps: ControlDeps = {
   },
   getSettings: async () => ({}),
   updateSettings: async () => ({}),
+  installLocally: async () => ({ ok: false, reason: null, path: null }),
   subscribeEvents: () => () => {},
 };
 

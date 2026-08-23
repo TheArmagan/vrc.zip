@@ -226,7 +226,46 @@ export interface ControlDepsOptions {
   readonly env?: NodeJS.ProcessEnv;
   readonly connectPipeline: (accountId: string) => void;
   readonly onSettingsSaved: (settings: Settings) => Promise<void>;
+  /**
+   * "Start with Windows", injected so this file cannot reach the registry and a test cannot write
+   * to the real one. Absent means unsupported, which is what every non-Windows run gets.
+   */
+  readonly startup?: StartupControl | undefined;
+  /** See `os/install.ts`. Absent means the platform cannot do it, which is every non-Windows run. */
+  readonly install?: InstallControl | undefined;
 }
+
+/** See `os/startup.ts`. Narrow on purpose: read it, write it, and say why it will not. */
+export interface StartupControl {
+  readonly supported: boolean;
+  readonly reason: string | null;
+  isEnabled(): boolean;
+  setEnabled(enabled: boolean): { ok: boolean; reason: string | null };
+}
+
+/**
+ * The install action and the state it changes, together.
+ *
+ * One object rather than two injected functions because they are two views of one thing: a settings
+ * screen that could learn "installing is available" and "already installed" from different places
+ * is a settings screen that can show an Install button for something already installed.
+ */
+export interface InstallControl {
+  run(options: {
+    desktopShortcut: boolean;
+    startMenuShortcut: boolean;
+  }): Promise<{ ok: boolean; reason: string | null; path: string | null }>;
+  /** Where the installed copy is, and whether this process is running from it. */
+  status(): { installed: boolean; path: string | null };
+}
+
+/** What an unsupported build reports: off, unchangeable, and with a sentence saying why. */
+const UNSUPPORTED_STARTUP: StartupControl = {
+  supported: false,
+  reason: "Starting with the machine is Windows only for now.",
+  isEnabled: () => false,
+  setEnabled: () => ({ ok: false, reason: "Starting with the machine is Windows only for now." }),
+};
 
 /**
  * Maps an upstream failure onto a status the control API is allowed to return.
@@ -1172,6 +1211,9 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
   const streamListeners = new Set<(event: StreamEvent) => void>();
   const { accounts, store, bus, limiter, secrets, presence, connectPipeline } = options;
   let settings = options.settings;
+  // Absent means unsupported, which is what every non-Windows run and every test gets. Nothing in
+  // this file may reach the registry directly; see `StartupControl`.
+  const startup = options.startup ?? UNSUPPORTED_STARTUP;
 
   /**
    * The plugin host, or a refusal.
@@ -3548,8 +3590,28 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       };
     },
 
+    /*
+     * Settings, plus the two fields that are not settings.
+     *
+     * `startWithWindows` is *not* in `settings.json` and deliberately so. The truth is a registry
+     * value the user can clear from Task Manager's Startup tab without telling us, so a copy on
+     * disk would be a second answer that is wrong whenever the two disagree — and the one on disk
+     * is the one the UI would draw. It is read live here and written straight through below.
+     *
+     * `startWithWindowsSupported` rides along so the UI can explain *why* the toggle is unavailable
+     * rather than showing a dead switch: from source the executable is `bun.exe`, and registering
+     * that would produce an autostart that silently does nothing.
+     */
     async getSettings(): Promise<WireSettings> {
-      return settings as unknown as WireSettings;
+      return {
+        ...settings,
+        startWithWindows: startup.supported && startup.isEnabled(),
+        startWithWindowsSupported: startup.supported,
+        startWithWindowsReason: startup.reason,
+        installSupported: options.install !== undefined,
+        installed: options.install?.status().installed ?? false,
+        installPath: options.install?.status().path ?? null,
+      } as unknown as WireSettings;
     },
 
     async updateSettings(patch: SettingsPatch): Promise<WireSettings> {
@@ -3570,7 +3632,49 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
 
       settings = next;
       await options.onSettingsSaved(next);
-      return next as unknown as WireSettings;
+
+      /*
+       * The registry write, after the file write and outside `next`.
+       *
+       * Kept out of the settings object on purpose: putting it there would persist it to
+       * `settings.json` and create the second source of truth `getSettings` explains. A patch
+       * asking for something the build cannot do is ignored rather than refused — the toggle is
+       * already disabled in the UI, and 400-ing a settings save because one field of it was
+       * unavailable would lose the rest of the patch with it.
+       */
+      let startupReason = startup.reason;
+      if (typeof patch.startWithWindows === "boolean" && startup.supported) {
+        const result = startup.setEnabled(patch.startWithWindows);
+        // The refusal replaces the standing reason, so the UI can say "vrc.zip is in your Downloads
+        // folder" against the switch that just refused to move rather than leaving it blank.
+        if (!result.ok) startupReason = result.reason;
+      }
+
+      return {
+        ...next,
+        startWithWindows: startup.supported && startup.isEnabled(),
+        startWithWindowsSupported: startup.supported,
+        startWithWindowsReason: startupReason,
+        installSupported: options.install !== undefined,
+        installed: options.install?.status().installed ?? false,
+        installPath: options.install?.status().path ?? null,
+      } as unknown as WireSettings;
+    },
+
+    /*
+     * The install action. Delegated straight through to `os/install.ts`, which is injectable for
+     * the same reason `startup` is: nothing under `wiring/` may copy files into the user's
+     * `%LOCALAPPDATA%` or write to the registry as a side effect of a test running.
+     */
+    async installLocally(request) {
+      if (options.install === undefined) {
+        return {
+          ok: false,
+          reason: "Installing to a permanent location is Windows only for now.",
+          path: null,
+        };
+      }
+      return await options.install.run(request);
     },
 
     streamClientCount(): number {

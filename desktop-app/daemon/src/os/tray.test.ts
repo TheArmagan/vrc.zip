@@ -97,6 +97,7 @@ describe("startTray", () => {
         launchUrl: "http://127.0.0.1:7773/",
         githubUrl: "https://example.invalid",
         ownsConsole: false,
+        startup: null,
         open: () => undefined,
         openExternal: () => undefined,
         onExit: () => undefined,
@@ -128,6 +129,7 @@ describe("startTray", () => {
         launchUrl: "http://127.0.0.1:7773/",
         githubUrl: "https://example.invalid",
         ownsConsole: false,
+        startup: null,
         open: (url) => {
           opened.push(url);
         },

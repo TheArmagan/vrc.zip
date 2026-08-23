@@ -1,3 +1,4 @@
+import { dirname } from "node:path";
 import { APP_NAME, APP_VERSION, REPOSITORY_URL } from "@vrcz/shared";
 import { startDaemon } from "./app.ts";
 import {
@@ -11,15 +12,25 @@ import {
 } from "./cli/banner.ts";
 import {
   applyWindowIcon,
+  askConsoleYesNo,
   claimConsole,
   enableAnsiColour,
   onConsoleKey,
   setConsoleTitle,
+  setConsoleVisible,
+  shouldStartHidden,
 } from "./os/console.ts";
+import { installLocally, installTarget, isInstalled } from "./os/install.ts";
 import { openExternalUrl, openUrl, shouldOpenBrowser } from "./os/open-url.ts";
-import { startTray } from "./os/tray.ts";
+import {
+  createStartupControl,
+  repairStartupEntry,
+  setStartupEnabled,
+  startupLocation,
+} from "./os/startup.ts";
+import { shouldShowTray, startTray } from "./os/tray.ts";
 import { isPackaged } from "./servers/embedded-ui.ts";
-import { needsFirstRun } from "./settings.ts";
+import { needsFirstRun, saveSettings } from "./settings.ts";
 
 /**
  * Daemon entry point.
@@ -57,6 +68,25 @@ async function runSubcommand(argv: readonly string[]): Promise<number | null> {
     return 0;
   }
 
+  /*
+   * `--uninstall`, answered here rather than by starting a daemon.
+   *
+   * This is what the `UninstallString` in Installed apps runs, so Windows invokes it directly and
+   * expects a process that does the work and exits. Answered alongside `--help` and `--version`, and
+   * for the same reason those are: it must not create a state directory, bind a port or touch the
+   * credential store on its way to removing the app.
+   */
+  if (argv.includes("--uninstall") || command === "uninstall") {
+    const { uninstallLocally } = await import("./os/install.ts");
+    const result = await uninstallLocally();
+    if (result.reason !== null) console.log(result.reason);
+    else if (result.path !== null) {
+      console.log(`Removed vrc.zip. ${result.path} goes when this process exits.`);
+      console.log("Your accounts, settings and feed are untouched in %APPDATA%\vrc.zip.");
+    }
+    return result.ok ? 0 : 1;
+  }
+
   if (command === "create-plugin") {
     const target = rest.find((arg) => !arg.startsWith("-"));
     if (target === undefined) {
@@ -78,6 +108,123 @@ async function runSubcommand(argv: readonly string[]): Promise<number | null> {
   }
 
   return null;
+}
+
+/**
+ * Whether to make the first-run install offer at all.
+ *
+ * Five conditions, and each one is a way this could otherwise be obnoxious.
+ *
+ * `--hidden` is the important one: that is the flag the autostart entry passes, so a machine
+ * signing in would otherwise stop and wait for a keypress nobody is there to give. The prompt would
+ * also be invisible, because that run has just hidden its own console.
+ *
+ * `installOffered` means the question has been asked once and answered. Declining is an answer, and
+ * an offer that comes back every start is nagware — the settings screen keeps the same actions
+ * available for whenever somebody changes their mind.
+ *
+ * The location check is what makes this an offer rather than an advert. A build already sitting in
+ * a sensible folder does not need a copy of itself somewhere else, so the only runs that get asked
+ * are the ones with a real problem: Downloads, and the temp folder Explorer extracts a zip into.
+ */
+export function shouldOfferInstall(
+  argv: readonly string[],
+  alreadyOffered: boolean,
+  packaged: boolean = isPackaged(),
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  if (platform !== "win32" || !packaged) return false;
+  if (argv.includes("--hidden")) return false;
+  if (alreadyOffered) return false;
+  if (isInstalled()) return false;
+  return !startupLocation().ok;
+}
+
+/**
+ * Records that the offer was made, in the settings object *and* on disk.
+ *
+ * Mutated in place rather than replaced, and that is load-bearing rather than lazy: `startDaemon`
+ * hands the very same object to the control API, which keeps its own reference to it. Writing a new
+ * object here would leave that copy still saying `installOffered: false`, and the first settings
+ * save from the UI would write that stale `false` back over this — so the offer would come round
+ * again on the next start, having been answered.
+ */
+async function rememberOffered(daemon: Awaited<ReturnType<typeof startDaemon>>): Promise<void> {
+  daemon.settings.installOffered = true;
+  await saveSettings(daemon.settings);
+}
+
+/**
+ * Offers to install, and asks the two follow-up questions only if the first is answered yes.
+ *
+ * The Start menu shortcut is not one of the questions. It is what makes vrc.zip come up when
+ * somebody types its name, which is most of what "install it properly" means to the person being
+ * asked — offering to skip it would be offering to do the job badly. The desktop shortcut is a
+ * matter of taste, so that one is asked.
+ *
+ * A null answer means there was no console to ask in, and nothing is recorded: the offer has not
+ * been made, so it is still owed. Only a real answer sets `installOffered`.
+ */
+async function offerInstall(daemon: Awaited<ReturnType<typeof startDaemon>>): Promise<void> {
+  const target = installTarget();
+  console.log("");
+  console.log(
+    attention(`vrc.zip is running from a folder Windows cleans up: ${dirname(process.execPath)}`),
+  );
+  console.log(
+    note(
+      target === null
+        ? "Move it somewhere permanent to keep it."
+        : `It can copy itself to ${dirname(target)}, add a Start menu entry so you can search for it, and keep working from there.`,
+    ),
+  );
+
+  const install = await askConsoleYesNo("Install vrc.zip there now?");
+  if (install === null) return;
+
+  if (!install) {
+    await rememberOffered(daemon);
+    console.log(note("Not installing. You can do it later from Settings."));
+    return;
+  }
+
+  const desktop = (await askConsoleYesNo("Add a desktop shortcut?", false)) ?? false;
+
+  const result = await installLocally({ desktopShortcut: desktop, startMenuShortcut: true });
+  if (!result.ok) {
+    // Not recorded as offered: the question was answered yes and we failed to act on it, so the
+    // user is owed the offer again rather than being told to go find it in settings.
+    console.log(attention(result.reason ?? "Could not install vrc.zip."));
+    return;
+  }
+
+  console.log(note(`Installed to ${String(result.path)}.`));
+  if (result.desktopShortcut) console.log(note("Added a desktop shortcut."));
+  if (result.startMenuShortcut) {
+    console.log(note("Added it to the Start menu, so Windows search can find it."));
+  }
+
+  /*
+   * The last question, and it is asked *after* the copy rather than before.
+   *
+   * Before the copy the honest answer would have to be "no, and here is why not" — an autostart
+   * from Downloads is exactly what `os/startup.ts` refuses. Afterwards there is somewhere for the
+   * entry to point, so the question is a real one.
+   */
+  const autostart = await askConsoleYesNo("Start vrc.zip when Windows starts?");
+  if (autostart === false && result.startWithWindows) {
+    // `installLocally` registers it, so declining here is an undo rather than a no-op.
+    setStartupEnabled(false);
+    console.log(note("Left it out of startup."));
+  } else if (autostart === true) {
+    if (result.startWithWindows) console.log(note("It will start with Windows."));
+    // The reason from the install carries the *specific* refusal, which is worth more than a
+    // generic failure line: it is the difference between "could not" and "could not, because".
+    else console.log(attention(result.reason ?? "Could not register it to start with Windows."));
+  }
+
+  await rememberOffered(daemon);
+  console.log(note("Next time, start vrc.zip from the Start menu rather than this copy."));
 }
 
 async function main(): Promise<void> {
@@ -116,7 +263,10 @@ async function main(): Promise<void> {
    */
   if (console_ !== null && colour) forceColour();
 
-  const code = await runSubcommand(process.argv.slice(2));
+  // One copy, read by four flags now: `--open`/`--no-open`, `--tray`/`--no-tray` and `--hidden`.
+  const argv = process.argv.slice(2);
+
+  const code = await runSubcommand(argv);
   if (code !== null) {
     process.exit(code);
   }
@@ -137,7 +287,7 @@ async function main(): Promise<void> {
     }),
   );
 
-  if (shouldOpenBrowser(process.argv.slice(2), isPackaged())) {
+  if (shouldOpenBrowser(argv, isPackaged())) {
     // Best-effort by contract: a machine with no default browser still has a running daemon and a
     // URL on screen, which is a working app, not a failure to report.
     const opened = await openUrl(daemon.launchUrl);
@@ -155,6 +305,21 @@ async function main(): Promise<void> {
   }
 
   for (const line of daemon.startupNotes) console.log(note(line));
+
+  /*
+   * The first-run install offer.
+   *
+   * Before the `O`/`F` key listener, and that ordering is not cosmetic: `onConsoleKey` is one reader
+   * over one console handle, and two of them running at once would race for the same keypresses.
+   * The prompt attaches its own listener and takes it down before this returns.
+   *
+   * Everything about when *not* to ask is in `shouldOfferInstall`. The short version: only a
+   * packaged build, only when it is not already installed, only where the location is a problem
+   * worth solving, and never on a run that nobody is watching.
+   */
+  if (shouldOfferInstall(argv, daemon.settings.installOffered)) {
+    await offerInstall(daemon);
+  }
 
   /*
    * Keys, for the window nobody can type a URL into.
@@ -206,27 +371,59 @@ async function main(): Promise<void> {
    * inherited a developer's terminal must not offer to hide it, and the tray builds no Hide item
    * when the window is not ours.
    */
-  const tray = startTray({
-    title: `${APP_NAME} ${APP_VERSION}`,
-    launchUrl: daemon.launchUrl,
-    githubUrl: REPOSITORY_URL,
-    ownsConsole: console_ !== null,
-    open: (url) => {
-      void openUrl(url);
-    },
-    // A second opener, not the same one: `openUrl` refuses anything off loopback because the URL it
-    // is normally handed carries a session token, and "Open on GitHub" going through it is a menu
-    // item that quietly does nothing.
-    openExternal: (url) => {
-      void openExternalUrl(url);
-    },
-    // Routed through the same shutdown path a signal takes, rather than `process.exit`: the exit
-    // has to flush queued feed rows and close SQLite, and "quit from the tray" is not a reason to
-    // skip that.
-    onExit: () => {
-      shutdown("tray exit");
-    },
-  });
+  const startup = createStartupControl(process.platform, isPackaged());
+
+  /*
+   * An entry that has drifted is repaired before anything reads it.
+   *
+   * vrc.zip is a single file people move around, and a `Run` value still naming last month's folder
+   * is an autostart that silently does nothing at every sign-in. Only an entry that already exists
+   * is touched, so this can never turn the feature on by itself.
+   */
+  if (startup.supported && repairStartupEntry()) {
+    console.log(note("repaired the Windows startup entry, which pointed at an old location"));
+  }
+
+  const tray = shouldShowTray(argv)
+    ? startTray({
+        title: `${APP_NAME} ${APP_VERSION}`,
+        launchUrl: daemon.launchUrl,
+        githubUrl: REPOSITORY_URL,
+        ownsConsole: console_ !== null,
+        startup: startup.supported ? startup : null,
+        open: (url) => {
+          void openUrl(url);
+        },
+        // A second opener, not the same one: `openUrl` refuses anything off loopback because the URL
+        // it is normally handed carries a session token, and "Open on GitHub" going through it is a
+        // menu item that quietly does nothing.
+        openExternal: (url) => {
+          void openExternalUrl(url);
+        },
+        // Routed through the same shutdown path a signal takes, rather than `process.exit`: the exit
+        // has to flush queued feed rows and close SQLite, and "quit from the tray" is not a reason
+        // to skip that.
+        onExit: () => {
+          shutdown("tray exit");
+        },
+      })
+    : null;
+
+  /*
+   * `--hidden`, last, once there is an icon to get the window back from.
+   *
+   * The order is the safety property rather than tidiness: `shouldStartHidden` refuses the flag
+   * outright when the tray did not start, and the refusal is said out loud while there is still a
+   * console to say it in. This is the flag the startup entry passes, so the failure mode it guards
+   * against is a machine that boots into a vrc.zip with no window, no icon and no way back.
+   */
+  if (argv.includes("--hidden") && tray === null) {
+    console.log(
+      note("--hidden needs the tray icon to put the window back, and there is none. Ignoring it."),
+    );
+  } else if (shouldStartHidden(argv, tray !== null)) {
+    setConsoleVisible(false);
+  }
 
   let stopping = false;
   const shutdown = (signal: string): void => {

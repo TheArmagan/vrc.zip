@@ -4138,6 +4138,48 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      opened with. That one is in §Gotchas, because it was reality contradicting an assumption rather
      than a call made in advance.
 
+236. **vrc.zip installs itself, and the whole flow hangs off one refusal.** The tray grew a "Start
+     with Windows" item, which is one `REG_SZ` under `HKCU\…\CurrentVersion\Run` holding
+     `"<exe>" --hidden --no-open`. That much is ordinary. The rest of it comes from what happens when
+     the person ticking it is running vrc.zip out of their Downloads folder, which is what people
+     actually do with a single-file app: the entry works today and is broken by the first Storage
+     Sense pass, silently, months later, with nothing to connect the two. So `startupLocation`
+     refuses Downloads and the temp folder Explorer extracts a zip into — and a refusal with no way
+     forward is a dead end, which is where `os/install.ts` came from.
+
+     The chain, in the order a user meets it: first run from a bad folder offers to install; yes
+     copies the executable to `%LOCALAPPDATA%\vrc.zip`, writes a Start menu shortcut (which *is* the
+     "searchable in Windows" feature, since that folder is what Search indexes), optionally a desktop
+     one, and registers an Installed apps entry whose `UninstallString` is `"<exe>" --uninstall`;
+     then it asks about autostart, which is only a real question once there is somewhere sound to
+     point it. The same actions live on the settings screen for anybody who declined.
+
+     Decisions inside that are not obvious:
+
+     - **The Downloads folder is found by `FOLDERID_Downloads`, not by looking for the word.** It is
+       `Indirilenler` on a Turkish install and `Téléchargements` on a French one. A name comparison
+       would have shipped a guard that protects English installs only, which is worse than no guard
+       because it would look tested.
+     - **`startWithWindows` is not in `settings.json`.** The registry is the truth and the user can
+       clear it from Task Manager, so a copy on disk would be a second answer that is wrong exactly
+       when the two disagree — and the wrong one is the one the UI would draw. It is read live on
+       every `GET /api/settings` and written straight through on `PUT`.
+     - **Shortcuts are PowerShell; the tray icon is FFI.** Not inconsistent: a `.lnk` is COM
+       (`IShellLink` + `IPersistFile`, vtable slots by index), and the trade that made FFI right for
+       the tray runs the other way here. The tray needed a PowerShell host alive all session, which
+       would have doubled idle memory to draw a 16px square. This runs once and exits.
+     - **`repairStartupEntry` only repairs what is actually broken.** The first version rewrote the
+       entry whenever it did not name the running executable, which is fine until the installer
+       exists and then is a bug: run the leftover Downloads copy once and it "repairs" a working
+       entry into a broken one. It now touches the entry only when the file it names is gone.
+     - **Uninstall does not delete the user's data.** `%APPDATA%\vrc.zip` holds the credential store,
+       the database and settings. Removing the app is not a statement that the data was a mistake,
+       and an uninstall that silently destroys a signed-in account's secrets is one nobody can safely
+       try.
+     - **`--hidden` refuses to hide without a tray icon.** It is the flag the autostart entry passes,
+       so the failure it guards against is a machine that boots into a vrc.zip with no window, no
+       icon and no way back short of Task Manager.
+
 ---
 
 ## Gotchas
@@ -4145,6 +4187,20 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **One more route tipped the control API's Hono chain into "type instantiation is excessively
+  deep".** `daemon/src/servers/control.ts` builds its app as a single chained
+  `new Hono().get(...).post(...)`, and Hono types that by accumulating every route into one growing
+  generic. Adding `POST /api/settings/install` to the end of it was enough for `tsc` to give up —
+  TS2589, pointing at the new route, with nothing wrong with the new route. Two things were needed
+  and only the second one worked: registering it as a statement rather than a link in the chain is
+  not enough, because `app` already carries the accumulated generic and calling `.post` on it
+  instantiates it again. Widening to a bare `Hono` first (`const plain: Hono = app`) erases it, and
+  the route registers for free. Also worth knowing: `c.json` of a *recursive* type (`JsonValue`) is
+  what pushed it over — giving the response a concrete interface was half the fix, and better
+  documentation than `JsonValue` was anyway. Nothing consumes this app's RPC type, so the widening
+  costs nothing; a file that did use `hc<ControlApp>` end-to-end would have to split the chain
+  instead.
 
 - **A tray icon cannot be driven from `PeekMessageW` alone; the shell's clicks are *sent*, not
   posted.** `daemon/src/os/tray.ts` was written to avoid handing Windows a function pointer into

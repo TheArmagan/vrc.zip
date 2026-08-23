@@ -1088,6 +1088,7 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
       settings = { ...settings, ...patch };
       return settings;
     },
+    installLocally: async () => ({ ok: false, reason: "not on this platform", path: null }),
     subscribeEvents: (listener) => {
       seen.listeners.push(listener);
       return () => {

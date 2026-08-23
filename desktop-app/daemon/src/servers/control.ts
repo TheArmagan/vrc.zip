@@ -704,6 +704,22 @@ export interface UserBatch {
 export const MAX_USER_IDS = 80;
 
 /**
+ * What `POST /api/settings/install` answers with.
+ *
+ * Spelled out rather than typed as `JsonValue`, which is what every other opaque payload here uses.
+ * `JsonValue` is recursive, and `c.json` of a recursive type on top of this file's route chain is
+ * enough to tip `tsc` into "type instantiation is excessively deep" — a concrete shape costs
+ * nothing to instantiate and documents the response, which was worth writing down anyway.
+ */
+export interface InstallReport {
+  readonly ok: boolean;
+  /** What went wrong or what is still not done, in a sentence fit to show. Null when all is well. */
+  readonly reason: string | null;
+  /** Where it now lives. Null when it did not get that far. */
+  readonly path: string | null;
+}
+
+/**
  * Settings are deliberately opaque here. The control API's job is to hand them to the UI and hand
  * a patch back; the schema belongs to whoever owns `settings.json`.
  */
@@ -1542,6 +1558,17 @@ export interface ControlDeps {
   getSettings(): Promise<Settings>;
   /** Merges the patch and resolves to the settings as they now stand. */
   updateSettings(patch: SettingsPatch): Promise<Settings>;
+  /**
+   * Copies vrc.zip somewhere permanent, adds its shortcuts, and registers it to start with Windows.
+   *
+   * A route rather than a settings field because it is an action with a result to report, not a
+   * value to store — and because the thing it changes is the filesystem, which no amount of
+   * `PUT /api/settings` would describe.
+   */
+  installLocally(options: {
+    desktopShortcut: boolean;
+    startMenuShortcut: boolean;
+  }): Promise<InstallReport>;
 
   /** The retention config, plus a dry run of what the next pass would delete. */
   getRetention(): Promise<RetentionSettings>;
@@ -2818,6 +2845,26 @@ export function createControlApp({ port, deps, appApi, token }: ControlAppOption
       }
       return c.json({ error: "internal_error", message: String(error) }, 500);
     });
+
+  /*
+   * Registered off the chain, and that is a compiler constraint rather than a preference.
+   *
+   * Hono types a chained builder by accumulating every route into one generic, and this file's
+   * chain is long enough that adding one more link tips `tsc` into "type instantiation is
+   * excessively deep". Widening to a bare `Hono` first erases that accumulated generic, so
+   * registering the route costs nothing to instantiate. Nothing consumes this app's RPC type, so
+   * the only thing thrown away is the thing that was breaking the compile.
+   */
+  const plain: Hono = app;
+  plain.post("/api/settings/install", async (c) => {
+    const body = (await readJsonObject(c.req.raw)) ?? {};
+    return c.json(
+      await deps.installLocally({
+        desktopShortcut: body.desktopShortcut !== false,
+        startMenuShortcut: body.startMenuShortcut !== false,
+      }),
+    );
+  });
 
   return app;
 }

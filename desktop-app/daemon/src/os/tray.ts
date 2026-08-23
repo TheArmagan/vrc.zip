@@ -73,6 +73,10 @@ const NOTIFYICON_VERSION_4 = 4;
 const NIF_MESSAGE = 0x0001;
 const NIF_ICON = 0x0002;
 const NIF_TIP = 0x0004;
+/** Turns the next `NIM_MODIFY` into a balloon rather than an edit. */
+const NIF_INFO = 0x0010;
+/** `NIIF_WARNING`: the yellow triangle. What a refusal is. */
+const NIIF_WARNING = 0x0002;
 
 /** Our own notification message. `WM_APP` and above are reserved for exactly this. */
 const WM_TRAY = 0x8000 + 1;
@@ -115,6 +119,10 @@ const MSGFLT_ALLOW = 1;
 
 const MF_STRING = 0x0000;
 const MF_SEPARATOR = 0x0800;
+/** Draws the tick. The item is still `MF_STRING`; this is an extra bit, not another kind. */
+const MF_CHECKED = 0x0008;
+/** Greyed and unclickable, for an item that is worth *showing* as unavailable. */
+const MF_GRAYED = 0x0001;
 const TPM_RIGHTBUTTON = 0x0002;
 /** Hands the chosen command back as the return value instead of posting `WM_COMMAND`. */
 const TPM_RETURNCMD = 0x0100;
@@ -124,6 +132,7 @@ const ID_OPEN = 1;
 const ID_CONSOLE = 2;
 const ID_GITHUB = 3;
 const ID_EXIT = 4;
+const ID_STARTUP = 5;
 
 /* -------------------------------------------------------------------------------------------- */
 /* Structs                                                                                        */
@@ -151,8 +160,13 @@ const NID = {
   uCallbackMessage: 24,
   hIcon: 32,
   szTip: 40,
+  /** The balloon's body, 256 `WCHAR`s. */
+  szInfo: 304,
   /** Union of `uTimeout` and `uVersion`; the latter is what `NIM_SETVERSION` reads. */
   uVersion: 816,
+  /** The balloon's title, 64 `WCHAR`s. */
+  szInfoTitle: 820,
+  dwInfoFlags: 948,
 } as const;
 
 /** UTF-16LE, NUL-terminated. Every `…W` entry point wants this. */
@@ -380,6 +394,23 @@ function load(): TrayLibs | null {
 /* The tray                                                                                       */
 /* -------------------------------------------------------------------------------------------- */
 
+/**
+ * The "Start with Windows" item's two halves.
+ *
+ * `isEnabled` is read every time the menu opens rather than cached, because the registry is the
+ * truth and the user can clear it from Task Manager's Startup tab without telling us. A menu that
+ * remembers what it last wrote is a tick that lies.
+ */
+export interface TrayStartup {
+  isEnabled(): boolean;
+  /**
+   * Reports rather than throws. A refusal comes back with a sentence, which the tray shows as a
+   * balloon — the alternative is a menu item that unticks itself with no explanation, and "vrc.zip
+   * is in your Downloads folder" is exactly the kind of thing that needs saying out loud.
+   */
+  setEnabled(enabled: boolean): { ok: boolean; reason: string | null };
+}
+
 export interface TrayOptions {
   /** Shown as the hover tooltip, and as the disabled first line of the menu. */
   readonly title: string;
@@ -393,6 +424,14 @@ export interface TrayOptions {
    * all — hiding a developer's terminal out from under them is not a feature.
    */
   readonly ownsConsole: boolean;
+  /**
+   * "Start with Windows", or null to leave the item out entirely.
+   *
+   * Injected rather than called directly for the same reason `open` is: this file should not be
+   * able to write to the registry, and a test that opens a menu should not be able to either. See
+   * `os/startup.ts`, which is where the value actually lives.
+   */
+  readonly startup: TrayStartup | null;
   /** How the tray opens the launch URL. Injected so a test does not launch a browser. */
   open(url: string): void;
   /**
@@ -410,6 +449,25 @@ export interface TrayOptions {
 export interface Tray {
   /** Removes the icon and stops the pump. Safe to call twice. */
   stop(): void;
+}
+
+/**
+ * Whether to put an icon in the notification area: `--tray` / `--no-tray`, defaulting to on.
+ *
+ * The same shape as `shouldOpenBrowser`, including `--no-tray` winning over `--tray` — a flag that
+ * turns something off should not depend on the order a script happened to append them in. The
+ * default differs though, and deliberately: a browser tab is an interruption and an icon is not, so
+ * this is on everywhere it works rather than only in a packaged build. Off it goes for anyone who
+ * wants a daemon with no desktop presence at all, which is a reasonable thing to want and currently
+ * takes a code edit.
+ */
+export function shouldShowTray(
+  argv: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  if (platform !== "win32") return false;
+  if (argv.includes("--no-tray")) return false;
+  return true;
 }
 
 /**
@@ -561,6 +619,26 @@ export function startTray(options: TrayOptions): Tray | null {
     return found === null || found === 0 ? null : found;
   };
 
+  /**
+   * Says something in a balloon from our own icon.
+   *
+   * A balloon rather than `notifyDesktop`, which would be the other option: this is a reply to a
+   * click the user just made on this icon, so it belongs on this icon rather than arriving as a
+   * separate toast from a PowerShell process a second later.
+   *
+   * `uFlags` is put back afterwards, and that is not tidiness. `NIF_INFO` is sticky — it lives in
+   * the same struct the tooltip and the icon are edited through, so leaving it set turns the next
+   * ordinary `NIM_MODIFY` into a repeat of this balloon.
+   */
+  const balloon = (title: string, body: string): void => {
+    writeFixedWide(dataView, NID.szInfoTitle, title, 64);
+    writeFixedWide(dataView, NID.szInfo, body, 256);
+    dataView.setUint32(NID.dwInfoFlags, NIIF_WARNING, true);
+    dataView.setUint32(NID.uFlags, NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_INFO, true);
+    shell32.Shell_NotifyIconW(NIM_MODIFY, data);
+    dataView.setUint32(NID.uFlags, NIF_MESSAGE | NIF_ICON | NIF_TIP, true);
+  };
+
   const showMenu = (): void => {
     const menu = user32.CreatePopupMenu();
     if (menu === null || menu === 0) return;
@@ -576,6 +654,33 @@ export function startTray(options: TrayOptions): Tray | null {
           wide(visible ? "Hide console" : "Show console"),
         );
       }
+      /*
+       * The tick is read from the registry every time this menu is built.
+       *
+       * `isEnabled` can throw only if the injected implementation does; it is wrapped because a
+       * menu that fails to open is a worse answer than a menu whose tick is missing, and this runs
+       * on the path a right-click takes.
+       */
+      if (options.startup !== null) {
+        let enabled = false;
+        try {
+          enabled = options.startup.isEnabled();
+        } catch {
+          enabled = false;
+        }
+        user32.AppendMenuW(
+          menu,
+          MF_STRING | (enabled ? MF_CHECKED : 0),
+          ID_STARTUP,
+          wide("Start with Windows"),
+        );
+      } else {
+        // Shown greyed rather than hidden. "Can this start with Windows?" is a question people come
+        // to this menu with, and an item that is missing reads as an app that cannot do it at all,
+        // where a greyed one reads as "not from here" — which is what running from source means.
+        user32.AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, wide("Start with Windows"));
+      }
+
       user32.AppendMenuW(menu, MF_STRING, ID_GITHUB, wide("Open on GitHub"));
       user32.AppendMenuW(menu, MF_SEPARATOR, 0, null);
       user32.AppendMenuW(menu, MF_STRING, ID_EXIT, wide("Exit vrc.zip"));
@@ -607,6 +712,19 @@ export function startTray(options: TrayOptions): Tray | null {
           const window = consoleWindow();
           if (window !== null) {
             user32.ShowWindow(window, user32.IsWindowVisible(window) !== 0 ? SW_HIDE : SW_SHOW);
+          }
+          break;
+        }
+        case ID_STARTUP: {
+          const startup = options.startup;
+          if (startup === null) break;
+          // Read again rather than reusing what the tick was drawn from: the menu may have been
+          // open for a while, and the registry is the truth.
+          const result = startup.setEnabled(!startup.isEnabled());
+          // A refusal that shows nothing is a checkbox that will not tick and will not say why,
+          // which is the single most annoying thing a settings control can do.
+          if (!result.ok && result.reason !== null) {
+            balloon("vrc.zip cannot start with Windows", result.reason);
           }
           break;
         }

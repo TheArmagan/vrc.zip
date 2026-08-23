@@ -41,6 +41,19 @@ export interface Settings {
    * error.
    */
   resolveAvatarIds: boolean;
+  /**
+   * Whether the first-run "shall I install myself properly?" offer has been made.
+   *
+   * A remembered decision rather than a preference, and it is here rather than in the registry
+   * because it is about this *installation's* conversation with the user, not about Windows. Note
+   * what it does **not** record: whether they said yes. Somebody who declined has declined, and an
+   * offer that comes back every start is nagware. The settings screen keeps the same actions
+   * available for whenever they change their mind.
+   *
+   * Set only when the question was actually asked and answered. A daemon started by Windows at
+   * sign-in has no console to ask in, and must not burn the offer by failing to make it.
+   */
+  installOffered: boolean;
 }
 
 /** See `daemon/src/forward-proxy/`. */
@@ -73,6 +86,7 @@ export const DEFAULT_SETTINGS: Settings = {
   logDirectories: [],
   openBrowserOnStart: true,
   resolveAvatarIds: true,
+  installOffered: false,
 };
 
 /** True until the user has completed first-run setup. The UI blocks on this. */
@@ -105,6 +119,10 @@ export async function loadSettings(env?: NodeJS.ProcessEnv): Promise<Settings> {
         typeof parsed.resolveAvatarIds === "boolean"
           ? parsed.resolveAvatarIds
           : DEFAULT_SETTINGS.resolveAvatarIds,
+      installOffered:
+        typeof parsed.installOffered === "boolean"
+          ? parsed.installOffered
+          : DEFAULT_SETTINGS.installOffered,
     };
   } catch {
     // A corrupt settings file must not stop the daemon booting — the user would have no UI in

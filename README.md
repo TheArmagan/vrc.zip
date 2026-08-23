@@ -45,54 +45,47 @@ Signing an account in does not launch VRChat, and quitting VRChat does not sign 
 never stored; the session cookie is, encrypted, and reused so VRChat is asked for a new session as
 rarely as possible.
 
-![Accounts](docs/screenshots/accounts.jpg)
+![Accounts](docs/renders/accounts.jpg)
 
 ## What you get
 
 ### Live sessions
 
-Every VRChat client running on this machine, read out of its log file: who it is signed in as, the
-world, the instance, and who has walked in and out since vrc.zip started watching.
+![Live sessions](docs/renders/live-sessions.jpg)
 
 Two clients on two accounts show up as two sessions. A client signed into an account vrc.zip does not
-manage still shows up, just without a name attached.
-
-![Live sessions](docs/screenshots/live-sessions.jpg)
+manage still shows up, just without a name attached, because a session is the unit here and an
+account is not.
 
 ### Friends
 
-All accounts in one list, grouped by status, with the world and instance each person is in. Presence
-comes off VRChat's own websocket, so a friend moving worlds lands in front of you rather than on the
-next poll.
+![Friends](docs/renders/friends.jpg)
 
-From a row you can invite them to where one of your clients already is, ask them for an invite, boop
-them, or open the profile and keep a private note on it. Where VRChat allows a join, there is a join
-button, and it self-invites instead of deep-linking when a client is already running on that account.
-
-![Friends](docs/screenshots/friends.jpg)
+Presence comes off VRChat's own websocket rather than a poll, so a friend moving worlds lands in
+front of you as it happens. The join button self-invites instead of opening a `vrchat://` link when a
+client is already running on that account, since a second client on one account fights the first over
+the game.
 
 ### Feed
 
-One searchable history across every account: friends coming online, moving worlds, notifications,
-game log lines, group activity. Filter by kind, by account, or by text.
+![Feed](docs/renders/feed.jpg)
 
 Rows link to the thing they mention. Profiles, worlds, groups and avatars open in the same panel with
 a back stack, so following a name three levels deep still has a way back.
 
-![Feed](docs/screenshots/feed.jpg)
+### Game log
 
-### Game log and notifications
+![Game log](docs/renders/game-log.jpg)
 
-The game log is the raw thing, parsed: joins, leaves, world changes, instance changes, per client.
-Notifications are friend requests, invites, group announcements and events, from every account, in
-one inbox. Marking one seen clears the count here and leaves VRChat's own inbox untouched.
+The parser reads the file VRChat is still writing to, by byte offset, so a running client is never
+locked or interrupted. Every live log is tailed at once.
 
-<table>
-<tr>
-<td width="50%"><img src="docs/screenshots/game-log.jpg" alt="Game log"></td>
-<td width="50%"><img src="docs/screenshots/notifications.jpg" alt="Notifications"></td>
-</tr>
-</table>
+### Notifications
+
+![Notifications](docs/renders/notifications.jpg)
+
+Everything that arrives while the daemon is running is written to the feed as well, so clearing the
+inbox does not lose the history.
 
 ### Everything by keyboard
 
@@ -105,12 +98,9 @@ something that is not an id, it says so instead of guessing.
 
 ### History you control
 
-Every kind of event has its own retention window, and you can see how many rows each one is holding
-before you change it. Expiring events are folded into daily counts first, so the shape of your
-history survives even when the individual rows do not. Notes, friend history, the avatar log and the
-user cache are never deleted.
+![History settings](docs/renders/history.jpg)
 
-![History settings](docs/screenshots/history.jpg)
+Notes, friend history, the avatar log and the user cache are outside all of it and are never deleted.
 
 ## Let your other apps use it
 
@@ -118,40 +108,30 @@ vrc.zip can stand in front of VRChat for other local apps, VRCX included. The ap
 always does, except the credentials it ends up holding are vrc.zip's, not VRChat's, and you decide
 what it may do with them.
 
-Point a proxy-aware app at `http://127.0.0.1:7776` and open that URL in a browser for the setup
-steps, including the certificate it needs to trust.
-
-![Forward proxy setup](docs/screenshots/forward-proxy.jpg)
+![Forward proxy setup](docs/renders/forward-proxy.jpg)
 
 When the app logs in, vrc.zip shows you who is asking and what it wants. You approve by typing the
 six-digit code into the app itself. There is no Allow button, on purpose.
 
-Afterwards, **Connected apps** is the whole picture: which account it acts as, every permission it
-holds with the risky ones marked, hourly limits you can tighten, what it has actually called
-recently, and one button that cuts it off. One more button cuts off all of them.
+![Connected apps](docs/renders/connected-apps.jpg)
 
-![Connected apps](docs/screenshots/connected-apps.jpg)
-
-An app that wants to be told rather than to ask can register a webhook and get the same events
+Revoking is immediate and takes the live event stream with it. One more button cuts off every app at
+once. An app that wants to be told rather than to ask can register a webhook and get the same events
 pushed to it. Your real VRChat session cookie never reaches any of them. It cannot leave the daemon.
 
 ## Plugins
 
-A plugin is a folder on your computer. There is no registry and no store. Install one and vrc.zip
-compiles it, scans it, and shows you what it is asking for before anything runs.
+Install one and vrc.zip compiles it, scans it, and shows you what it is asking for before any of its
+code runs.
 
-![Installing a plugin](docs/screenshots/plugin-consent.jpg)
+![Installing a plugin](docs/renders/plugin-consent.jpg)
 
 Read that warning and believe it: **a plugin runs with your account's privileges and can do anything
 you can do on this computer.** Nothing sandboxes it, nothing checks who wrote it. The permission list
 covers what it can ask vrc.zip for. It does not cover what it can do to your machine. Install
 plugins you trust.
 
-A plugin runs in its own process, on the same permissions you approved, and can draw a panel in the
-app, add commands to the palette, and subscribe to the event stream. Enable, disable and remove are
-all on one page.
-
-![Plugins](docs/screenshots/plugins.jpg)
+![Plugins](docs/renders/plugins.jpg)
 
 Writing one:
 

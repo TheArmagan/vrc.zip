@@ -3104,10 +3104,11 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      code rather than from the first draft's memory.** Two changes, one reason. The collage
      (`docs/collage.jpg`, 1600x760) is three screenshots fanned on a lighter ground, composed in a
      browser canvas and saved from the page; the ground is deliberately *not* the app's near-black,
-     because dark panels on a dark field have only their border to sit on. A screenshot pinned under
-     every heading was also the whole of the first draft's layout, so the two log-shaped screens now
-     share a two-column HTML table and the keyboard section carries no image at all, which is what
-     gives the page a rhythm rather than a column of equal slabs. The feature pass came from reading
+     because dark panels on a dark field have only their border to sit on. Every screenshot is now
+     rendered the same way into `docs/renders/`: the shot on that ground, under an amber rule, a
+     title and the sentence saying what the screen is for, so the image carries its own caption and
+     the prose beneath it can add something instead of repeating it. Both pages live in the
+     scratchpad, not the repo, because they run once per screenshot set. The feature pass came from reading
      `control.ts`'s route table, `user-actions.ts` and the command registry, and it found four things
      the README had never mentioned: the palette on `Ctrl+Shift+P`, the paste-an-id front door on
      `Ctrl+Shift+V`, the social actions and per-user notes, and webhooks. It also found one sentence

@@ -371,7 +371,14 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
   const social = createSocialActions({ accounts, store });
   const builtinNodes = createBuiltinNodes({ bus, social });
   const nodeProvider = new PluginNodeProvider({ host: plugins, builtins: builtinNodes });
-  const graphs = new GraphEngine({ store, bus, provider: nodeProvider });
+  const graphs = new GraphEngine({
+    store,
+    bus,
+    provider: nodeProvider,
+    // Read per execution rather than snapshotted: a secret the user changes takes effect on the
+    // next node that needs it, not on the next restart.
+    secrets: (graphId, nodeId, fieldId) => secrets.graphSecret(graphId, nodeId, fieldId),
+  });
   // Into the *same* registry a plugin's node types land in, so the palette and the type checker ask
   // one place. See `NodeRegistry.registerBuiltin`.
   plugins.registerBuiltinNodes(builtinNodes.definitions());

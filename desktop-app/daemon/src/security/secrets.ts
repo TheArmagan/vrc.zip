@@ -44,9 +44,30 @@ export interface SecretsFile {
   version: number;
   /** Keyed by VRChat user id (`usr_…`) once known, otherwise by a local id. */
   accounts: Record<string, AccountSecret>;
+  /**
+   * Values a node graph needs and the graph document must not carry — a webhook URL, a topic, a
+   * token. Keyed by {@link graphSecretKey}.
+   *
+   * **Optional, and the version was deliberately not bumped for it.** `open` refuses a payload
+   * whose version it does not know, so bumping would turn every existing install's credential store
+   * into a hard error on the next start. An absent field reads as an empty map and appears on the
+   * next flush, which is what a backwards-compatible addition looks like here.
+   */
+  graphSecrets?: Record<string, string>;
 }
 
 const EMPTY: SecretsFile = { version: VERSION, accounts: {} };
+
+/**
+ * The key one graph secret is stored under.
+ *
+ * Newlines as the separator because none of the three parts can contain one: a graph id is a uuid
+ * and the other two are node and field ids from a definition. A separator a part could contain is
+ * how two different secrets end up sharing a key.
+ */
+export function graphSecretKey(graphId: string, nodeId: string, fieldId: string): string {
+  return `${graphId}\n${nodeId}\n${fieldId}`;
+}
 
 export class SecretsError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
@@ -167,6 +188,57 @@ export class SecretsStore {
   async remove(accountId: string): Promise<void> {
     delete this.#data.accounts[accountId];
     await this.flush();
+  }
+
+  /* -- graph secrets ------------------------------------------------------- */
+
+  /**
+   * One graph secret, or undefined.
+   *
+   * The **only** reader is the graph engine, on its way to a node handler. There is deliberately no
+   * route that returns one: a secret field is write-only in the UI, so a value that went in cannot
+   * come back out through the API that put it there.
+   */
+  graphSecret(graphId: string, nodeId: string, fieldId: string): string | undefined {
+    return this.#data.graphSecrets?.[graphSecretKey(graphId, nodeId, fieldId)];
+  }
+
+  async putGraphSecret(
+    graphId: string,
+    nodeId: string,
+    fieldId: string,
+    value: string,
+  ): Promise<void> {
+    this.#data.graphSecrets ??= {};
+    this.#data.graphSecrets[graphSecretKey(graphId, nodeId, fieldId)] = value;
+    await this.flush();
+  }
+
+  async removeGraphSecret(graphId: string, nodeId: string, fieldId: string): Promise<void> {
+    if (this.#data.graphSecrets === undefined) return;
+    delete this.#data.graphSecrets[graphSecretKey(graphId, nodeId, fieldId)];
+    await this.flush();
+  }
+
+  /**
+   * Drops every secret belonging to one graph. Called when the graph is deleted.
+   *
+   * Without it, deleting a graph would leave its webhook URLs and tokens in the credential store
+   * forever, keyed to an id nothing will ever ask for again — invisible, unreachable, and still
+   * there in a file the user believes holds their accounts.
+   */
+  async removeGraphSecrets(graphId: string): Promise<void> {
+    const secrets = this.#data.graphSecrets;
+    if (secrets === undefined) return;
+    const prefix = `${graphId}\n`;
+    let removed = false;
+    for (const key of Object.keys(secrets)) {
+      if (key.startsWith(prefix)) {
+        delete secrets[key];
+        removed = true;
+      }
+    }
+    if (removed) await this.flush();
   }
 
   /**

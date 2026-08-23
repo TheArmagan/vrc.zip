@@ -18,7 +18,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { NodeDefinition, PortValues } from "@vrcz/plugin-api/nodes";
+import type { NodeConfigValues, NodeDefinition, PortValues } from "@vrcz/plugin-api/nodes";
 import {
   type GraphDocument,
   type GraphEdge,
@@ -52,7 +52,22 @@ export interface GraphEngineOptions {
   readonly sweepMs?: number;
   /** Where a failure that belongs to no run goes. Default: `console.error`. */
   readonly onError?: (message: string, error: unknown) => void;
+  /**
+   * Resolves a `secret` config field on its way to a node handler.
+   *
+   * Absent means every secret field arrives empty, which is the correct behaviour for a daemon with
+   * no credential store: a node that needs a token fails saying it has none, rather than sending a
+   * request without one.
+   */
+  readonly secrets?: GraphSecretResolver | undefined;
 }
+
+/** `(graph, node, field) -> value`, or undefined when nothing is stored. */
+export type GraphSecretResolver = (
+  graphId: string,
+  nodeId: string,
+  fieldId: string,
+) => string | undefined;
 
 /** Why a fire was not honoured. Carried on `graph.run.dropped`, because silence is the failure. */
 type DropReason = "fire_rate" | "busy" | "queue_full" | "unavailable";
@@ -67,6 +82,7 @@ export class GraphEngine {
   readonly #now: () => number;
   readonly #sweepMs: number;
   readonly #onError: (message: string, error: unknown) => void;
+  readonly #secrets: GraphSecretResolver | undefined;
   readonly #counters = new GraphCounters();
 
   /** Armed trigger instances, keyed `<graphId>:<nodeId>`, so a reload can disarm precisely. */
@@ -88,6 +104,7 @@ export class GraphEngine {
     this.#limits = { ...DEFAULT_GRAPH_LIMITS, ...options.limits };
     this.#now = options.now ?? Date.now;
     this.#sweepMs = options.sweepMs ?? DEFAULT_SWEEP_MS;
+    this.#secrets = options.secrets;
     this.#onError =
       options.onError ??
       ((message, error) => {
@@ -430,7 +447,8 @@ export class GraphEngine {
       }
 
       try {
-        const produced = await this.#provider.execute(node.type, inputs, node.config, {
+        const config = this.#withSecrets(graph.id, node, definition);
+        const produced = await this.#provider.execute(node.type, inputs, config, {
           graphId: graph.id,
           runId: run.id,
           nodeId,
@@ -579,6 +597,24 @@ export class GraphEngine {
   /* ---------------------------------------------------------------------------------------- */
   /* Small helpers                                                                              */
   /* ---------------------------------------------------------------------------------------- */
+
+  /**
+   * The node's config with every `secret` field filled in from the credential store.
+   *
+   * The substitution **overwrites** rather than filling a gap. A graph document has no business
+   * carrying a secret, so whatever a client wrote into that key is discarded here: the property
+   * "the document cannot leak a token" then holds at execution time regardless of what was saved,
+   * rather than depending on every writer having stripped it.
+   */
+  #withSecrets(graphId: string, node: GraphNode, definition: NodeDefinition): NodeConfigValues {
+    const fields = (definition.config ?? []).filter((field) => field.kind === "secret");
+    if (fields.length === 0) return node.config;
+    const config: Record<string, string | number | boolean> = { ...node.config };
+    for (const field of fields) {
+      config[field.id] = this.#secrets?.(graphId, node.id, field.id) ?? "";
+    }
+    return config;
+  }
 
   #definition(type: string): NodeDefinition | null {
     return INTRINSIC_DEFINITIONS.get(type) ?? this.#provider.definition(type);

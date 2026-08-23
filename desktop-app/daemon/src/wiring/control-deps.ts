@@ -2564,9 +2564,20 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       return toGraph(requireGraph(store, graphId));
     },
 
+    async setGraphSecret(graphId, nodeId, fieldId, value): Promise<void> {
+      requireGraph(store, graphId);
+      // Empty clears rather than storing an empty string: "" is what a node with no secret sees
+      // either way, and a stored blank would keep a key alive that says nothing.
+      if (value === "") await secrets.removeGraphSecret(graphId, nodeId, fieldId);
+      else await secrets.putGraphSecret(graphId, nodeId, fieldId, value);
+    },
+
     async deleteGraph(graphId): Promise<void> {
       // Idempotent, like every other removal here. The runs go with it, by foreign key.
       store.deleteGraph(graphId);
+      // The secrets do not: they live in `secrets.enc`, which has no foreign keys. Leaving them
+      // would keep a webhook URL in the credential store under an id nothing will ever ask for.
+      await secrets.removeGraphSecrets(graphId);
       // Disarms it: `reload` on a graph that no longer exists is the disarm path, which is why all
       // four of these call the same method rather than each having its own idea of the state.
       await options.graphs?.reload(graphId);

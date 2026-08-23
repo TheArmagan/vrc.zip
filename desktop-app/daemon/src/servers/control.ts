@@ -1215,6 +1215,14 @@ export interface ControlDeps {
    * about the document rather than an error.
    */
   runGraphNow(graphId: string): Promise<boolean>;
+  /**
+   * Stores (or clears, with an empty value) one node's `secret` config field.
+   *
+   * Write-only by design: there is no route that reads one back. The value goes to `secrets.enc`
+   * rather than into the graph document, so an exported or shared graph cannot carry it, and the
+   * engine substitutes it on its way to the node.
+   */
+  setGraphSecret(graphId: string, nodeId: string, fieldId: string, value: string): Promise<void>;
 
   /**
    * Every webhook registered on this daemon, newest first.
@@ -2626,6 +2634,23 @@ export function createControlApp({ port, deps, appApi, token }: ControlAppOption
         ? c.body(null, 202)
         : c.json({ error: "no_manual_trigger" }, 409),
     )
+
+    .put("/api/graphs/:id/secrets/:node/:field", async (c) => {
+      const body = await readJsonObject(c.req.raw);
+      const value = body?.value;
+      if (typeof value !== "string") {
+        return c.json({ error: "invalid_body", detail: "value must be a string" }, 400);
+      }
+      await deps.setGraphSecret(
+        c.req.param("id"),
+        c.req.param("node"),
+        c.req.param("field"),
+        value,
+      );
+      // 204 and nothing back. There is no route that reads a secret, and answering with the graph
+      // would be one — the object carries the node whose field was just set.
+      return c.body(null, 204);
+    })
 
     .get("/api/settings", async (c) => c.json(await deps.getSettings()))
 

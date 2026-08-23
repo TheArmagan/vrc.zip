@@ -67,6 +67,7 @@ const deps: ControlDeps = {
   },
   listGraphRuns: async () => [],
   runGraphNow: async () => false,
+  setGraphSecret: async () => {},
   publishPluginPanel: () => {},
   publishPluginToast: () => {},
   runPluginCommand: async () => {},

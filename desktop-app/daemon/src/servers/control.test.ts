@@ -498,6 +498,7 @@ interface Recorder {
   budgetWrites: { grantId: string; scope: string; limit: number | null }[];
   webhooksDeleted: string[];
   graphRuns: string[];
+  graphSecrets: { node: string; field: string; value: string }[];
   pluginInstalls: { rootDir: string; accountIds: readonly string[] }[];
   pluginToggles: { id: string; enabled: boolean }[];
   pluginsUninstalled: string[];
@@ -551,6 +552,7 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     budgetWrites: [],
     webhooksDeleted: [],
     graphRuns: [],
+    graphSecrets: [],
     pluginInstalls: [],
     pluginToggles: [],
     pluginsUninstalled: [],
@@ -722,6 +724,10 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     listGraphRuns: async (graphId) => {
       findGraph(graphId);
       return [];
+    },
+    setGraphSecret: async (graphId, node, field, value) => {
+      findGraph(graphId);
+      seen.graphSecrets.push({ node, field, value });
     },
     runGraphNow: async (graphId) => {
       findGraph(graphId);
@@ -2949,6 +2955,28 @@ describe("graph routes", () => {
     });
     expect((await call(deps, "/api/graphs/graph-1/run", { method: "POST" })).status).toBe(202);
     expect(seen.graphRuns).toEqual(["graph-1", "graph-1"]);
+  });
+
+  test("a secret is written through its own route and answered with nothing", async () => {
+    // 204 and no body: there is no route that reads a secret back, and answering with the graph
+    // would be one — the object carries the node whose field was just set.
+    const { deps, seen } = fakeDeps();
+    const res = await call(deps, "/api/graphs/graph-1/secrets/n2/token", {
+      ...json({ value: "s3cret" }),
+      method: "PUT",
+    });
+    expect(res.status).toBe(204);
+    expect(await res.text()).toBe("");
+    expect(seen.graphSecrets).toEqual([{ node: "n2", field: "token", value: "s3cret" }]);
+
+    expect(
+      (
+        await call(deps, "/api/graphs/graph-1/secrets/n2/token", {
+          ...json({ value: 7 }),
+          method: "PUT",
+        })
+      ).status,
+    ).toBe(400);
   });
 
   test("the graph routes are session-token only, like every other /api route", async () => {

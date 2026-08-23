@@ -548,11 +548,17 @@ get an **error output port**; and the port lattice grows **`list<T>`**.
       above, stated in decision 212:** the HTTP actions reuse the Phase 2 *hardening* but not its
       delivery queue, because a graph run does not retry and a `webhooks` row per node would put
       graph internals into the user's Connected-apps list.
-- [ ] **4.4 Dry-run, arming, secrets** — a new graph is in dry-run; outbound actions log what they
+- [x] **4.4 Dry-run, arming, secrets** — a new graph is in dry-run; outbound actions log what they
       would have done and an explicit **hold-to-confirm** arms it, with the dry-run log beside it as
       the evidence (decision 109's posture, applied to graphs). The acting account is per node,
       defaulting to the graph's. A `secret` config-field kind stored in `secrets.enc`, referenced from
       the blob, write-only in the UI, absent from exports; plugins get the same field kind.
+      **Built** (decision 213), with one correction to the line above: a secret is **not** referenced
+      from the blob, it is absent from it entirely — the engine substitutes by (graph, node, field)
+      and overwrites whatever the document held. The daemon half is complete: the `secret` field
+      kind, `secrets.enc` storage keyed per graph, `PUT /api/graphs/:id/secrets/:node/:field`, and
+      deletion that takes a graph's secrets with it. **The hold-to-confirm gesture is UI** and lands
+      with 4.5; `PUT /api/graphs/:id/armed` is what it will call.
 - [ ] **4.5 The canvas** — `@xyflow/svelte` (net-new dependency; Svelte is pinned at 5.56.10), palette
       grouped by source, red edges from `checkEdge` live, explicit save that revalidates server-side,
       session-local undo/redo, run inspector highlighting the failing node. A stopped or uninstalled
@@ -3517,6 +3523,34 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      **The tests use a real `Bun.serve` and a real UDP socket**, for the same reason the VRChat
      fixture is a real server: the bugs at this layer are wire-level, and a stub agrees with whatever
      the code already believes.
+
+213. **A secret is not in the graph, and the substitution overwrites.** 4.4's daemon half. The
+     `secret` config-field kind is new in `@vrcz/plugin-api`; its value lives in `secrets.enc` keyed
+     by (graph, node, field), and the engine fills it into the config on the way to the handler.
+
+     **The plan said "referenced from the blob". It is better than that: the blob holds nothing.**
+     The substitution *overwrites* whatever the document had under that key, which turns "a graph
+     cannot leak a token" from a property every writer has to preserve into one that holds at
+     execution time no matter what was saved. A client that smuggles a value into that field is
+     ignored, and there is no route that reads a secret back — `PUT` answers 204 with no body,
+     because answering with the graph would be a read of the node whose field was just set.
+
+     **The payload version was deliberately not bumped.** `SecretsStore.open` refuses a version it
+     does not recognise, so bumping it would turn every existing install's credential store into a
+     hard error on the next start. `graphSecrets` is an optional field that reads as empty when
+     absent and appears on the next flush — that is what a backwards-compatible addition looks like
+     in a file nobody can migrate without the master key.
+
+     **Deleting a graph deletes its secrets.** `secrets.enc` has no foreign keys, so without an
+     explicit sweep a deleted graph would leave webhook URLs and tokens in the credential store under
+     an id nothing will ever ask for again: invisible, unreachable, and still there in a file the
+     user believes holds their accounts.
+
+     **A stale banner found on the way past.** `packages/plugin-api/docs/nodes.md` still opened with
+     "Not built: outbound actions, the UI renderer, and nodes" and told authors that registering a
+     node type was step 3.10 and unavailable. Both were false as of 3.9–3.11 and doubly so now. Fixed
+     here, and worth checking the other pages under `docs/` for the same shape of rot — decision 183
+     rewrote the banner once for exactly this reason, and one page evidently kept its old copy.
 
 ---
 

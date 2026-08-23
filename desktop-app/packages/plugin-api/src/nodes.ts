@@ -195,6 +195,25 @@ export type NodeConfigField =
       readonly required?: boolean;
     }
   | {
+      /**
+       * A value the node needs and the graph must not carry: a webhook URL, a topic, a token.
+       *
+       * **The stored value never enters the graph document.** It lives in `secrets.enc`, keyed by
+       * (graph, node, field), and the host substitutes it into the config on its way to the handler.
+       * A graph that is exported, shared or read out of the database therefore cannot leak it, and a
+       * client that writes something into this field anyway is ignored rather than trusted — the
+       * substitution overwrites, always.
+       *
+       * Write-only in the UI: there is no route that reads one back.
+       */
+      readonly kind: "secret";
+      readonly id: string;
+      readonly label: string;
+      readonly description?: string;
+      readonly placeholder?: string;
+      readonly required?: boolean;
+    }
+  | {
       readonly kind: "duration";
       readonly id: string;
       readonly label: string;
@@ -448,7 +467,16 @@ export type NodeValidation =
   | { readonly ok: true; readonly definition: NodeDefinition }
   | { readonly ok: false; readonly issues: readonly NodeIssue[] };
 
-const CONFIG_KINDS = ["text", "number", "boolean", "select", "duration", "user", "world"] as const;
+const CONFIG_KINDS = [
+  "text",
+  "number",
+  "boolean",
+  "select",
+  "secret",
+  "duration",
+  "user",
+  "world",
+] as const;
 
 /** `publisher.name`-ish: an identifier a graph can store and a person can read in an error. */
 const NODE_ID_PATTERN = /^[a-z][a-z0-9]*(?:[-.][a-z0-9]+)*$/;

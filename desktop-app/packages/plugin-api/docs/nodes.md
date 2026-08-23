@@ -1,31 +1,21 @@
 # Node model
 
 > [!IMPORTANT]
-> **A plugin can be installed and started today, but only over the control API with the session
-> token, and nobody is asked first.** There is no plugin UI and no consent screen, so the grant is
-> written straight from what the manifest requested. Step 3.8 replaces that with a real consent
-> gesture, and grants made this way are not something to rely on.
+> **Node types are real now.** A plugin registers one with `ctx.nodes.register`, the host holds it in
+> the same registry its own built-in nodes live in, and Phase 4's graph runtime arms triggers and
+> executes actions and conditions against it. What does not exist yet is the **canvas**: there is no
+> visual editor to drag your node into, so a graph is built through the control API rather than by
+> hand. That is step 4.5.
 >
-> Built and wired: the install pipeline (compile, deny-scan, content-address, verify the hash on
-> every load), the supervisor (spawn, memory cap, heartbeat, watchdog, restart backoff), the
-> dispatcher answering scope-checked and account-checked **read** calls against VRChat, and the
-> events bridge.
->
-> Not built: outbound actions, the UI renderer, and nodes. Lifecycle dispatch and the `ctx` object
-> (`ctx.vrchat`, `ctx.storage`, `ctx.events`) now exist — `definePlugin` from
-> `@vrcz/plugin-api/runtime`, which your bundle carries rather than the host injecting.
->
-> These pages document what is **real today** and mark clearly what is not. Read
-> [status.md](./status.md) for the line-by-line breakdown before you build anything you are relying
-> on.
+> Read [status.md](./status.md) for the line-by-line breakdown of what is real.
 
 This page covers the `nodes` module of `@vrcz/plugin-api`: `PORT_TYPES`, `assignable`,
 `PortDefinition`, `NodeConfigField`, the body template, `NodeDefinition` and its two shapes, and
 `nodeDefinitionHash`. All of that is real and tested today.
 
-**Registering a node type with the host is not built** — it is step 3.10 in `PROGRESS.md`. You can
-write a `NodeDefinition`, evaluate its body template and hash it right now; nothing will put it in
-the graph editor's palette yet.
+Registering a node type **is** built: declare its id in `contributes.nodes`, call
+`ctx.nodes.register` when your plugin activates, and the graph runtime can arm and execute it. The
+palette that would let a user drag it onto a canvas is Phase 4's remaining step.
 
 ## What a node is for
 
@@ -142,7 +132,7 @@ Reusing `UINode` here would mean reading values back out of a rendering, which i
 a form that means something different after a redesign. The host draws config fields with the same
 components the [UI vocabulary](./ui.md) uses, so they look identical to a user regardless.
 
-Seven kinds:
+Eight kinds:
 
 | `kind` | Extra props | Notes |
 | --- | --- | --- |
@@ -150,11 +140,19 @@ Seven kinds:
 | `number` | `min?`, `max?`, `default?: number`, `required?` | |
 | `boolean` | `default?: boolean` | No `required` — a boolean is always set. |
 | `select` | `options` **required** `{ value, label }[]`, `default?: string`, `required?` | |
+| `secret` | `placeholder?`, `required?` | Stored outside the graph. See below. |
 | `duration` | `default?: number`, `required?` | **Integer unix-ms**, like every duration and timestamp in this project. |
 | `user` | `required?` | Host renders its own user picker. |
 | `world` | `required?` | Host renders its own world picker. |
 
 Every kind also carries `id`, `label` (both required) and `description?`.
+
+**`secret` is the one whose value does not live in the graph.** A webhook URL, a topic, a token: the
+host keeps it in the encrypted credential store, keyed by (graph, node, field), and substitutes it
+into the config on its way to your handler. Your node reads `config.token` like any other field and
+cannot tell the difference. What changes is everything around it — an exported or shared graph
+cannot carry the value, there is no route that reads one back, and the substitution **overwrites**,
+so a client that writes something into that key is ignored rather than trusted.
 
 A configured instance's values are `NodeConfigValues` — `Readonly<Record<string, string | number | boolean>>`,
 keyed by field id.

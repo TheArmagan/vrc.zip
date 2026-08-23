@@ -30,7 +30,12 @@ class FakeProvider implements NodeProvider {
   readonly handlers = new Map<string, Handler>();
   readonly armed = new Map<string, ArmRequest>();
   readonly disarmed: string[] = [];
-  readonly executed: { type: string; inputs: PortValues; context: ExecuteContext }[] = [];
+  readonly executed: {
+    type: string;
+    inputs: PortValues;
+    config: Readonly<Record<string, string | number | boolean>>;
+    context: ExecuteContext;
+  }[] = [];
 
   trigger(type: string, maxFiresPerMinute?: number): this {
     this.definitions.set(type, {
@@ -76,7 +81,7 @@ class FakeProvider implements NodeProvider {
     config: Readonly<Record<string, string | number | boolean>>,
     context: ExecuteContext,
   ): Promise<PortValues> {
-    this.executed.push({ type, inputs, context });
+    this.executed.push({ type, inputs, config, context });
     const handler = this.handlers.get(type);
     if (handler === undefined) throw new Error(`no handler for ${type}`);
     return await handler(inputs, config, context);
@@ -888,6 +893,103 @@ describe("arming", () => {
     expect(h.engine.armedCount).toBe(0);
     expect(h.provider.disarmed).toHaveLength(1);
     await h.engine.stop();
+  });
+});
+
+describe("secrets", () => {
+  test("a secret field is filled from the store and never from the document", async () => {
+    // The substitution overwrites rather than filling a gap: a graph document has no business
+    // carrying a token, so whatever a client wrote into that key is discarded here. The property
+    // then holds at execution time regardless of what was saved.
+    const store = Store.open(MEMORY);
+    const bus = new EventBus();
+    const provider = new FakeProvider();
+    provider.trigger("t");
+    provider.definitions.set("sender", {
+      id: "sender",
+      kind: "action",
+      title: "sender",
+      inputs: [{ id: "in", label: "In", type: "json" }],
+      outputs: [{ id: "out", label: "out", type: "json" }],
+      config: [
+        { kind: "secret", id: "token", label: "Token" },
+        { kind: "text", id: "url", label: "URL" },
+      ],
+    });
+    provider.handlers.set("sender", () => ({ out: 1 }));
+
+    const engine = new GraphEngine({
+      store,
+      bus,
+      provider,
+      sweepMs: 0,
+      secrets: (graphId, nodeId, fieldId) =>
+        graphId === "g1" && nodeId === "n2" && fieldId === "token" ? "s3cret" : undefined,
+    });
+
+    store.insertGraph({
+      id: "g1",
+      name: "g",
+      description: "",
+      enabled: 1,
+      armed: 1,
+      concurrency: "parallel",
+      account_id: null,
+      definition: JSON.stringify({
+        nodes: [
+          node("n1", "t"),
+          node("n2", "sender", { token: "written by a client", url: "https://example.test" }),
+        ],
+        edges: [edge("e1", "n1", "n2")],
+      }),
+      created_at: T0,
+      updated_at: T0,
+    });
+
+    await engine.fire("g1", "n1", { out: null });
+
+    const call = provider.executed[0];
+    expect(call?.config.token).toBe("s3cret");
+    // Everything else in the config is untouched.
+    expect(call?.config.url).toBe("https://example.test");
+    store.close();
+  });
+
+  test("a secret with nothing stored arrives empty rather than as whatever was saved", async () => {
+    const store = Store.open(MEMORY);
+    const provider = new FakeProvider();
+    provider.trigger("t");
+    provider.definitions.set("sender", {
+      id: "sender",
+      kind: "action",
+      title: "sender",
+      inputs: [{ id: "in", label: "In", type: "json" }],
+      outputs: [{ id: "out", label: "out", type: "json" }],
+      config: [{ kind: "secret", id: "token", label: "Token" }],
+    });
+    provider.handlers.set("sender", () => ({ out: 1 }));
+    const engine = new GraphEngine({ store, bus: new EventBus(), provider, sweepMs: 0 });
+
+    store.insertGraph({
+      id: "g1",
+      name: "g",
+      description: "",
+      enabled: 1,
+      armed: 1,
+      concurrency: "parallel",
+      account_id: null,
+      definition: JSON.stringify({
+        nodes: [node("n1", "t"), node("n2", "sender", { token: "smuggled" })],
+        edges: [edge("e1", "n1", "n2")],
+      }),
+      created_at: T0,
+      updated_at: T0,
+    });
+
+    await engine.fire("g1", "n1", { out: null });
+
+    expect(provider.executed[0]?.config.token).toBe("");
+    store.close();
   });
 });
 

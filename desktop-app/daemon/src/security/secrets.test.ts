@@ -151,4 +151,46 @@ describe("SecretsStore", () => {
     const leftovers = [...new Bun.Glob("*.tmp").scanSync({ cwd: dir })];
     expect(leftovers).toEqual([]);
   });
+  test("graph secrets round-trip, and clear one at a time", async () => {
+    const key = masterKey();
+    const store = await SecretsStore.open(key, env);
+    await store.putGraphSecret("g1", "n2", "token", "s3cret");
+    await store.putGraphSecret("g1", "n3", "url", "https://example.invalid/hook");
+
+    const reopened = await SecretsStore.open(key, env);
+    expect(reopened.graphSecret("g1", "n2", "token")).toBe("s3cret");
+    expect(reopened.graphSecret("g1", "n9", "token")).toBeUndefined();
+
+    await reopened.removeGraphSecret("g1", "n2", "token");
+    expect(reopened.graphSecret("g1", "n2", "token")).toBeUndefined();
+    expect(reopened.graphSecret("g1", "n3", "url")).toBe("https://example.invalid/hook");
+  });
+
+  test("deleting a graph takes every secret it owns", async () => {
+    // They live in `secrets.enc`, which has no foreign keys: without this, a deleted graph leaves
+    // its webhook URLs in the credential store under an id nothing will ever ask for again.
+    const store = await SecretsStore.open(masterKey(), env);
+    await store.putGraphSecret("g1", "n1", "a", "one");
+    await store.putGraphSecret("g1", "n2", "b", "two");
+    await store.putGraphSecret("g2", "n1", "a", "other graph");
+
+    await store.removeGraphSecrets("g1");
+
+    expect(store.graphSecret("g1", "n1", "a")).toBeUndefined();
+    expect(store.graphSecret("g1", "n2", "b")).toBeUndefined();
+    expect(store.graphSecret("g2", "n1", "a")).toBe("other graph");
+  });
+
+  test("a store written before graph secrets existed still opens", async () => {
+    // The payload version was deliberately not bumped for the new field: `open` refuses a version
+    // it does not know, so bumping would turn every existing install into a hard error at start.
+    const key = masterKey();
+    const before = await SecretsStore.open(key, env);
+    await before.put("usr_a", { username: "a", cookies: [] });
+
+    const reopened = await SecretsStore.open(key, env);
+    expect(reopened.graphSecret("g1", "n1", "token")).toBeUndefined();
+    await reopened.putGraphSecret("g1", "n1", "token", "later");
+    expect((await SecretsStore.open(key, env)).graphSecret("g1", "n1", "token")).toBe("later");
+  });
 });

@@ -3116,6 +3116,18 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      reached VRChat's inbox. A README written from what a feature ought to do is the same rot as a
      docs banner (see §Gotchas), minus the excuse.
 
+205. **`docs/social-preview.png` is the repository's link card, and it is committed even though
+     GitHub keeps its own copy.** GitHub takes one 1280x640 image per repository (Settings, General,
+     Social preview) and serves it as the `og:image` of the repo page, which is what Discord, Slack
+     and X render when the link is pasted; with none set they compose a card from the avatar and the
+     description and the app never appears in it. Uploading is a web-UI action with no REST endpoint,
+     so **the file in `docs/` is the source and the copy inside GitHub is a deployment of it** —
+     re-uploading by hand is the step to remember when it changes. It is built from the same parts as
+     the renders (the amber rule, the same ground, one screenshot as texture behind a veil) and
+     carries three lines, because it is usually seen at a third of its size. It keeps the UNOFFICIAL
+     line: that disclaimer is worth most on the one surface that reaches people who have not opened
+     the repository yet.
+
 ---
 
 ## Gotchas

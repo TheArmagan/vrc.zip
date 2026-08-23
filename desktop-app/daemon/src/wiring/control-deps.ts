@@ -21,13 +21,19 @@ import { PLUGIN_CAPABILITIES } from "@vrcz/plugin-api";
 import {
   GRAPH_RUN_STATUSES,
   type Graph,
+  type GraphConcurrency,
   type GraphDocument,
+  type GraphExport,
+  type GraphImportResult,
   type GraphRunStatus,
   type GraphRunSummary,
   type GraphSummary,
+  type GraphTemplate,
   isGraphConcurrency,
   isScope,
   type JsonValue,
+  MAX_GRAPH_DESCRIPTION,
+  MAX_GRAPH_NAME,
   type NodeTypeSummary,
   type PluginPanelFrame,
   type PluginToastFrame,
@@ -57,6 +63,7 @@ import type { EventBus } from "../bus/event-bus.ts";
 // opinion on what `~region(` means.
 import { parseLocation } from "../game-logs/index.ts";
 import { type GraphEngine, RUN_NOW_TYPE } from "../graphs/index.ts";
+import { GRAPH_TEMPLATES } from "../graphs/templates.ts";
 import { AvatarIdResolver } from "../net/avatar-ids.ts";
 import { ImageCache } from "../net/image-cache.ts";
 import type { RateBucketSnapshot, RateLimiter } from "../net/rate-limiter.ts";
@@ -988,8 +995,119 @@ function graphSummary(row: GraphRow): GraphSummary {
   };
 }
 
-function toGraph(row: GraphRow): Graph {
-  return { ...graphSummary(row), definition: parseGraphDocument(row.definition) };
+function toGraph(row: GraphRow, staleNodes: readonly string[] = []): Graph {
+  return { ...graphSummary(row), definition: parseGraphDocument(row.definition), staleNodes };
+}
+
+/**
+ * An exported document, validated.
+ *
+ * Everything is checked rather than trusted: this is a file the user was handed, and the *point* of
+ * the format is that it travels between machines. A malformed one is refused with a sentence rather
+ * than turned into a graph that fails later for reasons nobody can trace back to here.
+ */
+function parseExport(raw: unknown): {
+  name: string;
+  description: string;
+  concurrency: GraphConcurrency;
+  definition: GraphDocument;
+  nodeTypes: { qualifiedId: string; defHash?: string }[];
+} {
+  if (typeof raw !== "object" || raw === null) {
+    throw new ControlError(400, "invalid_import", "That is not a graph export.");
+  }
+  const value = raw as Record<string, unknown>;
+  if (value.version !== 1) {
+    throw new ControlError(
+      400,
+      "invalid_import",
+      "That export was written by a version of vrc.zip this build does not understand.",
+    );
+  }
+  const name = typeof value.name === "string" && value.name !== "" ? value.name : "Imported graph";
+  const result = validateGraphDocument(value.definition);
+  if (!result.ok) {
+    throw new ControlError(
+      400,
+      "invalid_import",
+      result.issues.map((issue) => `${issue.path}: ${issue.message}`).join("; "),
+    );
+  }
+  const definition = value.definition as GraphDocument;
+  const declared = Array.isArray(value.nodeTypes) ? value.nodeTypes : [];
+  const nodeTypes = declared
+    .filter(
+      (entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null,
+    )
+    .filter((entry) => typeof entry.qualifiedId === "string")
+    .map((entry) => ({
+      qualifiedId: entry.qualifiedId as string,
+      ...(typeof entry.defHash === "string" ? { defHash: entry.defHash } : {}),
+    }));
+
+  return {
+    name: name.slice(0, MAX_GRAPH_NAME),
+    description:
+      typeof value.description === "string"
+        ? value.description.slice(0, MAX_GRAPH_DESCRIPTION)
+        : "",
+    concurrency: isGraphConcurrency(value.concurrency) ? value.concurrency : "parallel",
+    definition,
+    // Falls back to the document's own types when the export listed none, so a hand-written file
+    // still gets a "you do not have this" report rather than silently importing as complete.
+    nodeTypes:
+      nodeTypes.length > 0
+        ? nodeTypes
+        : [...new Set(definition.nodes.map((node) => node.type))].map((qualifiedId) => ({
+            qualifiedId,
+          })),
+  };
+}
+
+/**
+ * Node ids whose type has changed since the graph was saved.
+ *
+ * A node with no stored `defHash` is not stale — it was saved before its type was ever registered,
+ * so there is nothing to compare against and inventing a mismatch would prompt for a migration the
+ * user cannot reason about. Neither is a node whose type is missing entirely: that is "the plugin is
+ * stopped", a different sentence with a different fix.
+ */
+async function staleNodes(
+  document: GraphDocument,
+  host: PluginHost | undefined,
+): Promise<string[]> {
+  if (host === undefined) return [];
+  const hashes = new Map<string, string | null>();
+  const stale: string[] = [];
+  for (const node of document.nodes) {
+    if (node.defHash === undefined) continue;
+    if (!hashes.has(node.type)) hashes.set(node.type, await host.nodeHash(node.type));
+    const current = hashes.get(node.type) ?? null;
+    if (current !== null && current !== node.defHash) stale.push(node.id);
+  }
+  return stale;
+}
+
+/**
+ * Stamps each node with the hash of the definition it is being saved against.
+ *
+ * Done on save rather than on create, because that is the moment the user last looked at the node
+ * and agreed with what it does. A type that is not registered is left unstamped rather than stamped
+ * with nothing — see `staleNodes` for why an absent hash has to stay absent.
+ */
+async function stampHashes(
+  document: GraphDocument,
+  host: PluginHost | undefined,
+): Promise<GraphDocument> {
+  if (host === undefined) return document;
+  const hashes = new Map<string, string | null>();
+  const nodes = [];
+  for (const node of document.nodes) {
+    if (!hashes.has(node.type)) hashes.set(node.type, await host.nodeHash(node.type));
+    const hash = hashes.get(node.type) ?? null;
+    nodes.push(hash === null ? node : { ...node, defHash: hash });
+  }
+  return { nodes, edges: document.edges };
 }
 
 function graphRunSummary(row: GraphRunRow): GraphRunSummary {
@@ -2569,7 +2687,8 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
     },
 
     async getGraph(graphId): Promise<Graph> {
-      return await Promise.resolve(toGraph(requireGraph(store, graphId)));
+      const row = requireGraph(store, graphId);
+      return toGraph(row, await staleNodes(parseGraphDocument(row.definition), options.plugins));
     },
 
     async createGraph(input): Promise<Graph> {
@@ -2599,6 +2718,12 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       if (input.definition !== undefined) checkGraphEdges(input.definition, options.plugins);
       // Re-armed after the write, below. A saved document may have moved a trigger's config, and an
       // engine still holding the previous arming is subscribed to the wrong thing.
+      // Stamped on save, which is the moment the user last looked at these nodes and agreed with
+      // what they do. That stamp is what makes "this node type changed under you" answerable later.
+      const definition =
+        input.definition === undefined
+          ? undefined
+          : await stampHashes(input.definition, options.plugins);
       store.updateGraph(graphId, {
         name: input.name ?? row.name,
         description: input.description ?? row.description,
@@ -2606,11 +2731,79 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         // `?? row.account_id` would make clearing the account impossible, since the caller clears it
         // by sending null. Absent and null are different answers here.
         account_id: input.accountId === undefined ? row.account_id : input.accountId,
-        definition:
-          input.definition === undefined ? row.definition : JSON.stringify(input.definition),
+        definition: definition === undefined ? row.definition : JSON.stringify(definition),
       });
       await options.graphs?.reload(graphId);
-      return toGraph(requireGraph(store, graphId));
+      const saved = requireGraph(store, graphId);
+      return toGraph(
+        saved,
+        await staleNodes(parseGraphDocument(saved.definition), options.plugins),
+      );
+    },
+
+    async exportGraph(graphId): Promise<GraphExport> {
+      const row = requireGraph(store, graphId);
+      const definition = parseGraphDocument(row.definition);
+      // Re-stamped rather than trusting what is stored: an export is the moment it leaves this
+      // machine, so it should describe what the graph runs against *now*.
+      const stamped = await stampHashes(definition, options.plugins);
+      const types = new Map<string, string | undefined>();
+      for (const node of stamped.nodes) types.set(node.type, node.defHash);
+      return {
+        version: 1,
+        exportedAt: Date.now(),
+        name: row.name,
+        description: row.description,
+        concurrency: isGraphConcurrency(row.concurrency) ? row.concurrency : "parallel",
+        definition: stamped,
+        nodeTypes: [...types].map(([qualifiedId, defHash]) => ({
+          qualifiedId,
+          ...(defHash === undefined ? {} : { defHash }),
+        })),
+      };
+    },
+
+    async importGraph(raw): Promise<GraphImportResult> {
+      const parsed = parseExport(raw);
+      const now = Date.now();
+      const id = randomUUID();
+      store.insertGraph({
+        id,
+        name: parsed.name,
+        description: parsed.description,
+        // Off and unarmed, whatever it was on the machine it came from. An imported graph is
+        // somebody else's judgement about what should run; enabling it is this user's.
+        enabled: 0,
+        armed: 0,
+        concurrency: parsed.concurrency,
+        // Deliberately not carried across: an account id from another machine names an account this
+        // one may not have, and silently acting as the wrong person is the worst failure here.
+        account_id: null,
+        definition: JSON.stringify(parsed.definition),
+        created_at: now,
+        updated_at: now,
+      });
+
+      const missing: string[] = [];
+      const changed: string[] = [];
+      for (const type of parsed.nodeTypes) {
+        const current = (await options.plugins?.nodeHash(type.qualifiedId)) ?? null;
+        if (current === null) missing.push(type.qualifiedId);
+        else if (type.defHash !== undefined && type.defHash !== current) {
+          changed.push(type.qualifiedId);
+        }
+      }
+
+      const row = requireGraph(store, id);
+      return {
+        graph: toGraph(row, await staleNodes(parsed.definition, options.plugins)),
+        missing,
+        changed,
+      };
+    },
+
+    async listGraphTemplates(): Promise<GraphTemplate[]> {
+      return await Promise.resolve([...GRAPH_TEMPLATES]);
     },
 
     async setGraphSecret(graphId, nodeId, fieldId, value): Promise<void> {

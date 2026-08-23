@@ -2694,12 +2694,14 @@ describe("control deps: avatars", () => {
 /* Graphs                                                                                         */
 /* -------------------------------------------------------------------------------------------- */
 
-/** The two methods the graph save path asks a plugin host for, and nothing else. */
-function nodeHost(refusal: string | null): PluginHost {
+/** The three methods the graph save path asks a plugin host for, and nothing else. */
+function nodeHost(refusal: string | null, hash: string | null = "hash-1"): PluginHost {
   return {
     nodeType: (qualifiedId: string) =>
       qualifiedId === "vrcz/known" ? ({ qualifiedId } as never) : null,
     checkNodeEdge: () => refusal,
+    nodeHash: async (qualifiedId: string) =>
+      await Promise.resolve(qualifiedId === "vrcz/known" ? hash : null),
   } as unknown as PluginHost;
 }
 
@@ -2746,6 +2748,126 @@ describe("the graph save path", () => {
       definition: document("vrcz/known", "vrcz/known"),
     });
     expect(saved.definition.nodes).toHaveLength(2);
+    h.stop();
+  });
+});
+
+describe("stale node types", () => {
+  test("a node whose type changed since the save is named", async () => {
+    // Saved against `hash-1`, and the registry now answers `hash-2`. That is the prompt the user
+    // needs: their graph was built against a node that has since moved.
+    const h = harness({ plugins: nodeHost(null, "hash-1") });
+    const graph = await h.deps.createGraph({ name: "g" });
+    const saved = await h.deps.updateGraph(graph.id, {
+      definition: document("vrcz/known", "vrcz/known"),
+    });
+    // Stamped on save, which is what makes the comparison possible at all.
+    expect(saved.definition.nodes.every((node) => node.defHash === "hash-1")).toBe(true);
+    expect(saved.staleNodes).toEqual([]);
+
+    const moved = harness({ plugins: nodeHost(null, "hash-2") });
+    moved.store.insertGraph({
+      id: "g-moved",
+      name: "g",
+      description: "",
+      enabled: 0,
+      armed: 0,
+      concurrency: "parallel",
+      account_id: null,
+      definition: JSON.stringify(saved.definition),
+      created_at: 0,
+      updated_at: 0,
+    });
+    expect((await moved.deps.getGraph("g-moved")).staleNodes).toEqual(["n1", "n2"]);
+    moved.stop();
+    h.stop();
+  });
+
+  test("an unregistered type is not stale — that is a different sentence", async () => {
+    // "Its plugin is stopped" and "its ports changed" want different fixes, so they are different
+    // states rather than one vague warning.
+    const h = harness({ plugins: nodeHost(null, "hash-1") });
+    const graph = await h.deps.createGraph({ name: "g" });
+    await h.deps.updateGraph(graph.id, { definition: document("acme.gone/a", "acme.gone/b") });
+    expect((await h.deps.getGraph(graph.id)).staleNodes).toEqual([]);
+    h.stop();
+  });
+});
+
+describe("export and import", () => {
+  test("an export carries the node types it was built against", async () => {
+    const h = harness({ plugins: nodeHost(null, "hash-1") });
+    const graph = await h.deps.createGraph({ name: "Shareable" });
+    await h.deps.updateGraph(graph.id, { definition: document("vrcz/known", "vrcz/known") });
+
+    const exported = await h.deps.exportGraph(graph.id);
+    expect(exported.version).toBe(1);
+    expect(exported.name).toBe("Shareable");
+    expect(exported.nodeTypes).toEqual([{ qualifiedId: "vrcz/known", defHash: "hash-1" }]);
+    h.stop();
+  });
+
+  test("an import lands off, unarmed, with no account, and says what is missing", async () => {
+    // An import that refused a graph naming a node this machine lacks would fail on exactly the
+    // case a shared graph is for. It creates it disabled and names what the user needs.
+    const h = harness({ plugins: nodeHost(null, "hash-1") });
+    const result = await h.deps.importGraph({
+      version: 1,
+      name: "From a friend",
+      description: "",
+      concurrency: "queue",
+      definition: document("vrcz/known", "acme.gone/node"),
+      nodeTypes: [
+        { qualifiedId: "vrcz/known", defHash: "hash-1" },
+        { qualifiedId: "acme.gone/node", defHash: "whatever" },
+      ],
+    });
+
+    expect(result.graph.name).toBe("From a friend");
+    expect(result.graph.enabled).toBe(false);
+    expect(result.graph.armed).toBe(false);
+    // Never carried across: an account id from another machine names an account this one may not
+    // have, and acting as the wrong person is the worst failure available here.
+    expect(result.graph.accountId).toBeNull();
+    expect(result.graph.concurrency).toBe("queue");
+    expect(result.missing).toEqual(["acme.gone/node"]);
+    h.stop();
+  });
+
+  test("an import notices a node type that has moved since the export", async () => {
+    const h = harness({ plugins: nodeHost(null, "hash-2") });
+    const result = await h.deps.importGraph({
+      version: 1,
+      name: "Older",
+      definition: document("vrcz/known", "vrcz/known"),
+      nodeTypes: [{ qualifiedId: "vrcz/known", defHash: "hash-1" }],
+    });
+    expect(result.changed).toEqual(["vrcz/known"]);
+    expect(result.missing).toEqual([]);
+    h.stop();
+  });
+
+  test("a malformed export is refused with a sentence rather than half-imported", async () => {
+    const h = harness({ plugins: nodeHost(null) });
+    await expect(h.deps.importGraph({ version: 2 })).rejects.toThrow(/does not understand/);
+    await expect(h.deps.importGraph("not an object")).rejects.toThrow(/not a graph export/);
+    await expect(
+      h.deps.importGraph({ version: 1, definition: { nodes: "nope", edges: [] } }),
+    ).rejects.toThrow(/nodes/);
+    expect(h.store.listGraphs()).toEqual([]);
+    h.stop();
+  });
+
+  test("the shipped templates use only built-in node types", async () => {
+    // A template naming a plugin the user does not have is a template that lands broken.
+    const h = harness();
+    const templates = await h.deps.listGraphTemplates();
+    expect(templates.length).toBeGreaterThan(0);
+    for (const template of templates) {
+      for (const node of template.definition.nodes) {
+        expect(node.type.startsWith("vrcz/")).toBe(true);
+      }
+    }
     h.stop();
   });
 });

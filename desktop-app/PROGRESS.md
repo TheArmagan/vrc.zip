@@ -5,14 +5,13 @@ the architecture and the reasoning. This file tracks only *state*: what exists, 
 was decided along the way.
 
 **Last updated:** 2026-08-23
-**Phase 4 is under way:** 4.1 is built (decision 207) — the two tables, the `graph` event family, the
-document model with its validator, and `/api/graphs`. Next is 4.2, the engine.
-**Current phase:** Phase 3 is **complete** — 3.0 through 3.11. Next is Phase 4, the node graph
-(decision 182), and it is now **scoped rather than started**: a planning pass on 2026-08-23 put
-twenty-four questions to the user four at a time, rewrote `PLAN.md` §Phase 4 from one paragraph into
-a spec, and left the Phase 4 checklist below as the build order (decision 206). It is a larger phase
-than 3.10 implied — a run can `wait`, so it is a durable object rather than a walk, and the canvas is
-step 4.5 of six rather than the bulk of the work. Shipping is wired up ahead of it:
+**Phase 4 landed in one pass:** decisions 207–215. A durable run engine, thirty-two built-in node
+types, a Svelte Flow canvas, and graphs that export to a file. Read decision 206 first for why it is shaped
+the way it is; 208 is the engine's one load-bearing rule.
+**Current phase:** Phase 4 is **complete** — 4.1 through 4.6, built on 2026-08-23 from the spec the
+planning pass of the same day produced (decision 206). Graphs are stored, run, edited on a canvas,
+armed behind a hold, and shared as files. What remains in the plan is Phase 5, packaging and polish,
+most of which shipped early. Shipping is wired up:
 `desktop-app-release.yml` packages the executable and publishes it to a GitHub Release on a manual
 trigger (decision 200).
 **Status: Phases 1 and 2 are both built.** Phase 1 was confirmed by hand on 2026-08-22 (1.10 and the
@@ -571,9 +570,16 @@ get an **error output port**; and the port lattice grows **`list<T>`**.
       both of its defects were found. **Outstanding:** the `nodeDefinitionHash` migration prompt.
       A stopped plugin's node already draws greyed and named rather than blocking the graph, but
       nothing yet compares the saved hash against the registered one.
-- [ ] **4.6 Export, import, templates** — JSON export with secrets stripped and node ids plus
+- [x] **4.6 Export, import, templates** — JSON export with secrets stripped and node ids plus
       definition hashes recorded, import with a report of what is missing, and a small set of starter
       templates so the first graph is an edit rather than a blank canvas.
+      **Built** (decision 215), and it closes 4.5's outstanding item too: node definition hashes are
+      stamped on save, compared on load, and the canvas marks the nodes whose type has moved.
+
+**Phase 4 is complete.** 4.1 through 4.6 are built, and everything below the checklist that once
+said "Phase 4's" now has a caller. What is *not* here, stated rather than implied: no undo/redo on
+the canvas beyond what the browser gives, no graph versioning, and no `/app` surface — all three
+were decided against in decision 206 rather than skipped.
 
 **Verification bar:** `bun test` over the engine (topological order, a `wait` across a simulated
 restart, all three concurrency modes, error ports, every ceiling); webhook, ntfy and OSC actions
@@ -3591,6 +3597,44 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      **Verified against a running daemon:** 32 node types in the palette, a graph saved from the
      canvas, `number -> string` refused on save with the edge named, a manual run firing through the
      engine, and the resulting `graph.note` arriving in the feed marked `dryRun: true`.
+
+215. **Export, import, templates — and the definition hash finally does something.** Phase 4 closes
+     here.
+
+     **An export carries no secret, and that is a property rather than a filter.** Nothing strips
+     one, because a secret never enters the document in the first place (decision 213). The test
+     asserts it by searching the exported JSON, which is the honest way to check a claim like that.
+
+     **An import lands off, unarmed, and with no acting account.** The first two because an imported
+     graph is somebody else's judgement about what should run and enabling it is this user's. The
+     third because an account id from another machine names an account this one may not have, and
+     acting as the wrong person is the worst failure available here.
+
+     **A missing node type does not fail the import.** Refusing would fail on exactly the case a
+     shared graph is for. The graph is created disabled and the response names what this machine
+     lacks — a fixable state rather than a dead end. A node type that is *present but changed* is
+     reported separately, because "install this plugin" and "your ports moved" are different jobs.
+
+     **`nodeDefinitionHash` stopped being decorative.** Hashes are stamped on save — the moment the
+     user last looked at a node and agreed with what it does — compared on load, and surfaced as
+     `Graph.staleNodes`, which the canvas draws as a count in the header and a line on each node.
+     Two absences are deliberate: a node with **no** stored hash is not stale (there is nothing to
+     compare, and inventing a mismatch prompts for a migration nobody can reason about), and a node
+     whose type is **missing** is not stale either — that is "its plugin is stopped", a different
+     sentence with a different fix. Nothing is rewired automatically: an automatic fix for "the
+     ports changed" is a guess about intent.
+
+     **Three templates, and a test file that exists because they are code.** Each is validated
+     against the real built-in definitions: a valid document, every type registered, every edge
+     type-checks, exactly one trigger root, **every node reachable from it**, and no secret or
+     account inside. The reachability check earns its place — a run walks only what its own trigger
+     reaches, so an unwired tail is a template that looks right on the canvas and does nothing. The
+     third template needed an edge added for exactly that reason while writing it.
+
+     **Export downloads through a blob rather than a link at the route.** `/api/graphs/:id/export`
+     needs the session token and a plain `<a download>` cannot carry an Authorization header;
+     fetching first also means a failure is an error in the UI rather than a downloaded file full of
+     JSON error text.
 
 ---
 

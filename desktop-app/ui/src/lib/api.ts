@@ -35,8 +35,11 @@ import {
   type GameSession,
   type Graph,
   type GraphCreate,
+  type GraphExport,
+  type GraphImportResult,
   type GraphRunSummary,
   type GraphSummary,
+  type GraphTemplate,
   type GraphUpdate,
   type GroupGalleryImagePage,
   type GroupGalleryImageSummary,
@@ -73,9 +76,12 @@ export type {
   GraphCreate,
   GraphDocument,
   GraphEdge,
+  GraphExport,
+  GraphImportResult,
   GraphNode,
   GraphRunSummary,
   GraphSummary,
+  GraphTemplate,
   GraphUpdate,
   NodeTypeSummary,
   RateSeries,
@@ -1513,6 +1519,26 @@ export const api = {
     /** Fires the manual trigger. Rejects `no_manual_trigger` when the graph has no such node. */
     runNow: (graphId: string): Promise<void> =>
       request<void>(`/graphs/${encodeURIComponent(graphId)}/run`, { method: "POST" }),
+
+    /** The graphs vrc.zip ships, so a first canvas is an edit rather than a blank page. */
+    templates: (signal?: AbortSignal): Promise<GraphTemplate[]> =>
+      request<GraphTemplate[]>("/graphs/templates", withSignal(signal)),
+
+    /**
+     * One graph as a portable document.
+     *
+     * Carries no secret, and not because anything strips one: a secret never enters the document,
+     * so this is safe to hand to somebody by construction.
+     */
+    export: (graphId: string, signal?: AbortSignal): Promise<GraphExport> =>
+      request<GraphExport>(`/graphs/${encodeURIComponent(graphId)}/export`, withSignal(signal)),
+
+    /** Creates a graph from an exported document — off, unarmed, and reporting what is missing. */
+    import: (document: unknown): Promise<GraphImportResult> =>
+      request<GraphImportResult>("/graphs/import", {
+        method: "POST",
+        body: document as Record<string, never>,
+      }),
 
     /**
      * Stores one node's secret field. Write-only: nothing reads it back, here or anywhere.

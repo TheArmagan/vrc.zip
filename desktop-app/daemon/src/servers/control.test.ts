@@ -603,6 +603,7 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     createdAt: 1_700_000_000_000,
     updatedAt: 1_700_000_000_000,
     definition: { nodes: [], edges: [] },
+    staleNodes: [],
   };
   let graphs: Graph[] = [GRAPH];
   const findGraph = (id: string): Graph => {
@@ -733,6 +734,38 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
       findGraph(graphId);
       return [];
     },
+    exportGraph: async (graphId) => {
+      const graph = findGraph(graphId);
+      return {
+        version: 1 as const,
+        exportedAt: 1_700_000_000_000,
+        name: graph.name,
+        description: graph.description,
+        concurrency: graph.concurrency,
+        definition: graph.definition,
+        nodeTypes: [...new Set(graph.definition.nodes.map((node) => node.type))].map(
+          (qualifiedId) => ({ qualifiedId }),
+        ),
+      };
+    },
+    importGraph: async (document) => {
+      const imported: Graph = {
+        ...GRAPH,
+        id: `graph-${String(graphs.length + 1)}`,
+        name: (document as { name?: string }).name ?? "Imported graph",
+        definition: (document as { definition: Graph["definition"] }).definition,
+      };
+      graphs.push(imported);
+      return { graph: imported, missing: ["acme.gone/node"], changed: [] };
+    },
+    listGraphTemplates: async () => [
+      {
+        id: "friend-online-discord",
+        name: "Tell Discord when a friend comes online",
+        description: "Posts a line to a Discord webhook whenever one of your friends appears.",
+        definition: { nodes: [], edges: [] },
+      },
+    ],
     setGraphSecret: async (graphId, node, field, value) => {
       findGraph(graphId);
       seen.graphSecrets.push({ node, field, value });

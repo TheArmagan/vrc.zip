@@ -85,7 +85,8 @@ async function load(id: string): Promise<void> {
   try {
     const loaded = await api.graphs.get(id);
     graph = loaded;
-    nodes = loaded.definition.nodes.map(toFlowNode);
+    const stale = new Set(loaded.staleNodes);
+    nodes = loaded.definition.nodes.map((node) => toFlowNode(node, stale.has(node.id)));
     edges = loaded.definition.edges.map(toFlowEdge);
     dirty = false;
     runs = await api.graphs.runs(id);
@@ -94,7 +95,7 @@ async function load(id: string): Promise<void> {
   }
 }
 
-function toFlowNode(node: WireNode): Node {
+function toFlowNode(node: WireNode, stale = false): Node {
   return {
     id: node.id,
     // One Svelte Flow node type for every vrc.zip node type: the card draws itself from the
@@ -102,7 +103,7 @@ function toFlowNode(node: WireNode): Node {
     type: "vrcz",
     position: { ...node.position },
     // No definition in here on purpose — the card resolves it live. See `GraphNodeCard.svelte`.
-    data: { qualifiedId: node.type, config: { ...node.config }, stale: false },
+    data: { qualifiedId: node.type, config: { ...node.config }, stale },
   };
 }
 
@@ -276,6 +277,16 @@ async function saveSecret(fieldId: string): Promise<void> {
   {/if}
   {#if dirty}
     <Badge variant="secondary">Unsaved</Badge>
+  {/if}
+  {#if graph !== null && graph.staleNodes.length > 0}
+    <!--
+      The migration prompt PLAN.md asks for, in the smallest honest form: the nodes whose type has
+      moved since this graph was saved are marked on the canvas, and saving re-stamps them. It does
+      not rewire anything — an automatic fix for "the ports changed" is a guess about intent.
+    -->
+    <Badge variant="destructive">
+      {graph.staleNodes.length} node{graph.staleNodes.length === 1 ? "" : "s"} changed
+    </Badge>
   {/if}
   <div class="ml-auto flex items-center gap-2">
     {#if selectedId !== null}

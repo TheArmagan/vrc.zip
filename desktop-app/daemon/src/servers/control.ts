@@ -13,8 +13,11 @@ import {
   type Graph,
   type GraphCreate,
   type GraphDocument,
+  type GraphExport,
+  type GraphImportResult,
   type GraphRunSummary,
   type GraphSummary,
+  type GraphTemplate,
   type GraphUpdate,
   type GroupGalleryImagePage,
   type GroupGalleryImageSummary,
@@ -1232,6 +1235,24 @@ export interface ControlDeps {
    * engine substitutes it on its way to the node.
    */
   setGraphSecret(graphId: string, nodeId: string, fieldId: string, value: string): Promise<void>;
+
+  /**
+   * One graph as a portable document.
+   *
+   * Carries no secret, and not because anything strips one: a secret never enters the document in
+   * the first place (decision 213), so this is safe to hand to somebody by construction.
+   */
+  exportGraph(graphId: string): Promise<GraphExport>;
+  /**
+   * Creates a graph from an exported document, **off and unarmed**, and says what is missing.
+   *
+   * An import that refused a graph naming a node type this machine does not have would be an import
+   * that fails on exactly the case a shared graph is for. It creates it anyway, disabled, and names
+   * what the user needs — which is a fixable state rather than a dead end.
+   */
+  importGraph(document: unknown): Promise<GraphImportResult>;
+  /** The graphs vrc.zip ships, so a first canvas is an edit rather than a blank page. */
+  listGraphTemplates(): Promise<GraphTemplate[]>;
 
   /**
    * Every webhook registered on this daemon, newest first.
@@ -2578,6 +2599,14 @@ export function createControlApp({ port, deps, appApi, token }: ControlAppOption
      */
     .get("/api/nodes", async (c) => c.json(await deps.listNodeTypes()))
 
+    .get("/api/graphs/templates", async (c) => c.json(await deps.listGraphTemplates()))
+
+    .post("/api/graphs/import", async (c) => {
+      const body = await readJsonObject(c.req.raw);
+      if (body === undefined) throw new ControlError(400, "invalid_body", "expected a JSON object");
+      return c.json(await deps.importGraph(body), 201);
+    })
+
     .get("/api/graphs", async (c) => c.json(await deps.listGraphs()))
 
     .post("/api/graphs", async (c) => {
@@ -2637,6 +2666,8 @@ export function createControlApp({ port, deps, appApi, token }: ControlAppOption
     })
 
     .get("/api/graphs/:id/runs", async (c) => c.json(await deps.listGraphRuns(c.req.param("id"))))
+
+    .get("/api/graphs/:id/export", async (c) => c.json(await deps.exportGraph(c.req.param("id"))))
 
     .post("/api/graphs/:id/run", async (c) =>
       // 409 rather than 404: the graph exists, it simply has nothing to press. A 404 would send the

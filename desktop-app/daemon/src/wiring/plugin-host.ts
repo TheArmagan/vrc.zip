@@ -43,6 +43,7 @@ import {
   type Envelope,
   grantHash,
   isPluginCapability,
+  nodeDefinitionHash,
   type PluginGrant,
   type PluginManifest,
   parseManifest,
@@ -272,6 +273,14 @@ export interface PluginHost {
     from: { readonly nodeType: string; readonly portId: string },
     to: { readonly nodeType: string; readonly portId: string },
   ): string | null;
+  /**
+   * The content hash of a node type as it is registered right now, or null when it is not.
+   *
+   * What makes "this node type changed under your graph" answerable. The hash covers ports, kinds
+   * and config field kinds and ignores labels and descriptions, so a typo fix does not prompt every
+   * user with a saved graph to migrate.
+   */
+  nodeHash(qualifiedId: string): Promise<string | null>;
 
   /*
    * The three host→plugin node calls. Phase 4's engine is the only caller, and it reaches them
@@ -876,6 +885,11 @@ export function createPluginHost(options: PluginHostOptions): PluginHost {
     },
 
     checkNodeEdge: (from, to) => checkEdge(nodes, from, to),
+
+    async nodeHash(qualifiedId) {
+      const entry = nodes.get(qualifiedId);
+      return entry === null ? null : await nodeDefinitionHash(entry.definition);
+    },
 
     async armNode(qualifiedId, instanceId, config) {
       await dispatcher.call(...nodeCall(qualifiedId, "nodes.arm", { instanceId, config }));

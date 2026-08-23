@@ -132,6 +132,53 @@ export interface GraphSummary {
 
 export interface Graph extends GraphSummary {
   readonly definition: GraphDocument;
+  /**
+   * Node ids whose type has changed since the graph was saved.
+   *
+   * Computed by comparing each node's stored `defHash` against the definition registered right now.
+   * A node whose type is not registered at all is **not** here: that is "the plugin is stopped",
+   * which is a different sentence and a different fix. Empty for a graph that has never been saved
+   * against a registered type, since there is nothing to compare.
+   */
+  readonly staleNodes: readonly string[];
+}
+
+/**
+ * A graph as it leaves this machine, and arrives on another.
+ *
+ * **Secrets cannot be in here, and that is a property rather than a filter.** A secret never enters
+ * the document in the first place (decision 213) — it lives in the credential store keyed by graph,
+ * node and field — so an export carries no token even if nobody remembers to strip one.
+ *
+ * `nodeTypes` records what the graph was built against. On import it is what lets the daemon say
+ * "this needs a plugin you do not have" instead of creating a graph that silently does nothing.
+ */
+export interface GraphExport {
+  /** Bumped only if the shape changes in a way an older build cannot read. */
+  readonly version: 1;
+  readonly exportedAt: number;
+  readonly name: string;
+  readonly description: string;
+  readonly concurrency: GraphConcurrency;
+  readonly definition: GraphDocument;
+  readonly nodeTypes: readonly { readonly qualifiedId: string; readonly defHash?: string }[];
+}
+
+/** What an import produced, and what it could not. */
+export interface GraphImportResult {
+  readonly graph: Graph;
+  /** Node types this machine does not have. The graph is created anyway, disabled. */
+  readonly missing: readonly string[];
+  /** Node types present but changed since the export. */
+  readonly changed: readonly string[];
+}
+
+/** One of the graphs vrc.zip ships, so the first canvas is an edit rather than a blank page. */
+export interface GraphTemplate {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string;
+  readonly definition: GraphDocument;
 }
 
 /** A run that has not finished. Live state, straight off `graph_runs`. */

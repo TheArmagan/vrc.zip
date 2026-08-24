@@ -87,6 +87,10 @@ function harness(options: { canNotify?: boolean } = {}): Harness {
         sent.push({ user, kind: "boop" });
         await Promise.resolve();
       },
+      inviteToGroup: async (_accountId, group, user) => {
+        sent.push({ user, kind: `invite-to-group:${group}` });
+        await Promise.resolve();
+      },
       selectAvatar: async (_accountId, avatar) => {
         sent.push({ user: avatar, kind: "wear-avatar" });
         await Promise.resolve();
@@ -712,6 +716,15 @@ describe("vrchat actions", () => {
     expect(splitInstance("wrld_x:")).toBeNull();
   });
 
+  test("a group invite carries the group as well as the person", async () => {
+    // Two required ports rather than one, because membership is not a place: which group it is for
+    // is the whole difference between this and `Invite someone`.
+    const h = harness();
+    const result = await h.run("invite-to-group", { user: "usr_a", group: "grp_1" });
+    expect(result).toEqual({ sent: true });
+    expect(h.sent).toEqual([{ user: "usr_a", kind: "invite-to-group:grp_1" }]);
+  });
+
   test("a graph with no account says so rather than sending as somebody", async () => {
     const h = harness();
     await expect(h.run("boop", { user: "usr_a" }, {}, { accountId: null })).rejects.toThrow(
@@ -742,6 +755,7 @@ describe("dry run", () => {
     await h.run("discord", { text: "x" }, { url: "https://vrc.zip.test/hook" }, context);
     await h.run("ntfy", { text: "x" }, { server: base, topic: "t" }, context);
     await h.run("invite", { user: "usr_a", instance: "wrld_x:1" }, {}, context);
+    await h.run("invite-to-group", { user: "usr_a", group: "grp_1" }, {}, context);
     await h.run("boop", { user: "usr_a" }, {}, context);
     await h.run("osc", { value: 1 }, { address: "/a", port: 1 }, context);
 
@@ -749,8 +763,9 @@ describe("dry run", () => {
     expect(received.length).toBe(before);
     expect(h.sent).toEqual([]);
     // And the evidence the arming gesture needs is in the feed, as ordinary events.
-    expect(notes(h.events)).toHaveLength(6);
+    expect(notes(h.events)).toHaveLength(7);
     expect(notes(h.events)[3]).toBe("invite usr_a to wrld_x:1");
+    expect(notes(h.events)[4]).toBe("invite usr_a to grp_1");
     expect(h.events.every((event) => event.kind === "graph.note")).toBe(true);
   });
 

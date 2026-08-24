@@ -59,6 +59,7 @@ export interface GraphSocialActions {
   ): Promise<void>;
   requestInvite(accountId: string, userId: string, requestSlot?: number): Promise<void>;
   boop(accountId: string, userId: string): Promise<void>;
+  inviteToGroup(accountId: string, groupId: string, userId: string): Promise<void>;
   selectAvatar(accountId: string, avatarId: string): Promise<void>;
 }
 
@@ -741,6 +742,46 @@ const INVITE: NodeDefinition = {
   ],
 };
 
+/**
+ * The other kind of invite, and it is a different act from `Invite someone`.
+ *
+ * An instance invite is one person asking another to come and stand somewhere for an evening. A
+ * group invite is membership, it outlives the run that sent it, and whether it is allowed at all
+ * depends on the acting account's **role in that group** rather than on the friendship. So it takes
+ * a `group` port beside the `user` one, and its refusal says the thing that is usually true: the
+ * problem is your permissions, not theirs.
+ *
+ * **No override-the-block switch.** VRChat's endpoint takes `confirmOverrideBlock`, and this node
+ * never sends it. A graph that can push an invite past a block is a harassment tool with a schedule
+ * on it; see `wiring/social-actions.ts`.
+ */
+const INVITE_TO_GROUP: NodeDefinition = {
+  id: "invite-to-group",
+  kind: "action",
+  title: "Invite someone to a group",
+  description: "Invites somebody to join a group. Needs a role in that group that may do it.",
+  category: "VRChat",
+  inputs: [
+    { id: "user", label: "To", type: "user", required: true },
+    { id: "group", label: "Group", type: "group", required: true },
+  ],
+  outputs: [{ id: "sent", label: "Sent", type: "boolean" }],
+  config: [
+    {
+      kind: "account",
+      id: "accountId",
+      label: "Act as",
+      description: "Leave blank to use the graph's account.",
+    },
+  ],
+  body: [
+    { kind: "literal", text: "invite " },
+    { kind: "port", port: "user" },
+    { kind: "literal", text: " to " },
+    { kind: "port", port: "group" },
+  ],
+};
+
 const REQUEST_INVITE: NodeDefinition = {
   id: "request-invite",
   kind: "action",
@@ -1142,6 +1183,20 @@ export function actionNodes(deps: ActionDeps): BuiltinNode[] {
         }
         if (social === undefined) throw new Error("This daemon cannot send invites.");
         await social.invite(requireAccount(context, "send the invite"), user, target);
+        return { sent: true };
+      },
+    },
+    {
+      definition: INVITE_TO_GROUP,
+      execute: async (inputs, _config, context) => {
+        const user = text(inputs.user);
+        const group = text(inputs.group);
+        if (context.dryRun) {
+          rehearse(deps, context, `invite ${user} to ${group}`);
+          return { sent: false };
+        }
+        if (social === undefined) throw new Error("This daemon cannot send invites.");
+        await social.inviteToGroup(requireAccount(context, "send the group invite"), group, user);
         return { sent: true };
       },
     },

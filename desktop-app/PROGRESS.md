@@ -4984,6 +4984,20 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
        request on a string that is not an id. `My current instance` still reports it, because
        `private` is a truthful answer to "where am I".
 
+264. **`Invite someone to a group`, and it sends no `confirmOverrideBlock`.** A fifth method on the
+     social-actions seam (`inviteToGroup`), `POST /groups/{groupId}/invites`, next to `Invite
+     someone` under **VRChat** rather than in **Me**: it acts on somebody else's notifications, not
+     on your own account. Two required ports, `user` and `group`, because membership is not a place
+     — which group it is for is the whole difference between this and an instance invite.
+     - **The override flag is never sent, and that is the decision.** VRChat's endpoint takes
+       `confirmOverrideBlock`, which pushes an invite past a block. A graph that can do that
+       unattended, on a schedule, is a harassment tool with a timer on it. Without the flag a
+       blocked pair is a 400 carrying VRChat's own sentence, which is the correct outcome.
+     - **Its 403 says something different from the other three.** `sendAsUser` guesses "they may not
+       accept them from you", which is right for an invite or a boop and wrong here: a group invite
+       is refused on the acting account's **role in the group** far more often than on the
+       recipient. So the helper took an optional `forbidden` override and this is its one caller.
+
 ---
 
 ## Gotchas

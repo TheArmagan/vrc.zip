@@ -43,7 +43,12 @@ export interface SocialActions {
   ): Promise<void>;
   requestInvite(accountId: string, userId: string, requestSlot?: number): Promise<void>;
   boop(accountId: string, userId: string): Promise<void>;
-  /** Wears an avatar. The one of the four that acts on the user rather than on somebody else. */
+  /**
+   * Invites somebody into a group. Needs a role in that group that may do it, which is why its 403
+   * says something different from the other three: the refusal is usually about *you*.
+   */
+  inviteToGroup(accountId: string, groupId: string, userId: string): Promise<void>;
+  /** Wears an avatar. The one of the five that acts on the user rather than on somebody else. */
   selectAvatar(accountId: string, avatarId: string): Promise<void>;
 }
 
@@ -86,6 +91,8 @@ export async function sendAsUser(
   path: string,
   body: Record<string, JsonValue>,
   what: string,
+  /** Overrides the 403 sentence where "they may not accept them from you" is the wrong guess. */
+  forbidden?: string,
 ): Promise<void> {
   const response = await vrcFetch(account.context(), path, {
     method: "POST",
@@ -102,7 +109,7 @@ export async function sendAsUser(
     throw new ControlError(
       403,
       "send_forbidden",
-      `VRChat will not deliver that ${what}. They may not accept them from you.`,
+      forbidden ?? `VRChat will not deliver that ${what}. They may not accept them from you.`,
     );
   }
   if (response.status === 404) {
@@ -141,6 +148,20 @@ export function createSocialActions(deps: {
         `/requestInvite/${userId}`,
         requestSlot === undefined ? {} : { requestSlot },
         "invite request",
+      );
+    },
+
+    async inviteToGroup(accountId, groupId, userId): Promise<void> {
+      const account = requireOnlineAccount(deps.accounts, accountId, "send the group invite");
+      // `confirmOverrideBlock` is deliberately never sent. It is VRChat's way of pushing an invite
+      // past a block, and a graph that can do that unattended is a harassment tool with a schedule
+      // on it. Without the flag a blocked pair is a 400 and the sentence VRChat wrote comes back.
+      await sendAsUser(
+        account,
+        `/groups/${groupId}/invites`,
+        { userId },
+        "group invite",
+        "VRChat will not send that group invite. Your role in the group may not be allowed to, or they may not take invites from it.",
       );
     },
 

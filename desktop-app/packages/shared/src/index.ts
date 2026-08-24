@@ -24,6 +24,8 @@ export {
   type BusEventKind,
   type ConsentEventKind,
   type ContentEventKind,
+  DESKTOP_ACTIVATION_KIND,
+  type DesktopEventKind,
   ECONOMY_CHANGE_ASPECTS,
   type EconomyChangeAspect,
   type EconomyEventKind,

@@ -53,6 +53,7 @@ interface ComLibs {
       out: Uint8Array,
     ) => number;
     CoTaskMemFree: (memory: number | bigint) => void;
+    PropVariantClear: (variant: Uint8Array) => number;
   };
 }
 
@@ -72,6 +73,7 @@ export function comLibs(): ComLibs | null {
         returns: FFIType.i32,
       },
       CoTaskMemFree: { args: [FFIType.ptr], returns: FFIType.void },
+      PropVariantClear: { args: [FFIType.ptr], returns: FFIType.i32 },
     });
     libs = { ole32: ole32.symbols as unknown as ComLibs["ole32"] };
   } catch {
@@ -205,6 +207,23 @@ export function createInstance(clsid: Uint8Array, iid: Uint8Array): number {
     return 0;
   }
   return Number(new DataView(out.buffer).getBigUint64(0, true));
+}
+
+/**
+ * Frees a `PROPVARIANT` a COM method filled in for us.
+ *
+ * Only ever called on one we were *given*. A variant we built ourselves points at a JavaScript
+ * buffer, and handing that to `CoTaskMemFree` — which is what this does for a `VT_LPWSTR` — frees
+ * memory the allocator never issued.
+ */
+export function propVariantClear(variant: Uint8Array): void {
+  const lib = comLibs();
+  if (lib === null) return;
+  try {
+    lib.ole32.PropVariantClear(variant);
+  } catch {
+    // A leak on a failure path is not worth a throw.
+  }
 }
 
 /** Frees memory a COM method allocated for us. */

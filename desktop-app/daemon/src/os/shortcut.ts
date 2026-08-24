@@ -32,7 +32,16 @@
 import { dlopen, FFIType, ptr, read, suffix } from "bun:ffi";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { call, createInstance, guid, queryInterface, release, S_OK, taskMemFree } from "./com.ts";
+import {
+  call,
+  createInstance,
+  guid,
+  propVariantClear,
+  queryInterface,
+  release,
+  S_OK,
+  taskMemFree,
+} from "./com.ts";
 import { wide } from "./message-pump.ts";
 
 const IS_WINDOWS = process.platform === "win32";
@@ -61,8 +70,8 @@ const PKEY_AppUserModel_ID = { fmtid: "9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3", pi
 
 /** Vtable slots. Inherited methods count, which is why none of these start at 3. */
 const IShellLink = { SetDescription: 7, SetWorkingDirectory: 9, SetIconLocation: 17, SetPath: 20 };
-const IPersistFile = { Save: 6 };
-const IPropertyStore = { SetValue: 6, Commit: 7 };
+const IPersistFile = { Load: 5, Save: 6 };
+const IPropertyStore = { GetValue: 5, SetValue: 6, Commit: 7 };
 
 /** `VT_LPWSTR`: a pointer to a NUL-terminated wide string that the callee copies. */
 const VT_LPWSTR = 31;
@@ -172,6 +181,89 @@ export function writeShortcut(options: ShortcutOptions): boolean {
   }
 }
 
+/**
+ * Reads an existing `.lnk`'s AppUserModelID, and stamps ours on it if it has none.
+ *
+ * This exists because of what is actually on people's machines. A copy installed by any build
+ * before the shortcut writer moved to COM has a perfectly good Start menu entry with no
+ * `System.AppUserModel.ID` on it, and a toast raised against an id no shortcut carries **succeeds**:
+ * `CreateToastNotifierWithId` returns `S_OK`, `Show` returns `S_OK`, and nothing appears. That is
+ * the worst failure shape there is, and it was the state of the machine this was written on.
+ *
+ * The repair is deliberately the smallest one that works. `IPersistFile::Load` reads the whole
+ * shortcut, so the target, the icon and the working directory are whatever the user's shortcut
+ * already said; only the property is touched, and only when it is absent or different. Saving with a
+ * null filename writes back to the file it was loaded from, so nothing has to be recomposed.
+ *
+ * Returns whether the shortcut can now be notified from.
+ */
+export function ensureShortcutAppId(path: string, appUserModelId: string): boolean {
+  if (!IS_WINDOWS) return false;
+
+  const link = createInstance(guid(CLSID_ShellLink), guid(IID_IShellLinkW));
+  if (link === 0) return false;
+
+  let file = 0;
+  let store = 0;
+  try {
+    file = queryInterface(link, guid(IID_IPersistFile));
+    if (file === 0) return false;
+    // `STGM_READWRITE`. Loading read-only and then saving is a shortcut that reports success and
+    // does not change.
+    if (
+      call(file, IPersistFile.Load, [FFIType.ptr, FFIType.u32], [wide(path), 0x0000_0002]) !== S_OK
+    ) {
+      return false;
+    }
+
+    store = queryInterface(link, guid(IID_IPropertyStore));
+    if (store === 0) return false;
+    const key = propertyKey(PKEY_AppUserModel_ID.fmtid, PKEY_AppUserModel_ID.pid);
+
+    const existing = new Uint8Array(24);
+    if (
+      call(store, IPropertyStore.GetValue, [FFIType.ptr, FFIType.ptr], [key, existing]) === S_OK
+    ) {
+      const view = new DataView(existing.buffer);
+      const address =
+        view.getUint16(0, true) === VT_LPWSTR ? Number(view.getBigUint64(8, true)) : 0;
+      const current = address === 0 ? "" : readWide(address);
+      // This one *was* allocated by COM, so unlike the variant we build, it must be cleared.
+      propVariantClear(existing);
+      if (current === appUserModelId) return true;
+    }
+
+    const { variant, text } = stringVariant(appUserModelId);
+    new DataView(variant.buffer).setBigUint64(8, BigInt(ptr(text)), true);
+    if (call(store, IPropertyStore.SetValue, [FFIType.ptr, FFIType.ptr], [key, variant]) !== S_OK) {
+      return false;
+    }
+    if (text.length === 0) return false;
+    if (call(store, IPropertyStore.Commit, [], []) !== S_OK) return false;
+
+    // A null filename means "the file you were loaded from", which is the whole point: nothing here
+    // knows what the user's shortcut pointed at and nothing here should have to.
+    return call(file, IPersistFile.Save, [FFIType.ptr, FFIType.i32], [null, 1]) === S_OK;
+  } catch {
+    return false;
+  } finally {
+    release(store);
+    release(file);
+    release(link);
+  }
+}
+
+/** Reads a NUL-terminated wide string out of foreign memory. */
+function readWide(address: number): string {
+  let text = "";
+  for (let offset = 0; offset < 32_768; offset += 2) {
+    const unit = read.u16(address, offset);
+    if (unit === 0) break;
+    text += String.fromCharCode(unit);
+  }
+  return text;
+}
+
 /* -------------------------------------------------------------------------------------------- */
 /* Where the shortcuts go                                                                         */
 /* -------------------------------------------------------------------------------------------- */
@@ -182,8 +274,26 @@ export const FOLDERID_Programs = "A77F5D77-2E2B-44C3-A6A2-ABA601054A51";
 
 let shell32: {
   SHGetKnownFolderPath: (id: Uint8Array, flags: number, token: null, out: Uint8Array) => number;
+  SetCurrentProcessExplicitAppUserModelID: (id: Uint8Array) => number;
 } | null = null;
 let shellAttempted = false;
+
+/** Opens shell32 once, for the two entry points here that are not COM. Never throws. */
+function loadShell32(): void {
+  if (shellAttempted || !IS_WINDOWS) return;
+  shellAttempted = true;
+  try {
+    shell32 = dlopen(`shell32.${suffix}`, {
+      SHGetKnownFolderPath: {
+        args: [FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.ptr],
+        returns: FFIType.i32,
+      },
+      SetCurrentProcessExplicitAppUserModelID: { args: [FFIType.ptr], returns: FFIType.i32 },
+    }).symbols as unknown as typeof shell32;
+  } catch {
+    shell32 = null;
+  }
+}
 
 /**
  * Asks Windows where a folder actually is.
@@ -195,19 +305,7 @@ let shellAttempted = false;
  */
 export function knownFolder(id: string): string | null {
   if (!IS_WINDOWS) return null;
-  if (!shellAttempted) {
-    shellAttempted = true;
-    try {
-      shell32 = dlopen(`shell32.${suffix}`, {
-        SHGetKnownFolderPath: {
-          args: [FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.ptr],
-          returns: FFIType.i32,
-        },
-      }).symbols as unknown as typeof shell32;
-    } catch {
-      shell32 = null;
-    }
-  }
+  loadShell32();
   if (shell32 === null) return null;
 
   const out = new Uint8Array(8);
@@ -254,6 +352,33 @@ export function installedShortcutPath(env: NodeJS.ProcessEnv = process.env): str
   return programs === null ? null : join(programs, "vrc.zip.lnk");
 }
 
+/**
+ * Tells Windows which app this process *is*.
+ *
+ * The half of the AppUserModelID story that is easy to miss, because everything works without it
+ * right up to the point where nothing appears. The shortcut declares that the id exists; this
+ * declares that we are it. Without the call, `CreateToastNotifierWithId` succeeds, `Show` returns
+ * `S_OK`, the platform even registers a notification handler for the id — and no toast is ever
+ * delivered, with nothing anywhere saying why.
+ *
+ * Found by reading Windows' own notification database (`wpndatabase.db`): our handler row was
+ * there, enabled, with zero notifications against it, while PowerShell's had hundreds.
+ *
+ * Once per process, and early: the documentation is explicit that it must happen before anything
+ * else in the process talks to the shell.
+ */
+function claimProcessAppId(appUserModelId: string): void {
+  if (!IS_WINDOWS || claimed) return;
+  claimed = true;
+  loadShell32();
+  try {
+    shell32?.SetCurrentProcessExplicitAppUserModelID(wide(appUserModelId));
+  } catch {
+    // An older Windows without the export. The toast then fails the honest way, by not appearing.
+  }
+}
+
+let claimed = false;
 let ensured: string | null | undefined;
 
 /**
@@ -263,19 +388,22 @@ let ensured: string | null | undefined;
  * notification takes, and a machine with no `%APPDATA%` should not pay for a filesystem probe per
  * toast.
  *
- * An installed copy's shortcut wins when it is there, and is used *as it is* rather than rewritten.
- * Two `vrc.zip` rows in somebody's Start menu would be worse than the problem being solved, and
- * rewriting the installed one from a process running somewhere else — a dev run from source, with an
- * install also on the machine — would repoint it at `bun.exe`. The one case this does not cover is a
- * shortcut written by a build older than this file, which carries no id: installing again fixes it,
- * and doing it silently from here would mean rewriting a file the user's Start menu points at on the
- * strength of a guess about what is in it.
+ * An installed copy's shortcut wins when it is there, and is *repaired* rather than rewritten: its
+ * AppUserModelID is stamped on if it is missing, and everything else about it — where it points,
+ * what icon it uses — is left exactly as the user's shortcut already had it. Rewriting it outright
+ * would repoint it at `bun.exe` when the process asking is a dev run rather than the installed copy,
+ * and adding a second entry beside it would put two `vrc.zip` rows in somebody's Start menu.
+ *
+ * The repair is not a nicety. Any copy installed before the writer moved to COM has a shortcut with
+ * no id on it, and a toast raised against an id no shortcut carries returns `S_OK` and shows
+ * nothing. See {@link ensureShortcutAppId}.
  */
 export async function ensureToastShortcut(
   env: NodeJS.ProcessEnv = process.env,
   execPath: string = process.execPath,
 ): Promise<string | null> {
   if (ensured !== undefined) return ensured;
+  claimProcessAppId(APP_USER_MODEL_ID);
   ensured = await createToastShortcut(env, execPath);
   return ensured;
 }
@@ -295,7 +423,11 @@ async function createToastShortcut(
   const own = toastShortcutPath(env);
   const target = execPath;
 
-  if (installed !== null && (await exists(installed))) return installed;
+  if (installed !== null && (await exists(installed))) {
+    if (ensureShortcutAppId(installed, APP_USER_MODEL_ID)) return installed;
+    // A shortcut we could not repair — read-only, held open, on a network path — is not a reason to
+    // give up: our own folder below is somewhere we are always allowed to write.
+  }
 
   if (own === null) return null;
   try {

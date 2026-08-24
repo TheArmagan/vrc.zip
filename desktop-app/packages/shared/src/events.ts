@@ -38,6 +38,7 @@ export type EventFamily =
   | "content"
   | "consent"
   | "graph"
+  | "desktop"
   | "other";
 
 /**
@@ -57,6 +58,7 @@ export const EVENT_FAMILIES: readonly EventFamily[] = [
   "account",
   "pipeline",
   "graph",
+  "desktop",
   "economy",
   "content",
   "consent",
@@ -255,6 +257,30 @@ export type GraphEventKind =
   | "graph.signal.local";
 
 /**
+ * Somebody pressed a button on one of the daemon's own desktop notifications.
+ *
+ * A family of its own rather than a `notification.*` kind, and the distinction is the whole reason:
+ * that family is **VRChat's** notifications — invites, friend requests, the things another person
+ * sent you. This is the operating system's, and it is about a toast vrc.zip raised. Filing a toast
+ * press under `notification.*` would put "you clicked Snooze" in the same filter as "someone invited
+ * you", which is two different questions with one answer.
+ *
+ * Only activation. Shown, dismissed and failed are all things the notifier knows and none of them is
+ * something to put on the spine: a press is a person acting, and the rest is a toast's own weather.
+ */
+export type DesktopEventKind = "desktop.notification.activated";
+
+/**
+ * The kind, as a value.
+ *
+ * Here rather than beside its emitter — which is where `graph.signal` and friends live — because
+ * this one has a producer in `wiring/` and a consumer in `graphs/`, and `graphs/` importing from
+ * `wiring/` would run the dependency backwards. An event name is a shared type; this is the package
+ * for those.
+ */
+export const DESKTOP_ACTIVATION_KIND: DesktopEventKind = "desktop.notification.activated";
+
+/**
  * Every kind the daemon can emit. Producers are typed against this, so adding a kind to a bridge
  * without adding it here does not compile.
  */
@@ -271,7 +297,8 @@ export type BusEventKind =
   | EconomyEventKind
   | ContentEventKind
   | ConsentEventKind
-  | GraphEventKind;
+  | GraphEventKind
+  | DesktopEventKind;
 
 /** @deprecated Prefer {@link BusEventKind}. Kept as the name the UI already imports. */
 export type KnownEventKind = BusEventKind;
@@ -371,6 +398,7 @@ export const BUS_EVENT_KINDS = [
   "graph.note",
   "graph.signal",
   "graph.signal.local",
+  "desktop.notification.activated",
 ] as const satisfies readonly BusEventKind[];
 
 /**

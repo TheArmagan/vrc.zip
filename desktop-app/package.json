@@ -15,6 +15,7 @@
   ],
   "scripts": {
     "daemon": "bun --watch daemon/src/index.ts",
+    "notify:smoke": "bun daemon/src/os/toast-smoke.ts",
     "codegen": "bun run --filter @vrcz/tools codegen",
     "icon": "bun run --filter @vrcz/tools icon",
     "package": "bun run --filter @vrcz/tools package",

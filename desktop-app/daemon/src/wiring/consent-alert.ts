@@ -23,9 +23,9 @@
  *    sheet the user can already see, which is a far cheaper failure than silence.
  *  - **The browser tab is opened only when nothing is connected.** *That* is the intrusive half:
  *    opening a tab on top of an app the user already has open is the kind of "help" that trains
- *    people to close things without reading them. A Windows toast cannot carry a click handler
- *    without a registered AppUserModelID (see `os/desktop-notification.ts`), so when there is no UI
- *    client the tab is what actually delivers the user and the toast explains why one appeared.
+ *    people to close things without reading them. The toast carries an `Open vrc.zip` button now that
+ *    it can — see `os/toast.ts` — so a connected user has a way there without a tab appearing on
+ *    top of what they were doing, and the tab stays the fallback for when nothing is connected.
  *
  * Both halves are best-effort and neither can fail the login that triggered them. A daemon on a
  * headless box has no browser and no notification daemon, and the pairing still works — the code is
@@ -33,7 +33,7 @@
  */
 
 import type { BusEvent, EventBus, Subscription } from "../bus/event-bus.ts";
-import { notifyDesktop } from "../os/desktop-notification.ts";
+import type { DesktopNotification, NotifyResult } from "../os/desktop-notification.ts";
 import { openUrl } from "../os/open-url.ts";
 import type { ConsentRegistry } from "../proxy/consent.ts";
 
@@ -44,8 +44,14 @@ export interface ConsentAlertOptions {
   readonly uiConnected: () => boolean;
   /** Builds the URL that lands on the consent screen for one request, token included. */
   readonly consentUrl: (pairingId: string) => string;
-  /** Test seams. Both default to the real thing. */
-  readonly notify?: typeof notifyDesktop | undefined;
+  /**
+   * How a notification is raised.
+   *
+   * Passed in rather than imported: the notifier is a constructed object now, since it holds the
+   * live toasts and the COM handlers behind them, and reaching for a module-level one would be two
+   * of it in a process that can only have one.
+   */
+  readonly notify: (notification: DesktopNotification) => Promise<NotifyResult>;
   readonly open?: typeof openUrl | undefined;
   /** The user can switch the browser half off; the notification half stays. */
   readonly openBrowser?: (() => boolean) | undefined;
@@ -53,7 +59,7 @@ export interface ConsentAlertOptions {
 
 /** Subscribes to `consent.pending` and alerts the user. Returns a detach function. */
 export function attachConsentAlerts(options: ConsentAlertOptions): () => void {
-  const notify = options.notify ?? notifyDesktop;
+  const notify = options.notify;
   const open = options.open ?? openUrl;
 
   const subscription: Subscription = options.bus.subscribe(
@@ -73,11 +79,20 @@ export function attachConsentAlerts(options: ConsentAlertOptions): () => void {
     if (pending === null) return;
 
     const scopeCount = pending.newScopes.length;
+    const screen = `/consent/${encodeURIComponent(pending.id)}`;
     const result = await notify({
       title: `${pending.app.name} wants to use your VRChat account`,
       body:
         `Code ${pending.code}. Type it into ${pending.app.name} to allow it ` +
         `${scopeCount === 1 ? "one new permission" : `${String(scopeCount)} new permissions`}.`,
+      // A tag, so a second request replaces the first rather than stacking: somebody retrying a
+      // login should see one toast with the current code, not four with three stale ones.
+      tag: "consent",
+      // It expires when the pairing does. A code that no longer works sitting in the Action Center
+      // is worse than no notification at all, because it reads as one that should.
+      expiresInMs: Math.max(0, pending.expiresAt - Date.now()),
+      click: { action: "screen", argument: screen },
+      buttons: [{ id: "open", label: "Open vrc.zip", action: "screen", argument: screen }],
     });
 
     if (!result.shown) {

@@ -12,9 +12,9 @@ import { GraphEngine } from "./graphs/index.ts";
 import { RateLimiter } from "./net/rate-limiter.ts";
 import { RequestMeter } from "./net/request-meter.ts";
 import { buildUserAgent } from "./net/user-agent.ts";
-import { notifyDesktop } from "./os/desktop-notification.ts";
+import { DesktopNotifier } from "./os/desktop-notification.ts";
 import { installedVersion, installLocally, installTarget, isInstalled } from "./os/install.ts";
-import { openUrl, openVrchatLaunch } from "./os/open-url.ts";
+import { openExternalUrl, openUrl, openVrchatLaunch } from "./os/open-url.ts";
 import { createStartupControl } from "./os/startup.ts";
 import { databasePath, ensureStateDir } from "./paths.ts";
 import { PipelineClient } from "./pipeline/index.ts";
@@ -41,11 +41,13 @@ import { createGraphData } from "./wiring/graph-data.ts";
 import { PluginNodeProvider } from "./wiring/graph-provider.ts";
 import { createGraphReads } from "./wiring/graph-reads.ts";
 import { createLogSink } from "./wiring/log-bridge.ts";
+import { attachNotificationActivations } from "./wiring/notification-activation.ts";
 import { NotificationSink } from "./wiring/notification-sink.ts";
 import { publishPipelineEvent } from "./wiring/pipeline-bridge.ts";
 import { createPluginHost } from "./wiring/plugin-host.ts";
 import { createSelfActions } from "./wiring/self-actions.ts";
 import { createSocialActions } from "./wiring/social-actions.ts";
+import { createToastImageResolver } from "./wiring/toast-image.ts";
 import { createTriggerContext } from "./wiring/trigger-context.ts";
 import { UpdateDiffSet } from "./wiring/update-diff.ts";
 import { attachWebhookBridge } from "./wiring/webhook-bridge.ts";
@@ -374,6 +376,34 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
    * than relied on: an install cannot happen before the servers are up, but a closure that would
    * throw if it did is not something to leave to reading order.
    */
+  /*
+   * The notifier, and the two holders it needs.
+   *
+   * It is constructed here rather than reached for, like everything else in this file — it owns the
+   * live toasts and the COM handlers Windows calls back into, and a second one would be a second set
+   * of those in a process that can only have one. Both of its outward-facing dependencies are
+   * assigned below: `launchUrl` needs a bound port and a session token, and the image resolver needs
+   * the control deps, which need the plugin host, which needs this. Same holder shape and same
+   * reason as `publishToast` underneath.
+   */
+  let launchUrl = "";
+  let resolveToastImage: (source: string) => Promise<string | null> = async () => null;
+
+  const notifier = new DesktopNotifier({
+    ...(env !== undefined ? { env } : {}),
+    // Two openers, because they are two different rules: `openUrl` refuses anything off loopback
+    // (it is handed URLs with a session token in them) and would silently do nothing for a public
+    // link. Routing a notification's button through the wrong one is a button that does not work.
+    openUrl: (url) => {
+      void openExternalUrl(url);
+    },
+    openScreen: (path) => {
+      if (launchUrl === "") return;
+      void openUrl(`${launchUrl}#${path}`);
+    },
+    resolveImage: async (source) => await resolveToastImage(source),
+  });
+
   let publishToast: (toast: PluginToast) => void = () => {
     // Nothing is attached yet, and a toast is by nature about *now* — queuing one for whoever
     // connects later would show a stale message to someone who was not there.
@@ -463,7 +493,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     // The same notifier the consent alert uses, so a graph's toast and the daemon's own look alike
     // and obey the same suppression switch. It never rejects and reports whether anything actually
     // appeared, which is what the node hands back on its `Shown` port.
-    notify: async (notification) => await notifyDesktop(notification, undefined, env),
+    notify: async (notification) => await notifier.notify(notification),
     // The cooldown and counter nodes. Four SQL statements behind a two-method seam, so the graph
     // runtime never learns that SQLite is under there.
     state: {
@@ -723,7 +753,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     env,
   );
 
-  const launchUrl = buildLaunchUrl(servers.urls.uiUrl, sessionToken);
+  launchUrl = buildLaunchUrl(servers.urls.uiUrl, sessionToken);
 
   // --- getting a consent request in front of the user -----------------------
   // Which channel runs depends on whether anyone is watching; see `wiring/consent-alert.ts`. The
@@ -780,16 +810,40 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     );
     // Best-effort, both of them. A headless box has no browser and no notification daemon, and the
     // install still works: the request is on the control API for anything that asks.
-    void notifyDesktop({
+    void notifier.notify({
       title: "vrc.zip: a plugin wants to be installed",
       body: `${what} is waiting for you to approve or deny it.`,
+      tag: "plugin-consent",
+      // The button is the point of the toast now: the browser tab below is the fallback for
+      // somebody who is not at their desk, and this is the way there for somebody who is.
+      click: { action: "screen", argument: "/plugins" },
+      buttons: [{ id: "open", label: "Open vrc.zip", action: "screen", argument: "/plugins" }],
     });
     void openUrl(`${launchUrl}#/plugins`);
   };
 
+  resolveToastImage = createToastImageResolver({
+    // The one path in the daemon that fetches a caller-chosen URL, reused rather than reopened: an
+    // unpackaged app's toast cannot load an image over the network, and a VRChat image cannot be
+    // fetched without the auth cookie and the User-Agent. See `wiring/toast-image.ts`.
+    fetchImage: async (url) => await deps.fetchImage(url),
+    ...(env !== undefined ? { env } : {}),
+  });
+
+  /*
+   * A press on a toast becomes an event, and from there it is an event like any other: the graph
+   * trigger subscribes to a kind, the feed writes it, a webhook can filter on it. This adapter is
+   * the only thing that knows the notifier and the bus both exist.
+   */
+  const detachActivations = attachNotificationActivations({
+    bus,
+    onActivation: (handler) => notifier.onActivation(handler),
+  });
+
   const detachConsentAlerts = attachConsentAlerts({
     bus,
     consent,
+    notify: async (notification) => await notifier.notify(notification),
     uiConnected: () => deps.streamClientCount() > 0,
     consentUrl: (pairingId) => `${launchUrl}#/consent/${encodeURIComponent(pairingId)}`,
     openBrowser: () => settings.openBrowserOnStart,
@@ -831,6 +885,11 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
       // Order is the reverse of construction, and the first two lines are the ones that matter:
       // stop accepting work, then flush what is already queued, before anything closes.
       detachConsentAlerts();
+      detachActivations();
+      // With it, since it is what the consent alert was raising. A toast outlives the process that
+      // showed it unless it is taken down, and one left on screen with an `Open vrc.zip` button
+      // pointing at a daemon that has exited is a button that does nothing.
+      notifier.stop();
       // Before the plugins, for the mirror of the reason it starts after them: disarming a trigger
       // is a call into a plugin, and a graph left armed against a stopped host would spend the
       // shutdown logging failures about a process that is already gone.

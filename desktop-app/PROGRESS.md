@@ -4646,6 +4646,44 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
        The old `shortcutScript` tests went with the script; what replaced them asserts that every
        planned shortcut carries the id and that the folders come from the shell.
 
+250. **The Windows notifier is a real WinRT toast now, over FFI, and PowerShell is gone from that
+     path.** Title, body, a silent switch, up to five buttons, an image, a scenario, a duration, an
+     expiry — and an `Activated` callback that arrives *in this process*, which is the one that
+     could never have worked before. A toast's activation is delivered to the process that created
+     it, and the old path's process was a PowerShell host that exited a second later. Buttons that
+     cannot report being pressed are not buttons.
+     - **`os/toast.ts` is the WinRT layer**, `os/com.ts` the three primitives underneath it, and
+       `os/desktop-notification.ts` is now a `DesktopNotifier` class built in `app.ts` — it holds
+       live COM handlers, the table of what is on screen and any pending snoozes, none of which can
+       exist twice in one process. The PowerShell fallback was deleted rather than kept: `Shown` is
+       a real answer, and "it appeared, without buttons, from PowerShell" is not one.
+     - **The IIDs and vtable slots were read off this machine's WinRT metadata, not remembered.**
+       Two of them would have been wrong. `IToastNotificationManagerStatics` is `…-BBEF-98FE4D1A3AD4`
+       and not the `…-BB85-…` that gets quoted around, and `IToastNotification` declares `Dismissed`
+       *before* `Activated`, so `add_Activated` is slot 11 rather than 9. A wrong slot is not an
+       error: it is a different function called with the wrong arguments.
+     - **The handler refuses `IAgileObject`, deliberately.** Saying yes means "call me on any
+       thread", and the notification platform takes it up — which for a JavaScript runtime is a
+       crash, not a race. Refusing makes COM marshal the call back into our STA, where
+       `os/message-pump.ts` is already pumping. `Invoke` only reads the arguments and queues; the
+       caller's handler runs on a microtask, off the foreign stack.
+     - Buttons wired to `dismiss` are `activationType="system"` and never reach this process at all.
+     - **macOS and Linux drop what they cannot do instead of refusing.** `NotifyResult.ignored`
+       names it. A cross-platform graph that asked for a button gets a notification without one,
+       which beats getting nothing and beats being told it worked in full.
+     - **A press is a bus event, not a resolved promise.** `desktop.notification.activated`, in a
+       `desktop` family of its own — filing it under `notification.*` would put "you clicked Snooze"
+       in the same filter as "someone invited you". `wiring/notification-activation.ts` is the
+       adapter, so `os/` still does not know what an EventBus is.
+     - **An image is fetched through the daemon's own `/api/image` path** and written to a file,
+       because an unpackaged app's toast cannot load one over the network and a VRChat image cannot
+       be fetched without the auth cookie and the User-Agent. `wiring/toast-image.ts`, reusing
+       `parseImageUrl`'s allowlist unchanged.
+     - **Every caller was audited.** The consent toast has an `Open vrc.zip` button and a body click
+       that opens the pairing screen, a tag so a retry replaces rather than stacks, and an expiry
+       matched to the pairing's own. The plugin-install toast has the same button. `tray.ts` keeps
+       its balloon, which is right: that one is a reply to a click on that icon.
+
 ---
 
 ## Gotchas
@@ -4653,6 +4691,25 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **A Windows toast can return `S_OK` at every step and never be shown.** The AppUserModelID story
+  has two halves and only one of them is the shortcut. `SetCurrentProcessExplicitAppUserModelID`
+  tells Windows which app the *process* is, and without it `CreateToastNotifierWithId` succeeds,
+  `Show` succeeds, and the platform even writes a notification handler row for the id — with zero
+  notifications ever delivered against it. Nothing logs anything anywhere. Found by copying
+  `%LOCALAPPDATA%\Microsoft\Windows\Notifications\wpndatabase.db` (and its `-wal`, or the last hour
+  of it is missing) and reading it with `bun:sqlite`: our handler was there, enabled, with an empty
+  `Notification` table, while PowerShell's had hundreds of rows. That database is the only honest
+  instrument for "did the toast actually happen"; `bun run notify:smoke` is the other half, since
+  whether a *person* can press the button is not something any test can answer.
+
+- **A shortcut written by an older build carries no AppUserModelID, which is the state of every
+  machine vrc.zip is already installed on.** The same silent failure as above, from the other
+  direction. `ensureShortcutAppId` loads the existing `.lnk` with `IPersistFile::Load`, reads the
+  property and stamps ours on only when it is missing — target, icon and working directory stay
+  exactly as the user's shortcut had them, and `Save(NULL, TRUE)` writes back to the file it was
+  loaded from. Rewriting it outright would have repointed an installed Start menu shortcut at
+  `bun.exe` the first time a run from source raised a toast.
 
 - **`Number(null)` is `0`, so the first balance a graph ever saw was reported as a windfall.** The
   balance trigger computed `delta` by coercing `FieldChange.from`, and `from` is null when the daemon

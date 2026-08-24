@@ -198,6 +198,13 @@ interface Preset {
    * "only friends" and an `Is a friend` output are one question asked twice.
    */
   readonly config?: readonly NodeConfigField[];
+  /**
+   * Set false to leave the account picker off this node.
+   *
+   * One preset needs it. See `on-game-start`: the event it listens for cannot be attributed to an
+   * account, so a picker there is a switch whose only setting is *never fire*.
+   */
+  readonly account?: boolean;
 }
 
 function text(value: unknown): string | null {
@@ -332,12 +339,15 @@ function presets(deps: TriggerDeps): readonly Preset[] {
         if (name === null) return null;
         const user = text(event.subjectId);
         if (!passesWho(deps, config, event.accountId, user)) return null;
+        // The line itself says nothing about where it happened, so the instance is the running
+        // client's own room. See `gamelogLocation`.
+        const location = gamelogLocation(deps, event);
         // `user` may be absent: VRChat has shipped this log line with and without an id, which is
         // exactly why the name is the required half and the id is offered separately.
         return {
           name,
           ...(user === null ? {} : { user }),
-          ...(text(event.location) === null ? {} : { location: event.location }),
+          ...(location === null ? {} : { location }),
           isFriend: user !== null && (deps.context?.isFriend(event.accountId, user) ?? false),
           at: event.ts,
         };
@@ -405,19 +415,24 @@ function presets(deps: TriggerDeps): readonly Preset[] {
       map: (event, config) => {
         const payload = payloadOf(event);
         const type = text(payload.type);
-        if (type === null) return null;
+        const id = text(payload.id);
+        // A notification with no type is a real notification, not a broken frame: `type` is optional
+        // on `notification-v2` and `id` is the only required field (see `pipeline/decode.ts`).
+        // Dropping the event lost one a graph could have accepted or declined, so only a frame with
+        // neither half is refused.
+        if (type === null && id === null) return null;
         // Filtered here rather than in the subscription, because the kind is the same for all of them
         // — the type is a payload field, so the bus cannot narrow it and this is the only layer that
         // can. Notifications arrive at human speed, so the cost is nothing.
         const wanted = typeof config.type === "string" ? config.type.trim() : "";
         if (wanted !== "" && type !== wanted) return null;
         return {
-          type,
+          type: type ?? "",
           ...(text(payload.senderUserId) === null ? {} : { from: payload.senderUserId }),
           message: text(payload.message) ?? "",
           // The id is what the Me family's accept and decline nodes take, and it was missing: a graph
           // could see an invite arrive and had no way to hand it to the node that answers it.
-          ...(text(payload.id) === null ? {} : { id: payload.id }),
+          ...(id === null ? {} : { id }),
           notification: event.payload ?? null,
         };
       },
@@ -426,7 +441,15 @@ function presets(deps: TriggerDeps): readonly Preset[] {
       id: "on-world-enter",
       title: "When you enter a world",
       description: "From the game log, for the account whose client it was.",
-      kinds: ["gamelog.world_enter", "gamelog.location_join"],
+      /*
+       * `gamelog.location_join` only, and the missing sibling is deliberate.
+       *
+       * `gamelog.world_enter` is the `Entering Room:` line, and the parser gets exactly one thing
+       * off it: a world **name**. Neither typed port here can be filled from a name, and the
+       * `Joining wrld_…` line that carries the ids arrives beside it anyway — so subscribing to
+       * both meant one entry firing twice, once of them with nothing in either port.
+       */
+      kinds: ["gamelog.location_join"],
       outputs: [
         { id: "world", label: "World", type: "world" },
         { id: "location", label: "Instance", type: "instance" },
@@ -434,11 +457,15 @@ function presets(deps: TriggerDeps): readonly Preset[] {
       ],
       map: (event) => {
         const payload = payloadOf(event);
-        const world = text(payload.worldId) ?? text(event.subjectId);
-        if (world === null) return null;
+        // The parser nests the whole instance under `location` as a `ParsedLocation`. There is no
+        // `worldId` beside it and `subjectId` is null on this line, which is why reading either of
+        // those made the node fire for nobody at all.
+        const location = locationOfPayload(payload);
+        if (location === null) return null;
+        const world = worldOfPayload(payload);
         return {
-          world,
-          ...(text(event.location) === null ? {} : { location: event.location }),
+          ...(world === null ? {} : { world }),
+          location,
           at: event.ts,
         };
       },
@@ -650,6 +677,40 @@ function subjectRecord(payload: Record<string, unknown>): Record<string, unknown
     : payload;
 }
 
+/**
+ * One aspect's value out of the payload, or null when the frame cannot supply it honestly.
+ *
+ * The avatar aspect is the whole reason this is not a plain field read. A `friend-update` frame's
+ * `user` is a public `PipelineUser`, which carries `currentAvatarImageUrl` and
+ * `currentAvatarThumbnailImageUrl` and **no `currentAvatar`** — VRChat does not tell you what avatar
+ * id somebody else is wearing. So the read comes back empty for everybody but you, and the guard
+ * here is what stops a URL-shaped string reaching a port typed `avatar`.
+ */
+function aspectValue(entry: ProfileAspect, payload: Record<string, unknown>): string | null {
+  if (entry.field === "") return null;
+  const value = text(subjectRecord(payload)[entry.field]);
+  if (value === null) return null;
+  return entry.port.type === "avatar" && !value.startsWith("avtr_") ? null : value;
+}
+
+/**
+ * The typed value port, or nothing at all.
+ *
+ * The fallback to the rendered `change.to` is right for every aspect except the avatar, where that
+ * string is the thumbnail URL `wiring/update-diff.ts` compares on rather than an `avtr_` id. An
+ * unproduced port kills only the branch that wanted the avatar; a URL in it produces a lookup that
+ * 404s, which is worse.
+ */
+function valuePort(
+  entry: ProfileAspect,
+  value: string | null,
+  change: { from: string | null; to: string | null },
+): PortValues {
+  if (value !== null) return { [entry.port.id]: value };
+  if (entry.port.type === "avatar" || change.to === null) return {};
+  return { [entry.port.id]: change.to };
+}
+
 /** The `changes` list a refined update event carries, as aspect names. */
 function changedAspects(payload: Record<string, unknown>): string[] {
   const changes = payload.changes;
@@ -714,16 +775,12 @@ function profilePresets(deps: TriggerDeps): Preset[] {
         return null;
       }
       const change = changeFor(payload, entry.aspect);
-      const value = entry.field === "" ? null : text(subjectRecord(payload)[entry.field]);
+      const value = aspectValue(entry, payload);
       const where = deps.context?.location(event.accountId) ?? "";
       return {
         // The typed port carries the payload's own field where there is one. Trust has none — it is
         // computed from a tag list — so it falls back to the rendered `to`, which is the rank name.
-        ...(value === null
-          ? change.to === null
-            ? {}
-            : { [entry.port.id]: change.to }
-          : { [entry.port.id]: value }),
+        ...valuePort(entry, value, change),
         from: change.from ?? "",
         to: change.to ?? value ?? "",
         ...(where === "" || where === "offline" ? {} : { where }),
@@ -813,15 +870,11 @@ function otherProfilePresets(deps: TriggerDeps): Preset[] {
       if (!passesWho(deps, config, event.accountId, friend.id)) return null;
 
       const change = changeFor(payload, entry.aspect);
-      const value = entry.field === "" ? null : text(subjectRecord(payload)[entry.field]);
+      const value = aspectValue(entry, payload);
       return {
         friend: friend.id,
         name: friend.name,
-        ...(value === null
-          ? change.to === null
-            ? {}
-            : { [entry.port.id]: change.to }
-          : { [entry.port.id]: value }),
+        ...valuePort(entry, value, change),
         from: change.from ?? "",
         to: change.to ?? value ?? "",
         at: event.ts,
@@ -873,7 +926,9 @@ function otherPresets(deps: TriggerDeps): Preset[] {
         // `offline` arrives down this frame as well and is not a place. `private` and `traveling`
         // are: a graph that wants to know somebody went somewhere it cannot see is a real graph.
         if (location === null || location === "offline") return null;
-        const world = text(payload.worldId) ?? worldOf(location);
+        // `worldId` is `"private"` on a hidden instance rather than absent, so it goes through the
+        // same prefix guard the location split has always had.
+        const world = worldIdOf(payload.worldId) ?? worldOf(location);
         const travelling = text(payload.travelingToLocation);
         return {
           friend: friend.id,
@@ -1022,12 +1077,19 @@ function selfPresets(): Preset[] {
         if (want === "vrchat" && fromLog) return null;
 
         const payload = payloadOf(event);
-        const location =
-          text(event.location) ??
-          text(payload.location) ??
-          text((payload.location as Record<string, unknown> | undefined)?.raw);
+        // The log half nests a `ParsedLocation` under `location`; the VRChat half sets it on the
+        // event and again as a flat string. `locationOfPayload` reads both shapes.
+        const location = text(event.location) ?? locationOfPayload(payload);
         if (location === null || location === "offline") return null;
-        const world = text(payload.worldId) ?? text(event.subjectId) ?? worldOf(location);
+        /*
+         * No `subjectId` fallback, and the guard is not optional.
+         *
+         * `wiring/pipeline-bridge.ts` fills `subjectId` from `payload.userId` first, so on a
+         * `user.location` frame it is a `usr_` id — which was going straight into a port typed
+         * `world`. And `worldId` itself is the literal `"private"` when VRChat will not name the
+         * instance. Both are caught by asking for a `wrld_` id and producing nothing otherwise.
+         */
+        const world = worldIdOf(payload.worldId) ?? worldOfPayload(payload) ?? worldOf(location);
         return {
           location,
           ...(world === null ? {} : { world }),
@@ -1321,8 +1383,11 @@ function gameLogPresets(): Preset[] {
       maxFiresPerMinute: 60,
       map: (event): PortValues => {
         const payload = payloadOf(event);
-        const destination = text(payload.destination) ?? text(payload.destinationLocation);
-        const world = destination === null ? null : worldOf(destination);
+        // The parser calls it **`target`**, and it is a whole `ParsedLocation` rather than a string:
+        // neither `destination` nor `destinationLocation` was ever a field on a `portal-spawn`
+        // event, so both ports were unset on every line that did name a destination.
+        const destination = locationOfPayload(payload, "target");
+        const world = worldOfPayload(payload, "target");
         return {
           ...(text(payload.spawnerDisplayName) === null ? {} : { by: payload.spawnerDisplayName }),
           ...(destination === null ? {} : { destination }),
@@ -1343,9 +1408,12 @@ function gameLogPresets(): Preset[] {
         { id: "at", label: "At", type: "number" },
       ],
       map: (event): PortValues | null => {
-        const location = text(event.location) ?? locationOfPayload(payloadOf(event));
+        const payload = payloadOf(event);
+        const location = text(event.location) ?? locationOfPayload(payload);
         if (location === null) return null;
-        const world = worldOf(location);
+        // The parsed location carries the world id already, which is the only way to get one off a
+        // destination with no instance suffix — there is no colon to split there.
+        const world = worldOfPayload(payload) ?? worldOf(location);
         return { location, ...(world === null ? {} : { world }), at: event.ts };
       },
     },
@@ -1392,6 +1460,16 @@ function gameLogPresets(): Preset[] {
       title: "When the game starts",
       description: "A VRChat client opened on this computer. Fires before it knows who you are.",
       kinds: ["session.start"],
+      /*
+       * The one preset with no account picker, because the event cannot carry an account.
+       *
+       * `session.start` is emitted the moment a log file appears, and the `User Authenticated:` line
+       * that names the account lands seconds later — so `accountId` is null on this event
+       * (`wiring/log-bridge.ts`), and `EventBus.emit` skips a null-account event for any subscription
+       * scoped to an account. Offering the field meant a picker whose every setting made the node
+       * fire for nobody, which the description already said was impossible.
+       */
+      account: false,
       outputs: [
         { id: "session", label: "Session", type: "number" },
         { id: "account", label: "Account", type: "string" },
@@ -1464,14 +1542,66 @@ function worldOf(location: string): string | null {
   return world.startsWith("wrld_") ? world : null;
 }
 
-/** A parsed location out of a game-log payload, which nests it under `location`. */
-function locationOfPayload(payload: Record<string, unknown>): string | null {
-  const location = payload.location;
+/**
+ * A value that is allowed into a `world` port, or null.
+ *
+ * The guard is not paranoia about types. VRChat writes the literal seven-character string
+ * `"private"` into `worldId` when it will not name the instance (see `PipelineWorldId` in
+ * `pipeline/events.ts`), and a graph that fed that to `Look up a world` would spend a request on a
+ * 404. Nothing is the honest answer, and it kills only the branch that wanted the world.
+ */
+function worldIdOf(value: unknown): string | null {
+  const id = text(value);
+  return id?.startsWith("wrld_") === true ? id : null;
+}
+
+/**
+ * The instance string a game-log payload nests under a `ParsedLocation`.
+ *
+ * The field on `ParsedLocation` is **`location`**, not `raw` (see `game-logs/parser.ts`), which is
+ * why this read found nothing and the ports that depend on it were never produced. `key` names the
+ * field holding the parsed location, because `portal-spawn` calls its one `target`.
+ */
+function locationOfPayload(payload: Record<string, unknown>, key = "location"): string | null {
+  const location = payload[key];
   if (typeof location === "string") return location === "" ? null : location;
   if (typeof location === "object" && location !== null) {
-    return text((location as Record<string, unknown>).raw);
+    return text((location as Record<string, unknown>).location);
   }
   return null;
+}
+
+/**
+ * The world id out of the same nested `ParsedLocation`, which carries it already parsed.
+ *
+ * Read rather than re-split, because a location with no instance suffix is a bare `wrld_…` that
+ * {@link worldOf} would decline to split at all.
+ */
+function worldOfPayload(payload: Record<string, unknown>, key = "location"): string | null {
+  const location = payload[key];
+  if (typeof location === "object" && location !== null) {
+    const world = worldIdOf((location as Record<string, unknown>).worldId);
+    if (world !== null) return world;
+  }
+  const raw = locationOfPayload(payload, key);
+  return raw === null ? null : worldOf(raw);
+}
+
+/**
+ * Where the client a game-log line came from was standing.
+ *
+ * **Not `event.location`**: `wiring/log-bridge.ts` emits `gamelog.*` events with kind, accountId,
+ * ts, sessionId, subjectId and payload, and never sets `location` — so every port fed from it was
+ * silently unset. The two honest sources are the parsed location the few lines that carry one put in
+ * their payload, and for everything else the running client's own room from {@link TriggerContext},
+ * which is the same in-memory read the profile triggers' `Where I was` port uses. `offline` is not a
+ * place.
+ */
+function gamelogLocation(deps: TriggerDeps, event: BusEvent): string | null {
+  const parsed = locationOfPayload(payloadOf(event));
+  if (parsed !== null) return parsed;
+  const live = deps.context?.location(event.accountId) ?? "";
+  return live === "" || live === "offline" ? null : live;
 }
 
 function numberOf(value: unknown): number | null {
@@ -1504,7 +1634,7 @@ function presetDefinition(preset: Preset): NodeDefinition {
     description: preset.description,
     category: "Triggers",
     outputs: preset.outputs,
-    config: [ACCOUNT_FIELD, ...(preset.config ?? [])],
+    config: [...(preset.account === false ? [] : [ACCOUNT_FIELD]), ...(preset.config ?? [])],
     ...(preset.maxFiresPerMinute === undefined
       ? {}
       : { maxFiresPerMinute: preset.maxFiresPerMinute }),
@@ -1518,8 +1648,8 @@ function presetDefinition(preset: Preset): NodeDefinition {
 /**
  * One trigger for the whole game log, with a picker.
  *
- * `on-player-join` and `on-world-enter` are presets over two of these kinds and stay, because their
- * *typed* outputs are what make a graph downstream check. This node is the other half: everything
+ * `on-player-join` and `on-world-enter` are presets over one of these kinds each and stay, because
+ * their *typed* outputs are what make a graph downstream check. This node is the other half: everything
  * the log can say, including the lines nobody has written a preset for — a portal dropped, a join
  * refused, a screenshot taken.
  *
@@ -1565,13 +1695,16 @@ function gamelogKinds(config: NodeConfigValues): readonly string[] {
   return isEventPatternString(chosen) && chosen.startsWith("gamelog.") ? [chosen] : ["gamelog.*"];
 }
 
-function gamelogOutputs(event: BusEvent): PortValues {
+function gamelogOutputs(deps: TriggerDeps, event: BusEvent): PortValues {
   const payload = payloadOf(event);
+  // The log bridge sets no `location` on the event, so this reads the line's own parsed location
+  // where there is one and the running client's room otherwise. See `gamelogLocation`.
+  const location = gamelogLocation(deps, event);
   return {
     kind: event.kind,
     name: text(payload.displayName) ?? "",
     ...(text(event.subjectId) === null ? {} : { user: event.subjectId }),
-    ...(text(event.location) === null ? {} : { location: event.location }),
+    ...(location === null ? {} : { location }),
     at: event.ts,
     event: event.payload ?? null,
   };
@@ -1816,7 +1949,12 @@ export function triggerNodes(deps: TriggerDeps): BuiltinNode[] {
       },
       baseOutputs,
     ),
-    busTrigger(deps, ON_GAMELOG, (config) => gamelogKinds(config), gamelogOutputs),
+    busTrigger(
+      deps,
+      ON_GAMELOG,
+      (config) => gamelogKinds(config),
+      (event) => gamelogOutputs(deps, event),
+    ),
     busTrigger(deps, ON_PIPELINE, (config) => pipelineKinds(config), pipelineOutputs),
     ...pipelineEventNodes(deps),
     ...presets(deps).map((preset) =>

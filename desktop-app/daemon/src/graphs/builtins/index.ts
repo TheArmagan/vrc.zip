@@ -66,8 +66,24 @@ export class BuiltinNodes {
   /** Teardowns from armed triggers, by instance id. */
   readonly #armed = new Map<string, () => void>();
 
+  /**
+   * A duplicate id **throws**, at module load, before anything is registered.
+   *
+   * The map used to take the last writer, which meant two nodes sharing an id produced one node and
+   * no complaint: the loser vanished from the palette, every saved graph naming it drew a hole, and
+   * the winner was whichever of them happened to be constructed later. That is a programming error
+   * in this file's own assembly rather than anything a user can cause, so failing loudly at startup
+   * is the whole fix. The title check in `extras.test.ts` never covered it — two nodes can share an
+   * id with different titles.
+   */
   constructor(nodes: readonly BuiltinNode[]) {
-    for (const node of nodes) this.#nodes.set(builtinId(node.definition, BUILTIN_NAMESPACE), node);
+    for (const node of nodes) {
+      const id = builtinId(node.definition, BUILTIN_NAMESPACE);
+      if (this.#nodes.has(id)) {
+        throw new Error(`Two built-in nodes claim the id ${id}. Node ids must be unique.`);
+      }
+      this.#nodes.set(id, node);
+    }
   }
 
   /** Every definition, for registration into the shared registry. */
@@ -296,8 +312,9 @@ export function createBuiltinNodes(deps: BuiltinNodeDeps = {}): BuiltinNodes {
     ...programs,
     ...me,
     ...signals,
-    // Last, so a hand-written node with the same id would win the map. None does today — the
-    // generated ids are all `api-` prefixed — but the ordering states which is the floor.
+    // Last, and the ordering no longer decides anything: a shared id throws in the constructor
+    // rather than letting one of the two win quietly. None collides today — the generated ids are
+    // all `api-` prefixed — and if the spec ever mints one that does, startup says so.
     ...apiNodes(deps.api),
   ]);
 }

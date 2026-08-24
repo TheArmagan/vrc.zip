@@ -184,7 +184,7 @@ export function signalKinds(scope: string): readonly string[] {
 export function signalNodes(deps: SignalDeps): BuiltinNode[] {
   const now = deps.now ?? Date.now;
   const state = deps.state;
-  /** The in-memory fallback for `once` when there is no store. Per process, by instance. */
+  /** The in-memory fallback for `once` when there is no store. Per process, by graph and node. */
   const fired = new Set<string>();
 
   return [
@@ -253,7 +253,7 @@ export function signalNodes(deps: SignalDeps): BuiltinNode[] {
             // "everybody react to this except me" expressible at all.
             if (scope === "local" && !mine) return;
             if (scope === "global" && mine) return;
-            if (once && !claimFirst(state, fired, request)) return;
+            if (once && !claimFirst(state, fired, request, now)) return;
             request.fire({
               value: signal.value,
               name: signal.name,
@@ -282,13 +282,19 @@ function claimFirst(
   state: GraphStateStore | undefined,
   fired: Set<string>,
   request: BuiltinArmRequest,
+  now: () => number,
 ): boolean {
   if (state === undefined) {
-    if (fired.has(request.instanceId)) return false;
-    fired.add(request.instanceId);
+    // Keyed by the graph and the node, not by the instance id: an instance id is minted afresh on
+    // every arm, so a saved graph or a daemon reload re-armed the node under a name the set had
+    // never seen and `only the first time` fired again. The store half is keyed this way already,
+    // and the fallback promises the same thing for a process rather than for an arming.
+    const key = `${request.graphId} ${request.nodeId}`;
+    if (fired.has(key)) return false;
+    fired.add(key);
     return true;
   }
   if (state.get(request.graphId, request.nodeId, ONCE_KEY) !== null) return false;
-  state.put(request.graphId, request.nodeId, ONCE_KEY, "1", Date.now());
+  state.put(request.graphId, request.nodeId, ONCE_KEY, "1", now());
   return true;
 }

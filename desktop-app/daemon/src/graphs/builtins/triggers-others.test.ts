@@ -137,8 +137,40 @@ describe("somebody else's profile changing", () => {
   });
 
   test("reads the value out of the nested user object, not the flat payload", async () => {
-    // The rendered change for an avatar is the thumbnail URL the differ compares on. The real id is
-    // in the user object beside it, which is what makes the `avatar` port something a node can use.
+    const h = await armed("on-someone-status-change");
+    h.emit({
+      kind: "friend.updated.status",
+      subjectId: "usr_a",
+      // Same field on the flat payload, holding the wrong answer. A read that ignored the nesting
+      // would take this one.
+      payload: { ...frame({ status: "busy" }, []), status: "away" },
+    });
+    expect(h.fired[0]?.outputs).toMatchObject({ status: "busy" });
+  });
+
+  test("somebody else's avatar port is unset, because the frame cannot name the avatar", async () => {
+    /*
+     * A `friend-update` frame's `user` is a public `PipelineUser`: it carries
+     * `currentAvatarThumbnailImageUrl` and no `currentAvatar`, because VRChat does not tell you
+     * which avatar id somebody else is wearing. The rendered change beside it is that same URL, so
+     * falling back to it put an image address in a port typed `avatar`. Nothing is the honest
+     * answer, and the node still fires for the branches that wanted the before and after.
+     */
+    const h = await armed("on-someone-avatar-change");
+    h.emit({
+      kind: "friend.updated.avatar",
+      subjectId: "usr_a",
+      payload: frame({ currentAvatarThumbnailImageUrl: "https://a/2.png" }, [
+        { aspect: "avatar", from: "https://a/1.png", to: "https://a/2.png" },
+      ]),
+    });
+    expect(h.fired).toHaveLength(1);
+    expect("avatar" in (h.fired[0]?.outputs ?? {})).toBe(false);
+    expect(h.fired[0]?.outputs).toMatchObject({ friend: "usr_a", to: "https://a/2.png" });
+  });
+
+  test("an avatar id in the frame does reach the port", async () => {
+    // Kept because the port is not dead: a frame that does carry an `avtr_` id fills it.
     const h = await armed("on-someone-avatar-change");
     h.emit({
       kind: "friend.updated.avatar",

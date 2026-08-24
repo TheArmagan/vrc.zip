@@ -14,9 +14,17 @@ interface Fired {
 }
 
 /** Arms one trigger and collects what it fires. Returns the teardown the engine would hold. */
-async function armed(type: string, config: NodeConfigValues = {}) {
+async function armed(type: string, config: NodeConfigValues = {}, where?: string) {
   const bus = new EventBus();
-  const nodes = createBuiltinNodes({ bus, now: () => T0 });
+  const nodes = createBuiltinNodes({
+    bus,
+    now: () => T0,
+    // Only where a test needs the running client's room. The rest arm without a context, which is
+    // the build that cannot answer and must therefore leave those ports unset.
+    ...(where === undefined
+      ? {}
+      : { triggerContext: { location: () => where, isFriend: () => false } }),
+  });
   const fired: Fired[] = [];
   await nodes.arm(`vrcz/${type}`, {
     instanceId: "inst-1",
@@ -107,17 +115,18 @@ describe("the presets", () => {
 
   test("player join offers the name always and the id when the log had one", async () => {
     // VRChat has shipped that log line both ways, which is why the name is the required half.
+    // The event is exactly what `wiring/log-bridge.ts` emits: kind, accountId, ts, sessionId,
+    // subjectId and the parsed line. There is no `location` on it, and there never was.
     const withId = await armed("on-player-join");
     withId.emit({
       kind: "gamelog.player_join",
       subjectId: "usr_a",
-      location: "wrld_x:1~private",
-      payload: { displayName: "Ada" },
+      sessionId: 1,
+      payload: { kind: "player-join", displayName: "Ada", userId: "usr_a", at: T0 },
     });
     expect(withId.fired[0]?.outputs).toEqual({
       name: "Ada",
       user: "usr_a",
-      location: "wrld_x:1~private",
       // False rather than absent: this harness arms without a `TriggerContext`, and "vrc.zip cannot
       // tell" is reported as not-a-friend rather than as a missing port. The filter that reads the
       // same answer stays *open* in that case — see `passesWho`.
@@ -126,8 +135,58 @@ describe("the presets", () => {
     });
 
     const withoutId = await armed("on-player-join");
-    withoutId.emit({ kind: "gamelog.player_join", payload: { displayName: "Ada" } });
+    withoutId.emit({
+      kind: "gamelog.player_join",
+      payload: { kind: "player-join", displayName: "Ada", userId: null, at: T0 },
+    });
     expect(withoutId.fired[0]?.outputs).toEqual({ name: "Ada", isFriend: false, at: T0 });
+  });
+
+  test("the instance on a join comes from the running client, since the line has none", async () => {
+    // The `OnPlayerJoined` line names a person and nothing else, so the only honest answer to
+    // *where* is the room the client on this machine is in — the same in-memory read the profile
+    // triggers' `Where I was` port uses. A build with no context leaves the port unset instead.
+    const known = await armed("on-player-join", {}, "wrld_x:1~region(eu)");
+    known.emit({
+      kind: "gamelog.player_join",
+      subjectId: "usr_a",
+      payload: { kind: "player-join", displayName: "Ada", userId: "usr_a", at: T0 },
+    });
+    expect(known.fired[0]?.outputs).toMatchObject({ location: "wrld_x:1~region(eu)" });
+
+    const closed = await armed("on-player-join", {}, "");
+    closed.emit({
+      kind: "gamelog.player_join",
+      subjectId: "usr_a",
+      payload: { kind: "player-join", displayName: "Ada", userId: "usr_a", at: T0 },
+    });
+    expect("location" in (closed.fired[0]?.outputs ?? {})).toBe(false);
+  });
+
+  test("entering a world reads the parsed location the join line carries", async () => {
+    // `location-join` nests a whole `ParsedLocation` under `location`, whose string field is
+    // `location` and whose world id sits beside it. Neither `payload.worldId` nor `subjectId`
+    // exists on this event, which is why reading those fired for nobody at all.
+    const h = await armed("on-world-enter");
+    h.emit({
+      kind: "gamelog.location_join",
+      payload: {
+        kind: "location-join",
+        at: T0,
+        location: {
+          location: "wrld_x:1~region(eu)",
+          worldId: "wrld_x",
+          instanceId: "1",
+          region: "eu",
+          groupId: null,
+        },
+      },
+    });
+    expect(h.fired[0]?.outputs).toEqual({
+      world: "wrld_x",
+      location: "wrld_x:1~region(eu)",
+      at: T0,
+    });
   });
 
   test("a notification fires with its type and sender", async () => {

@@ -330,7 +330,10 @@ export function buildBody(
   config: NodeConfigValues,
 ): unknown {
   if (!operation.hasBody) return undefined;
-  if (inputs.body !== undefined) return inputs.body;
+  // `null` is not a body. An upstream `json` port that produced nothing arrives here as an explicit
+  // null, and sending the literal `null` is worse than falling through to the box the author typed
+  // into and can see — the same rule the path parameters follow for a blank wire.
+  if (inputs.body !== undefined && inputs.body !== null) return inputs.body;
   const typed = typeof config.body === "string" ? config.body.trim() : "";
   if (typed === "") return undefined;
   try {
@@ -349,7 +352,19 @@ export function buildQuery(
   for (const param of operation.params) {
     if (param.in !== "query") continue;
     const value = config[param.name];
-    if (value === undefined || value === "") continue;
+    if (value === undefined || value === null || value === "") continue;
+    /*
+     * A checkbox is never blank, so "the author left this alone" has to be spelled some other way.
+     *
+     * An untouched boolean field holds its own default, which is `false` unless the spec says
+     * otherwise — and sending `?releaseStatus=false` for every one of those both lies about what the
+     * author asked for and overrides a default VRChat may set to true. A boolean equal to its
+     * default is therefore absent; anything else is a deliberate choice and is sent.
+     */
+    if (typeof value === "boolean") {
+      const fallback = typeof param.defaultValue === "boolean" ? param.defaultValue : false;
+      if (value === fallback) continue;
+    }
     query[param.name] = String(value);
   }
   return query;

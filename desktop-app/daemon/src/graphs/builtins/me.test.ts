@@ -226,7 +226,9 @@ describe("the one-port reads", () => {
         await Promise.resolve({
           currentAvatar: "avtr_1",
           homeLocation: "wrld_home",
-          presence: { world: "wrld_stale:1~private" },
+          // The two halves as `CurrentUserPresence` really carries them: `world` is a world id on
+          // its own and the instance sits beside it in `instance`.
+          presence: { world: "wrld_stale", instance: "1~region(eu)" },
         }),
       gameState: () => ({
         running: true,
@@ -253,9 +255,20 @@ describe("the one-port reads", () => {
   });
 
   test("with no client running it falls back to what VRChat was last told", async () => {
+    // Both halves joined. Reading `presence.world` alone handed a bare `wrld_…` with no instance
+    // suffix to `Invite myself`, which is a world rather than a place anybody can be invited to.
     const self = present({ gameState: () => ({ running: false, platform: "", location: "" }) });
-    expect(await run(self, "my-instance")).toEqual({ instance: "wrld_stale:1~private" });
+    expect(await run(self, "my-instance")).toEqual({ instance: "wrld_stale:1~region(eu)" });
     expect(await run(self, "my-world")).toEqual({ world: "wrld_stale" });
+  });
+
+  test("a presence with no instance beside the world is nowhere, not a bare world", async () => {
+    const self = present({
+      me: async () => await Promise.resolve({ presence: { world: "wrld_stale", instance: "" } }),
+      gameState: () => ({ running: false, platform: "", location: "" }),
+    });
+    expect(await run(self, "my-instance")).toEqual({});
+    expect(await run(self, "my-world")).toEqual({});
   });
 
   test("a private world produces nothing rather than the word private", async () => {

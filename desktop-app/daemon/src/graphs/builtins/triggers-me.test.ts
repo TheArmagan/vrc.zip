@@ -144,16 +144,38 @@ describe("my profile changing", () => {
 
   test("the avatar node hands back a real avatar id, not the rendered change", async () => {
     // `FieldChange` carries rendered strings — an image URL here — but the whole user object is in
-    // the payload beside it, so the typed port can be something `Look up an avatar` accepts.
+    // the payload beside it, so the typed port can be something `Look up an avatar` accepts. The
+    // frame is `{ userId, user: { … } }`, which is what `pipeline/events.ts` says arrives.
     const h = await armed("on-my-avatar-change");
     h.emit({
       kind: "user.updated.avatar",
+      subjectId: "usr_me",
       payload: {
-        currentAvatar: AVATAR,
+        userId: "usr_me",
+        user: { id: "usr_me", currentAvatar: AVATAR },
         changes: [{ aspect: "avatar", from: "https://a/1.png", to: "https://a/2.png" }],
       },
     });
     expect(h.fired[0]?.outputs).toMatchObject({ avatar: AVATAR });
+  });
+
+  test("an avatar port stays unset rather than carrying the thumbnail URL", async () => {
+    // The rendered `to` is the image URL `wiring/update-diff.ts` compares on, and a frame about
+    // somebody else has no `currentAvatar` at all. An `avatar` port holding a URL is a lookup that
+    // 404s, so it is left unproduced and only the branch that wanted it stops.
+    const h = await armed("on-my-avatar-change");
+    h.emit({
+      kind: "user.updated.avatar",
+      subjectId: "usr_me",
+      payload: {
+        userId: "usr_me",
+        user: { id: "usr_me", currentAvatarThumbnailImageUrl: "https://a/2.png" },
+        changes: [{ aspect: "avatar", from: "https://a/1.png", to: "https://a/2.png" }],
+      },
+    });
+    expect(h.fired).toHaveLength(1);
+    expect("avatar" in (h.fired[0]?.outputs ?? {})).toBe(false);
+    expect(h.fired[0]?.outputs).toMatchObject({ to: "https://a/2.png" });
   });
 
   test("trust has no payload field of its own and falls back to the rendered rank", async () => {
@@ -247,6 +269,26 @@ describe("the notification type filter", () => {
   });
 });
 
+/** A `location-join` line as the parser hands it over, nested location and all. */
+const LOCATION_JOIN = {
+  kind: "location-join",
+  at: T0,
+  location: {
+    location: "wrld_x:1",
+    worldId: "wrld_x",
+    instanceId: "1",
+    region: null,
+    groupId: null,
+  },
+};
+
+/** A `user-location` frame as `wiring/pipeline-bridge.ts` puts it on the bus. */
+const USER_LOCATION = {
+  subjectId: "usr_me",
+  location: "wrld_y:2",
+  payload: { userId: "usr_me", location: "wrld_y:2", worldId: "wrld_y" },
+};
+
 describe("the rest of the Me triggers", () => {
   test("VRC+ reports whether it is on now, not the direction of travel", async () => {
     const on = await armed("on-my-vrc-plus-change");
@@ -293,16 +335,37 @@ describe("the rest of the Me triggers", () => {
   });
 
   test("the location trigger honours its source picker", async () => {
+    // Each half as its own producer emits it: the log bridge sets no `location` on the event and
+    // nests a `ParsedLocation` in the payload, while the pipeline bridge sets `location` from the
+    // frame and fills `subjectId` from `payload.userId`.
     const log = await armed("on-my-location-change", { source: "log" });
-    log.emit({ kind: "gamelog.location_join", location: "wrld_x:1" });
-    log.emit({ kind: "user.location", location: "wrld_y:2" });
+    log.emit({ kind: "gamelog.location_join", payload: LOCATION_JOIN });
+    log.emit({ kind: "user.location", ...USER_LOCATION });
     expect(log.fired).toHaveLength(1);
     expect(log.fired[0]?.outputs).toMatchObject({ location: "wrld_x:1", source: "log" });
 
     const either = await armed("on-my-location-change", { source: "both" });
-    either.emit({ kind: "gamelog.location_join", location: "wrld_x:1" });
-    either.emit({ kind: "user.location", location: "wrld_y:2" });
+    either.emit({ kind: "gamelog.location_join", payload: LOCATION_JOIN });
+    either.emit({ kind: "user.location", ...USER_LOCATION });
     expect(either.fired).toHaveLength(2);
+  });
+
+  test("the world port carries a world id, never a user id and never `private`", async () => {
+    // `subjectId` on a `user.location` frame is the *user*, and `worldId` is the literal string
+    // `private` when VRChat will not name the instance. Both were reaching a port typed `world`.
+    const hidden = await armed("on-my-location-change", { source: "vrchat" });
+    hidden.emit({
+      kind: "user.location",
+      subjectId: "usr_me",
+      location: "private",
+      payload: { userId: "usr_me", location: "private", worldId: "private" },
+    });
+    expect(hidden.fired[0]?.outputs).toMatchObject({ location: "private" });
+    expect("world" in (hidden.fired[0]?.outputs ?? {})).toBe(false);
+
+    const named = await armed("on-my-location-change", { source: "vrchat" });
+    named.emit({ kind: "user.location", ...USER_LOCATION });
+    expect(named.fired[0]?.outputs).toMatchObject({ world: "wrld_y" });
   });
 
   test("a ready queue carries the instance", async () => {
@@ -327,10 +390,24 @@ describe("the rest of the Me triggers", () => {
 
 describe("the game-log triggers", () => {
   test("a portal fires even when the line named neither half", async () => {
+    // The parser's own shape: the destination is a `ParsedLocation` under `target`, which is what
+    // `wiring/log-bridge.ts` puts in the payload verbatim. A fixture spelling it `destination`
+    // agreed with the node and with nothing that ever runs.
     const full = await armed("on-portal-spawn");
     full.emit({
       kind: "gamelog.portal_spawn",
-      payload: { spawnerDisplayName: "Ada", destination: "wrld_x:1~region(eu)" },
+      payload: {
+        kind: "portal-spawn",
+        spawnerDisplayName: "Ada",
+        objectPath: "Portals/PortalInternalDynamic",
+        target: {
+          location: "wrld_x:1~region(eu)",
+          worldId: "wrld_x",
+          instanceId: "1",
+          region: "eu",
+          groupId: null,
+        },
+      },
     });
     expect(full.fired[0]?.outputs).toMatchObject({
       by: "Ada",
@@ -341,7 +418,10 @@ describe("the game-log triggers", () => {
     // An unproduced port kills only the branch that needed it, so a graph wired through "a portal
     // appeared" still runs on a line that never said where it went.
     const bare = await armed("on-portal-spawn");
-    bare.emit({ kind: "gamelog.portal_spawn", payload: {} });
+    bare.emit({
+      kind: "gamelog.portal_spawn",
+      payload: { kind: "portal-spawn", spawnerDisplayName: null, target: null, objectPath: null },
+    });
     expect(bare.fired).toHaveLength(1);
     const outputs = bare.fired[0]?.outputs ?? {};
     expect("by" in outputs).toBe(false);
@@ -376,8 +456,22 @@ describe("every new trigger", () => {
       expect(definition?.kind, id).toBe("trigger");
       expect(definition?.category, id).toBe("Triggers");
       const account = definition?.config?.find((field) => field.id === "accountId");
-      expect(account?.kind, id).toBe("account");
+      // One exception, and it is the point of the test below it.
+      expect(account?.kind, id).toBe(id === "on-game-start" ? undefined : "account");
     }
+  });
+
+  test("the game-start trigger offers no account picker, because it could only refuse", () => {
+    /*
+     * `session.start` is emitted when a log file appears, seconds before the `User Authenticated:`
+     * line names anybody, so its `accountId` is null — and `EventBus.emit` skips a null-account
+     * event for a subscription scoped to an account. A picker here was a field whose every setting
+     * stopped the node from ever firing, on a node whose own description says it fires before it
+     * knows who you are.
+     */
+    const nodes = createBuiltinNodes({ bus: new EventBus() });
+    const fields = nodes.definition("vrcz/on-game-start")?.config ?? [];
+    expect(fields.map((field) => field.id)).not.toContain("accountId");
   });
 
   test("arms and tears down without leaving a subscription behind", async () => {

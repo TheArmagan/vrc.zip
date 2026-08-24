@@ -223,6 +223,11 @@ describe("building a request", () => {
     expect(buildBody(withBody, { body: { a: 1 } }, { body: '{"b":2}' })).toEqual({ a: 1 });
     expect(buildBody(withBody, {}, { body: '{"b":2}' })).toEqual({ b: 2 });
     expect(buildBody(withBody, {}, {})).toBeUndefined();
+    // An explicit `null` off a `json` port is not a body. It arrives whenever an upstream node
+    // produced nothing, and sending the literal `null` is worse than using the box the author typed
+    // into and can see — the same rule a blank wire follows on a path parameter.
+    expect(buildBody(withBody, { body: null }, { body: '{"b":2}' })).toEqual({ b: 2 });
+    expect(buildBody(withBody, { body: null }, {})).toBeUndefined();
     // Thrown rather than gated, unlike `JSON value`: the body is the thing this node exists to
     // send, so calling VRChat without it would be a worse answer than a sentence on the error port.
     expect(() => buildBody(withBody, {}, { body: "{ oops" })).toThrow(/not valid JSON/);
@@ -237,6 +242,22 @@ describe("building a request", () => {
     if (paged === undefined) return;
     expect(buildQuery(paged, { n: 10 })).toEqual({ n: "10" });
     expect(buildQuery(paged, { n: "" })).toEqual({});
+  });
+
+  test("an untouched checkbox is absent, and a ticked one is sent", () => {
+    /*
+     * A checkbox is never blank, so "the author left this alone" has to be spelled some other way:
+     * it holds the parameter's own default, which the spec leaves at false throughout. Sending
+     * `offline=false` on every call both misreports what the author asked for and would override a
+     * default VRChat may one day set to true.
+     */
+    const friends = API_OPERATIONS.find((operation) => operation.operationId === "getFriends");
+    expect(friends).toBeDefined();
+    if (friends === undefined) return;
+    const offline = friends.params.find((param) => param.name === "offline");
+    expect(offline?.defaultValue ?? false).toBe(false);
+    expect(buildQuery(friends, { offline: false })).toEqual({});
+    expect(buildQuery(friends, { offline: true })).toEqual({ offline: "true" });
   });
 });
 

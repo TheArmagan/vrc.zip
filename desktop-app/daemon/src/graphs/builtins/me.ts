@@ -211,10 +211,26 @@ function whereAmI(me: Record<string, unknown>, game: GraphGameState): string {
   const presence = me.presence;
   const fallback =
     typeof presence === "object" && presence !== null
-      ? text((presence as Record<string, unknown>).world)
+      ? presenceLocation(presence as Record<string, unknown>)
       : "";
   const location = game.location === "" ? fallback : game.location;
   return location === "offline" ? "" : location;
+}
+
+/**
+ * VRChat's own answer about where this account is, as a location.
+ *
+ * The two halves live in two fields: `presence.world` is a **world id** and `presence.instance` is
+ * the instance beside it (`CurrentUserPresence` in the pinned spec). Reading `world` alone handed a
+ * bare `wrld_…` to `Invite myself`, which is not an instance and cannot be invited to. A world with
+ * no instance is nowhere, and so is `private` or `offline` sitting where a world id belongs — both
+ * come back as empty rather than as a place.
+ */
+function presenceLocation(presence: Record<string, unknown>): string {
+  const world = text(presence.world);
+  const instance = text(presence.instance);
+  if (!world.startsWith("wrld_") || instance === "") return "";
+  return `${world}:${instance}`;
 }
 
 /**

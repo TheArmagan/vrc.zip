@@ -1,9 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import type { NodeConfigValues, PortValues } from "@vrcz/plugin-api/nodes";
+import type { NodeConfigValues, NodeDefinition, PortValues } from "@vrcz/plugin-api/nodes";
 import { EventBus } from "../../bus/event-bus.ts";
 import type { ExecuteContext } from "../types.ts";
-import { createBuiltinNodes, type GraphReads, type GraphStateStore } from "./index.ts";
+import {
+  BuiltinNodes,
+  createBuiltinNodes,
+  type GraphReads,
+  type GraphStateStore,
+} from "./index.ts";
 import { formatTime, matchesQuery, parseClock, withinWindow } from "./operators.ts";
+import { SIGNAL_KIND } from "./signals.ts";
 
 /**
  * The nodes added after Phase 4 closed: values, resolvers, operators, and the two that remember.
@@ -163,6 +169,14 @@ describe("value nodes", () => {
       expect(typeof value === "number" && value >= 1 && value <= 100).toBe(true);
     }
   });
+
+  test("bounds with no whole number between them produce nothing", async () => {
+    // 1.2 to 1.8 rounds inward to 2 and 1, and the old arithmetic then returned exactly 2 — outside
+    // the range the node promises. There is no whole number in there, so there is no answer.
+    const h = harness();
+    expect(await h.run("random-number", {}, { min: 1.2, max: 1.8 })).toEqual({});
+    expect(await h.run("random-number", {}, { min: 1.2, max: 2.8 })).toEqual({ value: 2 });
+  });
 });
 
 describe("resolver nodes", () => {
@@ -269,6 +283,33 @@ describe("operator nodes", () => {
     });
   });
 
+  test("a typed separator splits faithfully, and a blank one splits on spaces", async () => {
+    const h = harness();
+    // "a,,b" is three fields, one of them empty. Dropping it shifted every position after it, so a
+    // graph reading part 3 of a line read part 2 of the source.
+    expect(await h.run("split", { text: "a,,b" }, { separator: "," })).toEqual({
+      parts: ["a", "", "b"],
+    });
+    // The blank separator has a documented meaning of its own, and there the empties are noise.
+    expect(await h.run("split", { text: "a  b " }, {})).toEqual({ parts: ["a", "b"] });
+  });
+
+  test("an emptied join separator joins with nothing", async () => {
+    const h = harness();
+    // Cleared on purpose is the only way to say "glue these together"; never filled in still means
+    // the ", " the card shows.
+    expect(await h.run("join", { list: ["a", "b"] }, { separator: "" })).toEqual({ text: "ab" });
+    expect(await h.run("join", { list: ["a", "b"] }, {})).toEqual({ text: "a, b" });
+  });
+
+  test("round needs no B, so a cleared B box still rounds", async () => {
+    // The daemon never applies a config `default`, so a B nobody typed is simply absent. Refusing
+    // to run killed every branch below a node that had no use for B.
+    const h = harness();
+    expect(await h.run("math", { a: 2.4 }, { op: "round" })).toEqual({ result: 2 });
+    expect(await h.run("math", { a: 2.4 }, { op: "add" })).toEqual({});
+  });
+
   test("a timestamp becomes something readable", () => {
     expect(formatTime(T0, "iso")).toBe(new Date(T0).toISOString());
     expect(formatTime(Number.NaN, "iso")).toBe("");
@@ -287,12 +328,33 @@ describe("operator nodes", () => {
     expect(withinWindow(at(12), 9 * 60, 17 * 60)).toBe(true);
   });
 
-  test("an unreadable window fails closed", async () => {
-    // A gate exists to hold things back, so a typo in one must not let everything through.
+  test("an unreadable window fails closed, and says so", async () => {
+    // A gate exists to hold things back, so a typo in one must not let everything through. It must
+    // not fail *silently* either: producing nothing forever is a graph that never runs and never
+    // explains itself, so the typo is thrown and lands on the run.
     const h = harness();
-    expect(await h.run("time-window", { payload: "x" }, { from: "nonsense", to: "02:00" })).toEqual(
-      {},
-    );
+    await expect(
+      h.run("time-window", { payload: "x" }, { from: "nonsense", to: "02:00" }),
+    ).rejects.toThrow(/not a time of day/);
+  });
+
+  test("an unfilled window is the whole day, and 24:00 is a time", async () => {
+    // The card offers "00:00 to 24:00" when the boxes are empty, and the daemon never applies a
+    // config default, so both bounds arrive blank. What the card promises has to be what runs.
+    expect(parseClock("24:00")).toBe(24 * 60);
+    expect(parseClock("24:01")).toBeNull();
+    const h = harness();
+    expect(await h.run("time-window", { payload: "x" }, {})).toEqual({ out: "x" });
+    expect(await h.run("time-window", { payload: "x" }, { from: "00:00", to: "24:00" })).toEqual({
+      out: "x",
+    });
+  });
+
+  test("a window that starts where it ends is all day, not never", () => {
+    // "09:00 to 09:00" is how somebody writes all of it; the old arithmetic answered never.
+    const at = (hour: number): number => new Date(2026, 0, 1, hour, 30).getTime();
+    expect(withinWindow(at(3), 9 * 60, 9 * 60)).toBe(true);
+    expect(withinWindow(at(12), 9 * 60, 9 * 60)).toBe(true);
   });
 
   test("searching a list matches text and regex, and is case-insensitive by default", () => {
@@ -373,7 +435,97 @@ describe("stateful nodes", () => {
   });
 });
 
+describe("a signal heard only the first time", () => {
+  /**
+   * Arms one `on-signal` with `once` set, under a fresh instance id each time.
+   *
+   * The instance id is the part that matters: the engine mints a new one on every arm, so re-arming
+   * is what a graph save, a toggle off and on, or a daemon restart looks like from in here.
+   */
+  async function listen(
+    h: ReturnType<typeof harness>,
+    instanceId: string,
+    fires: PortValues[],
+  ): Promise<void> {
+    await h.nodes.arm("vrcz/on-signal", {
+      instanceId,
+      graphId: "g1",
+      nodeId: "listener",
+      config: { name: "greet", scope: "any", once: true },
+      fire: (outputs) => {
+        fires.push(outputs);
+      },
+    });
+  }
+
+  test("stays fired across a re-arm, with no store to remember in", async () => {
+    // The in-memory fallback was keyed by the instance id, which is minted afresh every arm — so
+    // "only the first time" fired again after every save and every reload. Per *process* is what
+    // the node promises, and the graph and node ids are what survive an arming.
+    const h = harness();
+    const fires: PortValues[] = [];
+    await listen(h, "inst-1", fires);
+    await h.run("emit-signal", {}, { name: "greet", scope: "global" });
+    expect(fires).toHaveLength(1);
+
+    await h.nodes.disarm("vrcz/on-signal", "inst-1");
+    await listen(h, "inst-2", fires);
+    await h.run("emit-signal", {}, { name: "greet", scope: "global" });
+    expect(fires).toHaveLength(1);
+    await h.nodes.disarm("vrcz/on-signal", "inst-2");
+  });
+
+  test("with a store it writes one row, stamped from the injected clock", async () => {
+    const state = memoryState();
+    const h = harness({ state });
+    const fires: PortValues[] = [];
+    await listen(h, "inst-1", fires);
+    await h.run("emit-signal", {}, { name: "greet", scope: "global" });
+    await h.run("emit-signal", {}, { name: "greet", scope: "global" });
+    expect(fires).toHaveLength(1);
+    // Every other write in this file is stamped from `deps.now`; this one reached for `Date.now`,
+    // which makes the row untestable and disagrees with the rest of the module.
+    expect([...state.rows.values()]).toEqual([{ value: "1", updatedAt: T0 }]);
+    await h.nodes.disarm("vrcz/on-signal", "inst-1");
+  });
+
+  test("the signal itself still reaches a listener that did not ask for once", async () => {
+    // Guards the claim above: what changed is the bookkeeping, not which signals arrive.
+    const h = harness();
+    const fires: PortValues[] = [];
+    await h.nodes.arm("vrcz/on-signal", {
+      instanceId: "inst-3",
+      graphId: "g1",
+      nodeId: "listener",
+      config: { name: "greet", scope: "any" },
+      fire: (outputs) => {
+        fires.push(outputs);
+      },
+    });
+    await h.run("emit-signal", { value: 1 }, { name: "greet", scope: "global" });
+    await h.run("emit-signal", { value: 2 }, { name: "greet", scope: "global" });
+    expect(fires.map((outputs) => outputs.value)).toEqual([1, 2]);
+    expect(SIGNAL_KIND).toBe("graph.signal");
+    await h.nodes.disarm("vrcz/on-signal", "inst-3");
+  });
+});
+
 describe("the palette", () => {
+  test("no two built-in nodes share an id, and a set that tried would refuse to build", () => {
+    /*
+     * The map used to take the last writer: two nodes claiming one id produced one node and no
+     * complaint, the loser vanished from the palette, every saved graph naming it drew a hole, and
+     * which of them survived came down to construction order. The title check below never covered
+     * it — two nodes can share an id and differ in title.
+     */
+    const nodes = createBuiltinNodes({ bus: new EventBus(), reads: READS, state: memoryState() });
+    const ids = nodes.definitions().map((definition) => definition.id);
+    expect(ids.filter((id, index) => ids.indexOf(id) !== index)).toEqual([]);
+
+    const twice = { definition: nodes.definition("vrcz/branch") as NodeDefinition };
+    expect(() => new BuiltinNodes([twice, twice])).toThrow(/claim the id/);
+  });
+
   test("no two built-in nodes share a title", () => {
     // Two entries reading "Count" is a palette nobody can choose from — which is exactly what
     // shipped for an hour, until somebody looked at the list. The search box makes titles the

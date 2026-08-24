@@ -31,7 +31,9 @@ import {
   ERROR_PORT,
   isPortType,
   type NodeDefinition,
+  type OptionRow,
   parseButtonRows,
+  parseOptionRows,
   parseSlotRows,
   type PortType,
   type SlotRow,
@@ -1125,6 +1127,64 @@ function removeButtonRow(fieldId: string, index: number): void {
 }
 
 /* -------------------------------------------------------------------------------------------- */
+/* The option rows: an `options` field                                                            */
+/* -------------------------------------------------------------------------------------------- */
+
+/** Read from the config every time, like every other repeatable field. No draft copy. */
+function optionRowsOf(fieldId: string): OptionRow[] {
+  if (selected === null) return [];
+  return parseOptionRows((selected.data as { config: Record<string, unknown> }).config[fieldId]);
+}
+
+function setOptionRows(fieldId: string, rows: readonly OptionRow[]): void {
+  setConfig(fieldId, JSON.stringify(rows));
+}
+
+/**
+ * Adds a row on the first choice nothing has claimed yet.
+ *
+ * Not simply the first choice: a second row wearing an option the node already has would be a row
+ * the handler drops, and one somebody has to notice and change before it does anything. When every
+ * option is in use the button is not offered at all.
+ */
+function addOptionRow(fieldId: string, choices: readonly { value: string }[], max: number): void {
+  const rows = optionRowsOf(fieldId);
+  if (rows.length >= max) return;
+  const taken = new Set(rows.map((row) => row.option));
+  const next = choices.find((choice) => !taken.has(choice.value));
+  if (next === undefined) return;
+  setOptionRows(fieldId, [...rows, { option: next.value, value: "" }]);
+}
+
+function updateOptionRow(fieldId: string, index: number, patch: Partial<OptionRow>): void {
+  setOptionRows(
+    fieldId,
+    optionRowsOf(fieldId).map((row, i) => (i === index ? { ...row, ...patch } : row)),
+  );
+}
+
+function removeOptionRow(fieldId: string, index: number): void {
+  setOptionRows(
+    fieldId,
+    optionRowsOf(fieldId).filter((_, i) => i !== index),
+  );
+}
+
+/** The headings a catalogue asked for, in the order it declared them. */
+function optionGroups(
+  choices: readonly { value: string; label: string; group?: string }[],
+): { name: string; choices: readonly { value: string; label: string }[] }[] {
+  const groups: { name: string; choices: { value: string; label: string }[] }[] = [];
+  for (const choice of choices) {
+    const name = choice.group ?? "";
+    const existing = groups.find((group) => group.name === name);
+    if (existing === undefined) groups.push({ name, choices: [choice] });
+    else existing.choices.push(choice);
+  }
+  return groups;
+}
+
+/* -------------------------------------------------------------------------------------------- */
 /* The extractor rows: a `fields` or `paths` field                                                */
 /* -------------------------------------------------------------------------------------------- */
 
@@ -2048,6 +2108,98 @@ async function saveSecret(fieldId: string): Promise<void> {
                 {:else}
                   <span class="text-xs text-muted-foreground">
                     Every port on this node is in use. Compose a second object and merge them.
+                  </span>
+                {/if}
+              </div>
+            {:else if field.kind === "options"}
+              <!--
+                A row per option: a picker over the catalogue the node declared, and a value box only
+                for an option that takes one. The same shape the button rows have, minus the two
+                boxes that are about a button rather than about a choice.
+
+                The picker is grouped, because this catalogue came out of two documents and "which
+                of these is VRChat's and which is Unity's" is the first question anybody asks of it.
+              -->
+              {@const rows = optionRowsOf(field.id)}
+              {@const choices = field.choices}
+              {@const max = field.max ?? choices.length}
+              <div class="flex flex-col gap-2">
+                {#each rows as row, index (index)}
+                  {@const chosen = choices.find((choice) => choice.value === row.option)}
+                  {@const duplicate = rows.some(
+                    (other, i) => i !== index && other.option === row.option,
+                  )}
+                  <div class="rounded border border-border p-2">
+                    <div class="flex items-center gap-1">
+                      <select
+                        class="h-7 min-w-0 flex-1 rounded border border-input bg-background px-2 text-sm"
+                        value={row.option}
+                        onchange={(event: Event) =>
+                          updateOptionRow(field.id, index, {
+                            option: (event.currentTarget as HTMLSelectElement).value,
+                          })}
+                      >
+                        <!-- An option a newer build wrote is kept and shown as itself rather than
+                             silently becoming the first entry in the list. -->
+                        {#if chosen === undefined}
+                          <option value={row.option}>
+                            {row.option === "" ? "Pick one" : `${row.option} (not in this version)`}
+                          </option>
+                        {/if}
+                        {#each optionGroups(choices) as group (group.name)}
+                          {#if group.name === ""}
+                            {#each group.choices as choice (choice.value)}
+                              <option value={choice.value}>{choice.label}</option>
+                            {/each}
+                          {:else}
+                            <optgroup label={group.name}>
+                              {#each group.choices as choice (choice.value)}
+                                <option value={choice.value}>{choice.label}</option>
+                              {/each}
+                            </optgroup>
+                          {/if}
+                        {/each}
+                      </select>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        class="size-7 shrink-0"
+                        title="Remove this option"
+                        onclick={() => removeOptionRow(field.id, index)}
+                      >
+                        <TrashIcon class="size-4" />
+                      </Button>
+                    </div>
+                    {#if chosen?.argumentLabel !== undefined}
+                      <Input
+                        class="mt-1 h-7 text-sm"
+                        placeholder={chosen.placeholder ?? chosen.argumentLabel}
+                        value={row.value}
+                        oninput={(event: Event) =>
+                          updateOptionRow(field.id, index, {
+                            value: (event.currentTarget as HTMLInputElement).value,
+                          })}
+                      />
+                    {/if}
+                    {#if duplicate}
+                      <span class="text-xs text-destructive">
+                        This option is in the list twice. Only the first one is used.
+                      </span>
+                    {/if}
+                    <div class="mt-1 font-mono text-[10px] text-muted-foreground">{row.option}</div>
+                  </div>
+                {/each}
+                {#if rows.length < max && rows.length < choices.length}
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onclick={() => addOptionRow(field.id, choices, max)}
+                  >
+                    Add an option
+                  </Button>
+                {:else}
+                  <span class="text-xs text-muted-foreground">
+                    Every option this node knows is in the list.
                   </span>
                 {/if}
               </div>

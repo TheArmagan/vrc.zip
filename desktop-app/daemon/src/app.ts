@@ -15,6 +15,7 @@ import { buildUserAgent } from "./net/user-agent.ts";
 import { DesktopNotifier } from "./os/desktop-notification.ts";
 import { installedVersion, installLocally, installTarget, isInstalled } from "./os/install.ts";
 import { openExternalUrl, openUrl, openVrchatLaunch } from "./os/open-url.ts";
+import { openSteamUrl, runProgram, steamRunUrl } from "./os/run-program.ts";
 import { createStartupControl } from "./os/startup.ts";
 import { databasePath, ensureStateDir } from "./paths.ts";
 import { PipelineClient } from "./pipeline/index.ts";
@@ -474,6 +475,16 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     // node's own config, defaulting on, so a running client shows the instance instead of a second
     // client starting up and fighting the first for the account.
     launch: async (location, attach) => await openVrchatLaunch(location, attach),
+    /*
+     * The two launchers, and they are the sharpest thing in the palette: a graph pointing this at a
+     * path runs it with the user's own privileges. That is the posture this app states rather than
+     * hides, and the guard is the one every outbound action already has — a graph rehearses until
+     * the user arms it by holding a button. What is *not* left to the node is the mechanical half:
+     * an argv array reaches `Bun.spawn` with no shell anywhere on the path, so an argument is an
+     * argument rather than a second command.
+     */
+    run: async (request) => await runProgram(request),
+    steam: async (appId, args) => await openSteamUrl(steamRunUrl(appId, args)),
     // What a trigger asks about the world as it fires. Both answers come from memory — the open
     // sessions and the presence map — because a map runs inside a bus subscription and a burst of
     // forty player-joins runs it forty times per armed graph.

@@ -30,6 +30,7 @@ import { dataStoreNodes, type GraphDataStore } from "./data-store.ts";
 import { extractNodes } from "./extract.ts";
 import { type GraphLaunchVrchat, type GraphSelf, meNodes } from "./me.ts";
 import { operatorNodes } from "./operators.ts";
+import { type GraphRunProgram, type GraphRunSteamApp, programNodes } from "./programs.ts";
 import { type GraphReads, resolverNodes } from "./resolvers.ts";
 import { shapingNodes } from "./shaping.ts";
 import { signalNodes } from "./signals.ts";
@@ -54,6 +55,7 @@ export type {
   GraphModeration,
   GraphSelf,
 } from "./me.ts";
+export type { GraphProgramResult, GraphRunProgram, GraphRunSteamApp } from "./programs.ts";
 export type { GraphReads } from "./resolvers.ts";
 export type { GraphStateStore } from "./stateful.ts";
 export type { TriggerContext } from "./triggers.ts";
@@ -192,6 +194,16 @@ export interface BuiltinNodeDeps {
    */
   readonly launch?: GraphLaunchVrchat | undefined;
   /**
+   * Starting a program on this machine, for `Open VRChat` and `Open an executable`.
+   *
+   * Two seams rather than one because they are two different acts: one spawns a process this daemon
+   * is the parent of, the other hands a `steam://` link to the operating system and never sees what
+   * Steam does with it. A build with neither leaves both nodes in the palette saying so, like every
+   * other node whose capability is missing.
+   */
+  readonly run?: GraphRunProgram | undefined;
+  readonly steam?: GraphRunSteamApp | undefined;
+  /**
    * What a trigger asks about the world at the moment it fires: where the running client is, and
    * whether somebody is a friend.
    *
@@ -252,6 +264,20 @@ export function createBuiltinNodes(deps: BuiltinNodeDeps = {}): BuiltinNodes {
           ...(deps.launch === undefined ? {} : { launch: deps.launch }),
           ...(deps.state === undefined ? {} : { memory: deps.state }),
         });
+  /*
+   * The launchers, which need the bus for their rehearsal note like every other action — and, like
+   * the actions, are dropped entirely from a set built without one rather than shipped as nodes
+   * that cannot say what they would have done.
+   */
+  const programs =
+    bus === undefined
+      ? []
+      : programNodes({
+          bus,
+          ...clock,
+          ...(deps.run === undefined ? {} : { run: deps.run }),
+          ...(deps.steam === undefined ? {} : { steam: deps.steam }),
+        });
   const stateful = deps.state === undefined ? [] : statefulNodes(deps.state, clockFn);
   const stored = deps.data === undefined ? [] : dataStoreNodes(deps.data);
   return new BuiltinNodes([
@@ -267,6 +293,7 @@ export function createBuiltinNodes(deps: BuiltinNodeDeps = {}): BuiltinNodes {
     ...stateful,
     ...stored,
     ...actions,
+    ...programs,
     ...me,
     ...signals,
     // Last, so a hand-written node with the same id would win the map. None does today — the

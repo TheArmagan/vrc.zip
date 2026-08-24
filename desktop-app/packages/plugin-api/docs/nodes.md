@@ -169,11 +169,12 @@ Thirteen kinds:
 | `fields` | `options` **required** `{ value, label, list? }[]`, `max?`, `default?: string` | A list of fields to pull out of a value, picked from a catalogue you declare. Each row claims an output slot. See below. |
 | `paths` | `placeholder?`, `max?`, `default?: string` | The same rows with the path typed by hand, for a value nothing has a schema for. |
 | `keys` | `placeholder?`, `max?`, `default?: string` | A list of keys, each claiming an **input** slot. The mirror of `paths`. See below. |
+| `options` | `choices` **required** `{ value, label, argumentLabel?, placeholder?, group? }[]`, `max?`, `default?: string` | A list of options picked from a catalogue, each with a value where it takes one. Claims no ports. See below. |
 
 Every kind also carries `id`, `label` (both required) and `description?`.
 
-**Four kinds are repeatable — `buttons`, `fields`, `paths`, `keys` — and all four store a JSON array
-in a string.** That is deliberate rather than a shortcut: a config value is `string | number | boolean` in
+**Five kinds are repeatable — `buttons`, `fields`, `paths`, `keys`, `options` — and all five store a
+JSON array in a string.** That is deliberate rather than a shortcut: a config value is `string | number | boolean` in
 four places at once (the wire type, the definition hash, the secret substitution, the validator), and
 widening it for one field would touch all four. The same trade `duration` makes by storing
 milliseconds in a `number`.
@@ -225,6 +226,25 @@ key and claims one input slot, which the host draws wearing that key — see
 override, then the key **whole**, then the slot id. Whole, unlike `slotRowLabel`, because a key of
 `user.name` means a field called exactly that rather than a route to a nested one. A row's `list` is
 unused here.
+
+**`options` is for a vocabulary somebody else defined**, where a checkbox per entry would be thirty
+config fields and a text box would mean looking the spelling up every time. Each row picks from
+`choices` and carries a value where the choice declares an `argumentLabel`; a choice without one is a
+flag. `group` draws the picker under headings, which is what a catalogue assembled from two documents
+wants. Read the rows with `parseOptionRows(config.options)`:
+
+```ts
+interface OptionRow {
+  readonly option: string;  // the `value` of the choice, or something a newer build wrote
+  readonly value: string;   // blank for a flag, or for a row nobody has filled in yet
+}
+```
+
+It claims no ports, which is what separates it from `keys`: `MAX_NODE_PORTS` is sixteen and a
+catalogue is usually longer, and most entries are flags with nothing for a wire to carry. **A row
+naming an option this build has never heard of is kept**, because `choices` is not hashed — a graph
+authored against a newer release names newer options, and dropping them silently would change what
+the author asked for. Decide what to do with an unknown one where you read the rows.
 
 In your handler, key the outputs by `row.slot` and read the **slot's declared type**, not the row's
 `list` flag — the slot is what an edge is wired to and what the type check ran against, and a

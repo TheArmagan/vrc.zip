@@ -29,6 +29,8 @@ text, and a notification can carry arbitrary JSON that comes back with the press
 the palette drop a new node where the canvas is, not where the graph's origin is.
 **Decision 258 is the input half of that mechanism.** `Compose JSON` builds an object from a list of
 keys, one input port per key, over a `variadicInputSlots` mechanism and a `keys` config kind.
+**Decision 261 adds three launchers.** `Open VRChat` (through Steam or the executable, with every
+documented launch option that is not a `-force-` one), `Open a Steam app`, and `Open an executable`.
 **Current phase:** Phase 4 is **complete** — 4.1 through 4.6, built on 2026-08-23 from the spec the
 planning pass of the same day produced (decision 206). Graphs are stored, run, edited on a canvas,
 armed behind a hold, and shared as files. What remains in the plan is Phase 5, packaging and polish,
@@ -4904,6 +4906,45 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      `toFlow()` serves the double-click, the dropped wire's fallback, and the palette's centring.
      A released wire also stopped falling back to the graph's origin when Svelte Flow had no position
      to offer: `0,0` is off screen and nowhere near the gesture.
+
+261. **Three launcher nodes: `Open VRChat`, `Open a Steam app`, `Open an executable`.** The palette
+     could open a link and show an instance in a client that was already running, and could not start
+     one — which is the first half of half the automations anybody actually wants.
+     - **An `options` config kind, because thirty checkboxes is not a design.** VRChat documents
+       thirteen launch options and Unity eighteen more that are not `-force-*`, which is past
+       `MAX_NODE_CONFIG_FIELDS` before the node has a path field, and past readability well before
+       that. So they are one repeatable field: pick from a catalogue that documents itself, fill in a
+       value where the option takes one. The catalogue travels in the definition and is not hashed,
+       so an option VRChat adds next release is one line here and marks nobody's graph stale — and a
+       row naming an option *this* build has never heard of is kept and passed through, because the
+       graph may have been authored against a newer one.
+     - It claims no ports, which is what separates it from decision 258's `keys`. Sixteen is the port
+       ceiling, the catalogue is thirty-one, and most entries are flags with nothing for a wire to
+       carry. The wireable escape is one `Extra arguments` port, appended after the configured ones.
+     - **The joining rule is read off the flag rather than stored beside it**: `--name=value` for
+       VRChat's own options, `-name value` for Unity's. That is the actual convention of the two
+       documents, so a catalogue entry is just its flag and its label.
+     - **The `-force-*` family is left out on purpose.** It overrides the graphics API and the
+       device, it is the fastest way to a client that will not start, and a graph is a bad place to
+       find that out. The extra-arguments box is the escape hatch, and the node says so.
+     - **`Open an executable` runs whatever it is pointed at, with the user's own privileges**, and
+       that is stated rather than hidden — the same posture PLAN.md §Phase 3 correction 6 takes for
+       plugins. The guard is the one every outbound action already has: a graph rehearses until the
+       user arms it by holding a button, and a rehearsal writes what it *would* have run to the feed.
+       What the code owes on top of that is the mechanical half, and it pays it: an argv array
+       reaches `Bun.spawn` with no shell anywhere on the path, so `&& calc.exe` in an argument is
+       five characters rather than a second program. `splitArguments` is a shell's *splitting* and
+       none of its other behaviour — no globbing, no variables, no operators.
+     - **A failed launch throws rather than answering false**, unlike `Open a link`. A link has one
+       plausible failure and nothing useful to say; a path has several — not there, is a directory,
+       not runnable — and the sentence naming which is the whole value of the answer. Thrown, it
+       reaches the node's `error` port, and `Started` keeps meaning what it says.
+     - Steam is reached through `explorer.exe` rather than the `cmd /c start` every other opener in
+       this project uses, and that is a security decision rather than a preference: `cmd` re-parses
+       the command line it is handed, so a `&` or a `%name%` inside a URL carrying the author's
+       launch options would be cmd's rather than Steam's. The arguments are percent-encoded on top.
+       A Steam app id is checked against `^\d+$` for the same reason — it is interpolated into a link
+       somebody else's parser reads.
 
 ---
 

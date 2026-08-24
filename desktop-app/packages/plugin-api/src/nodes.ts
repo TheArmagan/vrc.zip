@@ -425,6 +425,45 @@ export type NodeConfigField =
       readonly placeholder?: string;
       readonly max?: number;
       readonly default?: string;
+    }
+  | {
+      /**
+       * A list of options chosen from a catalogue, each with a value where it takes one.
+       *
+       * The repeatable field for a node whose settings are a *vocabulary somebody else defined* —
+       * `Open VRChat` and its thirty-odd launch options, half of them flags and half of them values.
+       * A checkbox per option would be thirty config fields, past {@link MAX_NODE_CONFIG_FIELDS} and
+       * well past the point where an inspector is readable; a free-text argument box would be
+       * correct and would make the author look the spelling up every time. This is the middle: pick
+       * from a list that documents itself, fill in a value when the option takes one.
+       *
+       * It claims no ports, which is what separates it from `keys`. Thirty options cannot each have
+       * one — {@link MAX_NODE_PORTS} is sixteen — and most of them are flags with no value for a
+       * wire to carry. A node that wants a computed option composes it into its free-text extras.
+       *
+       * `choices` travels **inside the definition**, like a `fields` catalogue and for the same
+       * reason: whoever registers the node declares its vocabulary, and it is not hashed, so an
+       * option added next release does not mark a saved graph stale.
+       *
+       * The stored value is a JSON array in a string, for the four reasons `buttons` is. Read it
+       * with {@link parseOptionRows}.
+       */
+      readonly kind: "options";
+      readonly id: string;
+      readonly label: string;
+      readonly description?: string;
+      /** What a row may choose. No `argumentLabel` means the option is a flag and takes no value. */
+      readonly choices: readonly {
+        readonly value: string;
+        readonly label: string;
+        /** Blank hides the value box for that option, which is right for a plain flag. */
+        readonly argumentLabel?: string;
+        readonly placeholder?: string;
+        /** Draws the choices under headings, for a catalogue that came from two documents. */
+        readonly group?: string;
+      }[];
+      readonly max?: number;
+      readonly default?: string;
     };
 
 /** One row of a `buttons` field. `id` is what an activation reports, so it is not the label. */
@@ -477,6 +516,43 @@ export function parseButtonRows(value: unknown): ButtonRow[] {
       argument: typeof row.argument === "string" ? row.argument : "",
     });
   });
+  return rows;
+}
+
+/** One row of an `options` field: which option, and the value where it takes one. */
+export interface OptionRow {
+  readonly option: string;
+  readonly value: string;
+}
+
+/**
+ * Reads an `options` field's value.
+ *
+ * Total, like every other row parser here: the value arrives from a document that was exported,
+ * hand-edited and imported again. A row naming an option this build's catalogue does not have is
+ * **kept**, because the catalogue is not hashed — a graph authored against a newer release names
+ * options this one has never heard of, and dropping them here would quietly rewrite what the author
+ * asked for. Whatever consumes the rows decides what to do with one it does not recognise.
+ */
+export function parseOptionRows(value: unknown): OptionRow[] {
+  if (typeof value !== "string" || value.trim() === "") return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+
+  const rows: OptionRow[] = [];
+  for (const entry of parsed) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const row = entry as Record<string, unknown>;
+    rows.push({
+      option: typeof row.option === "string" ? row.option.trim() : "",
+      value: typeof row.value === "string" ? row.value : "",
+    });
+  }
   return rows;
 }
 
@@ -1094,6 +1170,7 @@ const CONFIG_KINDS = [
   "fields",
   "paths",
   "keys",
+  "options",
 ] as const;
 
 /** `publisher.name`-ish: an identifier a graph can store and a person can read in an error. */
@@ -1242,6 +1319,11 @@ export function validateNodeDefinition(value: unknown): NodeValidation {
         // nothing to pick, and the row would be a `paths` field wearing the wrong control.
         if (field.kind === "fields" && !Array.isArray(field.options)) {
           issues.push({ path: `${at}.options`, message: "a fields picker needs options" });
+        }
+        // Same rule for the same reason: an options list with no catalogue offers nothing to pick,
+        // and the author would be left with a row that cannot say anything.
+        if (field.kind === "options" && !Array.isArray(field.choices)) {
+          issues.push({ path: `${at}.choices`, message: "an options list needs choices" });
         }
       });
     }

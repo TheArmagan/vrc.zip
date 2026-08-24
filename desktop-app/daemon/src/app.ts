@@ -1,5 +1,10 @@
 import { resolve } from "node:path";
-import { launchUrl as buildLaunchUrl, DEFAULT_HOSTNAME, type JsonValue } from "@vrcz/shared";
+import {
+  APP_VERSION,
+  launchUrl as buildLaunchUrl,
+  DEFAULT_HOSTNAME,
+  type JsonValue,
+} from "@vrcz/shared";
 import { CookieJar } from "./accounts/cookie-jar.ts";
 import { AccountManager } from "./accounts/manager.ts";
 import { NotificationService } from "./accounts/notifications.ts";
@@ -32,6 +37,7 @@ import { isPackaged } from "./servers/embedded-ui.ts";
 import { type BoundServers, bindServers, createAppApi } from "./servers/index.ts";
 import { loadSettings, needsFirstRun, type Settings, saveSettings } from "./settings.ts";
 import { type RetentionScheduler, Store, startRetentionScheduler } from "./store/index.ts";
+import { createUpdateChecker, type UpdateChecker } from "./updates/checker.ts";
 import { WebhookManager } from "./webhooks/index.ts";
 import { createAppApiDeps } from "./wiring/app-api-deps.ts";
 import { attachConsentAlerts } from "./wiring/consent-alert.ts";
@@ -92,6 +98,14 @@ export interface RunningDaemon {
   readonly webhooks: WebhookManager;
   readonly sessionToken: string;
   readonly launchUrl: string;
+  /**
+   * The release checker, so the entry point can give it a restart to call.
+   *
+   * Installing an update ends with the app handing over to the executable it just wrote, and the
+   * tidy shutdown that handover needs is `stop()` below — which nothing inside `startDaemon` holds
+   * a reference to. So the checker is exposed and `index.ts` sets `onRestart` on it.
+   */
+  readonly updates: UpdateChecker;
   /**
    * Lines for the entry point to print after the URL block.
    *
@@ -621,8 +635,29 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     },
   };
 
+  /*
+   * The release check, and the one outbound request in this app that is not to VRChat.
+   *
+   * Constructed here with everything else, started below once the servers are up. `canInstall` is
+   * the same pair of conditions the install offer uses — a packaged build, on Windows — because
+   * replacing the running executable is what the button does and neither a `bun run daemon` nor a
+   * platform without a packaged asset can do it. The check itself runs everywhere; being told an
+   * update exists is useful even where vrc.zip cannot fetch it for you.
+   */
+  const updates = createUpdateChecker({
+    canInstall: process.platform === "win32" && isPackaged(),
+    onAvailable: (release) => {
+      // The console half of "show it in both places". The UI half is the banner, which reads the
+      // same status over `GET /api/update`.
+      console.log(
+        `[vrc.zip] vrc.zip ${release.version} is out, and this is ${APP_VERSION}. Update from the banner at the top of the app, or from ${release.url}`,
+      );
+    },
+  });
+
   const deps = createControlDeps({
     accounts,
+    updates,
     store,
     bus,
     limiter,
@@ -885,6 +920,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
    */
   await graphs.start();
 
+  // Last, and on a timer rather than now: the first check is twenty seconds out, so nothing about
+  // a network that is slow or missing is on the path between here and a usable app.
+  updates.start();
+
   return {
     bus,
     store,
@@ -896,11 +935,20 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     webhooks,
     sessionToken,
     launchUrl,
+    /**
+     * The release checker, handed back so `index.ts` can give it the one thing it cannot build for
+     * itself: a restart. Installing an update ends in a handover, and the tidy shutdown that
+     * handover needs is `daemon.stop()`, which only the caller holds.
+     */
+    updates,
     async stop() {
       // Order is the reverse of construction, and the first two lines are the ones that matter:
       // stop accepting work, then flush what is already queued, before anything closes.
       detachConsentAlerts();
       detachActivations();
+      // First, and trivially: a six-hourly timer that fires into a half-stopped daemon would be a
+      // fetch nobody is waiting for.
+      updates.stop();
       // With it, since it is what the consent alert was raising. A toast outlives the process that
       // showed it unless it is taken down, and one left on screen with an `Open vrc.zip` button
       // pointing at a daemon that has exited is a button that does nothing.

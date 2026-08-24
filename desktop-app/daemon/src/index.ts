@@ -27,6 +27,8 @@ import {
   installLocally,
   installTarget,
   isInstalled,
+  startInstalledCopy,
+  stopRunningCopies,
   updateInstalledCopy,
 } from "./os/install.ts";
 import { openExternalUrl, openUrl, shouldOpenBrowser } from "./os/open-url.ts";
@@ -39,6 +41,7 @@ import {
 import { shouldShowTray, startTray } from "./os/tray.ts";
 import { isPackaged } from "./servers/embedded-ui.ts";
 import { needsFirstRun, saveSettings } from "./settings.ts";
+import { restartInto, sweepSidecars } from "./updates/apply.ts";
 
 /**
  * Daemon entry point.
@@ -157,11 +160,14 @@ export function shouldOfferInstall(
  * Whether to replace the installed copy with the one that is running.
  *
  * The question this answers is narrow: somebody downloaded a newer vrc.zip, extracted it, and ran
- * it, while an older one sits installed. Nothing about that involves the network — vrc.zip does not
- * phone home and does not check for releases — so the only moment it can know a newer build exists
- * is the moment one is executing. When that moment arrives the copy on disk is simply brought up to
- * date, with no question asked: the user already chose this version by running it, and asking them
- * to confirm the same choice a second time is a keypress that only ever has one sensible answer.
+ * it, while an older one sits installed. Nothing about it involves the network, which is what keeps
+ * it separate from `updates/` — that subsystem asks GitHub whether a release exists and offers a
+ * button; this one is the case where the newer build is already here, in the user's hand, running.
+ * When that moment arrives the copy on disk is simply brought up to date, with no question asked:
+ * the user already chose this version by running it, and asking them to confirm the same choice a
+ * second time is a keypress that only ever has one sensible answer.
+ * What follows the copy is a handover — the installed copy is started and this one stops — so that
+ * the version the user chose is also the version that ends up running, from where it belongs.
  *
  * `isInstalled()` excluding: if this *is* the installed copy, there is nothing to copy over itself.
  *
@@ -201,21 +207,37 @@ async function rememberOffered(daemon: Awaited<ReturnType<typeof startDaemon>>):
 }
 
 /**
- * Replaces the installed copy with the running one, without asking.
+ * Replaces the installed copy with the running one, without asking, and hands over to it.
+ *
+ * Four steps, and the order is the design:
+ *
+ *  1. Copy this executable over the installed one.
+ *  2. If that failed with `EBUSY` — the installed copy is running — kill it and copy again. Windows
+ *     holds a running image open and there is no polite way around that; the file cannot be replaced
+ *     while somebody is executing it.
+ *  3. Start the copy that was just written.
+ *  4. Stop being the process the user launched.
+ *
+ * Steps 3 and 4 are that way round because a process cannot start anything after it has exited. The
+ * effect is what was asked for either way: one vrc.zip is running when this is over, and it is the
+ * updated one, from the place it is installed. Nothing is holding a port or the database while the
+ * successor starts, because none of it has been opened yet — see the call site on why this runs
+ * before `startDaemon`.
  *
  * Only the executable and the Installed apps version change. "Start with Windows" and the shortcuts
  * are left exactly as the user left them, which is `updateInstalledCopy`'s whole reason for existing
  * separately from `installLocally`: an update that silently re-enabled autostart, or put back a
  * desktop shortcut somebody deleted, would be undoing their decisions on the way past.
  *
- * It still says what it did. Doing this quietly is the point; doing it invisibly is not, and the
- * lines below are the only record the user gets that the file on disk changed.
+ * It says what it did at every step. Doing this without asking is the point; doing it invisibly is
+ * not, and these lines are the only record the user gets that the file on disk changed and that the
+ * window in front of them is about to be replaced by another one.
  *
- * A failure is reported and otherwise ignored. The commonest one is `EBUSY` — the installed copy is
- * running too — and there is nothing to do about that from here except run the version in hand,
- * which is what this process goes on to do.
+ * Returns whether it handed over. False means every failure there is — the copy did not happen, or
+ * it did and the successor would not start — and in all of them the caller carries on and runs the
+ * version in hand, which is a working app whatever else went wrong.
  */
-async function updateInstalledCopyNow(): Promise<void> {
+async function updateInstalledCopyNow(argv: readonly string[]): Promise<boolean> {
   const installed = installedVersion();
   console.log("");
   console.log(
@@ -224,19 +246,42 @@ async function updateInstalledCopyNow(): Promise<void> {
     ),
   );
 
-  const result = await updateInstalledCopy();
+  let result = await updateInstalledCopy();
+  if (!result.ok && result.busy) {
+    console.log(note("The installed copy is running. Closing it so the file can be replaced."));
+    const stop = await stopRunningCopies();
+    if (stop.stopped > 0) {
+      console.log(
+        note(
+          stop.stopped === 1
+            ? "Closed it."
+            : `Closed ${String(stop.stopped)} running copies of it.`,
+        ),
+      );
+    }
+    // Retried whatever the stop reported. A kill that closed nothing is not proof the file is still
+    // held — the process may have exited on its own between the two attempts — and the copy is the
+    // only thing that can actually answer that.
+    result = await updateInstalledCopy();
+  }
+
   if (!result.ok) {
     console.log(attention(result.reason ?? "Could not update the installed copy."));
-    return;
+    console.log(note("Carrying on with the copy you ran."));
+    return false;
   }
 
   console.log(note(`Updated ${String(result.path)} to ${result.to}.`));
   if (result.reason !== null) console.log(note(result.reason));
-  console.log(
-    note(
-      "Your shortcuts and startup setting are unchanged. This window is still the copy you ran.",
-    ),
-  );
+  console.log(note("Your shortcuts and startup setting are unchanged."));
+
+  if (!startInstalledCopy(argv)) {
+    console.log(attention("Could not start the updated copy, so this window is carrying on."));
+    return false;
+  }
+
+  console.log(note("Starting the updated copy. This window is closing."));
+  return true;
 }
 
 /**
@@ -358,6 +403,37 @@ async function main(): Promise<void> {
 
   console.log(banner());
 
+  /*
+   * The update, and it is here — before anything is bound, opened or written — for one reason.
+   *
+   * It ends by starting the copy it just wrote and standing down, so everything this process would
+   * otherwise be holding is something the successor would then have to wait for: three ports, an
+   * open SQLite handle, a WebSocket to VRChat. Doing it up here means there is nothing to hand over.
+   * Down where it used to live, after `startDaemon`, the update could only ever be a file copy that
+   * took effect *next* time.
+   *
+   * When it hands over, this process is done. Not `shutdown`, which flushes a daemon that was never
+   * started: `process.exit` is the whole of the exit path for a run that has done nothing but copy
+   * a file.
+   *
+   * Everything about when not to act is in the predicate. The short version: only a packaged build,
+   * only when this executable is not itself the installed one, and only when it is strictly newer
+   * than the copy on disk.
+   */
+  if (shouldUpdateInstalledCopy() && (await updateInstalledCopyNow(argv))) {
+    process.exit(0);
+  }
+
+  /*
+   * The tidying an in-app update could not do for itself.
+   *
+   * A self-update renames the executable it is running out of and cannot then delete it, so the
+   * file is still there when its successor starts — which is this process. Silent unless it finds
+   * something, and silent when it fails: a leftover file is untidy, and a start that stopped over
+   * one is broken.
+   */
+  await sweepSidecars();
+
   const daemon = await startDaemon();
 
   // Every address in one place, including the forward proxy's — which used to announce itself from
@@ -398,21 +474,12 @@ async function main(): Promise<void> {
    * over one console handle, and two of them running at once would race for the same keypresses.
    * The prompt attaches its own listener and takes it down before this returns.
    *
-   * Two things, and at most one of them happens. The update comes first because it is the more
-   * specific situation: an older copy is already installed and the executable in the user's hand is
-   * newer than it, which is a different problem from having no installation at all. `shouldOfferInstall`
-   * stands down whenever an installation exists, so these cannot both fire.
-   *
-   * Only the install *asks*. Updating an existing installation to the version already running is
-   * done outright, so it does not need a console and is not held back on a `--hidden` run.
-   *
-   * Everything about when not to act is in the two predicates. The short version: only a packaged
-   * build, only when this executable is not itself the installed one, and only where there is
-   * something worth doing about it.
+   * The update is not here any more, and this is not the pair it used to be. It runs before
+   * `startDaemon`, because it now ends by handing over to the copy it wrote — see the call site.
+   * The two still cannot both fire: `shouldOfferInstall` stands down whenever an installation
+   * exists, and an update that got this far is one that decided not to hand over.
    */
-  if (shouldUpdateInstalledCopy()) {
-    await updateInstalledCopyNow();
-  } else if (shouldOfferInstall(argv, daemon.settings.installOffered)) {
+  if (shouldOfferInstall(argv, daemon.settings.installOffered)) {
     await offerInstall(daemon);
   }
 
@@ -521,7 +588,15 @@ async function main(): Promise<void> {
   }
 
   let stopping = false;
-  const shutdown = (signal: string): void => {
+  /**
+   * The one exit path, whatever asked for it.
+   *
+   * `after` runs once everything is flushed and closed and immediately before the process goes, and
+   * has exactly one caller: the update, which starts its successor there. That is the *only* moment
+   * it can — a second later there is no process to start anything from, and a second earlier the
+   * successor would be racing this one for three ports and the SQLite file.
+   */
+  const shutdown = (signal: string, after?: () => void): void => {
     // A second Ctrl-C during shutdown should not start a second one; the flush is not reentrant.
     if (stopping) return;
     stopping = true;
@@ -532,12 +607,29 @@ async function main(): Promise<void> {
     daemon
       .stop()
       .then(() => {
+        after?.();
         process.exit(0);
       })
       .catch((error: unknown) => {
         console.error("shutdown failed:", error);
         process.exit(1);
       });
+  };
+
+  /*
+   * The restart half of the update button.
+   *
+   * The checker downloads the release and swaps the file; everything from here is this file's job,
+   * because the tidy shutdown is. An update that killed the process outright would lose whatever
+   * the feed writer had queued — which is exactly the cost the startup path pays when it has to
+   * kill an older copy, and exactly the cost worth avoiding when the app is stopping on purpose.
+   */
+  daemon.updates.onRestart = () => {
+    console.log("");
+    console.log(attention("The update is in place. Restarting vrc.zip."));
+    shutdown("update", () => {
+      restartInto(process.execPath, argv);
+    });
   };
 
   process.on("SIGINT", () => {

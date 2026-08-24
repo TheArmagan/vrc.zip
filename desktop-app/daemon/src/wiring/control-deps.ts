@@ -19,6 +19,7 @@ import type {
 } from "@vrcz/api/types";
 import { PLUGIN_CAPABILITIES } from "@vrcz/plugin-api";
 import {
+  APP_VERSION,
   GRAPH_RUN_STATUSES,
   type Graph,
   type GraphConcurrency,
@@ -118,6 +119,8 @@ import {
   type SettingsPatch,
   type StatusSnapshot,
   type StreamEvent,
+  type UpdateInstallResult,
+  type UpdateStatus,
   type UserBadge,
   type UserBatch,
   type UserDetail,
@@ -137,6 +140,7 @@ import {
   type Store,
 } from "../store/index.ts";
 import type { GrantRow, GraphKvEntryRow, GraphRow, GraphRunRow } from "../store/types.ts";
+import type { UpdateChecker } from "../updates/checker.ts";
 import type { WebhookManager } from "../webhooks/index.ts";
 import { EPHEMERAL } from "./feed-writer.ts";
 import type { InstalledPluginView, PluginBudgetView, PluginHost } from "./plugin-host.ts";
@@ -233,6 +237,13 @@ export interface ControlDepsOptions {
   readonly startup?: StartupControl | undefined;
   /** See `os/install.ts`. Absent means the platform cannot do it, which is every non-Windows run. */
   readonly install?: InstallControl | undefined;
+  /**
+   * The release checker. Absent means "this daemon never looks", which is what every test that
+   * builds these deps wants — a suite that reaches api.github.com four times a day is a suite with
+   * a network dependency nobody asked for. The routes still answer, with a status that says
+   * nothing is known.
+   */
+  readonly updates?: UpdateChecker | undefined;
 }
 
 /** See `os/startup.ts`. Narrow on purpose: read it, write it, and say why it will not. */
@@ -264,6 +275,25 @@ export interface InstallControl {
    */
   status(): { installed: boolean; path: string | null; version: string | null };
 }
+
+/**
+ * What a daemon with no release checker reports.
+ *
+ * Not an error and not an empty object: the current version is a fact this build knows whether or
+ * not anybody is checking, and a banner that reads `available: false` renders nothing, which is
+ * exactly right.
+ */
+const NO_UPDATE_CHECKER: UpdateStatus = {
+  current: APP_VERSION,
+  latest: null,
+  available: false,
+  url: null,
+  canInstall: false,
+  checkedAt: null,
+  checking: false,
+  installing: false,
+  error: null,
+};
 
 /** What an unsupported build reports: off, unchangeable, and with a sentence saying why. */
 const UNSUPPORTED_STARTUP: StartupControl = {
@@ -3763,6 +3793,30 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         };
       }
       return await options.install.run(request);
+    },
+
+    /*
+     * The three update routes, and the same posture as the install action: delegated whole to the
+     * checker, and answered honestly when there is not one. A daemon built without a checker is not
+     * broken — it is one that does not look — and a status saying so is more use to the banner than
+     * a 404 it would have to learn to interpret.
+     */
+    updateStatus(): UpdateStatus {
+      return options.updates?.status() ?? NO_UPDATE_CHECKER;
+    },
+
+    async checkForUpdate(): Promise<UpdateStatus> {
+      return (await options.updates?.check()) ?? NO_UPDATE_CHECKER;
+    },
+
+    async installUpdate(): Promise<UpdateInstallResult> {
+      return (
+        (await options.updates?.install()) ?? {
+          ok: false,
+          restarting: false,
+          reason: "This copy of vrc.zip does not check for updates.",
+        }
+      );
     },
 
     streamClientCount(): number {

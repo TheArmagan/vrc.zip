@@ -45,11 +45,25 @@ import {
   parseWorldIds,
   type Settings,
   type StreamEvent,
+  type UpdateStatus,
   type UserBatch,
   type UserDetail,
   type WorldDetail,
   type WorldSummary,
 } from "./control.ts";
+
+/** A daemon that never checks for releases: no network in the suite, and no timer to stop. */
+const NO_UPDATES: UpdateStatus = {
+  current: "0.0.0",
+  latest: null,
+  available: false,
+  url: null,
+  canInstall: false,
+  checkedAt: null,
+  checking: false,
+  installing: false,
+  error: null,
+};
 
 const PORT = 7775;
 const TOKEN = generateSessionToken();
@@ -1091,6 +1105,9 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
       return settings;
     },
     installLocally: async () => ({ ok: false, reason: "not on this platform", path: null }),
+    updateStatus: () => NO_UPDATES,
+    checkForUpdate: async () => NO_UPDATES,
+    installUpdate: async () => ({ ok: false, restarting: false, reason: "not in a test" }),
     subscribeEvents: (listener) => {
       seen.listeners.push(listener);
       return () => {

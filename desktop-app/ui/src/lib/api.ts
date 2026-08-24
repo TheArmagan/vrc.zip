@@ -818,6 +818,32 @@ export interface InstallReport {
   readonly path: string | null;
 }
 
+/**
+ * What the daemon's six-hourly release check last found. Read off `daemon/src/updates/checker.ts`.
+ *
+ * `available` and `canInstall` are two different questions and the banner needs both: a release
+ * exists, and this build can replace itself with it. A packaged Windows copy answers yes to both
+ * and gets a button; a `bun run daemon` gets the same news and a link.
+ */
+export interface UpdateStatus {
+  readonly current: string;
+  readonly latest: string | null;
+  readonly available: boolean;
+  readonly url: string | null;
+  readonly canInstall: boolean;
+  readonly checkedAt: number | null;
+  readonly checking: boolean;
+  readonly installing: boolean;
+  readonly error: string | null;
+}
+
+/** What `POST /api/update/install` answers with, before the daemon restarts under you. */
+export interface UpdateInstallResult {
+  readonly ok: boolean;
+  readonly restarting: boolean;
+  readonly reason: string | null;
+}
+
 /** The subset of `Settings` that `PUT /api/settings` accepts. Ports are read-only over the wire. */
 export interface SettingsPatch {
   readonly contact?: string;
@@ -2083,6 +2109,21 @@ export const api = {
       startMenuShortcut: boolean;
     }): Promise<InstallReport> =>
       request<InstallReport>("/settings/install", { method: "POST", body: options }),
+  },
+
+  /*
+   * Updates. `get` is the cheap read the banner polls and never touches the network; `check` is the
+   * "check now" button and does; `install` replaces the executable and restarts the daemon, so it
+   * is the last call this page's daemon will answer.
+   */
+  updates: {
+    get: (signal?: AbortSignal): Promise<UpdateStatus> =>
+      request<UpdateStatus>("/update", withSignal(signal)),
+
+    check: (): Promise<UpdateStatus> => request<UpdateStatus>("/update/check", { method: "POST" }),
+
+    install: (): Promise<UpdateInstallResult> =>
+      request<UpdateInstallResult>("/update/install", { method: "POST" }),
   },
 
   /*

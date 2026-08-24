@@ -61,6 +61,7 @@ import type { ServerWebSocket } from "bun";
 import { Hono } from "hono";
 import { createBunWebSocket } from "hono/bun";
 import { hostGuard, originGuard, sessionAuth, type TokenSource } from "../security/guards.ts";
+import type { UpdateInstallResult, UpdateStatus } from "../updates/checker.ts";
 import { APP_API_PREFIX, type AppApi, type AppApiDeps, createAppApi } from "./app-api.ts";
 
 /**
@@ -80,6 +81,12 @@ import { APP_API_PREFIX, type AppApi, type AppApiDeps, createAppApi } from "./ap
  * `wiring/control-deps.ts`, `servers/index.ts`, the tests - keeps its import path unchanged while
  * there is exactly one definition. See the header of `packages/shared/src/wire.ts` for what the two
  * hand-copied sets had drifted into.
+ */
+/**
+ * The update shapes, re-exported on the same terms and for the same reason, though they come from
+ * `updates/checker.ts` rather than `@vrcz/shared`: the checker is a daemon-side object and its
+ * status is the only part of it that crosses the wire, so the definition stays with the thing that
+ * produces it and everyone else reads it from the contract they already import.
  */
 export type {
   AppAuditEntry,
@@ -105,6 +112,8 @@ export type {
   RateLimitSnapshot,
   StatusSnapshot,
   TwoFactorMethod,
+  UpdateInstallResult,
+  UpdateStatus,
   VerifyTwoFactorInput,
 };
 
@@ -1570,6 +1579,24 @@ export interface ControlDeps {
     startMenuShortcut: boolean;
   }): Promise<InstallReport>;
 
+  /**
+   * Whether a newer vrc.zip has been released, as of the last six-hourly check.
+   *
+   * Read, never checked: this returns what the daemon already knows, so the banner can render on
+   * the first paint of a cold tab without waiting for a round trip to GitHub. Forcing a check is
+   * `checkForUpdate`, and it is a separate call because it is a separate cost.
+   */
+  updateStatus(): UpdateStatus;
+  /** Asks GitHub now. Resolves to the same shape, whether it found something or failed. */
+  checkForUpdate(): Promise<UpdateStatus>;
+  /**
+   * Downloads the release, replaces this executable and restarts into it.
+   *
+   * Answers before the restart, deliberately: the reply is the only chance the browser has to be
+   * told what is about to happen to the daemon it is talking to.
+   */
+  installUpdate(): Promise<UpdateInstallResult>;
+
   /** The retention config, plus a dry run of what the next pass would delete. */
   getRetention(): Promise<RetentionSettings>;
   /**
@@ -2865,6 +2892,18 @@ export function createControlApp({ port, deps, appApi, token }: ControlAppOption
       }),
     );
   });
+
+  /*
+   * The update surface, three routes on the same widened app and for the same compiler reason.
+   *
+   * `GET` is the cheap one and the one the banner polls: it reports what the six-hourly check last
+   * found and never touches the network, so a tab opened cold paints the banner from the daemon's
+   * own memory. The two `POST`s are the deliberate acts — ask GitHub now, and replace this
+   * executable — and being verbs on their own paths is what keeps the cheap read cheap.
+   */
+  plain.get("/api/update", (c) => c.json(deps.updateStatus()));
+  plain.post("/api/update/check", async (c) => c.json(await deps.checkForUpdate()));
+  plain.post("/api/update/install", async (c) => c.json(await deps.installUpdate()));
 
   return app;
 }

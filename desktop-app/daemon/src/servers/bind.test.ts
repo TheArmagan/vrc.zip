@@ -5,7 +5,20 @@ import type { ProxyDeps } from "../proxy/handshake.ts";
 import { generateSessionToken } from "../security/session-token.ts";
 import { MEMORY, Store } from "../store/store.ts";
 import { type BoundServers, bindServer, bindServers, launchUrl } from "./bind.ts";
-import type { ControlDeps } from "./control.ts";
+import type { ControlDeps, UpdateStatus } from "./control.ts";
+
+/** A daemon that never checks for releases, which is what every test wants: no network, no timer. */
+const NO_UPDATES: UpdateStatus = {
+  current: "0.0.0",
+  latest: null,
+  available: false,
+  url: null,
+  canInstall: false,
+  checkedAt: null,
+  checking: false,
+  installing: false,
+  error: null,
+};
 
 const TOKEN = generateSessionToken();
 
@@ -166,6 +179,9 @@ const deps: ControlDeps = {
   getSettings: async () => ({}),
   updateSettings: async () => ({}),
   installLocally: async () => ({ ok: false, reason: null, path: null }),
+  updateStatus: () => NO_UPDATES,
+  checkForUpdate: async () => NO_UPDATES,
+  installUpdate: async () => ({ ok: false, restarting: false, reason: "not in a test" }),
   subscribeEvents: () => () => {},
 };
 

@@ -14,6 +14,10 @@ config-field kind, and a `vrchat://` opener that attaches to a running client in
 second one. Decision 241 adds twenty-eight **named triggers** over the pipeline and the game log, so
 a graph starts on "my status changed" or "a portal appeared" with typed ports, rather than on a
 pattern with a `json` blob.
+**vrc.zip updates itself as of 2026-08-24** (decisions 283 and 284): the update-on-run path
+closes the copy that is in the way, replaces the file and hands over to it, and a six-hourly
+check against GitHub's release list drives a console line, a bar across the top of the UI, and a
+button that downloads the release and restarts into it.
 **The loop grew up on 2026-08-24** (decisions 242 and 243): `Collect` and `Stop when` as
 intrinsics, a `results` port, a pace between items, the body drawn as a tinted region on the canvas,
 a live position readout while a run is in flight, and every node card redesigned around its palette
@@ -5339,6 +5343,88 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
        absence would make `is empty` lie about a counter that reached zero. Blank-but-whitespace text
        *is* empty, because VRChat returns `""` and `" "` where another API would omit the field.
 
+283. **The update-on-run finishes the job: it closes the old copy, replaces the file, and hands over
+     to it.** Decision 280 stopped asking and copied the newer executable over the installed one,
+     which left two things half-done. The copy failed outright whenever the installed copy happened
+     to be running - the commonest case there is, since the reason an older version exists is that
+     somebody has been using it - and when it worked, the version now on disk was not the version
+     the user was looking at: this window went on serving the build in Downloads, and the update
+     took effect *next* time.
+
+     Both are fixed by the same four steps, in `daemon/src/index.ts` and `os/install.ts`:
+
+     - **The whole thing moved before `startDaemon`.** It ends in a handover now, so everything this
+       process would otherwise be holding - three ports, an open SQLite handle, a socket to
+       VRChat - is something the successor would have to wait for. Up there, there is nothing to
+       hand over. That also makes the step reachable at all: a second daemon started while the first
+       holds 7773-7775 falls back to ephemeral ports and runs on, so the update used to be decided
+       by a process that had already forked the state.
+     - **`EBUSY` is now a fact on the result, not a sentence to match on.** `updateInstalledCopy`
+       reports `busy`, and the caller answers it by killing whatever is running the installed
+       executable and copying again. Windows will not let a running image be overwritten and there
+       is no polite way around that.
+     - **The kill matches on the full image path, never the process name.** `taskkill /im
+       vrc.zip.exe` would take a checkout, a copy in Downloads and this process itself; `stopScript`
+       matches `$_.Path -ieq $target`, excludes our own pid, and then *waits* - the image lock goes
+       when the process is gone, not when the kill is asked for, and without the wait the copy fails
+       intermittently. It is PowerShell for the same reason `removeShortcuts` is: enumerating
+       processes and waiting on handles is four Win32 calls against one line of a language that is
+       already on the machine.
+     - **Spawn, then exit.** "Kill this one and start that one" cannot be done in that order by the
+       process being killed, so the installed copy is started and this one stops. The argv carries
+       over, so a `--hidden` autostart stays hidden.
+
+     The cost is stated rather than hidden: a killed copy does not flush its queued feed rows or
+     close SQLite tidily. WAL survives it, and the alternative is refusing to update whenever the app
+     being updated is open, which is nearly always. The in-app updater in decision 284 does not pay
+     this - it stops the daemon properly first, because there it is the same process.
+
+284. **vrc.zip checks GitHub for releases every six hours, says so in both places, and can replace
+     itself.** Decision 280's premise was that the only moment the app can know a newer build exists
+     is the moment one is executing. That was true and is no longer the posture: `daemon/src/updates/`
+     asks `api.github.com` for the release list four times a day, and the answer drives a console
+     line, a bar across the top of the UI and a button that does the update.
+
+     - **The one outbound request that is not VRChat and not a lookup the user switched on.** It
+       carries a User-Agent naming the app, its version and the repository, and nothing else - in
+       particular **not** the VRChat contact address from settings, which is an email given for
+       VRChat's User-Agent requirement and has no business reaching a third party. It does not go
+       through the rate limiter either: those three buckets are VRChat's ceilings, and spending
+       VRChat's allowance on GitHub would be the actual mistake.
+     - **The tag list, not `/releases/latest`.** GitHub's answer to "which is newest" is whichever
+       release was *marked* latest, which hides one published out of order. `newestRelease` orders
+       the tags with `compareVersions` - the same comparison decision 280's path uses, so there is
+       one definition of "newer" - and takes the highest that beats the running version. Strictly
+       newer: a local build of `main` is ahead of every release and is not offered a downgrade.
+     - **Available and installable are two questions.** A release exists; and this build can replace
+       itself with it. A packaged Windows copy answers yes to both and gets a button. Everything
+       else gets the same news and a link, because knowing is useful where acting is not.
+     - **It never installs on its own.** Decision 280's path acts unasked because the user *ran* the
+       new build, which is as clear a request as a button. Here they ran the old one and are being
+       told something, and the swap ends with the app restarting under them.
+     - **The rename trick, and the rollback that goes with it.** A running image cannot be
+       overwritten but can be renamed, so `applyUpdate` downloads beside the target (never `%TEMP%`:
+       a cross-volume rename is a copy, and a copy can half-happen), checks what arrived, renames the
+       running executable to `<name>.old-<pid>`, and renames the download into the name it vacated.
+       If that last rename fails the original goes back - a failed update that leaves no vrc.zip at
+       the path every shortcut and the autostart entry point at is the one outcome worth writing
+       rollback code for. The sidecar is deleted by the *next* start, since the process holding it
+       open is the one doing the updating.
+     - **No signature check, said out loud.** The release workflow publishes an unsigned executable,
+       and a checksum fetched from the host that served the file proves only that GitHub served two
+       consistent things. The trust is TLS to github.com plus the fact that the URL came out of that
+       repository's own release list, and claiming more would be a hash that reads like a guarantee.
+     - **The restart is the daemon's tidy one.** `POST /api/update/install` answers *before* the
+       handover - that reply is the browser's only chance to be told what is about to happen to the
+       daemon it is talking to - and the restart then runs `daemon.stop()` and starts the new file
+       from `shutdown`'s new `after` hook, which is the only moment it can: a second earlier the
+       successor races this process for three ports and the database.
+     - **The banner is not a stream frame.** A release is not an event: it needs no feed row, no
+       retention window and no webhook delivery. `GET /api/update` is a local read of what the daemon
+       already knows, so a cold tab paints the bar on its first frame, and the UI re-reads every half
+       hour purely so a tab left open overnight notices. Dismissing is per-tab and not persisted - a
+       stored dismissal is how an app ends up several versions behind in silence.
+
 ---
 
 ## Gotchas
@@ -5346,6 +5432,18 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **Bun's `typeof fetch` is not a function type an arrow can satisfy.** It carries `preconnect`, so
+  every injected `fetch` stub in `updates/` failed to typecheck against it while behaving perfectly
+  at runtime. The fix is a `FetchLike` alias naming the two arguments the callers actually use,
+  which is also the more honest description of the dependency: a test double should have to
+  implement what is used, not whatever the global happens to hang off itself.
+
+- **Windows will rename a running executable, and that is the whole basis of the self-updater.** The
+  refusal is on *overwriting* the image, not on moving it: the file can be renamed out of the way
+  while the process keeps executing from it, which is what lets a new build be written into the name
+  it just vacated. The process cannot then delete its own predecessor, so the leftover is swept by
+  the next start rather than by the update that created it.
 
 - **Expanding an offline friend turned them online, and they stayed that way.** Reported from the
   Friends screen: open the expander on a row in the Offline group and it flips to Active. The

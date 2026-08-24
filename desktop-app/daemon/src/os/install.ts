@@ -578,6 +578,15 @@ export interface UpdateResult {
   readonly path: string | null;
   /** Why it did not happen, in a sentence fit to show a user. Null on success. */
   readonly reason: string | null;
+  /**
+   * The failure was `EBUSY`: the installed copy is running and Windows will not let its image be
+   * overwritten.
+   *
+   * Separate from `reason` because it is the one failure with a way forward — closing that process
+   * and copying again — and a caller must not have to match on the wording of a sentence written
+   * for a human to tell it apart from a disk that is full.
+   */
+  readonly busy: boolean;
 }
 
 /**
@@ -603,7 +612,14 @@ export async function updateInstalledCopy(
   const directory = installDirectory(env);
   const target = installTarget(env);
   if (directory === null || target === null) {
-    return { ok: false, from, to, path: null, reason: "There is no installed copy to update." };
+    return {
+      ok: false,
+      from,
+      to,
+      path: null,
+      reason: "There is no installed copy to update.",
+      busy: false,
+    };
   }
 
   try {
@@ -612,8 +628,11 @@ export async function updateInstalledCopy(
   } catch (error) {
     /*
      * `EBUSY` means the installed copy is running. That is a likelier state here than it is during
-     * a first install — the whole reason there is an older copy is that somebody has been using
-     * it — even though its bound ports usually stop a second daemon getting this far.
+     * a first install — the whole reason there is an older copy is that somebody has been using it.
+     *
+     * Reported rather than acted on. The caller is the one that knows whether it is early enough in
+     * its own startup to close that process and try again (`stopRunningCopies`), or whether it is
+     * already serving and the honest answer is a sentence.
      */
     const busy = String(error).includes("EBUSY");
     return {
@@ -622,8 +641,9 @@ export async function updateInstalledCopy(
       to,
       path: target,
       reason: busy
-        ? "The installed copy of vrc.zip is running. Close it and try again."
+        ? "The installed copy of vrc.zip is running and could not be closed."
         : `Could not replace ${target}.`,
+      busy,
     };
   }
 
@@ -641,5 +661,162 @@ export async function updateInstalledCopy(
     to,
     path: target,
     reason: listed ? null : "Updated, but the Installed apps entry could not be refreshed.",
+    busy: false,
   };
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* Handing over to the copy we just wrote                                                         */
+/* -------------------------------------------------------------------------------------------- */
+
+/** `vrc.zip`, the process name Windows knows the executable by: the file name without `.exe`. */
+const PROCESS_NAME = EXECUTABLE_NAME.replace(/\.exe$/i, "");
+
+/** How long to wait for a killed copy to actually be gone, in seconds. */
+const STOP_TIMEOUT_SECONDS = 15;
+
+/**
+ * The script that closes running copies of the *installed* executable.
+ *
+ * Exported for the test, in the same spirit as {@link shortcutPlan}: this is the one thing here
+ * that terminates somebody's process, and what it matches on is worth asserting without running it.
+ *
+ * Three conditions, and dropping any one of them is a bug with a name:
+ *
+ * - **`$_.Path -ieq $target`** — the *full path*, not the process name. Somebody may well be running
+ *   another vrc.zip from Downloads, or from a checkout; those are not in the way of this copy and
+ *   are not ours to close. This is also why it is not `taskkill /im vrc.zip.exe`, which would take
+ *   every one of them, this process included.
+ * - **`$_.Id -ne <pid>`** — never ourselves. Currently redundant, since a process whose path equals
+ *   the install target would not be updating it, but it costs one comparison to make that a fact
+ *   rather than an inference from the caller's guard.
+ * - **`$_.Path`** truthy — `Get-Process` leaves `Path` empty for a process it cannot open, and
+ *   `$null -ieq $target` is false, so an unreadable process is skipped rather than matched.
+ *
+ * `Stop-Process -Force` is a kill, and it is worth being plain about the cost: the copy being closed
+ * does not get to flush its queued feed rows or close SQLite tidily. That is the trade the update
+ * makes — WAL means the database survives it, and the alternative is refusing to update whenever the
+ * app somebody is updating happens to be open, which is nearly always.
+ */
+export function stopScript(target: string, pid: number): string {
+  // A path can hold an apostrophe (`C:\Users\O'Brien\…`), and doubling it is how a single-quoted
+  // PowerShell string escapes one. A path can never hold the surrounding quote in any other way,
+  // which is what makes a literal string safe here at all.
+  const quoted = target.replace(/'/g, "''");
+  return [
+    "$ErrorActionPreference='SilentlyContinue'",
+    `$target='${quoted}'`,
+    `$found=@(Get-Process -Name '${PROCESS_NAME}' | Where-Object { $_.Id -ne ${String(pid)} -and $_.Path -and $_.Path -ieq $target })`,
+    "$found | Stop-Process -Force",
+    // The wait is the point. Windows releases the image lock when the process is gone, not when the
+    // kill is asked for, and copying over it a millisecond later is how this fails intermittently.
+    `$found | Wait-Process -Timeout ${String(STOP_TIMEOUT_SECONDS)}`,
+    "Write-Output $found.Count",
+  ].join("; ");
+}
+
+export interface StopResult {
+  /** How many processes were killed. Zero is a perfectly ordinary answer. */
+  readonly stopped: number;
+  /** False when the script could not be run at all. */
+  readonly ok: boolean;
+}
+
+/**
+ * Kills whatever is running the installed executable, and waits for it to be gone.
+ *
+ * PowerShell rather than FFI, matching `removeShortcuts` above: enumerating processes, filtering
+ * them by image path and waiting on their handles is four Win32 calls and a snapshot loop, against
+ * one line of a language that is already on every Windows machine. The FFI in `shortcut.ts` and
+ * `registry.ts` is there because those needed something PowerShell genuinely could not do.
+ *
+ * Only ever called on the `EBUSY` path, so the second or so PowerShell costs to start is paid on
+ * the rare run that is about to replace an executable anyway, and never on an ordinary one.
+ */
+export async function stopRunningCopies(
+  env: NodeJS.ProcessEnv = process.env,
+  pid: number = process.pid,
+): Promise<StopResult> {
+  const target = installTarget(env);
+  if (!IS_WINDOWS || target === null) return { stopped: 0, ok: false };
+
+  try {
+    const child = Bun.spawn(
+      ["powershell", "-NoProfile", "-NonInteractive", "-Command", stopScript(target, pid)],
+      { stdout: "pipe", stderr: "ignore", stdin: "ignore", windowsHide: true },
+    );
+    const output = await new Response(child.stdout).text();
+    const code = await child.exited;
+    const count = Number.parseInt(output.trim().split(/\s+/).pop() ?? "", 10);
+    return { stopped: Number.isNaN(count) ? 0 : count, ok: code === 0 };
+  } catch {
+    return { stopped: 0, ok: false };
+  }
+}
+
+/**
+ * Starts the installed copy and lets go of it, passing this run's arguments along.
+ *
+ * The arguments carry over because the run being replaced is the run the user asked for: a
+ * `--hidden` autostart that came back with a visible console window, or a `--no-open` run that
+ * opened a browser tab, would both read as the update having broken something.
+ *
+ * `unref`, and the caller exits immediately afterwards. The child is a GUI-subsystem executable that
+ * claims a console of its own, so it does not need ours — which is just as well, since ours is about
+ * to close with us.
+ */
+export function startInstalledCopy(
+  args: readonly string[] = [],
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const target = installTarget(env);
+  const directory = installDirectory(env);
+  if (target === null || directory === null) return false;
+  return startExecutable(target, args, directory);
+}
+
+/**
+ * Starts a vrc.zip and lets go of it. The successor half of every handover in this app.
+ *
+ * `unref`, and every caller exits immediately afterwards. The child is a GUI-subsystem executable
+ * that claims a console of its own, so it does not need the one this process is holding — which is
+ * just as well, since that window is about to close along with us.
+ */
+export function startExecutable(path: string, args: readonly string[], directory: string): boolean {
+  if (!IS_WINDOWS) return false;
+  try {
+    Bun.spawn([path, ...args], {
+      cwd: directory,
+      stdout: "ignore",
+      stderr: "ignore",
+      stdin: "ignore",
+    }).unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Rewrites the version the Installed apps entry shows, after something replaced the file it names.
+ *
+ * Does nothing unless there is an installed copy on disk, which is the check that keeps a portable
+ * run from claiming an install it does not have. `updateInstalledCopy` writes the whole entry
+ * itself and does not need this; the self-updater does, because the file it replaced was the
+ * installed one *in place*, so nothing else would notice the number had changed.
+ */
+export function noteInstalledVersion(
+  version: string,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const target = installTarget(env);
+  if (!IS_WINDOWS || target === null || !installExists(env)) return false;
+  const ok = writeString(UNINSTALL_KEY_PATH, "DisplayVersion", version);
+  try {
+    const size = Bun.file(target).size;
+    if (size > 0) writeDword(UNINSTALL_KEY_PATH, "EstimatedSize", Math.round(size / 1024));
+  } catch {
+    // Costs the entry its size column and nothing else.
+  }
+  return ok;
 }

@@ -12,6 +12,7 @@
   import SunIcon from "@lucide/svelte/icons/sun";
   import type { Snippet } from "svelte";
   import KeychainWarning from "$lib/components/KeychainWarning.svelte";
+  import UpdateBanner from "$lib/components/UpdateBanner.svelte";
   import Sparkline from "$lib/components/Sparkline.svelte";
   import UnofficialBadge from "$lib/components/UnofficialBadge.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
@@ -64,6 +65,11 @@
   {#if app.status?.degradedKeychain === true}
     <KeychainWarning />
   {/if}
+  <!--
+    Under the keychain warning on purpose. That one is about credentials in the wrong place and
+    outranks everything; a new version is news, and news goes second.
+  -->
+  <UpdateBanner />
 
   <Tooltip.Provider delayDuration={200}>
     <header

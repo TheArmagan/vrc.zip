@@ -7,6 +7,7 @@ import {
   installTarget,
   isInstalled,
   shortcutPlan,
+  stopScript,
 } from "./install.ts";
 import { APP_USER_MODEL_ID, FOLDERID_Desktop, knownFolder } from "./shortcut.ts";
 import { startupCommand, startupEntryTarget, startupLocation, startupSupport } from "./startup.ts";
@@ -208,6 +209,41 @@ describe("the shortcut plan", () => {
     if (desktop === null) return;
     expect(desktop.length).toBeGreaterThan(0);
     expect(desktop).not.toBe(process.env.USERPROFILE);
+  });
+});
+
+describe("the script that closes a running copy", () => {
+  const target = "C:UsersaAppDataLocalPrograms\vrc.zip\vrc.zip.exe";
+
+  test("matches on the full path, never on the process name alone", () => {
+    /*
+     * The assertion this block exists for. `taskkill /im vrc.zip.exe` would take every vrc.zip on
+     * the machine - a checkout, a copy in Downloads, and the process running this code - when the
+     * only one in the way of the update is the one at the install path.
+     */
+    const script = stopScript(target, 4242);
+    expect(script).toContain(`$target='${target}'`);
+    expect(script).toContain("$_.Path -ieq $target");
+    expect(script).not.toContain("taskkill");
+  });
+
+  test("never matches itself", () => {
+    expect(stopScript(target, 4242)).toContain("$_.Id -ne 4242");
+  });
+
+  test("waits for the kill rather than assuming it", () => {
+    // Windows releases the image lock when the process is gone, not when the kill is asked for.
+    // Without the wait, the copy that follows fails with EBUSY intermittently.
+    const script = stopScript(target, 1);
+    expect(script).toContain("Stop-Process -Force");
+    expect(script).toContain("Wait-Process");
+  });
+
+  test("escapes an apostrophe in the path", () => {
+    // `C:\Users\O'Brien\...` is an ordinary Windows path, and an unescaped quote here would end the
+    // string and hand the rest of the path to PowerShell as code.
+    const script = stopScript("C:UsersO'Brien\vrc.zip.exe", 1);
+    expect(script).toContain("$target='C:UsersO''Brien\vrc.zip.exe'");
   });
 });
 

@@ -26,6 +26,7 @@ import { isTypingTarget, matchKeybinding, runCommand } from "$lib/commands.svelt
 import { currentRoute, onRouteChange, type Route } from "$lib/router.ts";
 import { app } from "$lib/state/app.svelte.ts";
 import { theme } from "$lib/state/theme.svelte.ts";
+import { updates } from "$lib/state/updates.svelte.ts";
 import { screenFor } from "./screens/lazy.ts";
 
 let route = $state<Route>(currentRoute());
@@ -48,6 +49,14 @@ $effect(() =>
  * running eagerly would be enough to re-register every command on the next session change.
  */
 $effect(() => untrack(() => app.start()));
+
+/*
+ * The release check's reader. `untrack` for the same reason `app.start()` has it: `start()` kicks
+ * off a read that writes the status it would otherwise take a dependency on, and the poll would
+ * then restart itself on every answer. The teardown clears the interval, so a hot reload in dev
+ * leaves one poller rather than one per reload.
+ */
+$effect(() => untrack(() => updates.start()));
 
 $effect(() =>
   untrack(() => {

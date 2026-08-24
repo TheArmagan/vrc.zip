@@ -46,6 +46,7 @@ import {
 import { app } from "$lib/state/app.svelte.ts";
 import { prefs } from "$lib/state/prefs.svelte.ts";
 import { theme } from "$lib/state/theme.svelte.ts";
+import { updates } from "$lib/state/updates.svelte.ts";
 
 let contact = $state("");
 let contactTouched = $state(false);
@@ -117,6 +118,9 @@ const installPath = $derived(app.settings?.installPath ?? null);
  */
 const installedVersion = $derived(app.settings?.installedVersion ?? null);
 const updatable = $derived(installedVersion !== null && !installed);
+
+/** The daemon's last answer about releases. The banner reads the same object. */
+const updateStatus = $derived(updates.status);
 
 let installing = $state(false);
 let desktopShortcut = $state(true);
@@ -369,8 +373,8 @@ async function askForNotifications(): Promise<void> {
                   <p class="text-sm text-muted-foreground">
                     Version <span class="font-mono text-xs">{installedVersion}</span> is installed at
                     <span class="font-mono text-xs">{installPath}</span>, and this is a different
-                    copy. Installing again replaces it with the one you are running. vrc.zip does not
-                    update itself, so nothing happens here until you ask for it.
+                    copy. Installing again replaces it with the one you are running, which is also
+                    what happens on its own the next time you start this copy.
                   </p>
                 {:else}
                   <p class="text-sm text-muted-foreground">
@@ -418,6 +422,56 @@ async function askForNotifications(): Promise<void> {
               </p>
             </div>
           {/if}
+
+          <!--
+            The release check, in the Daemon section with the rest of "what this program does about
+            itself" rather than in an About page nobody opens. It says the same three things the
+            banner says, minus the urgency: what is running, what is newest, and when it last asked.
+          -->
+          <div class="space-y-3 px-4 py-3">
+            <div class="space-y-1">
+              <p class="text-sm font-medium">Updates</p>
+              <p class="text-sm text-muted-foreground">
+                vrc.zip asks GitHub for the newest release every six hours. That request carries the
+                app name and version and nothing about you, and it is the only one this program makes
+                that is not to VRChat or a lookup you turned on below.
+              </p>
+              <p class="text-sm text-muted-foreground">
+                Running <span class="font-mono text-xs">{updateStatus?.current ?? "?"}</span>.
+                {#if updateStatus?.available === true}
+                  <span class="font-mono text-xs">{updateStatus.latest}</span> is out.
+                {:else if updateStatus !== null && updateStatus.checkedAt !== null}
+                  This is the newest release.
+                {:else}
+                  It has not checked yet.
+                {/if}
+              </p>
+              {#if updates.failure !== null}
+                <p class="text-sm text-amber-600 dark:text-amber-500">{updates.failure}</p>
+              {/if}
+            </div>
+
+            <div class="flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={updates.busy || updates.restarting}
+                onclick={() => void updates.check()}
+              >
+                {updates.busy ? "Checking…" : "Check now"}
+              </Button>
+              {#if updateStatus?.available === true && updateStatus.canInstall}
+                <Button
+                  size="sm"
+                  disabled={updates.busy || updates.restarting}
+                  onclick={() => void updates.install()}
+                >
+                  <DownloadIcon class="size-4" />
+                  {updates.restarting ? "Restarting…" : `Update to ${updateStatus.latest} and restart`}
+                </Button>
+              {/if}
+            </div>
+          </div>
 
           <SettingSwitchRow
             label="Open the browser at startup"

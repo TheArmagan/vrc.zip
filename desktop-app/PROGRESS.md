@@ -5310,6 +5310,35 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
        about what runs is only half of it; what a run costs is the other half, and this file is the
        only place that can see it.
 
+282. **`Compare` has nine more tests, and every negative one fails closed.** The palette had `is`,
+     `is not`, the three text tests and the four orderings — enough to ask "is this greater than
+     that", and not enough to ask the two questions graphs actually keep asking: "is this one of
+     these" and "does this list have that in it". Both used to need a chain of `Compare` and
+     `Or` nodes, or a regex with alternation typed into `matches`, which is how somebody ends up
+     debugging a pattern instead of writing a graph. Added: `is one of` / `is not one of`,
+     `does not contain`, `ends with`, `does not match (regex)`, `list includes` /
+     `list does not include`, and `is empty` / `is not empty`. `Filter list` reads the same table,
+     so it got all nine for free.
+     - **The negatives are the whole risk, and it is the fail-open bug decision 273 already fixed
+       once.** `"".includes("")` is true, so `does not contain` with an unfilled term would be
+       *false of nothing and true of everything* — a gate that fires on every event and a filter
+       that keeps the whole list. Every negative test therefore requires a term before it will
+       answer anything but `false`, exactly as its positive twin does. `is not one of` wants at
+       least one choice; `list does not include` wants both a list on the left and a term on the
+       right. The one pair exempt is `is empty` / `is not empty`, which take no term at all, so
+       there is no unfilled state for them to be wrong about.
+     - **Two directions of membership, because they are not the same question.** `is one of` reads
+       the *right* as the collection, `list includes` reads the *left* as one. Friend trust rank
+       against a set of ranks is the first; a person's `tags` against one tag is the second. Neither
+       rewrites into the other without a node in between, and offering only one of them means half
+       the graphs get the awkward half.
+     - **Choices are typed with commas** — `visitor, trusted` — since a config box is text, and each
+       is trimmed and empty pieces dropped so a trailing comma is not a secret choice. An object
+       arriving there is *no choices*, not its JSON chopped on commas into `{"a":1` and `"b":2}`.
+     - **`0` and `false` are not empty.** They are answers. Inheriting C's habit of treating them as
+       absence would make `is empty` lie about a counter that reached zero. Blank-but-whitespace text
+       *is* empty, because VRChat returns `""` and `" "` where another API would omit the field.
+
 ---
 
 ## Gotchas

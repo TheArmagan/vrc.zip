@@ -29,6 +29,62 @@ describe("compare", () => {
     expect(evaluateCompare("contains", "Ada Lovelace", "Love")).toBe(true);
     expect(evaluateCompare("starts", "Ada Lovelace", "Ada")).toBe(true);
     expect(evaluateCompare("matches", "wrld_1234", "^wrld_")).toBe(true);
+    expect(evaluateCompare("ends", "Ada Lovelace", "lace")).toBe(true);
+    expect(evaluateCompare("ends", "Ada Lovelace", "Ada")).toBe(false);
+    expect(evaluateCompare("not-contains", "Ada Lovelace", "Grace")).toBe(true);
+    expect(evaluateCompare("not-contains", "Ada Lovelace", "Love")).toBe(false);
+    expect(evaluateCompare("not-matches", "wrld_1234", "^usr_")).toBe(true);
+    expect(evaluateCompare("not-matches", "wrld_1234", "^wrld_")).toBe(false);
+  });
+
+  test("is one of takes a list on the wire or commas in the box", () => {
+    expect(evaluateCompare("in", "trusted", ["visitor", "trusted"])).toBe(true);
+    expect(evaluateCompare("in", "trusted", "visitor, trusted")).toBe(true);
+    // Trimmed, because the space after a comma is punctuation and not part of the word, and an
+    // empty piece is dropped so a trailing comma is not a choice that matches nothing.
+    expect(evaluateCompare("in", "", "a, b,")).toBe(false);
+    expect(evaluateCompare("in", "known", "visitor, trusted")).toBe(false);
+    expect(evaluateCompare("not-in", "known", "visitor, trusted")).toBe(true);
+    // Numbers still compare as numbers, the same as `is` does.
+    expect(evaluateCompare("in", 3, "1, 2, 3")).toBe(true);
+    // An object is no choices at all rather than its JSON chopped on commas.
+    expect(evaluateCompare("in", '{"a":1', { a: 1 })).toBe(false);
+  });
+
+  test("list includes reads the left side as the list", () => {
+    expect(
+      evaluateCompare("includes", ["system_trust_basic", "admin_moderator"], "admin_moderator"),
+    ).toBe(true);
+    expect(evaluateCompare("includes", ["system_trust_basic"], "admin_moderator")).toBe(false);
+    expect(evaluateCompare("not-includes", ["system_trust_basic"], "admin_moderator")).toBe(true);
+    // Not a list is not "a list without it in": both directions answer no, so a mis-wired port
+    // cannot run the branch below `list does not include`.
+    expect(evaluateCompare("includes", "admin_moderator", "admin_moderator")).toBe(false);
+    expect(evaluateCompare("not-includes", "admin_moderator", "admin_moderator")).toBe(false);
+  });
+
+  test("empty is nothing, blank text, an empty list or an empty object", () => {
+    expect(evaluateCompare("empty", "", null)).toBe(true);
+    expect(evaluateCompare("empty", "   ", null)).toBe(true);
+    expect(evaluateCompare("empty", null, null)).toBe(true);
+    expect(evaluateCompare("empty", [], null)).toBe(true);
+    expect(evaluateCompare("empty", {}, null)).toBe(true);
+    // Answers, not absences. Treating these as empty is the C habit nobody wants in a graph.
+    expect(evaluateCompare("empty", 0, null)).toBe(false);
+    expect(evaluateCompare("empty", false, null)).toBe(false);
+    expect(evaluateCompare("not-empty", "Ada", null)).toBe(true);
+    expect(evaluateCompare("not-empty", "", null)).toBe(false);
+  });
+
+  test("every negative test fails closed on an unfilled term", () => {
+    // The whole hazard of adding negatives: `!"".includes("")` is true, so a half-configured
+    // "does not contain" would fire on every event. Each one wants a term before it says yes.
+    expect(evaluateCompare("not-contains", "Ada Lovelace", "")).toBe(false);
+    expect(evaluateCompare("not-matches", "Ada Lovelace", "")).toBe(false);
+    expect(evaluateCompare("ends", "Ada Lovelace", "")).toBe(false);
+    expect(evaluateCompare("not-in", "Ada", "")).toBe(false);
+    expect(evaluateCompare("not-in", "Ada", [])).toBe(false);
+    expect(evaluateCompare("not-includes", ["a"], "")).toBe(false);
   });
 
   test("a number that arrived as text still compares as a number", () => {

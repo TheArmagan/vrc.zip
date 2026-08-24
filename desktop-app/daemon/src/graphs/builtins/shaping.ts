@@ -20,16 +20,36 @@ import type { BuiltinNode } from "./types.ts";
 /* Compare                                                                                        */
 /* -------------------------------------------------------------------------------------------- */
 
+/**
+ * Every test the palette offers, in the order somebody reads them: equality, membership, text,
+ * ordering, lists, emptiness.
+ *
+ * **Each negative test fails closed the same way its positive twin does.** `does not contain` with
+ * an empty term is not "true of everything" — it is a half-configured node, and answering `true`
+ * there is the fail-open bug the positive tests were already fixed for. So every one of them
+ * requires a term before it will answer anything but `false`. The two emptiness tests are the
+ * exception and are allowed to be negative freely: they take no term, so there is no unfilled state
+ * for them to be wrong about.
+ */
 const COMPARE_OPS = [
   { value: "eq", label: "is" },
   { value: "ne", label: "is not" },
+  { value: "in", label: "is one of" },
+  { value: "not-in", label: "is not one of" },
   { value: "contains", label: "contains" },
+  { value: "not-contains", label: "does not contain" },
   { value: "starts", label: "starts with" },
+  { value: "ends", label: "ends with" },
   { value: "matches", label: "matches (regex)" },
+  { value: "not-matches", label: "does not match (regex)" },
   { value: "gt", label: "is greater than" },
   { value: "gte", label: "is at least" },
   { value: "lt", label: "is less than" },
   { value: "lte", label: "is at most" },
+  { value: "includes", label: "list includes" },
+  { value: "not-includes", label: "list does not include" },
+  { value: "empty", label: "is empty" },
+  { value: "not-empty", label: "is not empty" },
 ] as const;
 
 const COMPARE: NodeDefinition = {
@@ -49,7 +69,8 @@ const COMPARE: NodeDefinition = {
       kind: "text",
       id: "value",
       label: "Compared with",
-      description: "Used when nothing is wired to That.",
+      description:
+        "Used when nothing is wired to That. For is one of, write the choices separated by commas. The two emptiness tests ignore it.",
     },
   ],
   body: [
@@ -93,10 +114,42 @@ export function evaluateCompare(op: string, left: unknown, right: unknown): bool
     // fail closed, the same way an unreadable clock window does.
     case "contains":
       return asText(right) !== "" && asText(left).includes(asText(right));
+    case "not-contains":
+      return asText(right) !== "" && !asText(left).includes(asText(right));
     case "starts":
       return asText(right) !== "" && asText(left).startsWith(asText(right));
+    case "ends":
+      return asText(right) !== "" && asText(left).endsWith(asText(right));
     case "matches":
       return asText(right) !== "" && matches(asText(left), asText(right));
+    case "not-matches":
+      return asText(right) !== "" && !matches(asText(left), asText(right));
+    // Membership, in both directions. `is one of` reads the *right* as the collection, `list
+    // includes` reads the *left* as one — which is the only difference between them, and the reason
+    // both exist: a graph asks "is this trust rank one of these" about a value and "does this
+    // person's tags list have that in it" about a list, and neither phrasing rewrites into the
+    // other without a node in between.
+    case "in":
+    case "not-in": {
+      const candidates = asCandidates(right);
+      // Nothing to be one of is the unfilled state, so both directions answer no. Same rule as an
+      // empty search term: a node nobody has finished configuring must not fire.
+      if (candidates.length === 0) return false;
+      const found = candidates.some((candidate) => sameValue(left, candidate));
+      return op === "in" ? found : !found;
+    }
+    case "includes":
+    case "not-includes": {
+      // Not a list is not "a list without it in": the author wired the wrong thing, and answering
+      // `true` to `list does not include` would run the branch on that mistake.
+      if (!Array.isArray(left) || asText(right) === "") return false;
+      const found = left.some((item) => sameValue(item, right));
+      return op === "includes" ? found : !found;
+    }
+    case "empty":
+      return isEmpty(left);
+    case "not-empty":
+      return !isEmpty(left);
     case "gt":
     case "gte":
     case "lt":
@@ -130,6 +183,43 @@ function sameValue(left: unknown, right: unknown): boolean {
   const rightNumber = asNumber(right);
   if (leftNumber !== null && rightNumber !== null) return leftNumber === rightNumber;
   return String(left) === String(right);
+}
+
+/**
+ * The choices for `is one of`, from either a wire or a config box.
+ *
+ * A list on a wire is already the answer. A config box is text, so the choices are typed the way
+ * people type a short list anywhere else — `blue, orange, trusted` — and each one is trimmed,
+ * because the space after a comma is punctuation rather than part of the word. An empty piece is
+ * dropped, so a trailing comma is not a secret choice that matches nothing.
+ *
+ * An object is **no choices at all** rather than its JSON split on commas: `{"a":1,"b":2}` would
+ * otherwise become the two nonsense strings `{"a":1` and `"b":2}`, and a test that quietly compares
+ * against those is worse than one that answers no.
+ */
+function asCandidates(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  if (value === null || value === undefined || typeof value === "object") return [];
+  return asText(value)
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part !== "");
+}
+
+/**
+ * Empty: nothing at all, blank text, an empty list, an object with no fields.
+ *
+ * Whitespace counts as blank, because a field VRChat returned as `" "` is not a bio somebody wrote.
+ * `0` and `false` are **not** empty — they are answers, and the C habit of treating them as absence
+ * is exactly the confusion a graph author does not want to inherit. VRChat's own habit of returning
+ * `""` instead of leaving a field out is what makes this test worth having at all.
+ */
+function isEmpty(value: unknown): boolean {
+  if (value === null || value === undefined) return true;
+  if (typeof value === "string") return value.trim() === "";
+  if (Array.isArray(value)) return value.length === 0;
+  if (typeof value === "object") return Object.keys(value).length === 0;
+  return false;
 }
 
 /**
@@ -487,7 +577,13 @@ const LIST_FILTER: NodeDefinition = {
       description: "Left blank, the item itself is tested.",
     },
     { kind: "select", id: "op", label: "Test", options: [...COMPARE_OPS], default: "eq" },
-    { kind: "text", id: "value", label: "Compared with" },
+    {
+      kind: "text",
+      id: "value",
+      label: "Compared with",
+      description:
+        "For is one of, write the choices separated by commas. The two emptiness tests ignore it.",
+    },
   ],
   body: [
     { kind: "literal", text: "where " },

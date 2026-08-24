@@ -5248,6 +5248,37 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
        a `SvelteMap` so the lookup tracks structural change, and each entry is `$state` so reading
        `entry.location` tracks the mutation.
 
+280. **A newer executable updates the installed copy outright, and decision 239's prompt is gone.**
+     The situation is unchanged — an older vrc.zip is installed, a newer one was downloaded,
+     extracted and run — but the question that used to follow it is not asked any more. Running the
+     new build *is* the answer: somebody who has already double-clicked this version does not need to
+     confirm that they meant it, and a Y/n whose sensible reply is always the same one is a keypress
+     charged for nothing.
+
+     What changed, all in `daemon/src/index.ts`:
+
+     - `shouldOfferUpdate` is `shouldUpdateInstalledCopy`, and it no longer takes `argv` or a
+       declined version. Its remaining conditions are the ones that were always about *whether there
+       is anything to do*: packaged, on Windows, not itself the installed copy, an installed
+       executable really on disk, and strictly newer than it.
+     - **`--hidden` is no longer a reason to skip it.** That flag means nobody is watching the
+       console, which mattered when this stopped for an answer and does not now. An autostarted run
+       from a newer build updating the copy on disk silently is the wanted behaviour, not a hazard.
+     - `offerUpdate` is `updateInstalledCopyNow`, which prints what it is doing and does it. It still
+       prints, because doing this quietly is the point and doing it invisibly is not — those lines
+       are the only record the user gets that a file on disk changed.
+     - **`settings.updateDeclinedVersion` is deleted**, not left behind. With nothing to decline it
+       is dead state, and `loadSettings` ignores unknown keys, so a settings file written by an
+       earlier build simply drops it on the next save.
+
+     Decision 239's "the console asks whether to replace it" and its declined-version bullet are
+     superseded by this. Everything else in 239 stands, and the two load-bearing parts are untouched:
+     `updateInstalledCopy` is still separate from `installLocally` so an update cannot re-enable
+     autostart or restore a deleted shortcut, and it is still strictly-newer-only so running an old
+     build on purpose never overwrites a good install. The *install* offer is still an offer — that
+     one moves a file into a folder the user did not choose, which is a real decision, unlike
+     refreshing a copy they already agreed to have.
+
 ---
 
 ## Gotchas

@@ -154,31 +154,28 @@ export function shouldOfferInstall(
 }
 
 /**
- * Whether to offer to update the installed copy with the one that is running.
+ * Whether to replace the installed copy with the one that is running.
  *
  * The question this answers is narrow: somebody downloaded a newer vrc.zip, extracted it, and ran
- * it, while an older one sits installed. Nothing about that is automatic — vrc.zip does not update
- * itself, does not phone home, and does not check for releases — so the only moment it can know a
- * newer build exists is the moment one is executing.
+ * it, while an older one sits installed. Nothing about that involves the network — vrc.zip does not
+ * phone home and does not check for releases — so the only moment it can know a newer build exists
+ * is the moment one is executing. When that moment arrives the copy on disk is simply brought up to
+ * date, with no question asked: the user already chose this version by running it, and asking them
+ * to confirm the same choice a second time is a keypress that only ever has one sensible answer.
  *
  * `isInstalled()` excluding: if this *is* the installed copy, there is nothing to copy over itself.
- * `--hidden` excluding for the same reason the install offer does: that is the autostart flag, and
- * a machine signing in must not stop for a keypress nobody is there to give.
  *
- * `declined` is the version whose offer was already refused, so saying no to 0.2.0 is remembered
- * for 0.2.0 and forgotten the moment 0.3.0 turns up.
+ * `--hidden` is deliberately *not* excluded, unlike the install offer. That flag means nobody is
+ * watching the console, which mattered when this stopped for an answer and does not now — a silent
+ * update on an autostarted run is exactly the behaviour wanted.
  */
-export function shouldOfferUpdate(
-  argv: readonly string[],
-  declined: string,
+export function shouldUpdateInstalledCopy(
   running: string = APP_VERSION,
   packaged: boolean = isPackaged(),
   platform: NodeJS.Platform = process.platform,
 ): boolean {
   if (platform !== "win32" || !packaged) return false;
-  if (argv.includes("--hidden")) return false;
   if (isInstalled()) return false;
-  if (declined === running) return false;
 
   if (!installExists()) return false;
   const installed = installedVersion();
@@ -204,39 +201,31 @@ async function rememberOffered(daemon: Awaited<ReturnType<typeof startDaemon>>):
 }
 
 /**
- * Offers to replace the installed copy with the running one.
+ * Replaces the installed copy with the running one, without asking.
  *
  * Only the executable and the Installed apps version change. "Start with Windows" and the shortcuts
  * are left exactly as the user left them, which is `updateInstalledCopy`'s whole reason for existing
  * separately from `installLocally`: an update that silently re-enabled autostart, or put back a
  * desktop shortcut somebody deleted, would be undoing their decisions on the way past.
  *
- * A null answer means there was no console to ask in, and nothing is recorded — the offer has not
- * been made, so it is still owed.
+ * It still says what it did. Doing this quietly is the point; doing it invisibly is not, and the
+ * lines below are the only record the user gets that the file on disk changed.
+ *
+ * A failure is reported and otherwise ignored. The commonest one is `EBUSY` — the installed copy is
+ * running too — and there is nothing to do about that from here except run the version in hand,
+ * which is what this process goes on to do.
  */
-async function offerUpdate(daemon: Awaited<ReturnType<typeof startDaemon>>): Promise<void> {
+async function updateInstalledCopyNow(): Promise<void> {
   const installed = installedVersion();
   console.log("");
   console.log(
     attention(
-      `This is vrc.zip ${APP_VERSION}. The installed copy is ${installed ?? "an older version"}.`,
+      `This is vrc.zip ${APP_VERSION}. The installed copy is ${installed ?? "an older version"}, so it is being updated.`,
     ),
   );
-  console.log(note(`Installed at ${String(installTarget())}`));
-
-  const update = await askConsoleYesNo("Update the installed copy to this version?");
-  if (update === null) return;
-
-  if (!update) {
-    daemon.settings.updateDeclinedVersion = APP_VERSION;
-    await saveSettings(daemon.settings);
-    console.log(note("Left it alone. You will be asked again when a newer version turns up."));
-    return;
-  }
 
   const result = await updateInstalledCopy();
   if (!result.ok) {
-    // Not recorded as declined: they said yes and it failed, so the offer is still owed.
     console.log(attention(result.reason ?? "Could not update the installed copy."));
     return;
   }
@@ -409,17 +398,20 @@ async function main(): Promise<void> {
    * over one console handle, and two of them running at once would race for the same keypresses.
    * The prompt attaches its own listener and takes it down before this returns.
    *
-   * Two offers, and at most one of them is made. Updating comes first because it is the more
+   * Two things, and at most one of them happens. The update comes first because it is the more
    * specific situation: an older copy is already installed and the executable in the user's hand is
    * newer than it, which is a different problem from having no installation at all. `shouldOfferInstall`
    * stands down whenever an installation exists, so these cannot both fire.
    *
-   * Everything about when *not* to ask is in the two predicates. The short version: only a packaged
-   * build, only when this executable is not itself the installed one, only where there is something
-   * worth doing about it, and never on a run that nobody is watching.
+   * Only the install *asks*. Updating an existing installation to the version already running is
+   * done outright, so it does not need a console and is not held back on a `--hidden` run.
+   *
+   * Everything about when not to act is in the two predicates. The short version: only a packaged
+   * build, only when this executable is not itself the installed one, and only where there is
+   * something worth doing about it.
    */
-  if (shouldOfferUpdate(argv, daemon.settings.updateDeclinedVersion)) {
-    await offerUpdate(daemon);
+  if (shouldUpdateInstalledCopy()) {
+    await updateInstalledCopyNow();
   } else if (shouldOfferInstall(argv, daemon.settings.installOffered)) {
     await offerInstall(daemon);
   }

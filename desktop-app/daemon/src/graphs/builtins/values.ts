@@ -18,20 +18,41 @@
  *
  * ## They are **sources**
  *
- * None of these has an input, so none is reachable from a trigger. The engine has a rule for that
- * (`#withSources`): a node type with no inputs runs when something that *is* reachable consumes it.
- * That is what makes a literal usable without wiring a "run me" port into it.
+ * None of these waits on anything, so none is reachable from a trigger. The engine has a rule for
+ * that (`#withSources`): a node with nothing wired into it runs when something that *is* reachable
+ * consumes it. That is what makes a literal usable without wiring a "run me" port into it.
+ *
+ * ## The five id literals also take an id
+ *
+ * A `user` port cannot be fed a `string`, which is the lattice working — but it leaves a graph
+ * holding an id it computed (off an event payload, out of `Read field`, from a webhook body) with no
+ * way to say "this is a person" and hand it to `Look up a user`. So each of the five id literals has
+ * one **optional** `Id` input: wired, it names the subject at run time; unwired, the typed-in config
+ * value is used exactly as before. That is the whole converter, and it costs no request — the
+ * resolver downstream is what talks to VRChat.
+ *
+ * An id node with its input wired is no longer a source, and does not need to be: it is reachable
+ * through the edge that feeds it.
  */
 
 import type { NodeConfigValues, NodeDefinition, PortType } from "@vrcz/plugin-api/nodes";
 import type { BuiltinNode } from "./types.ts";
 
 /**
+ * The port types that name a thing by its id, and so get the optional `Id` input.
+ *
+ * Not `string`, `number`, `boolean` or `json`: an input that overrides a text literal with text
+ * would be a passthrough with extra steps, and there is already a node for moving a value along.
+ */
+const ID_TYPES: readonly PortType[] = ["user", "world", "instance", "avatar", "group"];
+
+/**
  * A literal of one port type.
  *
  * The id types (`user`, `world`, …) exist because a resolver takes an id and a `string` cannot flow
  * into a `user` port — which is the lattice working, not getting in the way. Typing an id into a
- * `User` node is the honest way to say "this specific person".
+ * `User` node is the honest way to say "this specific person"; wiring one into its `Id` input is the
+ * honest way to say "whoever this run is about".
  */
 function literal(
   type: PortType,
@@ -42,13 +63,23 @@ function literal(
 ): BuiltinNode {
   const numeric = type === "number";
   const boolean = type === "boolean";
+  const identifier = ID_TYPES.includes(type);
   const definition: NodeDefinition = {
     id,
     kind: "action",
     title,
     description,
     category: "Values",
-    inputs: [],
+    inputs: identifier
+      ? [
+          {
+            id: "id",
+            label: "Id",
+            type: "string",
+            description: "Leave unwired to use the id typed in below.",
+          },
+        ]
+      : [],
     outputs: [{ id: "value", label: "Value", type }],
     config: [
       numeric
@@ -62,7 +93,13 @@ function literal(
 
   return {
     definition,
-    execute: (_inputs, config) => ({ value: readValue(config, numeric, boolean) }),
+    execute: (inputs, config) => {
+      // The wire wins, and an empty wire is not one: a `Read field` that found nothing must not
+      // blank an id the author typed in and can see on the canvas.
+      const wired = identifier && typeof inputs.id === "string" ? inputs.id.trim() : "";
+      if (wired !== "") return { value: wired };
+      return { value: readValue(config, numeric, boolean) };
+    },
   };
 }
 

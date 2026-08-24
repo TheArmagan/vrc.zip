@@ -68,6 +68,22 @@ class FakeProvider implements NodeProvider {
     return this;
   }
 
+  /**
+   * A node that declares an input but does not insist on one — the shape the five id literals took
+   * on when they grew an optional `Id` port. Wired, it is an ordinary node; unwired, it is a source.
+   */
+  optional(type: string, handler: Handler, required = false): this {
+    this.definitions.set(type, {
+      id: type,
+      kind: "action",
+      title: type,
+      inputs: [{ id: "in", label: "In", type: "json", ...(required ? { required } : {}) }],
+      outputs: [{ id: "out", label: "out", type: "json" }],
+    });
+    this.handlers.set(type, handler);
+    return this;
+  }
+
   node(type: string, kind: "action" | "condition", handler: Handler, outputs = ["out"]): this {
     this.definitions.set(type, {
       id: type,
@@ -846,6 +862,46 @@ describe("source nodes", () => {
 
     expect(h.provider.order).toEqual(["value", "use"]);
     expect(h.provider.executed[1]?.inputs.in).toBe("from the literal");
+  });
+
+  test("an unwired optional input is still nothing to wait for", async () => {
+    // The five id literals declare an `Id` port and almost never have one wired. Counting declared
+    // ports rather than incoming edges would have left every graph saved before that port existed
+    // dead from the literal down.
+    const h = harness();
+    h.provider
+      .trigger("t")
+      .optional("value", () => ({ out: "from the literal" }))
+      .node("use", "action", (inputs) => ({ out: inputs.in }));
+    const id = h.graph({
+      nodes: [node("n1", "t"), node("n2", "value"), node("n3", "use")],
+      edges: [edge("e1", "n1", "n3", "out", "trigger"), edge("e2", "n2", "n3", "out", "in")],
+    });
+
+    await h.engine.fire(id, "n1", { out: null });
+
+    expect(h.provider.order).toEqual(["value", "use"]);
+    expect(h.provider.executed[1]?.inputs.in).toBe("from the literal");
+  });
+
+  test("a required input left unwired is not a source", async () => {
+    // Nothing supplied it, so running it would be running against a value that does not exist. The
+    // graph check refuses to save this; the engine declining to invent one is the same answer. Its
+    // consumer waits on it and so never becomes ready either, which is what an unreachable feeder
+    // has always done here.
+    const h = harness();
+    h.provider
+      .trigger("t")
+      .optional("needs", () => ({ out: 1 }), true)
+      .node("use", "action", (inputs) => ({ out: inputs.in }));
+    const id = h.graph({
+      nodes: [node("n1", "t"), node("n2", "needs"), node("n3", "use")],
+      edges: [edge("e1", "n1", "n3", "out", "trigger"), edge("e2", "n2", "n3", "out", "in")],
+    });
+
+    await h.engine.fire(id, "n1", { out: null });
+
+    expect(h.provider.order).toEqual([]);
   });
 
   test("a source nothing reachable consumes does not run", async () => {

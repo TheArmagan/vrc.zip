@@ -200,6 +200,36 @@ function actingAccount(config: NodeConfigValues, context: ExecuteContext, doing:
   return context.accountId;
 }
 
+/**
+ * Where this account is, or `""` when it is nowhere.
+ *
+ * The log first and VRChat's own `presence` second: the client on this machine knows where it is,
+ * and VRChat knows what it was last told. They disagree constantly. `offline` is not a place, so it
+ * comes back as nothing rather than flowing into an invite as a location.
+ */
+function whereAmI(me: Record<string, unknown>, game: GraphGameState): string {
+  const presence = me.presence;
+  const fallback =
+    typeof presence === "object" && presence !== null
+      ? text((presence as Record<string, unknown>).world)
+      : "";
+  const location = game.location === "" ? fallback : game.location;
+  return location === "offline" ? "" : location;
+}
+
+/**
+ * The world half of a location.
+ *
+ * `""` for `private` and for anything else that is not a world id — VRChat writes `private` where a
+ * world would go when it will not say, and a graph must not receive that in a `world` port and then
+ * spend a request looking it up.
+ */
+function worldOfLocation(location: string): string {
+  const colon = location.indexOf(":");
+  const world = colon === -1 ? location : location.slice(0, colon);
+  return world.startsWith("wrld_") ? world : "";
+}
+
 /** "This is what I would have done." The same rehearsal note every other action emits. */
 function rehearse(deps: MeDeps, context: ExecuteContext, what: string): void {
   deps.bus.emit({
@@ -344,6 +374,85 @@ const MY_NOTIFICATIONS: NodeDefinition = {
     },
   ],
   body: [{ kind: "literal", text: "my notifications" }],
+};
+
+/**
+ * The five one-port reads: where I am, what I am wearing, where I live, whose badge I wear.
+ *
+ * `Me` already carries every one of these, and that is the point. A graph that only wants the world
+ * it is standing in should not have to place a fourteen-port node and know which of them to pull —
+ * it should place `My current world` and wire the one wire. They read the same cached record `Me`
+ * does, so putting one of these beside a `Me` is not a second request.
+ *
+ * **They hand back an id, not an object.** Turning one into a name is `Look up a world`'s job, and
+ * that is the node that spends the request. Keeping the split means a graph that just wants to
+ * compare where it is against where it was costs nothing at all.
+ *
+ * The one exception is `My current group`, which VRChat does not put in the current-user record: the
+ * representation lives on the membership list, so that node costs the same request `My groups` does
+ * and says so.
+ */
+const MY_WORLD: NodeDefinition = {
+  id: "my-world",
+  kind: "action",
+  title: "My current world",
+  description: "The world this account is standing in, as an id. Costs no request.",
+  category: ME_CATEGORY,
+  inputs: [],
+  outputs: [{ id: "world", label: "World", type: "world" }],
+  config: [ACT_AS],
+  body: [{ kind: "literal", text: "my current world" }],
+};
+
+const MY_INSTANCE: NodeDefinition = {
+  id: "my-instance",
+  kind: "action",
+  title: "My current instance",
+  description: "The instance this account is in, as VRChat writes it. Costs no request.",
+  category: ME_CATEGORY,
+  inputs: [],
+  outputs: [{ id: "instance", label: "Instance", type: "instance" }],
+  config: [ACT_AS],
+  body: [{ kind: "literal", text: "my current instance" }],
+};
+
+const MY_AVATAR: NodeDefinition = {
+  id: "my-avatar",
+  kind: "action",
+  title: "My current avatar",
+  description: "The avatar this account is wearing, as an id. Costs no request.",
+  category: ME_CATEGORY,
+  inputs: [],
+  outputs: [{ id: "avatar", label: "Avatar", type: "avatar" }],
+  config: [ACT_AS],
+  body: [{ kind: "literal", text: "my current avatar" }],
+};
+
+const MY_HOME_WORLD: NodeDefinition = {
+  id: "my-home-world",
+  kind: "action",
+  title: "My home world",
+  description: "The world this account spawns into, as an id. Costs no request.",
+  category: ME_CATEGORY,
+  inputs: [],
+  outputs: [{ id: "world", label: "World", type: "world" }],
+  config: [ACT_AS],
+  body: [{ kind: "literal", text: "my home world" }],
+};
+
+const MY_GROUP: NodeDefinition = {
+  id: "my-group",
+  kind: "action",
+  title: "My current group",
+  description: "The group badge on your profile right now. Costs a request.",
+  category: ME_CATEGORY,
+  inputs: [],
+  outputs: [
+    { id: "group", label: "Group", type: "group" },
+    { id: "name", label: "Name", type: "string" },
+  ],
+  config: [ACT_AS],
+  body: [{ kind: "literal", text: "my current group" }],
 };
 
 const MY_GROUPS: NodeDefinition = {
@@ -911,14 +1020,7 @@ export function meNodes(deps: MeDeps): BuiltinNode[] {
         const account = actingAccount(config, context, "read your own profile");
         const me = await self().me(account, config.refresh === true);
         const game = self().gameState(account);
-        // The log first and VRChat's own `presence` second: the client on this machine knows where
-        // it is, and VRChat knows what it was last told. They disagree constantly.
-        const presence = me.presence;
-        const fallback =
-          typeof presence === "object" && presence !== null
-            ? text((presence as Record<string, unknown>).world)
-            : "";
-        const location = game.location === "" ? fallback : game.location;
+        const location = whereAmI(me, game);
         return {
           user: text(me.id),
           name: text(me.displayName),
@@ -931,7 +1033,7 @@ export function meNodes(deps: MeDeps): BuiltinNode[] {
           joined: text(me.date_joined),
           // Absent rather than empty: an empty `instance` flowing into an invite node would produce
           // a request about nowhere, which is the same reason `Look up a user` omits it.
-          ...(location === "" || location === "offline" ? {} : { instance: location }),
+          ...(location === "" ? {} : { instance: location }),
           platform: game.platform === "" ? text(me.last_platform) : game.platform,
           playing: game.running,
           ...(text(me.homeLocation) === "" ? {} : { home: me.homeLocation }),
@@ -1004,6 +1106,58 @@ export function meNodes(deps: MeDeps): BuiltinNode[] {
           ...(notifications[0] === undefined ? {} : { first: notifications[0] }),
           count: notifications.length,
         };
+      },
+    },
+    {
+      definition: MY_WORLD,
+      execute: async (_inputs, config, context): Promise<PortValues> => {
+        const account = actingAccount(config, context, "read where you are");
+        const me = await self().me(account);
+        const world = worldOfLocation(whereAmI(me, self().gameState(account)));
+        // Nothing rather than an empty id, which gates whatever is downstream. Not being in a world
+        // is an ordinary state — the client is closed, or you are somewhere VRChat will not name.
+        return world === "" ? {} : { world };
+      },
+    },
+    {
+      definition: MY_INSTANCE,
+      execute: async (_inputs, config, context): Promise<PortValues> => {
+        const account = actingAccount(config, context, "read where you are");
+        const me = await self().me(account);
+        const instance = whereAmI(me, self().gameState(account));
+        return instance === "" ? {} : { instance };
+      },
+    },
+    {
+      definition: MY_AVATAR,
+      execute: async (_inputs, config, context): Promise<PortValues> => {
+        const account = actingAccount(config, context, "read what you are wearing");
+        const me = await self().me(account);
+        const avatar = text(me.currentAvatar);
+        return avatar === "" ? {} : { avatar };
+      },
+    },
+    {
+      definition: MY_HOME_WORLD,
+      execute: async (_inputs, config, context): Promise<PortValues> => {
+        const account = actingAccount(config, context, "read your home world");
+        const me = await self().me(account);
+        // An account with no home set is a real state, and VRChat writes it as an empty string.
+        const world = text(me.homeLocation);
+        return world === "" ? {} : { world };
+      },
+    },
+    {
+      definition: MY_GROUP,
+      execute: async (_inputs, config, context): Promise<PortValues> => {
+        const account = actingAccount(config, context, "read which group you represent");
+        const groups = await self().groups(account);
+        // VRChat keeps the representation on the membership rather than on the user, so this is the
+        // one node here that costs a request. Representing nothing is the common case.
+        const representing = groups.find((group) => group.isRepresenting === true);
+        if (representing === undefined) return {};
+        const id = text(representing.groupId) || text(representing.id);
+        return id === "" ? {} : { group: id, name: text(representing.name) };
       },
     },
     {

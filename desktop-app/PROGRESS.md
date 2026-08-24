@@ -4946,6 +4946,44 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
        A Steam app id is checked against `^\d+$` for the same reason — it is interpolated into a link
        somebody else's parser reads.
 
+262. **The five id literals take an id, so a computed id can reach a resolver.** `A user`,
+     `A world`, `An instance`, `An avatar` and `A group` each grew one **optional** `Id` input of
+     type `string`. Wired and non-blank it names the subject for that run; unwired, the typed-in
+     config value is used exactly as before. The hole it fills: a `string` cannot flow into a `user`
+     port — the lattice working — so a graph holding an id it computed off an event payload, out of
+     `Read field`, or from a webhook body had no way to hand it to `Look up a user`. This is that
+     converter, and it costs no request; the resolver downstream is what talks to VRChat.
+     - **Optional, not required, and the config field stays.** The alternative was a separate
+       "Text to user" family, which would have left two nodes meaning the same thing in the palette
+       forever. The cost is that adding a port restamps each node's `nodeDefinitionHash`, so a saved
+       graph using one is flagged as changed. Accepted deliberately: behaviour for an unwired node
+       is identical, so the migration is a click rather than a rewire.
+     - **A blank wire is not a wire.** A `Read field` that found nothing must not blank an id the
+       author typed in and can see on the canvas. A *dead* edge is different and still gates the
+       node, which is what every other node here does when its input never arrived.
+     - **The engine's source rule had to move with it**, and the new rule is the more honest one.
+       `#withSources` admitted a node with **no declared inputs**; it now admits one with **nothing
+       wired into it** and no required input. Counting declared ports would have left every graph
+       saved before this port existed dead from the literal down. The question the engine cares
+       about was always "is this waiting on anything", and an unwired optional port is not something
+       to wait for.
+
+263. **Five one-port reads in **Me**: `My current world`, `My current instance`, `My current
+     avatar`, `My home world`, `My current group`.** `Me` already carries all of these, and that is
+     the point — a graph that wants the world it is standing in should not have to place a
+     fourteen-port node and know which output to pull. They read the same cached `CurrentUser` and
+     the same game log, so putting one beside a `Me` is not a second request.
+     - **They hand back an id, not an object.** Resolving one is `Look up a world`'s job and that is
+       the node that spends the request, so a graph comparing where it is against where it was costs
+       nothing at all. Paired with decision 262, the id nodes now close the loop in both directions.
+     - **`My current group` is the exception and costs a request**, because VRChat keeps the
+       representation on the group membership rather than on the user record — there is no
+       `representedGroup` on `CurrentUser`. It reuses the call `My groups` already makes.
+     - **`private` comes back as nothing in a `world` port.** VRChat writes `private` where a world
+       id would go when it will not say, and letting that reach `Look up a world` would spend a
+       request on a string that is not an id. `My current instance` still reports it, because
+       `private` is a truthful answer to "where am I".
+
 ---
 
 ## Gotchas

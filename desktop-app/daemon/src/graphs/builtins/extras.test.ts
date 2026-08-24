@@ -105,11 +105,44 @@ describe("value nodes", () => {
     expect(await h.run("number-value", {}, { value: "nonsense" })).toEqual({ value: 0 });
   });
 
-  test("they are sources: no inputs at all", () => {
+  test("they are sources: nothing to wait for", () => {
     const h = harness();
     const definition = h.nodes.definition("vrcz/text-value");
     expect(definition?.kind).not.toBe("trigger");
     expect(definition !== null && "inputs" in definition ? definition.inputs : []).toEqual([]);
+  });
+
+  test("only the id literals take an id, and taking one is optional", () => {
+    // Optional is what keeps them sources: the engine admits a node with nothing wired into it, so
+    // every graph saved before the port existed still runs its literal.
+    const h = harness();
+    const inputs = (type: string) => {
+      const definition = h.nodes.definition(`vrcz/${type}`);
+      return definition !== null && "inputs" in definition ? definition.inputs : [];
+    };
+    for (const type of ["user", "world", "instance", "avatar", "group"]) {
+      const ports = inputs(`${type}-value`);
+      expect(ports.length, `${type}-value`).toBe(1);
+      expect(ports[0]?.id).toBe("id");
+      expect(ports[0]?.type).toBe("string");
+      expect(ports[0]?.required).toBeUndefined();
+    }
+    for (const type of ["text-value", "number-value", "boolean-value", "json-value"]) {
+      expect(inputs(type), type).toEqual([]);
+    }
+  });
+
+  test("a wired id names the subject, and an empty wire does not blank the typed-in one", async () => {
+    // Which is the whole point: an id computed off an event payload is a `string`, and a `string`
+    // cannot flow into a `user` port. This is the converter, and it costs no request.
+    const h = harness();
+    expect(await h.run("user-value", { id: "usr_wired" }, { value: "usr_typed" })).toEqual({
+      value: "usr_wired",
+    });
+    expect(await h.run("world-value", { id: "  " }, { value: "wrld_typed" })).toEqual({
+      value: "wrld_typed",
+    });
+    expect(await h.run("group-value", {}, { value: "grp_typed" })).toEqual({ value: "grp_typed" });
   });
 
   test("JSON that will not parse produces nothing rather than a broken string", async () => {

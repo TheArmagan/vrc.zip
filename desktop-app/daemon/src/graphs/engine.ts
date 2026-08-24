@@ -407,12 +407,19 @@ export class GraphEngine {
   }
 
   /**
-   * Adds the **source** nodes that feed a scope: node types with no inputs at all.
+   * Adds the **source** nodes that feed a scope: the ones with nothing wired into them.
    *
    * A value literal, "now", a random number, the friend list — none of them has an incoming edge, so
    * none of them is reachable from a trigger, so without this they would never run and everything
-   * downstream of one would skip. Reachability is the right rule for nodes that take input; a node
-   * that takes none has nothing to wait for and belongs to whatever consumes it.
+   * downstream of one would skip. Reachability is the right rule for a node that is waiting on
+   * something; a node waiting on nothing belongs to whatever consumes it.
+   *
+   * **"Nothing wired in", not "no inputs declared".** The five id literals took no inputs until they
+   * grew an optional `Id` port (see `values.ts`), and a rule counting declared ports would have
+   * stopped every saved graph using one dead. The question the engine actually cares about is
+   * whether this node has anything to wait for, and an unwired optional port is not something to
+   * wait for. A **required** input left unwired is a different thing — the graph check refuses to
+   * save that — and it stays out rather than running against a value that was never supplied.
    *
    * **Only when something in the scope actually consumes it.** A source wired into a branch that
    * this run never reaches stays out — which matters because one of these performs a VRChat read,
@@ -427,7 +434,8 @@ export class GraphEngine {
       if (out.has(node.id)) continue;
       const definition = this.#definition(node.type);
       if (definition === null || definition.kind === "trigger") continue;
-      if (definition.inputs.length > 0) continue;
+      if ((scope.incoming.get(node.id) ?? []).length > 0) continue;
+      if (definition.inputs.some((input) => input.required === true)) continue;
       const feeds = (scope.outgoing.get(node.id) ?? []).some((edge) => out.has(edge.to.node));
       if (feeds) out.add(node.id);
     }

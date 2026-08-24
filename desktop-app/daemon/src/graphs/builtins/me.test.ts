@@ -129,6 +129,11 @@ describe("dry run", () => {
     "my-game",
     "my-notifications",
     "my-groups",
+    "my-world",
+    "my-instance",
+    "my-avatar",
+    "my-home-world",
+    "my-group",
     // Not a read, but it settles before it gets as far as rehearsing: with nothing remembered there
     // is no write to describe. Its own test below covers that.
     "restore-status",
@@ -209,6 +214,84 @@ describe("nodes with nothing behind them", () => {
     const { nodes } = build(refusingSelf());
     const restore = nodes.find((node) => node.definition.id === "restore-status");
     expect(await restore?.execute?.({}, {}, context())).toEqual({ status: "", set: false });
+  });
+});
+
+describe("the one-port reads", () => {
+  /** A seam that is somewhere, wearing something, with a home and a group badge. */
+  function present(overrides: Partial<GraphSelf> = {}): GraphSelf {
+    return {
+      ...refusingSelf(),
+      me: async () =>
+        await Promise.resolve({
+          currentAvatar: "avtr_1",
+          homeLocation: "wrld_home",
+          presence: { world: "wrld_stale:1~private" },
+        }),
+      gameState: () => ({
+        running: true,
+        platform: "desktop",
+        location: "wrld_now:12345~region(eu)",
+      }),
+      groups: async () =>
+        await Promise.resolve([
+          { groupId: "grp_1", name: "Quiet", isRepresenting: false },
+          { groupId: "grp_2", name: "Movie Night", isRepresenting: true },
+        ]),
+      ...overrides,
+    };
+  }
+
+  async function run(self: GraphSelf, id: string) {
+    const { nodes } = build(self);
+    return await nodes.find((node) => node.definition.id === id)?.execute?.({}, {}, context());
+  }
+
+  test("the log wins over VRChat's presence, and the world is the half before the colon", async () => {
+    expect(await run(present(), "my-instance")).toEqual({ instance: "wrld_now:12345~region(eu)" });
+    expect(await run(present(), "my-world")).toEqual({ world: "wrld_now" });
+  });
+
+  test("with no client running it falls back to what VRChat was last told", async () => {
+    const self = present({ gameState: () => ({ running: false, platform: "", location: "" }) });
+    expect(await run(self, "my-instance")).toEqual({ instance: "wrld_stale:1~private" });
+    expect(await run(self, "my-world")).toEqual({ world: "wrld_stale" });
+  });
+
+  test("a private world produces nothing rather than the word private", async () => {
+    // It would flow into `Look up a world` and spend a request on an id that is not one.
+    const self = present({
+      gameState: () => ({ running: true, platform: "vr", location: "private" }),
+    });
+    expect(await run(self, "my-instance")).toEqual({ instance: "private" });
+    expect(await run(self, "my-world")).toEqual({});
+  });
+
+  test("nowhere at all gates everything downstream", async () => {
+    const self = present({
+      me: async () => await Promise.resolve({}),
+      gameState: () => ({ running: false, platform: "", location: "offline" }),
+    });
+    expect(await run(self, "my-instance")).toEqual({});
+    expect(await run(self, "my-world")).toEqual({});
+    expect(await run(self, "my-avatar")).toEqual({});
+    expect(await run(self, "my-home-world")).toEqual({});
+  });
+
+  test("the avatar and the home world come off the cached record", async () => {
+    expect(await run(present(), "my-avatar")).toEqual({ avatar: "avtr_1" });
+    expect(await run(present(), "my-home-world")).toEqual({ world: "wrld_home" });
+  });
+
+  test("the represented group is the one membership flagged as such", async () => {
+    expect(await run(present(), "my-group")).toEqual({ group: "grp_2", name: "Movie Night" });
+  });
+
+  test("representing nothing is an answer, not an error", async () => {
+    const self = present({
+      groups: async () => await Promise.resolve([{ groupId: "grp_1", isRepresenting: false }]),
+    });
+    expect(await run(self, "my-group")).toEqual({});
   });
 });
 

@@ -719,8 +719,12 @@ function requireAccount(context: ExecuteContext, doing: string): string {
  * The buttons this run should carry: the configured rows, with any wired labels put over the top.
  *
  * The wired label wins when there is one, and an empty wire is not one — a `Compose text` that
- * produced nothing must not blank a button the author wrote a label for, since a button with no text
- * is a button nobody can press.
+ * produced nothing must not blank a button the author wrote a label for.
+ *
+ * A row that ends up with no text at all is dropped here, which is the one place that rule can live:
+ * the editor has to be able to hold a half-typed row, and `parseButtonRows` has to be able to read
+ * one back, so "a button with no text is a button nobody can press" is enforced where the button is
+ * actually drawn.
  */
 function desktopButtons(
   config: NodeConfigValues,
@@ -732,11 +736,12 @@ function desktopButtons(
       const wired = text(inputs[`button${String(index + 1)}`]).trim();
       return {
         id: row.id,
-        label: wired === "" ? row.label : wired,
+        label: wired === "" ? row.label.trim() : wired,
         ...(isButtonAction(row.action) ? { action: row.action } : {}),
         ...(row.argument === "" ? {} : { argument: row.argument }),
       };
-    });
+    })
+    .filter((button) => button.label !== "");
 }
 
 const BUTTON_ACTIONS: readonly GraphButtonAction[] = [

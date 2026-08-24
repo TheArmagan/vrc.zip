@@ -4717,6 +4717,19 @@ Empirical notes. Add to this as you hit things — especially where the plan tur
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
 
+- **A newly added button row vanished the moment it appeared.** `parseButtonRows` dropped rows with
+  a blank label, on the reasoning that a button with no text is a button nobody can press — which is
+  true, and which is a rule about *drawing* a button rather than about reading a value. The editor
+  adds a row before there is anything to call it, so the row was parsed away on the same tick, and
+  clearing the box to retype a label would have done the same. The rule moved to the handler, which
+  drops a blank-labelled button when it builds the notification. Only visible by clicking Add a
+  button in a running app; every test passed throughout.
+
+- **Vite pre-bundles `@vrcz/plugin-api` and does not watch it.** The fix above appeared not to work
+  for twenty minutes because the dev server was still serving the copy of `nodes.ts` it optimised
+  into `node_modules/.vite/deps` at startup. A workspace package edited during a session needs
+  `vite --force` (or a restart) — HMR covers `ui/src`, not a dependency's source.
+
 - **A Windows toast can return `S_OK` at every step and never be shown.** The AppUserModelID story
   has two halves and only one of them is the shortcut. `SetCurrentProcessExplicitAppUserModelID`
   tells Windows which app the *process* is, and without it `CreateToastNotifierWithId` succeeds,

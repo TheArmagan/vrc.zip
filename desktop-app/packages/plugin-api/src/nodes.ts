@@ -358,8 +358,13 @@ export interface ButtonRow {
  * here from a JSON document that was exported, hand-edited and imported again, so "somebody wrote
  * something else in it" is an ordinary input and not an exception.
  *
- * Rows with a blank label are dropped, because a button with no text is a button nobody can press.
- * A row with no id gets its index, so a list that was authored before ids existed still routes.
+ * A row with a **blank label is kept**, and that is not an oversight. A button with no text is a
+ * button nobody can press, so the handler drops it when it builds the notification — but the editor
+ * adds a row before there is anything to call it, and a row that vanished the moment it appeared
+ * (or the moment somebody cleared the box to retype it) would be unusable. The rule belongs where
+ * the button is *drawn*, not where the value is read.
+ *
+ * A row with no id gets its index, so a list authored before ids existed still routes.
  */
 export function parseButtonRows(value: unknown): ButtonRow[] {
   if (typeof value !== "string" || value.trim() === "") return [];
@@ -376,8 +381,7 @@ export function parseButtonRows(value: unknown): ButtonRow[] {
   parsed.forEach((entry, index) => {
     if (typeof entry !== "object" || entry === null) return;
     const row = entry as Record<string, unknown>;
-    const label = typeof row.label === "string" ? row.label.trim() : "";
-    if (label === "") return;
+    const label = typeof row.label === "string" ? row.label : "";
     const wanted =
       typeof row.id === "string" && row.id.trim() !== "" ? row.id.trim() : `b${String(index)}`;
     // Two rows reporting the same id would make a graph unable to tell which was pressed, which is

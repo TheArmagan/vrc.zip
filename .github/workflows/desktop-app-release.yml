@@ -23,16 +23,16 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to publish (default: v<version from package.json>)'
+        description: "Tag to publish (default: v<version from package.json>)"
         required: false
         type: string
       overwrite:
-        description: 'Replace the release and re-point the tag if they already exist'
+        description: "Replace the release and re-point the tag if they already exist"
         required: false
         type: boolean
         default: true
       prerelease:
-        description: 'Mark the release as a pre-release'
+        description: "Mark the release as a pre-release"
         required: false
         type: boolean
         default: false
@@ -178,24 +178,24 @@ jobs:
 
           ### Install
 
-          Download \`$ZIP_NAME\` and extract it. Inside is a single \`vrc.zip.exe\` carrying the
-          daemon, the UI and its own Bun runtime — there is no installer and nothing else to copy.
+          Download \`$ZIP_NAME\` and unpack it. What comes out is one file, \`vrc.zip.exe\`, holding
+          the daemon, the UI and its own Bun runtime. There is no installer and nothing else to copy.
 
-          **Extract it somewhere before running it.** Double-clicking the executable from inside the
-          zip runs it out of a temporary folder that Windows deletes, and running it from Downloads
-          is not much better. vrc.zip notices both: it offers to copy itself to
-          \`%LOCALAPPDATA%\Programs\vrc.zip\`, add a Start menu entry and start with Windows,
-          and you can decline and move it yourself.
+          **Unpack it somewhere first.** Launching the executable from inside the zip runs it out of
+          a temporary folder Windows later throws away, and Downloads is barely an improvement.
+          vrc.zip catches both cases and offers to copy itself to
+          \`%LOCALAPPDATA%\Programs\vrc.zip\`, add a Start menu entry and start with Windows. Say no
+          and move it wherever you like.
 
-          It opens a console window and prints a link — open that link, or press <kbd>O</kbd>. There
-          is a tray icon for the rest.
+          A console window opens with a link in it. Click the link or press <kbd>O</kbd>. After that
+          the tray icon takes over.
 
-          Windows will warn about an unrecognised publisher the first time. The executable is not
-          code-signed; verify the checksum below if that matters to you.
+          The first launch gets a warning from Windows about an unrecognised publisher, because the
+          executable is not code-signed. Check the digest below if that matters to you.
 
           ### Verify
 
-          The digest is of the zip, which is what you downloaded.
+          The digest covers the zip, which is the file you downloaded.
 
           \`\`\`
           certutil -hashfile $ZIP_NAME SHA256

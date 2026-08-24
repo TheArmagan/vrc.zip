@@ -8,6 +8,7 @@ import { GraphEngine } from "./engine.ts";
 import {
   BRANCH_TYPE,
   COLLECT_TYPE,
+  DEFAULT_WAIT_MS,
   ERROR_PORT,
   FOREACH_TYPE,
   STOP_WHEN_TYPE,
@@ -1508,5 +1509,401 @@ describe("dry-run", () => {
 
     expect(h.provider.executed[0]?.context.accountId).toBe(ACCOUNT);
     expect(h.provider.executed[1]?.context.accountId).toBe("usr_alt");
+  });
+});
+
+/* -------------------------------------------------------------------------------------------- */
+/* The bugs this file did not catch                                                               */
+/* -------------------------------------------------------------------------------------------- */
+
+describe("sources, transitively", () => {
+  test("a chain of sources two hops from the scope still runs", async () => {
+    // `Text value -> Compose text -> Discord`, with only the last of the three reachable from the
+    // trigger. The old rule looked at one node at a time and asked whether it fed the scope
+    // *directly*: `Compose text` has an incoming edge so it was not a source, `Text value` fed a
+    // node that was not in the scope so it was not added either, and the run finished having
+    // executed nothing at all.
+    const h = harness();
+    h.provider
+      .trigger("t")
+      .source("value", () => ({ out: "hello" }))
+      .node("compose", "action", (inputs) => ({ out: `${String(inputs.in)}!` }))
+      .node("send", "action", (inputs) => ({ out: inputs.in }));
+    const id = h.graph({
+      nodes: [node("n1", "t"), node("n2", "value"), node("n3", "compose"), node("n4", "send")],
+      edges: [
+        edge("e1", "n1", "n4", "out", "trigger"),
+        edge("e2", "n2", "n3"),
+        edge("e3", "n3", "n4", "out", "in"),
+      ],
+    });
+
+    await h.engine.fire(id, "n1", { out: null });
+
+    expect(h.provider.order).toEqual(["value", "compose", "send"]);
+    expect(h.provider.executed[2]?.inputs.in).toBe("hello!");
+  });
+
+  test("a chain rooted at an unfired trigger is still not a source", async () => {
+    // The closure must not become a way in for the other root's branch.
+    const h = harness();
+    h.provider
+      .trigger("t")
+      .node("middle", "action", (inputs) => ({ out: inputs.in }))
+      .node("send", "action", (inputs) => ({ out: inputs.in }));
+    const id = h.graph({
+      nodes: [node("n1", "t"), node("n2", "t"), node("n3", "middle"), node("n4", "send")],
+      edges: [
+        edge("e1", "n1", "n4", "out", "trigger"),
+        edge("e2", "n2", "n3"),
+        edge("e3", "n3", "n4", "out", "in"),
+      ],
+    });
+
+    await h.engine.fire(id, "n1", { out: null });
+
+    expect(h.provider.order).toEqual([]);
+  });
+
+  test("a source feeding only a nested loop belongs to the nested loop", async () => {
+    // The outer body contains the inner one, so promoting the source into the outer scope ran it
+    // once per outer item on top of once per inner item, and `clearScope` threw that first result
+    // away unread. Two outer items of two inner items each is four asks, not six.
+    const h = harness();
+    let calls = 0;
+    h.provider
+      .trigger("t")
+      .source("value", () => {
+        calls += 1;
+        return { out: calls };
+      })
+      .node("use", "action", (inputs) => ({ out: inputs.in }));
+    const id = h.graph({
+      nodes: [
+        node("n1", "t"),
+        node("outer", FOREACH_TYPE),
+        node("inner", FOREACH_TYPE),
+        node("n2", "value"),
+        node("n3", "use"),
+      ],
+      edges: [
+        edge("e1", "n1", "outer", "out", "list"),
+        edge("e2", "outer", "inner", "item", "list"),
+        edge("e3", "inner", "n3", "item", "in"),
+        edge("e4", "n2", "n3", "out", "extra"),
+      ],
+    });
+
+    await h.engine.fire(id, "n1", {
+      out: [
+        [1, 2],
+        [3, 4],
+      ],
+    });
+
+    expect(calls).toBe(4);
+  });
+});
+
+describe("a scope that cannot drain", () => {
+  test("a node blocked by something outside the scope is skipped, not left hanging", async () => {
+    // `#pickNext` will not look at the dead-edge rule until every input has settled, so a node
+    // waiting on the *other* trigger of a two-trigger graph was neither run nor skipped: the run
+    // reported `finished` having stopped halfway, and the feed said the automation had run.
+    const h = harness();
+    h.provider
+      .trigger("t")
+      .node("both", "action", (inputs) => ({ out: inputs.in }))
+      .node("after", "action", (inputs) => ({ out: inputs.in }));
+    const id = h.graph({
+      nodes: [node("n1", "t"), node("n2", "t"), node("n3", "both"), node("n4", "after")],
+      edges: [
+        edge("e1", "n1", "n3", "out", "in"),
+        edge("e2", "n2", "n3", "out", "other"),
+        edge("e3", "n3", "n4"),
+      ],
+    });
+
+    await h.engine.fire(id, "n1", { out: null });
+
+    expect(h.provider.order).toEqual([]);
+    // And it really is over, rather than over-and-pretending: the run row is gone.
+    expect(h.store.listGraphRuns(id)).toEqual([]);
+    expect(kinds(h.events)).toContain("graph.run.finished");
+  });
+});
+
+describe("what a loop leaves behind", () => {
+  test("a node wired to both item and done runs once, after the loop, with the last item", async () => {
+    // `foreachBodies` subtracts such a node out of the body on purpose so it runs once in the outer
+    // scope. Replacing the loop's outputs with `{done, results}` alone made its `item` edge dead,
+    // so the node the subtraction exists to support was silently skipped instead.
+    const h = harness();
+    h.provider.trigger("t").node("sum", "action", (inputs) => ({ out: inputs }));
+    const id = h.graph({
+      nodes: [node("n1", "t"), node("loop", FOREACH_TYPE), node("n2", "sum")],
+      edges: [
+        edge("e1", "n1", "loop", "out", "list"),
+        edge("e2", "loop", "n2", "item", "in"),
+        edge("e3", "loop", "n2", "done", "count"),
+      ],
+    });
+
+    await h.engine.fire(id, "n1", { out: ["a", "b", "c"] });
+
+    expect(h.provider.order).toEqual(["sum"]);
+    expect(h.provider.executed[0]?.inputs).toEqual({ in: "c", count: 3 });
+  });
+
+  test("an empty list produces no last item at all", async () => {
+    // There is no last item, and inventing one would be worse than a dead edge.
+    const h = harness();
+    h.provider.trigger("t").node("sum", "action", (inputs) => ({ out: inputs }));
+    const id = h.graph({
+      nodes: [node("n1", "t"), node("loop", FOREACH_TYPE), node("n2", "sum")],
+      edges: [
+        edge("e1", "n1", "loop", "out", "list"),
+        edge("e2", "loop", "n2", "item", "in"),
+        edge("e3", "loop", "n2", "done", "count"),
+      ],
+    });
+
+    await h.engine.fire(id, "n1", { out: [] });
+
+    expect(h.provider.order).toEqual([]);
+  });
+});
+
+describe("ceilings that punished the wrong graph", () => {
+  test("fires dropped for being busy do not count towards the runs-per-hour ceiling", async () => {
+    // A `drop`-mode graph refusing two hundred fires while it executes one run is a graph obeying
+    // the ceiling, and it used to be switched off for it.
+    const h = harness({ maxRunsPerHour: 3 });
+    let release = (): void => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    h.provider.trigger("t").node("slow", "action", async () => {
+      await held;
+      return { out: 1 };
+    });
+    const id = h.graph(
+      {
+        nodes: [node("n1", "t"), node("n2", "slow")],
+        edges: [edge("e1", "n1", "n2")],
+      },
+      { concurrency: "drop" },
+    );
+
+    const first = h.engine.fire(id, "n1", { out: null });
+    for (let i = 0; i < 6; i += 1) await h.engine.fire(id, "n1", { out: null });
+    release();
+    await first;
+
+    expect(h.store.getGraph(id)?.enabled).toBe(1);
+    expect(kinds(h.events)).not.toContain("graph.disabled");
+  });
+
+  test("the hour window dies with the auto-disable, so re-enabling actually works", async () => {
+    // Otherwise the user clears the loop, presses Enable, and the same two hundred timestamps
+    // switch the graph off again before it has run once.
+    const h = harness({ maxRunsPerHour: 2 });
+    h.provider.trigger("t").node("after", "action", () => ({ out: 1 }));
+    const id = h.graph({
+      nodes: [node("n1", "t"), node("n2", "after")],
+      edges: [edge("e1", "n1", "n2")],
+    });
+
+    for (let i = 0; i < 3; i += 1) await h.engine.fire(id, "n1", { out: null });
+    expect(h.store.getGraph(id)?.enabled).toBe(0);
+
+    h.store.setGraphEnabled(id, true, null, h.now);
+    await h.engine.reload(id);
+    await h.engine.fire(id, "n1", { out: null });
+
+    expect(h.store.getGraph(id)?.enabled).toBe(1);
+  });
+
+  test("a trigger declaring no fires of its own is held to that, not to the default", async () => {
+    const h = harness();
+    h.provider.trigger("t", 0).node("after", "action", () => ({ out: 1 }));
+    const id = h.graph({
+      nodes: [node("n1", "t"), node("n2", "after")],
+      edges: [edge("e1", "n1", "n2")],
+    });
+
+    await h.engine.fire(id, "n1", { out: null });
+
+    expect(h.provider.order).toEqual([]);
+    expect(payloadOf(h.events, "graph.run.dropped").reason).toBe("fire_rate");
+  });
+
+  test("saving a graph does not clear the fire-rate window it is being held by", async () => {
+    // Every save, enable and disable comes through `reload`, and disarming used to forget the
+    // window — so pressing Save released a trigger from a ceiling it was standing at.
+    const h = harness();
+    h.provider.trigger("t", 1).node("after", "action", () => ({ out: 1 }));
+    const id = h.graph({
+      nodes: [node("n1", "t"), node("n2", "after")],
+      edges: [edge("e1", "n1", "n2")],
+    });
+    await h.engine.start();
+
+    await h.engine.fire(id, "n1", { out: null });
+    await h.engine.reload(id);
+    await h.engine.fire(id, "n1", { out: null });
+
+    expect(h.provider.order).toEqual(["after"]);
+    expect(payloadOf(h.events, "graph.run.dropped").reason).toBe("fire_rate");
+  });
+});
+
+describe("what a restart finds", () => {
+  test("a run left running by a crash is given up rather than occupying a slot for good", async () => {
+    // `countLiveGraphRuns` counts `running`, and nothing cleared those rows: one kill at the wrong
+    // moment left a `drop`-mode graph refusing every future fire with "a run is already in flight",
+    // for the life of the database.
+    const h = harness();
+    h.provider.trigger("t").node("after", "action", () => ({ out: 1 }));
+    const id = h.graph(
+      {
+        nodes: [node("n1", "t"), node("n2", "after")],
+        edges: [edge("e1", "n1", "n2")],
+      },
+      { concurrency: "drop" },
+    );
+    h.store.insertGraphRun({
+      id: "orphan",
+      graph_id: id,
+      trigger_node: "n1",
+      status: "running",
+      dry_run: 0,
+      state: JSON.stringify({ outputs: {}, skipped: [], executed: [] }),
+      started_at: h.now,
+      updated_at: h.now,
+    });
+    expect(h.store.countLiveGraphRuns(id)).toBe(1);
+
+    const second = h.restart();
+    await second.start();
+
+    expect(h.store.countLiveGraphRuns(id)).toBe(0);
+    await second.fire(id, "n1", { out: null });
+    expect(h.provider.order).toEqual(["after"]);
+  });
+
+  test("a queued fire left by a crash is started rather than stranded", async () => {
+    const h = harness();
+    h.provider.trigger("t").node("after", "action", () => ({ out: 1 }));
+    const id = h.graph(
+      {
+        nodes: [node("n1", "t"), node("n2", "after")],
+        edges: [edge("e1", "n1", "n2")],
+      },
+      { concurrency: "queue" },
+    );
+    h.store.insertGraphRun({
+      id: "waiting-in-line",
+      graph_id: id,
+      trigger_node: "n1",
+      status: "queued",
+      dry_run: 0,
+      state: JSON.stringify({ outputs: { n1: { out: null } }, skipped: [], executed: [] }),
+      started_at: h.now,
+      updated_at: h.now,
+    });
+
+    const second = h.restart();
+    await second.start();
+
+    expect(h.provider.order).toEqual(["after"]);
+    expect(h.store.listGraphRuns(id)).toEqual([]);
+  });
+});
+
+describe("a wait that outlived its graph", () => {
+  test("a graph switched off while a run waits does not resume it", async () => {
+    // The one door `fire` left open: the triggers are disarmed, but a parked row is picked up by
+    // the sweep on its own time and the rest of the run went out on a graph the user had turned off.
+    const h = harness();
+    h.provider.trigger("t").node("after", "action", () => ({ out: 1 }));
+    const id = h.graph({
+      nodes: [node("n1", "t"), node("w", WAIT_TYPE, { durationMs: 1000 }), node("n2", "after")],
+      edges: [edge("e1", "n1", "w", "out", "in"), edge("e2", "w", "n2", "out", "in")],
+    });
+
+    await h.engine.fire(id, "n1", { out: null });
+    expect(h.provider.order).toEqual([]);
+
+    h.store.setGraphEnabled(id, false, "the user switched it off", h.now);
+    h.now += 5000;
+    await h.engine.resumeDue();
+
+    expect(h.provider.order).toEqual([]);
+    expect(h.store.listGraphRuns(id)).toEqual([]);
+    expect(payloadOf(h.events, "graph.run.dropped").reason).toBe("unavailable");
+  });
+
+  test("a wait deleted while the run was parked gives the run up rather than resuming blind", async () => {
+    // Resuming would walk a state keyed by node ids that no longer exist, and would silently ignore
+    // an `onMissed: skip` set on the very node being resumed, because the policy is read off a node
+    // that cannot be found.
+    const h = harness();
+    h.provider.trigger("t").node("after", "action", () => ({ out: 1 }));
+    const id = h.graph({
+      nodes: [
+        node("n1", "t"),
+        node("w", WAIT_TYPE, { durationMs: 1000, onMissed: "skip" }),
+        node("n2", "after"),
+      ],
+      edges: [edge("e1", "n1", "w", "out", "in"), edge("e2", "w", "n2", "out", "in")],
+    });
+
+    await h.engine.fire(id, "n1", { out: null });
+
+    const graph = h.store.getGraph(id);
+    if (graph === null) throw new Error("the graph went missing");
+    h.store.updateGraph(
+      id,
+      {
+        name: graph.name,
+        description: graph.description,
+        concurrency: graph.concurrency,
+        account_id: graph.account_id,
+        definition: JSON.stringify({
+          nodes: [node("n1", "t"), node("n2", "after")],
+          edges: [],
+        }),
+      },
+      h.now,
+    );
+
+    h.now += 5000;
+    await h.engine.resumeDue();
+
+    expect(h.provider.order).toEqual([]);
+    expect(h.store.listGraphRuns(id)).toEqual([]);
+    expect(kinds(h.events)).toContain("graph.run.failed");
+  });
+
+  test("a wait with no duration in the document waits the definition's default", async () => {
+    // The daemon never applies a config default, so an imported document reaches here with no
+    // `durationMs` at all. Reading that as zero parked the run in the past and continued it on the
+    // very next sweep: a Wait that did not wait.
+    const h = harness();
+    h.provider.trigger("t").node("after", "action", () => ({ out: 1 }));
+    const id = h.graph({
+      nodes: [node("n1", "t"), node("w", WAIT_TYPE), node("n2", "after")],
+      edges: [edge("e1", "n1", "w", "out", "in"), edge("e2", "w", "n2", "out", "in")],
+    });
+
+    await h.engine.fire(id, "n1", { out: null });
+    h.now += 1000;
+    await h.engine.resumeDue();
+    expect(h.provider.order).toEqual([]);
+
+    h.now += DEFAULT_WAIT_MS;
+    await h.engine.resumeDue();
+    expect(h.provider.order).toEqual(["after"]);
   });
 });

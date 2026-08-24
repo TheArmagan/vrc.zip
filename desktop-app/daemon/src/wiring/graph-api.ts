@@ -27,13 +27,56 @@ const MAX_RESPONSE_BYTES = 512 * 1024;
  * those would make a whole class of operations unusable for a reason the author cannot act on.
  */
 async function readBody(response: Response): Promise<unknown> {
-  const text = (await response.text().catch(() => "")).slice(0, MAX_RESPONSE_BYTES);
+  const text = await readCapped(response);
   if (text === "") return null;
   try {
     return JSON.parse(text) as unknown;
   } catch {
     return text;
   }
+}
+
+/**
+ * At most `MAX_RESPONSE_BYTES` of the body, and **only** that much off the wire.
+ *
+ * This used to be `(await response.text()).slice(...)`, which caps the node's output and nothing
+ * else: `text()` buffers the whole body first, so the cap was a statement about what the graph saw
+ * rather than about what the daemon held. A redirected host, or an endpoint answering with an error
+ * page, could materialise hundreds of megabytes in a 50-80MB-idle process before a single byte was
+ * thrown away. Reading through the stream and cancelling at the ceiling is the same cap, applied
+ * where it is worth applying.
+ *
+ * A partial read is still a useful answer: a truncated body will not parse as JSON and comes back
+ * as the text it is, which is what the caller does with anything unparseable anyway.
+ */
+async function readCapped(response: Response): Promise<string> {
+  const body = response.body;
+  if (body === null) return "";
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  let bytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done || value === undefined) break;
+      const room = MAX_RESPONSE_BYTES - bytes;
+      if (value.byteLength >= room) {
+        text += decoder.decode(value.subarray(0, room));
+        break;
+      }
+      bytes += value.byteLength;
+      text += decoder.decode(value, { stream: true });
+    }
+    text += decoder.decode();
+  } catch {
+    // A body that stops mid-stream is not worth failing the node over on its own: the status is
+    // what the caller acts on, and whatever arrived before the break is still the best answer there
+    // is. `vrcFetch` has already dealt with anything that went wrong at the request level.
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  return text;
 }
 
 export function createGraphApi(deps: { readonly accounts: AccountManager }): GraphApiCall {

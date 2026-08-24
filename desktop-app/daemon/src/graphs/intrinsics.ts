@@ -67,6 +67,17 @@ export type WaitOnMissed = (typeof WAIT_ON_MISSED)[number];
  */
 export const MISSED_RESUME_GRACE_MS = 60_000;
 
+/**
+ * How long a `Wait` waits when its document does not say.
+ *
+ * Named rather than written twice, because the engine has to apply it too: a config `default` is
+ * only ever applied by the editor when a node is created, so a document that arrived by import or
+ * by hand can perfectly well reach the engine with no `durationMs` at all. Reading that as `0` —
+ * which is what the engine did — parked the run with `resumeAt = now` and continued it on the very
+ * next sweep, so a `Wait` in an imported graph did not wait.
+ */
+export const DEFAULT_WAIT_MS = 60_000;
+
 const WAIT_DEFINITION: NodeDefinition = {
   id: "wait",
   kind: "action",
@@ -81,7 +92,7 @@ const WAIT_DEFINITION: NodeDefinition = {
       id: "durationMs",
       label: "Wait for (ms)",
       min: 0,
-      default: 60_000,
+      default: DEFAULT_WAIT_MS,
       required: true,
     },
     {

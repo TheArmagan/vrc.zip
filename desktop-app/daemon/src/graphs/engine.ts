@@ -13,8 +13,10 @@
  *    process, and it is why the ceilings can be answered with a `COUNT(*)` that a restart cannot
  *    disagree with.
  *
- * What is not here yet: `foreach` (the other half of the iteration answer), and the type check on
- * save. Both are named in the Phase 4 checklist.
+ * `foreach` and the type check on save both landed after this header was written, and it said they
+ * had not for long enough to be worth correcting here rather than quietly: a header that lists what
+ * is missing has to be maintained like anything else, or it becomes the first thing a reader is
+ * wrong about. The Phase 4 checklist is where the outstanding work actually lives.
  */
 
 import { randomUUID } from "node:crypto";
@@ -35,6 +37,7 @@ import type { GraphRow, GraphRunRow } from "../store/types.ts";
 import {
   BRANCH_TYPE,
   COLLECT_TYPE,
+  DEFAULT_WAIT_MS,
   ERROR_PORT,
   FOREACH_TYPE,
   INTRINSIC_DEFINITIONS,
@@ -143,8 +146,16 @@ export class GraphEngine {
   async start(): Promise<void> {
     if (this.#started) return;
     this.#started = true;
+    this.#reclaimOrphanRuns();
     for (const graph of this.#store.listEnabledGraphs()) await this.#arm(graph);
     await this.resumeDue();
+    // Queued fires outlive a crash too, and nothing else would ever pump them: `#pumpQueue` is only
+    // reached from the end of a run, and after a restart there is no run to end.
+    for (const graphId of new Set(
+      this.#store.listGraphRunsByStatus("queued").map((run) => run.graph_id),
+    )) {
+      await this.#pumpQueue(graphId);
+    }
     if (this.#sweepMs > 0) {
       this.#sweep = setInterval(() => {
         void this.resumeDue().catch((error: unknown) => {
@@ -153,6 +164,37 @@ export class GraphEngine {
       }, this.#sweepMs);
       // The sweep must never be the reason a daemon refuses to exit.
       this.#sweep.unref?.();
+    }
+  }
+
+  /**
+   * Gives up the runs a previous process was walking when it died.
+   *
+   * A `running` row means "some process has this run in hand", and after a restart no process has.
+   * Nothing was clearing them: `start` resumes `waiting` rows only, while `countLiveGraphRuns`
+   * counts `running` too — so one kill at the wrong moment left a `drop`-mode graph with a row that
+   * said a run was in flight **forever**, and every fire from then on was refused with "a run is
+   * already in flight". The graph never ran again and the canvas stayed dimmed, with nothing
+   * anywhere saying why.
+   *
+   * Deleted rather than resumed, and that is the conservative half. The state is persisted at node
+   * boundaries, so a run killed *during* a node has no record that the node ran: picking it up
+   * again would re-execute it, and the node most likely to be interrupted is the slow one, which is
+   * the one that sends something. Re-sending an invite is a worse failure than losing a run.
+   */
+  #reclaimOrphanRuns(): void {
+    for (const run of this.#store.listGraphRunsByStatus("running")) {
+      this.#store.deleteGraphRun(run.id);
+      const graph = this.#store.getGraph(run.graph_id);
+      if (graph === null) continue;
+      this.#emit("graph.run.failed", graph, {
+        runId: run.id,
+        triggerNode: run.trigger_node,
+        dryRun: run.dry_run === 1,
+        durationMs: this.#now() - run.started_at,
+        node: null,
+        message: "vrc.zip stopped while this run was in flight, so it was given up.",
+      });
     }
   }
 
@@ -173,12 +215,31 @@ export class GraphEngine {
    * wrong about which subscription is live.
    */
   async reload(graphId: string): Promise<void> {
+    const before: string[] = [];
     for (const key of [...this.#armed.keys()]) {
-      if (key.startsWith(`${graphId}:`)) await this.#disarmKey(key);
+      if (!key.startsWith(`${graphId}:`)) continue;
+      before.push(key);
+      // Kept, not forgotten: see below.
+      await this.#disarmKey(key, false);
     }
     const graph = this.#store.getGraph(graphId);
-    if (graph === null || graph.enabled !== 1 || !this.#started) return;
-    await this.#arm(graph);
+    if (graph !== null && graph.enabled === 1 && this.#started) await this.#arm(graph);
+    /*
+     * The fire-rate window survives a reload, and it has to.
+     *
+     * Disarming used to forget it unconditionally, and every save, enable and disable comes through
+     * here — so a trigger that was being held back by `maxFiresPerMinute` was released from it by
+     * the author pressing Save, and could exceed the ceiling inside the same minute by doing so
+     * repeatedly. A trigger that is armed again under the same key is the *same* trigger, whatever
+     * new instance id it got, so its window carries over. Only a key that did not come back is
+     * forgotten, which is what stops the map growing for the life of the process as graphs are
+     * edited and deleted.
+     */
+    for (const key of before) {
+      if (!this.#armed.has(key)) this.#counters.fires.forget(key);
+    }
+    // The graph is gone, so its runs-per-hour window is nobody's. Same leak, one level up.
+    if (graph === null) this.#counters.runs.forget(graphId);
   }
 
   /**
@@ -218,18 +279,14 @@ export class GraphEngine {
       return;
     }
 
-    const runsThisHour = this.#counters.runs.hit(graphId, now);
-    if (runsThisHour > this.#limits.maxRunsPerHour) {
-      // The one ceiling whose answer is to switch the graph off. A graph running two hundred times
-      // an hour is not going to recover on the next fire, and dropping quietly for the rest of the
-      // evening would be indistinguishable from being broken.
-      const reason = `Ran more than ${String(this.#limits.maxRunsPerHour)} times in an hour.`;
-      this.#store.setGraphEnabled(graphId, false, reason, now);
-      this.#emit("graph.disabled", graph, { reason, node: nodeId });
-      await this.reload(graphId);
-      return;
-    }
-
+    /*
+     * The concurrency questions come **before** the runs-per-hour window, and the order is the
+     * whole point: that window counts *runs*, and a fire dropped for `busy` or `queue_full` never
+     * becomes one. Counting it anyway meant a `drop`-mode graph with a chatty trigger could be
+     * force-disabled for "running more than 200 times in an hour" while it was executing one run
+     * and refusing the other two hundred — the ceiling firing at exactly the graph that was
+     * obeying it.
+     */
     const live = this.#store.countLiveGraphRuns(graphId);
     if (graph.concurrency === "drop" && live > 0) {
       this.#drop(graph, nodeId, "busy", "a run is already in flight");
@@ -239,12 +296,34 @@ export class GraphEngine {
       this.#drop(graph, nodeId, "busy", `already running ${String(live)} times`);
       return;
     }
-    if (graph.concurrency === "queue" && live > 0) {
+    const queueing = graph.concurrency === "queue" && live > 0;
+    if (queueing) {
       const queued = this.#store.countGraphRunsByStatus(graphId, "queued");
       if (queued >= this.#limits.maxQueuedRuns) {
         this.#drop(graph, nodeId, "queue_full", `${String(queued)} fires already waiting`);
         return;
       }
+    }
+
+    // A queued fire is counted here rather than when it is pumped: it is a run that will happen,
+    // and waiting would let a queue absorb the whole hour's worth and release it uncounted.
+    const runsThisHour = this.#counters.runs.hit(graphId, now);
+    if (runsThisHour > this.#limits.maxRunsPerHour) {
+      // The one ceiling whose answer is to switch the graph off. A graph running two hundred times
+      // an hour is not going to recover on the next fire, and dropping quietly for the rest of the
+      // evening would be indistinguishable from being broken.
+      const reason = `Ran more than ${String(this.#limits.maxRunsPerHour)} times in an hour.`;
+      this.#store.setGraphEnabled(graphId, false, reason, now);
+      // Forgotten here, so the hour's evidence dies with the disable. It has done its job; leaving
+      // it behind meant the user could fix the loop, press Enable, and be switched off again by the
+      // same two hundred timestamps before the graph had run once.
+      this.#counters.runs.forget(graphId);
+      this.#emit("graph.disabled", graph, { reason, node: nodeId });
+      await this.reload(graphId);
+      return;
+    }
+
+    if (queueing) {
       this.#insertRun(graph, nodeId, outputs, "queued", now);
       return;
     }
@@ -295,11 +374,18 @@ export class GraphEngine {
     }
   }
 
-  async #disarmKey(key: string): Promise<void> {
+  /**
+   * Takes one trigger instance down.
+   *
+   * `forget` is whether its fire-rate window goes with it. A reload says no — the same trigger is
+   * about to be armed again under the same key and its recent fires still happened — while a stop
+   * or a delete says yes, because nothing will ever ask about that key again.
+   */
+  async #disarmKey(key: string, forget = true): Promise<void> {
     const armed = this.#armed.get(key);
     if (armed === undefined) return;
     this.#armed.delete(key);
-    this.#counters.fires.forget(key);
+    if (forget) this.#counters.fires.forget(key);
     try {
       await this.#provider.disarm(armed.type, armed.instanceId);
     } catch (error) {
@@ -340,9 +426,12 @@ export class GraphEngine {
   async #advance(runId: string): Promise<void> {
     if (this.#walking.has(runId)) return;
     this.#walking.add(runId);
+    // Remembered outside the `try` so the failure path can still pump the queue. See its comment.
+    let graphId: string | null = null;
     try {
       const run = this.#store.getGraphRun(runId);
       if (run === null) return;
+      graphId = run.graph_id;
       const graph = this.#store.getGraph(run.graph_id);
       const document = graph === null ? null : readDocument(graph);
       if (graph === null || document === null) {
@@ -363,6 +452,13 @@ export class GraphEngine {
       // left `running` forever regardless: an orphan row would occupy a concurrency slot for good.
       this.#store.deleteGraphRun(runId);
       this.#onError(`graph run ${runId} died`, error);
+      // And the queue is pumped here as well as on the normal path. In `queue` mode nothing else
+      // ever starts the next fire — a later `fire` sees `live > 0` and only enqueues — so an engine
+      // defect on one run used to strand every fire behind it until the daemon restarted.
+      if (graphId !== null) {
+        this.#walking.delete(runId);
+        await this.#pumpQueue(graphId);
+      }
     } finally {
       this.#walking.delete(runId);
     }
@@ -427,17 +523,62 @@ export class GraphEngine {
    *
    * An unfired **trigger** is never a source, however few inputs it has: a graph with two trigger
    * roots must not run the other one's branch.
+   *
+   * **A chain of them counts, not just the last link.** This used to look at one node at a time and
+   * ask whether it fed the scope *directly*, which quietly excluded every source more than one hop
+   * away: `Text value → Compose text → Discord`, with only `Discord` reachable from the trigger,
+   * left `Compose text` out (it has an incoming edge, so it is not a source) and `Text value` out
+   * (it feeds a node that was itself not in the scope). `Discord`'s input never settled and the run
+   * reported finished having executed nothing. So the answer is a closure rather than a filter: walk
+   * *backwards* from what the scope consumes, then admit a node once everything feeding it is in.
+   *
+   * `consumers` is what has to be fed, which is the scope itself except inside a nested loop —
+   * see `#runForeach`, where an inner body's sources belong to the inner body.
    */
-  #withSources(scope: Scope, allowed: ReadonlySet<string>): Set<string> {
+  #withSources(
+    scope: Scope,
+    allowed: ReadonlySet<string>,
+    consumers: ReadonlySet<string> = allowed,
+  ): Set<string> {
     const out = new Set(allowed);
-    for (const node of scope.document.nodes) {
-      if (out.has(node.id)) continue;
-      const definition = this.#definition(node.type);
-      if (definition === null || definition.kind === "trigger") continue;
-      if ((scope.incoming.get(node.id) ?? []).length > 0) continue;
-      if (definition.inputs.some((input) => input.required === true)) continue;
-      const feeds = (scope.outgoing.get(node.id) ?? []).some((edge) => out.has(edge.to.node));
-      if (feeds) out.add(node.id);
+
+    // Everything upstream of what the scope consumes, gathered backwards. A node not in here feeds
+    // nothing anybody is waiting for, so whether it *could* run is not a question worth asking.
+    const upstream = new Set<string>();
+    const queue = [...consumers];
+    for (;;) {
+      const id = queue.pop();
+      if (id === undefined) break;
+      for (const edge of scope.incoming.get(id) ?? []) {
+        const from = edge.from.node;
+        if (out.has(from) || upstream.has(from)) continue;
+        upstream.add(from);
+        queue.push(from);
+      }
+    }
+
+    // Then forwards to a fixpoint: a node joins once every one of its own inputs is settled by
+    // something already in. A chain rooted at an unfired trigger never satisfies this, which is
+    // what keeps the other trigger's branch out.
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const id of upstream) {
+        if (out.has(id)) continue;
+        const node = scope.nodes.get(id);
+        if (node === undefined) continue;
+        const definition = this.#definition(node.type);
+        if (definition === null || definition.kind === "trigger") continue;
+        const edges = scope.incoming.get(id) ?? [];
+        if (!edges.every((edge) => out.has(edge.from.node))) continue;
+        // A **required** input left unwired is a different thing — the graph check refuses to save
+        // that — and the node stays out rather than running against a value never supplied.
+        const wired = new Set(edges.map((edge) => edge.to.port));
+        if (definition.inputs.some((input) => input.required === true && !wired.has(input.id))) {
+          continue;
+        }
+        out.add(id);
+        grew = true;
+      }
     }
     return out;
   }
@@ -458,7 +599,23 @@ export class GraphEngine {
     const { graph, document, run, nodes, incoming, outgoing } = scope;
     for (;;) {
       const nodeId = this.#pickNext(document, allowed, state, incoming);
-      if (nodeId === null) return { kind: "finished" };
+      if (nodeId === null) {
+        /*
+         * Nothing is ready. That is usually the end of the scope, but not always: a node can be
+         * waiting on a source that is **not in this scope at all** — the other trigger of a
+         * two-trigger graph, most often — and no amount of walking will settle it. `#pickNext`
+         * requires every input to be settled before it will even look at the dead-edge rule, so
+         * such a node was neither run nor skipped and the run reported `finished` having stopped
+         * halfway. Blocking on something that can never arrive **is** a dead edge, so it is settled
+         * the way every other dead edge is: the node skips, and the walk carries on to whatever
+         * that unblocks. When there is nothing left to unblock, the scope really has drained.
+         */
+        const stuck = this.#stuckNodes(document, allowed, state, incoming);
+        if (stuck.length === 0) return { kind: "finished" };
+        state.skipped.push(...stuck);
+        this.#persist(run.id, state);
+        continue;
+      }
       const node = nodes.get(nodeId);
       if (node === undefined) return { kind: "finished" };
 
@@ -610,9 +767,24 @@ export class GraphEngine {
 
     const body = scope.bodies.get(nodeId) ?? new Set<string>();
 
+    /*
+     * A nested loop's body is part of this one's, so its nodes are walked here too — once, by the
+     * inner `#runForeach`. They are deliberately **not** counted as consumers when the sources are
+     * resolved: a source feeding only an inner-body node belongs to the inner body, which asks for
+     * it again on every inner item. Promoting it here as well ran it once per *outer* item on top
+     * of that, and `clearScope` threw the result away unread. For a source that performs a VRChat
+     * read, that is rate budget spent on nothing.
+     */
+    const nested = new Set<string>();
+    for (const [loop, inner] of scope.bodies) {
+      if (loop === nodeId || !body.has(loop)) continue;
+      for (const id of inner) nested.add(id);
+    }
+    const consumers = new Set([...body].filter((id) => !nested.has(id)));
+
     // Sources are resolved per body, not per run: a `now` or a random number inside a loop is asked
     // again for each item, which is what an author drawing it there means.
-    const scoped = this.#withSources(scope, body);
+    const scoped = this.#withSources(scope, body, consumers);
 
     // What this loop is accumulating and whether it has been told to stop. Keyed by the loop's node
     // id so a `Collect` two loops deep reaches its own, and removed in `finally` so a failed run
@@ -647,16 +819,52 @@ export class GraphEngine {
       state.loops = rest;
     }
 
-    // The loop is over, so `item` and `index` stop being produced and `done` starts: every edge out
-    // of the body side is dead from here, and the after-the-loop branch is the only live one.
-    // The body's own outputs are deliberately left in place, so a node downstream of *both* the loop
-    // and the body reads the last iteration rather than nothing.
-    //
-    // `done` counts the items that actually ran, which is the same as the list's length unless a
-    // `Stop when` cut it short — and if it said `list.length` there, the count would be a lie in the
-    // one case somebody is counting.
-    state.outputs[nodeId] = { done: ran, results: iteration.collected };
+    /*
+     * The loop is over, so `done` and `results` start being produced. The body's own outputs are
+     * deliberately left in place, so a node downstream of *both* the loop and the body reads the
+     * last iteration rather than nothing.
+     *
+     * **`item` and `index` are kept for the same reason**, which they were not until now. A node
+     * wired from both `item` and `done` is subtracted out of the body by `foreachBodies` on purpose
+     * — it runs once, after the loop, in the outer scope — and replacing the loop's outputs with
+     * `{done, results}` alone made its `item` edge dead, so the node that the subtraction exists to
+     * support was silently skipped instead. They carry the **last** iteration, which is the only
+     * honest reading of "item" once the loop has stopped, and they are absent when nothing ran:
+     * there is no last item for an empty list, and inventing one would be worse than a dead edge.
+     *
+     * `done` counts the items that actually ran, which is the same as the list's length unless a
+     * `Stop when` cut it short — and if it said `list.length` there, the count would be a lie in the
+     * one case somebody is counting.
+     */
+    state.outputs[nodeId] =
+      ran === 0
+        ? { done: ran, results: iteration.collected }
+        : { done: ran, results: iteration.collected, item: list[ran - 1] ?? null, index: ran - 1 };
     return { kind: "finished" };
+  }
+
+  /**
+   * The nodes in this scope that will never become ready, because something outside it feeds them.
+   *
+   * Only the ones blocked *directly* by an outsider: whatever they were blocking becomes ready (or
+   * becomes stuck in its own right) on the next pass, so one pass per layer settles the lot without
+   * this having to reason about the chain.
+   */
+  #stuckNodes(
+    document: GraphDocument,
+    allowed: ReadonlySet<string>,
+    state: RunState,
+    incoming: ReadonlyMap<string, GraphEdge[]>,
+  ): string[] {
+    const stuck: string[] = [];
+    for (const node of document.nodes) {
+      if (!allowed.has(node.id) || settled(node.id, state)) continue;
+      const edges = incoming.get(node.id) ?? [];
+      if (edges.some((edge) => !allowed.has(edge.from.node) && !settled(edge.from.node, state))) {
+        stuck.push(node.id);
+      }
+    }
+    return stuck;
   }
 
   /** The next node whose every incoming edge has settled. Document order, so a run is repeatable. */
@@ -716,7 +924,51 @@ export class GraphEngine {
       this.#store.deleteGraphRun(run.id);
       return;
     }
+    /*
+     * A graph the user switched off does not come back to life six hours later.
+     *
+     * `fire` refuses a disabled graph and the triggers are disarmed, so this was the one door left
+     * open: a run parked on a `Wait` is a row in `graph_runs`, the sweep picks it up on its time
+     * regardless, and the rest of the run — the invite, the webhook — went out on a graph the user
+     * had already turned off, or that the runs-per-hour ceiling had turned off for them. Dropped
+     * rather than left parked: "off" has to mean the pending work stops, and a row that resumes
+     * whenever somebody re-enables the graph is a delayed action nobody remembers arming.
+     */
+    if (graph.enabled !== 1) {
+      this.#store.deleteGraphRun(run.id);
+      this.#drop(
+        graph,
+        run.trigger_node,
+        "unavailable",
+        "the graph was switched off while it waited",
+      );
+      await this.#pumpQueue(graph.id);
+      return;
+    }
+
     const waitNode = document.nodes.find((node) => node.id === run.wait_node);
+    /*
+     * The document was edited while this run was parked and the `Wait` it is standing on is gone.
+     *
+     * Resuming would walk a state keyed by node ids that no longer exist, and — worse — it would
+     * silently ignore an `onMissed: "skip"` the author had set on the very node being resumed,
+     * because the policy is read off a node that cannot be found. There is no honest way to finish
+     * a run whose middle has been deleted, so it is given up and said out loud.
+     */
+    if (run.wait_node !== null && waitNode === undefined) {
+      this.#store.deleteGraphRun(run.id);
+      this.#emit("graph.run.failed", graph, {
+        runId: run.id,
+        triggerNode: run.trigger_node,
+        dryRun: run.dry_run === 1,
+        durationMs: now - run.started_at,
+        node: run.wait_node,
+        message:
+          "The Wait this run was parked on no longer exists. The graph was edited while it waited.",
+      });
+      await this.#pumpQueue(graph.id);
+      return;
+    }
     const missed = run.resume_at !== null && now - run.resume_at > MISSED_RESUME_GRACE_MS;
     if (missed && waitNode !== undefined && onMissed(waitNode) === "skip") {
       // The author's answer to "the app was closed past this time", and the reason it is a per-node
@@ -771,10 +1023,13 @@ export class GraphEngine {
     const document = readDocument(graph);
     const node = document?.nodes.find((entry) => entry.id === nodeId);
     const definition = node === undefined ? null : this.#definition(node.type);
-    if (definition !== null && definition.kind === "trigger" && definition.maxFiresPerMinute) {
-      return definition.maxFiresPerMinute;
-    }
-    return this.#limits.defaultFiresPerMinute;
+    // `?? `, not a truthiness test. A definition declaring `0` means "never on its own" — a trigger
+    // that only fires when something asks it to — and reading that as "unset" handed it the default
+    // of 120 a minute, which is the opposite of what it said.
+    const declared = definition?.kind === "trigger" ? definition.maxFiresPerMinute : undefined;
+    return typeof declared === "number" && Number.isFinite(declared) && declared >= 0
+      ? declared
+      : this.#limits.defaultFiresPerMinute;
   }
 
   #persist(runId: string, state: RunState): void {
@@ -923,9 +1178,21 @@ function actingAccount(node: GraphNode, graph: GraphRow): string | null {
   return graph.account_id;
 }
 
+/**
+ * How long this `Wait` waits.
+ *
+ * The fallback is the definition's own default rather than `0`, because the daemon never applies a
+ * config default — that is the editor's job, done once when the node is created — so a document that
+ * arrived by import, by hand, or from an older build reaches here with no `durationMs` at all. Zero
+ * parked the run with `resumeAt` in the past and continued it on the very next sweep, which is a
+ * `Wait` that does not wait. An explicit `0` is still honoured: that is somebody saying "park and
+ * continue", which is a real thing to ask for and the reason this checks the *type* rather than the
+ * value.
+ */
 function waitDuration(node: GraphNode): number {
   const raw = node.config.durationMs;
-  return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : 0;
+  if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) return raw;
+  return DEFAULT_WAIT_MS;
 }
 
 /** How long to pause between a loop's items. Absent, negative and NaN all mean "do not pause". */

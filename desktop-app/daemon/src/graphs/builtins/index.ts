@@ -300,7 +300,7 @@ export function createBuiltinNodes(deps: BuiltinNodeDeps = {}): BuiltinNodes {
     ...intrinsics,
     ...triggers,
     ...shapingNodes(),
-    ...extractNodes(),
+    ...extractNodes(deps.reads),
     ...collectionNodes(),
     ...composeNodes(),
     ...operatorNodes(clockFn),

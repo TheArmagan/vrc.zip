@@ -7,10 +7,35 @@
  * nobody can check for typos. These nodes are that shape said once — a list of paths, and one output
  * port per path.
  *
- * Pure, like everything in `shaping.ts` and for the same reason. **The input is an object that is
- * already in hand**, not an id: `Look up a user` costs a request and already exists, and its
- * `Everything` port is what these are wired to. An extractor that fetched would be a second way to
- * spend the rate budget with no way to see it on the card.
+ * ## An object, or the id of one
+ *
+ * The `From` port takes the object a `Look up a …` already produced — its `Everything` port is what
+ * these were built to be wired to, and an object never costs a request here.
+ *
+ * It also takes the **id**, and that is decision 278. Every trigger in the palette hands out ids:
+ * `When someone joins your instance` produces an `instance`, `A group` produces a `group`, and
+ * `assignable` lets both into a `json` port because `json` means "any value". So wiring a trigger
+ * straight into `Extract instance values` is a wire the editor draws, the save-time check accepts,
+ * and the run then silently produces nothing from — `readPath("wrld_…:12345", "worldId")` is
+ * `undefined`, every slot is empty, and the whole branch below skips with no error anywhere. A
+ * graph that looks right and quietly is not is the one failure this project spends the most effort
+ * refusing, and it was reachable from the shortest sensible path through the palette.
+ *
+ * So a **typed** extractor handed a string that is a bare id for its own model looks that model up,
+ * through the same `GraphReads` the resolver nodes use, on the same account, past the same rate
+ * limiter. It is not a second hidden way to spend the budget: it is the request the author would
+ * have made with the `Look up a …` node they were told to insert, made in the one case where the
+ * node knows exactly which one that is. The card says so, and the run's node list still shows one
+ * node rather than two, which is the only thing that is genuinely worse than inserting it by hand.
+ *
+ * Three guards keep it from being clever:
+ *
+ * - `Extract raw values` **never** resolves. It has no model, so an id there names nothing in
+ *   particular and guessing from a prefix would be a request the author cannot predict.
+ * - The string has to be an id **for that model**: `usr_…` into `Extract user values`,
+ *   `wrld_…:12345…` into `Extract instance values`. A location wired into `Extract world values`
+ *   is not two requests chained together; it finds nothing, as it always did.
+ * - An object is untouched. The old path is exactly the old path, with no request in it.
  *
  * ## Why the ports are slots
  *
@@ -44,6 +69,8 @@ import type {
   PortValues,
 } from "@vrcz/plugin-api/nodes";
 import { parseSlotRows } from "@vrcz/plugin-api/nodes";
+import type { ExecuteContext } from "../types.ts";
+import type { GraphReads } from "./resolvers.ts";
 import { readPath } from "./shaping.ts";
 import type { BuiltinNode } from "./types.ts";
 
@@ -113,6 +140,94 @@ const RAW: NodeDefinition = {
   ],
 };
 
+/* -------------------------------------------------------------------------------------------- */
+/* Which models can be resolved from an id, and how one is recognised                             */
+/* -------------------------------------------------------------------------------------------- */
+
+interface Model {
+  /** What the `From` port says on the card. */
+  readonly fromPort: string;
+  /**
+   * Whether this string is an id **for this model**, on VRChat's own prefixes.
+   *
+   * Prefix, not shape: the suffix is a UUID today and this project does not get to decide that it
+   * always will be. A wrong "yes" here is a request about nothing, which the resolver reports; a
+   * wrong "no" is the silence that made this whole mechanism necessary, so the test is deliberately
+   * the loose half of the two.
+   */
+  looksLikeId(value: string): boolean;
+  read(reads: GraphReads, account: string, id: string): Promise<Record<string, unknown>>;
+}
+
+/**
+ * An instance is a **location**, which is a world id with an instance on the end of it.
+ *
+ * The colon is the whole test, and it is what keeps `Extract world values` and `Extract instance
+ * values` from both claiming a bare `wrld_…`: one is a world and the other is a room in it, they
+ * are different requests, and a graph that meant the other one should say so rather than have the
+ * node pick. `private`, `traveling` and `offline` are locations VRChat also emits and none of them
+ * is a thing to look up — they have no colon, so they fall out here rather than needing a list.
+ */
+function isLocation(value: string): boolean {
+  return value.startsWith("wrld_") && value.includes(":");
+}
+
+const MODELS: Record<string, Model> = {
+  user: {
+    fromPort: "A user, or a user id — an id is looked up, which costs a request.",
+    looksLikeId: (value) => value.startsWith("usr_"),
+    read: (reads, account, id) => reads.user(account, id),
+  },
+  world: {
+    fromPort: "A world, or a world id — an id is looked up, which costs a request.",
+    looksLikeId: (value) => value.startsWith("wrld_") && !value.includes(":"),
+    read: (reads, account, id) => reads.world(account, id),
+  },
+  group: {
+    fromPort: "A group, or a group id — an id is looked up, which costs a request.",
+    looksLikeId: (value) => value.startsWith("grp_"),
+    read: (reads, account, id) => reads.group(account, id),
+  },
+  avatar: {
+    fromPort: "An avatar, or an avatar id — an id is looked up, which costs a request.",
+    looksLikeId: (value) => value.startsWith("avtr_"),
+    read: (reads, account, id) => reads.avatar(account, id),
+  },
+  instance: {
+    fromPort: "An instance, or an instance id — an id is looked up, which costs a request.",
+    looksLikeId: isLocation,
+    read: (reads, account, id) => reads.instance(account, id),
+  },
+};
+
+/**
+ * The input as an object: itself, or what its id names.
+ *
+ * Anything that is not a string this model recognises comes back untouched, which covers the object
+ * case, the empty case, and a location the author wired into the wrong extractor. Only a recognised
+ * id reaches the network, and a `reads` that is absent (a daemon with no VRChat behind it, which
+ * the tests are) leaves the string alone rather than throwing — the run then does what it did
+ * before this existed: finds nothing, produces nothing, skips.
+ */
+async function resolved(
+  model: string,
+  reads: GraphReads | undefined,
+  inputs: PortValues,
+  context: ExecuteContext,
+): Promise<PortValues> {
+  const entry = MODELS[model];
+  const value = inputs.value;
+  if (entry === undefined || reads === undefined || typeof value !== "string") return inputs;
+  if (!entry.looksLikeId(value)) return inputs;
+  const account = context.accountId;
+  if (account === null || account === "") {
+    throw new Error(
+      `No account is set for this graph, so vrc.zip cannot look up ${value} to read fields off it.`,
+    );
+  }
+  return { ...inputs, value: await entry.read(reads, account, value) };
+}
+
 /**
  * A typed extractor, built from the generated catalogue.
  *
@@ -129,13 +244,22 @@ function typedExtractor(
   fallback: { path: string; label: string },
 ): NodeDefinition {
   const catalogue = FIELD_CATALOGUES[model] ?? [];
+  const known = MODELS[model];
   return {
     id: `extract-${model}`,
     kind: "action",
     title,
     description,
     category: "Data",
-    inputs: [{ id: "value", label: "From", type: "json", required: true }],
+    inputs: [
+      {
+        id: "value",
+        label: "From",
+        type: "json",
+        required: true,
+        ...(known === undefined ? {} : { description: known.fromPort }),
+      },
+    ],
     outputs: SLOTS,
     variadicOutputs: ROWS_FIELD,
     config: [
@@ -174,31 +298,36 @@ const TYPED: readonly {
   {
     model: "user",
     title: "Extract user values",
-    description: "Pulls several fields out of a user, one output port per field.",
+    description:
+      "Pulls several fields out of a user, one output port per field. Takes the id of one too, and looks it up.",
     fallback: { path: "displayName", label: "Name" },
   },
   {
     model: "world",
     title: "Extract world values",
-    description: "Pulls several fields out of a world, one output port per field.",
+    description:
+      "Pulls several fields out of a world, one output port per field. Takes the id of one too, and looks it up.",
     fallback: { path: "name", label: "Name" },
   },
   {
     model: "group",
     title: "Extract group values",
-    description: "Pulls several fields out of a group, one output port per field.",
+    description:
+      "Pulls several fields out of a group, one output port per field. Takes the id of one too, and looks it up.",
     fallback: { path: "name", label: "Name" },
   },
   {
     model: "avatar",
     title: "Extract avatar values",
-    description: "Pulls several fields out of an avatar, one output port per field.",
+    description:
+      "Pulls several fields out of an avatar, one output port per field. Takes the id of one too, and looks it up.",
     fallback: { path: "name", label: "Name" },
   },
   {
     model: "instance",
     title: "Extract instance values",
-    description: "Pulls several fields out of an instance, one output port per field.",
+    description:
+      "Pulls several fields out of an instance, one output port per field. Takes the id of one too, and looks it up.",
     fallback: { path: "name", label: "Name" },
   },
 ];
@@ -239,12 +368,19 @@ export function extractValues(inputs: PortValues, config: NodeConfigValues): Por
 /* The set                                                                                        */
 /* -------------------------------------------------------------------------------------------- */
 
-export function extractNodes(): BuiltinNode[] {
+export function extractNodes(reads?: GraphReads | undefined): BuiltinNode[] {
   return [
+    // No model, so nothing to resolve an id against: `Extract raw values` is the pure one, and it
+    // stays pure. See the header.
     { definition: RAW, execute: extractValues },
     ...TYPED.map((entry) => ({
       definition: typedExtractor(entry.model, entry.title, entry.description, entry.fallback),
-      execute: extractValues,
+      execute: async (
+        inputs: PortValues,
+        config: NodeConfigValues,
+        context: ExecuteContext,
+      ): Promise<PortValues> =>
+        extractValues(await resolved(entry.model, reads, inputs, context), config),
     })),
   ];
 }

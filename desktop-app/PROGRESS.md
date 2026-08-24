@@ -5202,6 +5202,37 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
        is selected* and an item with that value can never show as chosen. Same workaround as
        `AccountFilter`, and the wire value stays `null` either way.
 
+278. **A typed extractor handed an id looks it up, and decision 253's third bullet is amended.** From
+     a user's exported graph — a player-join trigger whose `Instance` port went straight into
+     `Extract instance values` for the world id, and a `A group` literal into `Extract group values`
+     for the group's name. It armed, it ran, it invited, and it never notified. Nothing failed
+     anywhere: `assignable` lets any type into a `json` port because `json` means "any value", so
+     the editor drew both wires and the save-time check accepted both, and then
+     `readPath("wrld_…:12345", "worldId")` was `undefined`, every slot was empty, every edge out of
+     them was dead, and the whole branch below skipped. A graph that looks right and quietly is not,
+     reachable from the shortest sensible path through the palette.
+     - **The rule now: an object passes through untouched, an id of the node's own model is
+       resolved.** Same `GraphReads` the `Look up a …` nodes use, same account, same rate limiter.
+       Decision 253 said "the input is an object already in hand, not an id" to keep a second
+       invisible way to spend the rate budget out of the palette; the budget argument still holds
+       and is why the card now says so on the `From` port, but "the author must insert a node whose
+       name they do not know, or get silence" was the worse half of the trade.
+     - **`Extract raw values` never resolves.** It has no model, so an id there names nothing in
+       particular and a guess from the prefix is a request the author cannot predict.
+     - **The colon decides between a world and an instance.** `wrld_…` is a world, `wrld_…:12345…`
+       is a location. Neither extractor chains two requests to reach the other, and `private`,
+       `traveling` and `offline` fall out of the same test rather than needing a list.
+     - **A definition's description is not hashed**, so this cost no saved graph its `defHash`. The
+       port's id, type, label and requiredness are unchanged and there is a test that says so.
+     - **The gap was between two green test suites**, which is why `graphs/end-to-end.test.ts`
+       exists now: the extractor did what its unit test said, the walk did what its unit test said,
+       and the document a user drew produced nothing. That file runs one real exported graph through
+       the real engine over the real built-ins, bus event in and toast out. It fails on the old code.
+     - Two things about that graph are the author's rather than the engine's, and were reported
+       rather than fixed: the `Compare` node's `Result` is wired to nothing, so the world check
+       decides nothing and the invite fires for any world; and the `Only if` gate reads the invite's
+       own `Sent`, which is true by the time it is asked.
+
 ---
 
 ## Gotchas

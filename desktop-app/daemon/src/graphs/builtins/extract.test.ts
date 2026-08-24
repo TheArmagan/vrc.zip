@@ -4,6 +4,7 @@ import type { NodeConfigValues } from "@vrcz/plugin-api/nodes";
 import { parseSlotRows, visibleOutputs } from "@vrcz/plugin-api/nodes";
 import { extractNodes, extractValues } from "./extract.ts";
 import { createBuiltinNodes } from "./index.ts";
+import type { GraphReads } from "./resolvers.ts";
 
 const NODES = extractNodes();
 
@@ -49,16 +50,33 @@ describe("the extractor set", () => {
     }
   });
 
-  test("each one takes a json object already in hand, not an id", () => {
-    // An extractor that fetched would be a second way to spend the rate budget with no way to see
-    // it on the card. `Look up a user` costs the request; this reads its `Everything` port.
+  test("each one takes one json input, and the port keeps its id, type and label", () => {
+    // The port's *shape* is hashed into `defHash`, so this is the test that says a saved extractor
+    // stays wired. Decision 278 added a description to the typed ones and nothing else: a
+    // description is not hashed, and an id on this port is now looked up rather than ignored.
     for (const node of NODES) {
       const definition = node.definition;
       expect(definition.kind).toBe("action");
       if (definition.kind === "trigger") throw new Error("unreachable");
-      expect(definition.inputs).toEqual([
-        { id: "value", label: "From", type: "json", required: true },
-      ]);
+      expect(definition.inputs).toHaveLength(1);
+      const port = definition.inputs[0];
+      expect(port?.id).toBe("value");
+      expect(port?.label).toBe("From");
+      expect(port?.type).toBe("json");
+      expect(port?.required).toBe(true);
+    }
+  });
+
+  test("the typed ones say on the card that an id costs a request; raw says nothing", () => {
+    for (const node of NODES) {
+      const definition = node.definition;
+      if (definition.kind === "trigger") throw new Error("unreachable");
+      const description = definition.inputs[0]?.description ?? "";
+      if (definition.id === "extract-raw") {
+        expect(description).toBe("");
+        continue;
+      }
+      expect(description).toContain("costs a request");
     }
   });
 
@@ -208,5 +226,198 @@ describe("extractValues", () => {
     const first = extractValues({ value: user }, config);
     expect(extractValues({ value: user }, config)).toEqual(first);
     expect(user.tags).toEqual(["system_trust_veteran", "language_eng"]);
+  });
+});
+
+/* -------------------------------------------------------------------------------------------- */
+/* Decision 278: a typed extractor handed an id looks it up                                       */
+/* -------------------------------------------------------------------------------------------- */
+
+describe("an id on the From port", () => {
+  /** Every call this made, so a test can say "one request" or "none" rather than only "it worked". */
+  function fakeReads() {
+    const calls: string[] = [];
+    const reads = {
+      user: async (account: string, id: string) => {
+        calls.push(`user ${account} ${id}`);
+        return await Promise.resolve({ displayName: "Ada" });
+      },
+      world: async (account: string, id: string) => {
+        calls.push(`world ${account} ${id}`);
+        return await Promise.resolve({ name: "The Black Cat" });
+      },
+      instance: async (account: string, location: string) => {
+        calls.push(`instance ${account} ${location}`);
+        return await Promise.resolve({ worldId: "wrld_0ae3", userCount: 12 });
+      },
+      avatar: async (account: string, id: string) => {
+        calls.push(`avatar ${account} ${id}`);
+        return await Promise.resolve({ name: "Robot" });
+      },
+      group: async (account: string, id: string) => {
+        calls.push(`group ${account} ${id}`);
+        return await Promise.resolve({ name: "avtr.zip" });
+      },
+      friends: async () => await Promise.resolve([]),
+      instancePlayers: () => ({ names: [], users: [] }),
+    };
+    return { reads, calls };
+  }
+
+  const context = {
+    graphId: "g1",
+    runId: "r1",
+    nodeId: "n1",
+    dryRun: false,
+    accountId: "usr_me",
+  };
+
+  function nodeFor(id: string, reads?: GraphReads) {
+    const found = extractNodes(reads).find((node) => node.definition.id === id);
+    if (found?.execute === undefined) throw new Error(`no ${id} node`);
+    return found.execute;
+  }
+
+  test("an instance location is looked up, which is the wire the palette invites", async () => {
+    // `When someone joins your instance` hands out an `instance`, and `assignable` lets it into a
+    // json port. Before decision 278 this produced nothing at all and the whole branch below it
+    // skipped in silence.
+    const { reads, calls } = fakeReads();
+    const out = await nodeFor("extract-instance", reads)(
+      { value: "wrld_0ae3:12345~region(eu)" },
+      rows({ slot: "o2", path: "worldId" }),
+      context,
+    );
+    expect(out).toEqual({ o2: "wrld_0ae3" });
+    expect(calls).toEqual(["instance usr_me wrld_0ae3:12345~region(eu)"]);
+  });
+
+  test("a group id is looked up", async () => {
+    const { reads, calls } = fakeReads();
+    const out = await nodeFor("extract-group", reads)(
+      { value: "grp_3392dcb3" },
+      rows({ slot: "o1", path: "name" }),
+      context,
+    );
+    expect(out).toEqual({ o1: "avtr.zip" });
+    expect(calls).toEqual(["group usr_me grp_3392dcb3"]);
+  });
+
+  test("the other three models, each against its own prefix", async () => {
+    const cases = [
+      { id: "extract-user", value: "usr_ada", path: "displayName", expected: "Ada" },
+      { id: "extract-world", value: "wrld_cat", path: "name", expected: "The Black Cat" },
+      { id: "extract-avatar", value: "avtr_robot", path: "name", expected: "Robot" },
+    ];
+    for (const entry of cases) {
+      const { reads, calls } = fakeReads();
+      const out = await nodeFor(entry.id, reads)(
+        { value: entry.value },
+        rows({ slot: "o1", path: entry.path }),
+        context,
+      );
+      expect(out).toEqual({ o1: entry.expected });
+      expect(calls).toHaveLength(1);
+    }
+  });
+
+  test("an object is untouched, and costs nothing", async () => {
+    // The path this node was built for. A `Look up a user` already paid for the request; reading
+    // its `Everything` port must not pay again.
+    const { reads, calls } = fakeReads();
+    const out = await nodeFor("extract-user", reads)(
+      { value: { displayName: "Grace" } },
+      rows({ slot: "o1", path: "displayName" }),
+      context,
+    );
+    expect(out).toEqual({ o1: "Grace" });
+    expect(calls).toEqual([]);
+  });
+
+  test("a bare world id is not an instance, and a location is not a world", async () => {
+    // The colon is the whole test. Chaining two requests to get from one to the other would be the
+    // node deciding which of two different questions the author meant.
+    const first = fakeReads();
+    expect(
+      await nodeFor("extract-instance", first.reads)(
+        { value: "wrld_cat" },
+        rows({ slot: "o1", path: "worldId" }),
+        context,
+      ),
+    ).toEqual({});
+    expect(first.calls).toEqual([]);
+
+    const second = fakeReads();
+    expect(
+      await nodeFor("extract-world", second.reads)(
+        { value: "wrld_cat:12345" },
+        rows({ slot: "o1", path: "name" }),
+        context,
+      ),
+    ).toEqual({});
+    expect(second.calls).toEqual([]);
+  });
+
+  test("private, traveling and offline are locations with nothing behind them", async () => {
+    for (const value of ["private", "traveling", "offline", ""]) {
+      const { reads, calls } = fakeReads();
+      expect(
+        await nodeFor("extract-instance", reads)(
+          { value },
+          rows({ slot: "o1", path: "worldId" }),
+          context,
+        ),
+      ).toEqual({});
+      expect(calls).toEqual([]);
+    }
+  });
+
+  test("raw never resolves: it has no model to resolve against", async () => {
+    const { reads, calls } = fakeReads();
+    expect(
+      await nodeFor("extract-raw", reads)(
+        { value: "usr_ada" },
+        rows({ slot: "o1", path: "displayName" }),
+        context,
+      ),
+    ).toEqual({});
+    expect(calls).toEqual([]);
+  });
+
+  test("no account is a sentence, not a silent nothing", async () => {
+    const { reads } = fakeReads();
+    expect(
+      nodeFor("extract-group", reads)(
+        { value: "grp_3392dcb3" },
+        rows({ slot: "o1", path: "name" }),
+        { ...context, accountId: null },
+      ),
+    ).rejects.toThrow(/No account is set/);
+  });
+
+  test("a daemon with no VRChat behind it falls back to the old silence", async () => {
+    expect(
+      await nodeFor("extract-group")(
+        { value: "grp_3392dcb3" },
+        rows({ slot: "o1", path: "name" }),
+        context,
+      ),
+    ).toEqual({});
+  });
+
+  test("a failed lookup throws, so it lands on the node's error port", async () => {
+    // The resolvers' rule, and the reason it is theirs: "VRChat said no" is a thing the author
+    // should see on the run, and `on error` is right there for anyone who would rather handle it.
+    const reads = {
+      ...fakeReads().reads,
+      group: async () => await Promise.reject(new Error("404")),
+    };
+    expect(
+      nodeFor("extract-group", reads)(
+        { value: "grp_3392dcb3" },
+        rows({ slot: "o1", path: "name" }),
+        context,
+      ),
+    ).rejects.toThrow("404");
   });
 });

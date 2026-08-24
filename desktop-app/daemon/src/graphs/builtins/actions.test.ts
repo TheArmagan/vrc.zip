@@ -30,6 +30,11 @@ const server = Bun.serve({
       headers: Object.fromEntries(request.headers.entries()),
     });
     if (url.pathname === "/refuse") return new Response("no thanks", { status: 403 });
+    // A service answering a failure with a whole HTML page, which is the shape the read cap exists
+    // for: the body used to be buffered in full before anything was allowed to slice it.
+    if (url.pathname === "/refuse-big") {
+      return new Response("x".repeat(4 * 1024 * 1024), { status: 500 });
+    }
     return new Response("ok");
   },
 });
@@ -196,6 +201,40 @@ describe("http actions", () => {
     await expect(
       h.run("webhook", { text: "x" }, { url: "http://127.0.0.1:9999/hook" }),
     ).rejects.toThrow();
+  });
+
+  test("an enormous error body is quoted as an excerpt, not carried around", async () => {
+    // The error names the status and a taste of the body. Reading a four-megabyte page into the
+    // message (or into memory at all) is a webhook deciding how much of the daemon it gets.
+    const h = harness();
+    const failure = await h
+      .run("webhook", { text: "x" }, { url: "https://vrc.zip.test/refuse-big" })
+      .then(() => null)
+      .catch((error: unknown) => (error instanceof Error ? error.message : ""));
+    expect(failure).toContain("500");
+    expect((failure ?? "").length).toBeLessThan(400);
+  });
+
+  test("a rehearsal checks the URL it is rehearsing", async () => {
+    // The rehearsal is the evidence somebody reads at the hold-to-confirm gesture that arms the
+    // graph. A dry run of a private address used to report a cheerful "POST to ..." and status 0,
+    // and the refusal only arrived once the graph was live.
+    const h = harness();
+    await expect(
+      h.run("webhook", { text: "x" }, { url: "http://192.168.1.1/hook" }, { dryRun: true }),
+    ).rejects.toThrow(/private or reserved/);
+    await expect(
+      h.run("discord", { text: "x" }, { url: "http://192.168.1.1/hook" }, { dryRun: true }),
+    ).rejects.toThrow(/private or reserved/);
+    await expect(
+      h.run("ntfy", { text: "x" }, { server: "http://192.168.1.1", topic: "t" }, { dryRun: true }),
+    ).rejects.toThrow(/private or reserved/);
+    // And a rehearsal of a URL that passes still sends nothing.
+    const before = received.length;
+    expect(
+      await h.run("webhook", { text: "x" }, { url: "https://vrc.zip.test/hook" }, { dryRun: true }),
+    ).toEqual({ status: 0 });
+    expect(received.length).toBe(before);
   });
 
   test("discord sends a content field and clamps an over-long message", async () => {
@@ -480,6 +519,24 @@ describe("the desktop notification", () => {
       { id: "yes", label: "Accept", action: "signal" },
       { id: "no", label: "Decline", action: "signal" },
     ]);
+  });
+
+  test("a blank row does not take the name away from the button that has one", async () => {
+    // Both rules used to run against the array as it was *before* the labelled rows were kept, so a
+    // half-typed row and a finished one sharing a name lost both: the first for having no label, the
+    // second for not being the first occurrence. The configured button vanished with nothing said.
+    const h = harness();
+    await h.run(
+      "desktop-notification",
+      { text: "hi" },
+      {
+        buttons: JSON.stringify([
+          { id: "yes", label: "  " },
+          { id: "yes", label: "Accept" },
+        ]),
+      },
+    );
+    expect(h.toasts[0]?.buttons).toEqual([{ id: "yes", label: "Accept", action: "signal" }]);
   });
 
   test("nonsense in the buttons field is no buttons, not a failed run", async () => {

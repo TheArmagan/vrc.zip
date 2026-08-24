@@ -227,6 +227,13 @@ export function valueNodes(now: () => number): BuiltinNode[] {
         const high = Math.floor(Math.max(min, max));
         // Swapped bounds are read as a range rather than refused: somebody typing 100 and 1 meant a
         // range, and an error there would be pedantry rather than protection.
+        //
+        // Bounds with no whole number between them produce nothing. 1.2 to 1.8 rounds inward to 2
+        // and 1, and the arithmetic below then returns exactly `low` — a node answering 2 for a
+        // range that ends at 1.8, while its own description promises a whole number inside the
+        // bounds. There is no such number, so there is no answer, and an unproduced port stops the
+        // branch rather than sending an out-of-range one down it.
+        if (high < low) return {};
         return { value: low + Math.floor(Math.random() * (high - low + 1)) };
       },
     },

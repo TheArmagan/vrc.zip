@@ -130,10 +130,15 @@ export function composeJson(inputs: PortValues, config: NodeConfigValues): PortV
     const key = row.path.trim();
     // The first row wins a repeated key, the same rule two buttons with one name follow: the editor
     // has to be typeable through a state where two rows match, so the drop belongs here.
+    //
+    // The claim is made before the value is looked at, and that is the fix rather than the order it
+    // reads in. Claiming afterwards meant an unwired first row let a later one take its key — so
+    // which row owned `name` depended on what happened to be wired at the time, and wiring a branch
+    // that produced nothing silently changed the object's contents. The document decides.
     if (key === "" || claimedKeys.has(key)) continue;
+    claimedKeys.add(key);
     const value = inputs[row.slot];
     if (value === undefined) continue;
-    claimedKeys.add(key);
     entries.push([key, value]);
   }
   return { value: Object.fromEntries(entries) };

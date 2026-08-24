@@ -255,6 +255,14 @@ describe("Open VRChat", () => {
     expect(h.notes[0]).toContain("--no-vr");
   });
 
+  test("a rehearsal with no path says which half is missing, rather than rehearsing (no path)", async () => {
+    const h = harness();
+    await expect(h.run("open-vrchat", {}, { via: "executable" }, { dryRun: true })).rejects.toThrow(
+      /Say where VRChat is/,
+    );
+    expect(h.notes).toHaveLength(0);
+  });
+
   test("a launch that failed throws the reason rather than answering false", async () => {
     // A path has several ways to be wrong and the sentence naming which is the whole value of the
     // answer. Thrown, it reaches the node's error port; false would be a graph carrying on.
@@ -292,6 +300,16 @@ describe("Open a Steam app", () => {
       await expect(h.run("open-steam-app", {}, { appId })).rejects.toThrow(/Steam app id/);
     }
     expect(h.steam).toHaveLength(0);
+  });
+
+  test("a rehearsal refuses an id the real run would refuse", async () => {
+    // Same rule as the executable: the guard belongs ahead of the dry-run branch, or the evidence
+    // the graph is armed on is evidence about a different node.
+    const h = harness();
+    await expect(
+      h.run("open-steam-app", {}, { appId: "620&calc" }, { dryRun: true }),
+    ).rejects.toThrow(/Steam app id/);
+    expect(h.notes).toHaveLength(0);
   });
 
   test("a rehearsal starts nothing", async () => {
@@ -343,6 +361,17 @@ describe("Open an executable", () => {
   test("no path at all says so rather than spawning something", async () => {
     const h = harness();
     await expect(h.run("open-executable", {}, {})).rejects.toThrow(/Say which program to run/);
+    expect(h.started).toHaveLength(0);
+  });
+
+  test("a rehearsal of a run that cannot happen says so instead of rehearsing it", async () => {
+    // The rehearsal is what somebody reads at the hold-to-confirm gesture that arms the graph, so a
+    // node that will refuse itself has to refuse now: "run " with nothing after it read like a plan.
+    const h = harness();
+    await expect(h.run("open-executable", {}, {}, { dryRun: true })).rejects.toThrow(
+      /Say which program to run/,
+    );
+    expect(h.notes).toHaveLength(0);
     expect(h.started).toHaveLength(0);
   });
 

@@ -86,12 +86,17 @@ export function evaluateCompare(op: string, left: unknown, right: unknown): bool
       return sameValue(left, right);
     case "ne":
       return !sameValue(left, right);
+    // An empty term answers `false` rather than `true`, and that is the whole point of these three.
+    // `"".includes("")`, `startsWith("")` and `new RegExp("")` are all unconditionally true, so a
+    // gate whose term the author has not typed yet used to let everything through — a filter that
+    // kept the entire list and a "contains" that fired on every event. The unfilled state has to
+    // fail closed, the same way an unreadable clock window does.
     case "contains":
-      return asText(left).includes(asText(right));
+      return asText(right) !== "" && asText(left).includes(asText(right));
     case "starts":
-      return asText(left).startsWith(asText(right));
+      return asText(right) !== "" && asText(left).startsWith(asText(right));
     case "matches":
-      return matches(asText(left), asText(right));
+      return asText(right) !== "" && matches(asText(left), asText(right));
     case "gt":
     case "gte":
     case "lt":
@@ -116,6 +121,14 @@ function sameValue(left: unknown, right: unknown): boolean {
   if (typeof left === "object" || typeof right === "object") {
     return JSON.stringify(left) === JSON.stringify(right);
   }
+  // Two numbers are compared as numbers, so `is` agrees with `is at least` and `is at most` on the
+  // same pair. A config box holding `1.0` or ` 1` against a port carrying `1` used to answer "not
+  // equal" while both orderings answered "true", which is a graph that cannot be reasoned about.
+  // `asNumber` is the same parser the orderings use, and it declines `""` — so `""` is still not 0,
+  // and booleans never reach here at all, so `0` is still not `false`.
+  const leftNumber = asNumber(left);
+  const rightNumber = asNumber(right);
+  if (leftNumber !== null && rightNumber !== null) return leftNumber === rightNumber;
   return String(left) === String(right);
 }
 

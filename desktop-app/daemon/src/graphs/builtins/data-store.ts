@@ -31,6 +31,7 @@
  * pretends.
  */
 
+import { createHash } from "node:crypto";
 import type {
   ExecutableNodeDefinition,
   NodeConfigValues,
@@ -105,9 +106,30 @@ function storeName(config: NodeConfigValues): string {
  */
 function keyOf(inputs: PortValues, config: NodeConfigValues, port = "key"): string {
   const wired = inputs[port];
-  if (typeof wired === "string" && wired !== "") return wired.slice(0, 400);
-  if (wired !== undefined && wired !== null) return itemKey(wired).slice(0, 400);
-  return configText(config, "key").slice(0, 400);
+  if (typeof wired === "string" && wired !== "") return capKey(wired);
+  if (wired !== undefined && wired !== null) return capKey(itemKey(wired));
+  return capKey(configText(config, "key"));
+}
+
+/** How long a key may be. The column takes more; this is about a row staying readable in the panel. */
+const MAX_KEY_CHARS = 400;
+
+/** Hex characters of the digest that stands in for the part of a long key that was cut off. */
+const KEY_DIGEST_CHARS = 16;
+
+/**
+ * A key short enough to store, and still the key it came from.
+ *
+ * A plain `slice(0, 400)` made two different keys sharing a 400-character prefix into **one row**,
+ * silently overwriting each other — and the keys most likely to be long are the composed ones (a
+ * world id and an instance, a whole JSON item), which share prefixes by construction. The tail is
+ * replaced by a digest of the whole key instead, so the truncation is visible in the panel and two
+ * different keys stay two different rows. Short keys are untouched, so nothing already stored moves.
+ */
+function capKey(key: string): string {
+  if (key.length <= MAX_KEY_CHARS) return key;
+  const digest = createHash("sha256").update(key).digest("hex").slice(0, KEY_DIGEST_CHARS);
+  return `${key.slice(0, MAX_KEY_CHARS - KEY_DIGEST_CHARS - 1)}#${digest}`;
 }
 
 const KEY_INPUT = {
@@ -400,7 +422,7 @@ const LIST_ADD = node(
         min: 0,
         default: 0,
         description:
-          "Zero means no limit. Past the limit the oldest go, which makes this a rolling log.",
+          "Zero means no limit of your own, though a stored list still stops at 10,000 items. Past the limit the oldest go, which makes this a rolling log.",
       },
     ],
   },
@@ -490,10 +512,29 @@ function collectionName(config: NodeConfigValues): string {
   return configText(config, "name").slice(0, 200);
 }
 
+/**
+ * The ceiling on a stored list, whatever the node says.
+ *
+ * `Keep at most` defaults to zero, which means no limit, and a graph appending on every player join
+ * then grows **one SQLite row** for as long as the daemon runs. Every append reads the whole array,
+ * parses it, re-serialises it and writes it back, so the cost is quadratic in the number of appends
+ * and nothing upstream notices: the ceilings in `limits.ts` count run size, fire rate and runs per
+ * hour, and a thousand ordinary runs that each add one item pass all three.
+ *
+ * The constant lives here rather than in `limits.ts` because it is a property of this file's storage
+ * shape — one row holding the whole array — and not of how often a graph may run.
+ *
+ * Ten thousand items is far past any list a person reads and far short of a row that hurts to
+ * rewrite. Past it the oldest go, which is what the configured limit does; a rolling log is the
+ * honest reading of "no limit" once a limit is unavoidable.
+ */
+export const MAX_STORED_LIST_ITEMS = 10_000;
+
 function limit(config: NodeConfigValues): number {
   const raw = config.max;
   const value = typeof raw === "number" ? raw : Number(raw);
-  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+  const asked = Number.isFinite(value) && value > 0 ? Math.floor(value) : MAX_STORED_LIST_ITEMS;
+  return Math.min(asked, MAX_STORED_LIST_ITEMS);
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -566,7 +607,9 @@ export function dataStoreNodes(data: GraphDataStore): BuiltinNode[] {
       execute: (inputs, config) => {
         const { store, name } = at(config);
         const key = keyOf(inputs, config);
-        if (name === "" || key === "") return { found: false };
+        // `count` too, not just `found`: a node either produces every port it declares or produces
+        // nothing on purpose, and a subset leaves a wire out of `count` dead for no stated reason.
+        if (name === "" || key === "") return { found: false, count: 0 };
         const collection = mapCollection(name);
         const had = data.get(store, collection, key) !== null;
         data.remove(store, collection, key);
@@ -613,7 +656,7 @@ export function dataStoreNodes(data: GraphDataStore): BuiltinNode[] {
         const { store, name } = at(config);
         if (name === "") return {};
         const collection = setCollection(name);
-        const key = itemKey(inputs.item ?? null).slice(0, 400);
+        const key = capKey(itemKey(inputs.item ?? null));
         const added = data.get(store, collection, key) === null;
         // Written even when it was already a member, so the row's `updated_at` means "last seen"
         // rather than "first seen" — which is what the Stores panel orders by.
@@ -626,7 +669,7 @@ export function dataStoreNodes(data: GraphDataStore): BuiltinNode[] {
       execute: (inputs, config) => {
         const { store, name } = at(config);
         if (name === "") return { has: false };
-        const key = itemKey(inputs.item ?? null).slice(0, 400);
+        const key = capKey(itemKey(inputs.item ?? null));
         return { has: data.get(store, setCollection(name), key) !== null };
       },
     },
@@ -634,9 +677,10 @@ export function dataStoreNodes(data: GraphDataStore): BuiltinNode[] {
       definition: SET_REMOVE,
       execute: (inputs, config) => {
         const { store, name } = at(config);
-        if (name === "") return { found: false };
+        // Same rule as `Map: remove`: `count` is declared, so `count` is produced.
+        if (name === "") return { found: false, count: 0 };
         const collection = setCollection(name);
-        const key = itemKey(inputs.item ?? null).slice(0, 400);
+        const key = capKey(itemKey(inputs.item ?? null));
         const had = data.get(store, collection, key) !== null;
         data.remove(store, collection, key);
         return { found: had, count: data.count(store, collection) };
@@ -703,7 +747,9 @@ export function dataStoreNodes(data: GraphDataStore): BuiltinNode[] {
       definition: LIST_REMOVE,
       execute: (inputs, config) => {
         const { store, name } = at(config);
-        if (name === "") return { removed: 0 };
+        // `items` and `count` as well: an unnamed list is an empty one here, and a graph reading the
+        // remaining items should see none rather than lose the branch.
+        if (name === "") return { removed: 0, items: [], count: 0 };
         const items = readList(data, store, name);
         const kept = items.filter((entry) => !sameItem(entry, inputs.item ?? null));
         if (kept.length !== items.length) writeList(data, store, name, kept);

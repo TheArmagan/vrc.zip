@@ -82,6 +82,17 @@ describe("the Compose JSON node", () => {
     expect(out.value).toEqual({ k: "first" });
   });
 
+  test("the first row keeps its key even when nothing is wired into it", () => {
+    // Which row owns a key is the document's business, not the wiring's. The claim used to be made
+    // after the value was looked at, so an unwired first row handed its key to a later one — and
+    // wiring a branch that produced nothing silently changed what the object contained.
+    const out = composeJson(
+      { v2: "second" },
+      rows({ slot: "v1", path: "k" }, { slot: "v2", path: "k" }),
+    );
+    expect(Object.hasOwn(out.value as object, "k")).toBe(false);
+  });
+
   test("a slot the node does not have, and a second claim on one, are both skipped", () => {
     const out = composeJson(
       { v1: "a", v2: "b" },

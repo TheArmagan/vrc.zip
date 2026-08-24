@@ -31,6 +31,20 @@ function configText(config: NodeConfigValues, key: string, fallback = ""): strin
   return typeof raw === "string" && raw !== "" ? raw : fallback;
 }
 
+/**
+ * The same, except that a box the author deliberately emptied stays empty.
+ *
+ * `configText` cannot tell "never filled in" from "cleared on purpose", because both are `""` by the
+ * time it looks. That is the right call for a field whose blank state has a documented meaning, and
+ * the wrong one for `Join list`'s separator: emptying the box is how somebody says "no separator at
+ * all", and the fallback used to quietly put `, ` back. Absent (no key, or not a string) still takes
+ * the fallback, so an older document that never stored the field is unchanged.
+ */
+function configTextExact(config: NodeConfigValues, key: string, fallback = ""): string {
+  const raw = config[key];
+  return typeof raw === "string" ? raw : fallback;
+}
+
 /* -------------------------------------------------------------------------------------------- */
 /* Arithmetic                                                                                     */
 /* -------------------------------------------------------------------------------------------- */
@@ -70,6 +84,16 @@ const MATH: NodeDefinition = {
     { kind: "literal", text: " B" },
   ],
 };
+
+/**
+ * The operations that never look at B, so a missing B is not a reason to refuse to run.
+ *
+ * The daemon does not apply a config `default` — that is the editor's job — so a `B, when nothing is
+ * wired` box the author cleared arrives as nothing at all. `round (A only)` used to be refused on
+ * exactly that state, which killed every branch below a node that had no need of B in the first
+ * place. The rule of this file is that a node which *can* do its job does it.
+ */
+const UNARY_MATH_OPS = new Set(["round"]);
 
 export function evaluateMath(op: string, a: number, b: number): number | null {
   switch (op) {
@@ -139,7 +163,8 @@ const SPLIT: NodeDefinition = {
       id: "separator",
       label: "Separator",
       placeholder: ",",
-      description: "Left blank, the text is split on spaces.",
+      description:
+        "Left blank, the text is split on spaces. A separator you type is used exactly, so two of them in a row give an empty item and every position stays where it was in the line.",
     },
   ],
   body: [
@@ -236,13 +261,24 @@ const TIME_WINDOW: NodeDefinition = {
   ],
 };
 
-/** `21:00` as minutes past midnight, or null. */
+/** Midnight, and the end of the day. The card offers `24:00`, so `24:00` has to parse. */
+const DAY_MINUTES = 24 * 60;
+
+/**
+ * `21:00` as minutes past midnight, or null.
+ *
+ * `24:00` is accepted and is the only hour past 23 that is: the node's own card suggests it as the
+ * end of an unfilled window, and a spelling the interface offers must not be one the parser refuses.
+ * It means the end of the day, so `00:00 to 24:00` is every minute of it.
+ */
 export function parseClock(value: string): number | null {
   const match = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
   if (match === null) return null;
   const hours = Number(match[1]);
   const minutes = Number(match[2]);
-  if (hours > 23 || minutes > 59) return null;
+  if (minutes > 59) return null;
+  if (hours === 24) return minutes === 0 ? DAY_MINUTES : null;
+  if (hours > 23) return null;
   return hours * 60 + minutes;
 }
 
@@ -252,11 +288,27 @@ export function parseClock(value: string): number | null {
  * **A window that ends before it starts wraps over midnight**, which is the case people actually
  * want: "only between 9pm and 2am" is one evening, not an empty set. Refusing it would make the
  * commonest use of this node impossible to express.
+ *
+ * **A window that starts where it ends is the whole day**, not the empty set. "09:00 to 09:00" is
+ * how somebody writes "all of it", and the arithmetic used to answer `minutes >= 9*60 && minutes <
+ * 9*60`, which is never — a gate spelled the natural way that silently never fired.
  */
 export function withinWindow(at: number, from: number, to: number): boolean {
   const date = new Date(at);
   const minutes = date.getHours() * 60 + date.getMinutes();
-  return from <= to ? minutes >= from && minutes < to : minutes >= from || minutes < to;
+  if (from === to) return true;
+  return from < to ? minutes >= from && minutes < to : minutes >= from || minutes < to;
+}
+
+/** One end of the window: the card's own fallback when blank, a named error when unreadable. */
+function clockBound(config: NodeConfigValues, key: string, fallback: number): number {
+  const raw = configText(config, key);
+  if (raw === "") return fallback;
+  const minutes = parseClock(raw);
+  if (minutes === null) {
+    throw new Error(`"${raw}" is not a time of day. Write it as 21:00, between 00:00 and 24:00.`);
+  }
+  return minutes;
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -369,10 +421,12 @@ export function operatorNodes(now: () => number): BuiltinNode[] {
     {
       definition: MATH,
       execute: (inputs, config): PortValues => {
+        const op = typeof config.op === "string" ? config.op : "add";
         const a = asNumber(inputs.a);
         const b = inputs.b === undefined ? asNumber(config.value) : asNumber(inputs.b);
-        if (a === null || b === null) return {};
-        const result = evaluateMath(typeof config.op === "string" ? config.op : "add", a, b);
+        if (a === null) return {};
+        if (b === null && !UNARY_MATH_OPS.has(op)) return {};
+        const result = evaluateMath(op, a, b ?? 0);
         return result === null ? {} : { result };
       },
     },
@@ -401,12 +455,13 @@ export function operatorNodes(now: () => number): BuiltinNode[] {
     {
       definition: SPLIT,
       execute: (inputs, config): PortValues => {
-        const separator = configText(config, "separator", " ");
-        return {
-          parts: asText(inputs.text)
-            .split(separator)
-            .filter((part) => part !== ""),
-        };
+        // Blank means spaces, which the node's own description promises, and only that reading
+        // drops the empty pieces: "a  b" split on a space is two words, not four. A separator the
+        // author typed is split faithfully instead — "a,,b" on a comma is three fields, one of them
+        // empty, and swallowing the empty one used to shift every position after it by one.
+        const typed = configText(config, "separator");
+        const parts = asText(inputs.text).split(typed === "" ? " " : typed);
+        return { parts: typed === "" ? parts.filter((part) => part !== "") : parts };
       },
     },
     {
@@ -414,7 +469,9 @@ export function operatorNodes(now: () => number): BuiltinNode[] {
       execute: (inputs, config): PortValues => ({
         text: asArray(inputs.list)
           .map(asText)
-          .join(configText(config, "separator", ", ")),
+          // `configTextExact`: an emptied box joins with nothing, which is the only way to say
+          // "glue these together". Never filled in at all still means the `, ` on the card.
+          .join(configTextExact(config, "separator", ", ")),
       }),
     },
     {
@@ -427,11 +484,12 @@ export function operatorNodes(now: () => number): BuiltinNode[] {
     {
       definition: TIME_WINDOW,
       execute: (inputs, config): PortValues => {
-        const from = parseClock(configText(config, "from"));
-        const to = parseClock(configText(config, "to"));
-        // An unreadable window stops the run rather than letting everything through: a typo in a
-        // gate must fail closed, since the whole point of the node is to hold things back.
-        if (from === null || to === null) return {};
+        // A bound nobody filled in is the one the card shows: the start of the day and the end of
+        // it. A bound somebody filled in *wrongly* is different — it used to make the node produce
+        // nothing forever, which is a graph that never runs and never says why. It throws now, so
+        // the typo lands on the run's error and in the feed. Still failing closed, just not silently.
+        const from = clockBound(config, "from", 0);
+        const to = clockBound(config, "to", DAY_MINUTES);
         return withinWindow(now(), from, to) ? { out: inputs.payload ?? true } : {};
       },
     },

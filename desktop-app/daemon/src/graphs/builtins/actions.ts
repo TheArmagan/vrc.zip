@@ -232,14 +232,48 @@ async function postBody(
   }
 }
 
-/** Reads at most {@link MAX_RESPONSE_BYTES}, because an error message is not a place to store data. */
+/** How much of a failed response is quoted back in the error. An excerpt, not a copy. */
+const EXCERPT_CHARS = 200;
+
+/**
+ * The first {@link EXCERPT_CHARS} characters of a response, reading at most
+ * {@link MAX_RESPONSE_BYTES} to get them.
+ *
+ * The cap is on the **read**, which is the only place it does anything. This used to call
+ * `response.text()` and slice the result, so the whole body was already buffered in memory by the
+ * time either slice ran: a webhook answering with a 200 MB error page was 200 MB of daemon before
+ * the 8 KiB limit was consulted. The stream is cancelled as soon as there is enough to quote.
+ */
 async function readCapped(response: Response): Promise<string> {
+  const body = response.body;
+  if (body === null) return "";
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let excerpt = "";
+  let bytes = 0;
   try {
-    const body = await response.text();
-    return body.slice(0, MAX_RESPONSE_BYTES).slice(0, 200);
+    while (bytes < MAX_RESPONSE_BYTES && excerpt.length < EXCERPT_CHARS) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      bytes += chunk.value.byteLength;
+      excerpt += decoder.decode(chunk.value, { stream: true });
+    }
   } catch {
     return "";
+  } finally {
+    // Cancelled rather than left to drain: the rest of the body is bytes nobody asked for, and an
+    // unread stream holds the connection open.
+    await reader.cancel().catch(() => undefined);
   }
+  return excerpt.slice(0, EXCERPT_CHARS);
+}
+
+/**
+ * A URL from a config box, checked the way a registered webhook's is: https only, no private or
+ * loopback addresses. Thrown from here it reaches the node's `error` port like any other failure.
+ */
+function safeUrl(config: NodeConfigValues, key: string): string {
+  return validateWebhookUrl(configText(config, key));
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -903,10 +937,25 @@ function desktopButtons(
         ...(argument === "" ? {} : { argument }),
       };
     })
-    .filter((button, index, all) => {
-      if (button.label === "") return false;
-      return all.findIndex((other) => other.id === button.id) === index;
-    });
+    .filter(usableButton());
+}
+
+/**
+ * The two rules above, as one pass that remembers the names it has already handed out.
+ *
+ * Both rules used to be one `filter` whose duplicate check ran `findIndex` over the array *before*
+ * the labelled ones were kept — so a blank-labelled row and a configured row sharing an id lost
+ * both: the first for having no label, the second for not being the first occurrence. The
+ * configured button vanished from the notification and nothing said why. Keeping the state here
+ * means "first" means the first row that was usable at all.
+ */
+function usableButton(): (button: { id: string; label: string }) => boolean {
+  const taken = new Set<string>();
+  return (button) => {
+    if (button.label === "" || taken.has(button.id)) return false;
+    taken.add(button.id);
+    return true;
+  };
 }
 
 const BUTTON_ACTIONS: readonly GraphButtonAction[] = [
@@ -982,7 +1031,12 @@ export function actionNodes(deps: ActionDeps): BuiltinNode[] {
     {
       definition: WEBHOOK,
       execute: async (inputs, config, context) => {
-        const url = configText(config, "url");
+        // Validated *before* the rehearsal, not inside `postBody` afterwards. The rehearsal is the
+        // evidence somebody reads at the hold-to-confirm gesture that arms the graph, so it has to
+        // be a rehearsal of the request that would actually go out. A dry run of an http:// address
+        // on the local network used to report a cheerful "POST to ..." and a status of 0, and the
+        // refusal only arrived once the graph was armed and firing.
+        const url = safeUrl(config, "url");
         const payload =
           inputs.body === undefined ? { text: text(inputs.text) } : (inputs.body as unknown);
         if (context.dryRun) {
@@ -999,7 +1053,8 @@ export function actionNodes(deps: ActionDeps): BuiltinNode[] {
     {
       definition: DISCORD,
       execute: async (inputs, config, context) => {
-        const url = configText(config, "url");
+        // Checked ahead of the rehearsal, for the reason spelled out on the webhook node above.
+        const url = safeUrl(config, "url");
         const username = configText(config, "username");
         const message = text(inputs.text);
         if (context.dryRun) {
@@ -1023,11 +1078,15 @@ export function actionNodes(deps: ActionDeps): BuiltinNode[] {
         const title = configText(config, "title");
         const priority = configText(config, "priority") || "3";
         const message = text(inputs.text);
+        // The address is built and checked before the rehearsal, so a self-hosted ntfy the check
+        // will refuse is refused while the author is still watching. See the webhook node above.
+        const url = validateWebhookUrl(
+          `${server.replace(/\/+$/, "")}/${encodeURIComponent(topic)}`,
+        );
         if (context.dryRun) {
           rehearse(deps, context, `ntfy ${topic}: ${message.slice(0, 200)}`);
           return { status: 0 };
         }
-        const url = `${server.replace(/\/+$/, "")}/${encodeURIComponent(topic)}`;
         return {
           status: await postBody(deps, url, message, {
             "content-type": "text/plain; charset=utf-8",

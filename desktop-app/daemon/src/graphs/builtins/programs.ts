@@ -526,8 +526,15 @@ export function programNodes(deps: ProgramDeps): BuiltinNode[] {
           ...splitArguments(text(inputs.arguments)),
         ];
 
+        // Checked before the rehearsal rather than after it. The rehearsal is what somebody reads
+        // at the hold-to-confirm gesture that arms the graph, so a run that cannot happen must not
+        // rehearse as though it could: "open VRChat from (no path)" used to read like a plan.
+        if (!steam && path === "") {
+          throw new Error("Say where VRChat is, or start it through Steam.");
+        }
+
         if (context.dryRun) {
-          const how = steam ? "through Steam" : `from ${path === "" ? "(no path)" : path}`;
+          const how = steam ? "through Steam" : `from ${path}`;
           rehearse(deps, context, `open VRChat ${how}: ${args.join(" ").slice(0, 200)}`);
           return { started: false, pid: 0 };
         }
@@ -542,9 +549,6 @@ export function programNodes(deps: ProgramDeps): BuiltinNode[] {
         }
 
         if (deps.run === undefined) throw new Error("This daemon cannot start programs.");
-        if (path === "") {
-          throw new Error("Say where VRChat is, or start it through Steam.");
-        }
         const result = await deps.run({ path, args });
         if (!result.started) throw failure(path, result);
         return { started: true, pid: result.pid ?? 0 };
@@ -559,18 +563,22 @@ export function programNodes(deps: ProgramDeps): BuiltinNode[] {
           ...splitArguments(text(inputs.arguments)),
         ];
 
+        // Digits only, and this is a guard rather than tidiness: the id is interpolated into a URL
+        // that the operating system's protocol handler parses. Anything else in it is somebody
+        // else's parser being handed a caller-chosen string, which is where a link becomes an
+        // injection. The arguments beside it are encoded for the same reason.
+        //
+        // Ahead of the dry-run branch, because a rehearsal is what a graph is armed on the strength
+        // of: rehearsing an id this node will refuse is rehearsing a different node.
+        if (!/^\d+$/.test(appId)) {
+          throw new Error(`"${appId}" is not a Steam app id. They are numbers, like 438100.`);
+        }
+
         if (context.dryRun) {
           rehearse(deps, context, `open steam app ${appId}: ${args.join(" ").slice(0, 200)}`);
           return { started: false };
         }
 
-        // Digits only, and this is a guard rather than tidiness: the id is interpolated into a URL
-        // that the operating system's protocol handler parses. Anything else in it is somebody
-        // else's parser being handed a caller-chosen string, which is where a link becomes an
-        // injection. The arguments beside it are encoded for the same reason.
-        if (!/^\d+$/.test(appId)) {
-          throw new Error(`"${appId}" is not a Steam app id. They are numbers, like 438100.`);
-        }
         if (deps.steam === undefined) throw new Error("This daemon cannot start programs.");
         const result = await deps.steam(appId, args);
         if (!result.started) throw failure(`Steam app ${appId}`, result);
@@ -587,6 +595,9 @@ export function programNodes(deps: ProgramDeps): BuiltinNode[] {
           ...splitArguments(text(inputs.arguments)),
         ];
 
+        // Before the rehearsal: `run ` with nothing after it is not a plan anybody can approve.
+        if (path === "") throw new Error("Say which program to run.");
+
         if (context.dryRun) {
           const listed = args.length === 0 ? "" : ` ${args.join(" ")}`;
           rehearse(deps, context, `run ${path}${listed}`.slice(0, 200));
@@ -594,7 +605,6 @@ export function programNodes(deps: ProgramDeps): BuiltinNode[] {
         }
 
         if (deps.run === undefined) throw new Error("This daemon cannot start programs.");
-        if (path === "") throw new Error("Say which program to run.");
         const result = await deps.run({
           path,
           args,

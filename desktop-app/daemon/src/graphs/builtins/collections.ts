@@ -319,10 +319,18 @@ function keyOf(inputs: PortValues, config: NodeConfigValues): string {
   return configText(config, "key");
 }
 
-function positiveInt(config: NodeConfigValues, id: string, fallback: number): number {
+/**
+ * A whole count from a config box, where **zero is a count** and not a missing value.
+ *
+ * The `min: 1` on the field is the editor's, and the daemon never sees it — so a `Take from list`
+ * whose count reads 0 arrives here as 0 and used to be read as "nothing I like", handing back the
+ * fallback of ten. Asking for none and getting ten is the plausible wrong answer this file exists to
+ * avoid. Negative and unreadable still take the fallback: neither is a number of items.
+ */
+function countConfig(config: NodeConfigValues, id: string, fallback: number): number {
   const raw = config[id];
   const value = typeof raw === "number" ? raw : Number(raw);
-  return Number.isFinite(value) && value >= 1 ? Math.floor(value) : fallback;
+  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
 }
 
 /* -------------------------------------------------------------------------------------------- */
@@ -392,8 +400,11 @@ export function collectionNodes(): BuiltinNode[] {
       definition: LIST_SLICE,
       execute: (inputs, config) => {
         const list = asArray(inputs.list);
-        const n = positiveInt(config, "count", 10);
-        const next = config.from === "end" ? list.slice(-n) : list.slice(0, n);
+        const n = countConfig(config, "count", 10);
+        // `slice(-0)` is `slice(0)`, which is the whole list rather than none of it, so zero is
+        // spelled out instead of trusted to the negative index.
+        let next: unknown[] = [];
+        if (n > 0) next = config.from === "end" ? list.slice(-n) : list.slice(0, n);
         return { list: next, count: next.length };
       },
     },

@@ -38,6 +38,9 @@ function encodeString(value: string): Uint8Array {
  * meant as a float would arrive as an integer and be ignored; a caller that needs a float sends
  * `1.0`, which is not integral and encodes correctly.
  */
+const INT32_MIN = -2147483648;
+const INT32_MAX = 2147483647;
+
 export function encodeOscMessage(address: string, args: readonly OscArgument[]): Uint8Array {
   const tags = [","];
   const payloads: Uint8Array[] = [];
@@ -55,7 +58,11 @@ export function encodeOscMessage(address: string, args: readonly OscArgument[]):
     }
     const buffer = new Uint8Array(4);
     const view = new DataView(buffer.buffer);
-    if (Number.isInteger(arg)) {
+    // Integral, *and* small enough to say so: OSC's `i` is a 32-bit integer and `setInt32` wraps
+    // silently, so `3000000000` would arrive at the avatar as a negative number with the node still
+    // reporting success. Anything that does not fit goes out as a float, which is lossy in the last
+    // digits rather than wrong by four billion.
+    if (Number.isInteger(arg) && arg >= INT32_MIN && arg <= INT32_MAX) {
       tags.push("i");
       view.setInt32(0, arg, false);
     } else {
@@ -90,8 +97,25 @@ export function encodeOscMessage(address: string, args: readonly OscArgument[]):
 export function sendUdp(host: string, port: number, payload: Uint8Array): Promise<void> {
   return new Promise((resolve, reject) => {
     const socket = createSocket("udp4");
+    /*
+     * Once, whichever arrives first.
+     *
+     * This is both the `send` callback and the `error` handler, and a datagram that completes and
+     * *then* draws an asynchronous error (EMSGSIZE, an ICMP unreachable coming back) would call it
+     * twice. The second `close()` throws `ERR_SOCKET_DGRAM_NOT_RUNNING` from inside an event
+     * handler, which is an uncaught exception rather than a rejected promise: one misaddressed OSC
+     * send would take the daemon down. The guard settles the promise once; the `try` covers a close
+     * that fails for its own reasons, which is nothing this caller can act on.
+     */
+    let settled = false;
     const finish = (error?: Error): void => {
-      socket.close();
+      if (settled) return;
+      settled = true;
+      try {
+        socket.close();
+      } catch {
+        // Already closing. Nothing to do, and nothing the caller could do about it either.
+      }
       if (error) reject(error);
       else resolve();
     };

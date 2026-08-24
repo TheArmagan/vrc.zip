@@ -39,6 +39,27 @@ describe("compare", () => {
     expect(evaluateCompare("eq", 3, "3")).toBe(true);
   });
 
+  test("equality agrees with the orderings about what a number is", () => {
+    // `1.0` and ` 1` are what a config box holds after somebody types a number into it. Equality
+    // used to compare them as strings and answer false while `is at least` and `is at most` both
+    // answered true about the same pair, which is a graph nobody can reason about.
+    expect(evaluateCompare("eq", 1, "1.0")).toBe(true);
+    expect(evaluateCompare("eq", 1, " 1")).toBe(true);
+    expect(evaluateCompare("ne", 1, "1.0")).toBe(false);
+    // And it still declines the two loose comparisons `==` would have made.
+    expect(evaluateCompare("eq", "", 0)).toBe(false);
+    expect(evaluateCompare("eq", "Ada", "Grace")).toBe(false);
+  });
+
+  test("an empty term matches nothing rather than everything", () => {
+    // `"".includes("")` is true, so a half-configured gate used to fire on every event and a filter
+    // used to keep the whole list. An unfilled term fails closed.
+    expect(evaluateCompare("contains", "Ada Lovelace", "")).toBe(false);
+    expect(evaluateCompare("starts", "Ada Lovelace", "")).toBe(false);
+    expect(evaluateCompare("matches", "Ada Lovelace", "")).toBe(false);
+    expect(evaluateCompare("contains", "Ada Lovelace", null)).toBe(false);
+  });
+
   test("but a boolean is not a number and never equals one", () => {
     expect(evaluateCompare("eq", true, 1)).toBe(false);
     expect(evaluateCompare("eq", false, 0)).toBe(false);
@@ -228,6 +249,22 @@ describe("lists", () => {
     expect(await run("list-filter", { list: ["a", "b"] }, { op: "eq", value: "b" })).toEqual({
       list: ["b"],
     });
+  });
+
+  test("a filter with no term typed yet keeps nothing, not everything", async () => {
+    // The half-configured state has to fail closed the same way the gate does, or the node reads as
+    // working while it is doing nothing at all.
+    expect(await run("list-filter", { list: ["a", "b"] }, { op: "contains" })).toEqual({
+      list: [],
+    });
+    expect(await run("list-filter", { list: ["a", "b"] }, { op: "contains", value: "" })).toEqual({
+      list: [],
+    });
+    expect(await run("list-filter", { list: ["ab", "b"] }, { op: "contains", value: "a" })).toEqual(
+      {
+        list: ["ab"],
+      },
+    );
   });
 
   test("count and first", async () => {

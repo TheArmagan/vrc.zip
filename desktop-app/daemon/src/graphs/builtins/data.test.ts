@@ -3,7 +3,14 @@ import type { NodeConfigValues, PortValues } from "@vrcz/plugin-api/nodes";
 import { type BusEvent, EventBus } from "../../bus/event-bus.ts";
 import type { ExecuteContext } from "../types.ts";
 import { itemKey, sameItem } from "./collections.ts";
-import { type GraphDataStore, mapCollection, setCollection } from "./data-store.ts";
+import {
+  DEFAULT_STORE,
+  type GraphDataStore,
+  LIST_COLLECTION,
+  MAX_STORED_LIST_ITEMS,
+  mapCollection,
+  setCollection,
+} from "./data-store.ts";
 import { createBuiltinNodes, type GraphStateStore } from "./index.ts";
 import { LOCAL_SIGNAL_KIND, SIGNAL_KIND, signalKinds } from "./signals.ts";
 
@@ -168,6 +175,20 @@ describe("collections", () => {
     });
   });
 
+  test("taking none takes none", async () => {
+    // The `min: 1` on the field is the editor's and the daemon never sees it, so a count of 0 is a
+    // real state. It used to be read as "no number I like" and answered with the fallback of ten.
+    const h = harness();
+    expect(await h.run("list-slice", { list: [1, 2, 3, 4] }, { count: 0 })).toEqual({
+      list: [],
+      count: 0,
+    });
+    expect(await h.run("list-slice", { list: [1, 2, 3, 4] }, { from: "end", count: 0 })).toEqual({
+      list: [],
+      count: 0,
+    });
+  });
+
   test("an object needs both a name and a value to gain a field", async () => {
     const h = harness();
     expect(await h.run("make-object", { a: "usr_a", b: 1 }, { keyA: "user" })).toEqual({
@@ -299,6 +320,52 @@ describe("stored data", () => {
     expect(await h.run("store-list-items", {}, { name: "recent" })).toEqual({
       items: [3, 4],
       count: 2,
+    });
+  });
+
+  test("an uncapped list still stops growing, because the whole array is one row", async () => {
+    // "Keep at most 0" means no limit of the author's, and a graph appending on every join then
+    // rewrites one ever-larger row forever. None of the run-size or fire-rate ceilings sees it.
+    const data = memoryData();
+    const h = harness({ data });
+    const seeded = Array.from({ length: MAX_STORED_LIST_ITEMS }, (_, index) => index);
+    data.put(DEFAULT_STORE, LIST_COLLECTION, "log", JSON.stringify(seeded));
+
+    const result = await h.run("store-list-add", { item: "newest" }, { name: "log", max: 0 });
+    expect(result.count).toBe(MAX_STORED_LIST_ITEMS);
+    const items = result.items as unknown[];
+    // The oldest went, the newest stayed: the ceiling behaves like the configured limit does.
+    expect(items[items.length - 1]).toBe("newest");
+    expect(items[0]).toBe(1);
+  });
+
+  test("two long keys sharing a prefix are two rows", async () => {
+    // Keys are capped so a row stays readable, and a plain truncation made every key with the same
+    // first 400 characters the same row, each write silently overwriting the last.
+    const h = harness({ data: memoryData() });
+    const prefix = "usr_".padEnd(600, "x");
+    await h.run("store-value-set", { value: "first" }, { key: `${prefix}a` });
+    await h.run("store-value-set", { value: "second" }, { key: `${prefix}b` });
+    expect(await h.run("store-value-get", {}, { key: `${prefix}a` })).toEqual({
+      value: "first",
+      found: true,
+    });
+    expect(await h.run("store-value-get", {}, { key: `${prefix}b` })).toEqual({
+      value: "second",
+      found: true,
+    });
+  });
+
+  test("an unnamed collection still produces every port it declares", async () => {
+    // A node either produces all of its outputs or none on purpose. These used to answer with a
+    // strict subset, so a wire out of `count` or `items` died with nothing said.
+    const h = harness({ data: memoryData() });
+    expect(await h.run("store-map-remove", { key: "k" }, {})).toEqual({ found: false, count: 0 });
+    expect(await h.run("store-set-remove", { item: "k" }, {})).toEqual({ found: false, count: 0 });
+    expect(await h.run("store-list-remove", { item: "k" }, {})).toEqual({
+      removed: 0,
+      items: [],
+      count: 0,
     });
   });
 

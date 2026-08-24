@@ -43,7 +43,16 @@ class GraphRunState {
 
   #graphId: string | null = null;
   #timer: ReturnType<typeof setInterval> | undefined;
-  #inFlight = false;
+  /**
+   * The graph a poll is outstanding for, rather than a bare "a poll is outstanding".
+   *
+   * The distinction is what makes switching graphs immediate. This was a boolean, and `watch` calls
+   * `stop()` and then `refresh()` — so arriving on a second canvas while the first one's poll was
+   * still in the air made that first refresh a no-op, and the new graph's readout stayed blank for a
+   * whole tick. Overlap is still refused *per graph*, which is the thing that actually matters: two
+   * answers about the same run can arrive out of order and rewind the position.
+   */
+  #pollingFor: string | null = null;
 
   /** True when anything at all is running, which is what decides whether the canvas dims. */
   get running(): boolean {
@@ -84,8 +93,8 @@ class GraphRunState {
    */
   async refresh(): Promise<void> {
     const graphId = this.#graphId;
-    if (graphId === null || this.#inFlight) return;
-    this.#inFlight = true;
+    if (graphId === null || this.#pollingFor === graphId) return;
+    this.#pollingFor = graphId;
     try {
       const runs = await api.graphs.runs(graphId);
       if (this.#graphId !== graphId) return;
@@ -103,7 +112,9 @@ class GraphRunState {
     } catch {
       // Deliberately silent. See above.
     } finally {
-      this.#inFlight = false;
+      // Only if it is still ours. A poll left over from the previous graph must not clear the flag
+      // belonging to the one that replaced it.
+      if (this.#pollingFor === graphId) this.#pollingFor = null;
     }
   }
 }

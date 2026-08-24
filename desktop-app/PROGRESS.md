@@ -5053,6 +5053,133 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
        before/after was not obtained: the file was being edited by another session while the test ran,
        so the "without the fix" pass cannot be trusted to have run without it.
 
+268. **A bug sweep of the whole node-graph system, 2026-08-24.** Three readers over the engine and
+     the UI, the trigger/`Me`/API builtins, and the action/data builtins, then three fixers. Fifty-four
+     findings, forty-nine of them real. Decisions 269 to 276 are the calls that came out of it; the
+     rest were straightforward corrections and live in the diff. Two findings were left alone on
+     purpose and are named in 276. The reason this is worth a number at all: the great majority of
+     what it found was **silent** — a port that is never produced, a gate that answers true, a run
+     that reports finished having executed nothing. None of it throws, so none of it was going to
+     arrive as a bug report saying what it was.
+
+269. **Three separate ways a run could stop halfway and call it finishing.** All three are the same
+     shape: the walk had no way to say "this cannot proceed", so it said "there is nothing left".
+     - `#withSources` asked, for each node with nothing wired into it, whether it fed the scope
+       *directly*. A chain of two — `Text value → Compose text → Discord`, with only `Discord`
+       reachable from the trigger — satisfied neither test: the middle node has an incoming edge so
+       it is not a source, and the first feeds a node that is not in the scope. So it is a **closure**
+       now: walk backwards from what the scope consumes, then admit a node once everything feeding
+       it is in. A chain rooted at an unfired trigger still never satisfies that, which is what keeps
+       the other root's branch out, and there is a test for each half.
+     - `#pickNext` will not look at the dead-edge rule until every input has *settled*, so a node
+       waiting on something outside its scope — the other trigger of a two-trigger graph — was
+       neither run nor skipped, and the run drained around it. Blocking on something that can never
+       arrive **is** a dead edge, so it is now settled the way every other dead edge is: the node
+       skips, and the walk carries on to whatever that unblocks.
+     - A node wired to both a loop's `item` and its `done` is subtracted out of the body by
+       `foreachBodies` **on purpose**, so that it runs once, afterwards, in the outer scope. Then the
+       loop replaced its outputs with `{done, results}`, the `item` edge went dead, and the node the
+       subtraction exists to support was skipped. The loop now keeps the last `item` and `index`
+       alongside `done` — absent when nothing ran, because there is no last item of an empty list.
+
+270. **A ceiling must not fire at the graph that is obeying it.** `maxRunsPerHour` was counted before
+     the concurrency checks, so a `drop`-mode graph refusing two hundred fires while it executed one
+     run was force-disabled for "running more than 200 times in an hour" — it had run once. The
+     window is hit after the concurrency questions now, and a queued fire counts when it is queued,
+     because it is a run that will happen. Two related halves:
+     - The hour window is **forgotten when the auto-disable fires**. It had done its job by then, and
+       leaving it meant the user could fix the loop, press Enable, and be switched off again by the
+       same two hundred timestamps before the graph had run once.
+     - The per-trigger fire window now **survives a reload**. Every save, enable and disable comes
+       through `reload`, and disarming forgot the window unconditionally — so pressing Save released
+       a trigger from a ceiling it was standing at. Only a key that does not come back is forgotten,
+       which also stops the map growing for the life of the process as graphs are edited and deleted.
+
+271. **What a restart finds in `graph_runs`, and what it does about it.** `start()` resumed `waiting`
+     rows and nothing else, while `countLiveGraphRuns` counts `queued`, `running` and `waiting`. So a
+     kill at the wrong moment left a `running` row that no process owned, and a `drop`-mode graph
+     refused every fire for the rest of the database's life with "a run is already in flight" — the
+     canvas dimmed, nothing anywhere saying why. Orphan `running` rows are now given up at startup
+     with a `graph.run.failed` that says so, and `queued` rows are pumped, which nothing else would
+     ever have done after a restart.
+     - **Given up rather than resumed**, and that is deliberate. State is persisted at node
+       boundaries, so a run killed *during* a node has no record that the node ran; resuming would
+       re-execute it, and the node most likely to be interrupted is the slow one, which is the one
+       that sends something. Re-sending an invite is a worse failure than losing a run.
+
+272. **A parked `Wait` was the one door left open on a disabled graph.** `fire` refuses a disabled
+     graph and the triggers are disarmed, but a parked run is a row, and the sweep picks up rows.
+     Switch a graph off with a six-hour `Wait` in flight and the invite still went out six hours
+     later. `#resume` checks `enabled` now and drops the run. Two more things it did not check:
+     - The `Wait` node still **existing**. Edited away while the run was parked, the node lookup
+       returned `undefined` and the run resumed anyway — silently ignoring an `onMissed: "skip"` set
+       on that very node, because the policy is read off the node that cannot be found. That is given
+       up and said out loud instead.
+     - The **duration**, when the document does not carry one. The daemon never applies a config
+       `default` — that is the editor's job, done once when a node is created — so an imported or
+       hand-built document reaches the engine with no `durationMs`, which was read as `0`: parked in
+       the past, continued on the very next sweep. A `Wait` that does not wait. The fallback is
+       `DEFAULT_WAIT_MS`, exported from `intrinsics.ts` so the definition and the engine cannot
+       disagree about it.
+
+273. **An unfilled comparison term fails closed.** `contains`, `starts` and `matches` all answer
+     `true` against an empty needle — `"".includes("")`, `new RegExp("")` — so a `Compare` whose term
+     the author had not typed yet was a gate that let everything through, and `Filter list` with the
+     same config kept the whole list. On an armed graph that is the invite firing for everybody. An
+     empty term now answers false wherever it appears, which is the reading that matches what the
+     author has actually said: nothing. Two neighbours moved with it:
+     - `is` now compares through `asNumber` when both sides parse as numbers, so it agrees with
+       `is at least` and `is at most`. It did not: `String(1) !== String(1.0)`, so "is exactly 1"
+       against a config box holding `1.0` answered false while both ordering tests answered true.
+       `""` is still not `0` and `0` is still not `false`.
+     - `configText` returned its fallback for **any** empty string, so `Join list` with a deliberately
+       blank separator joined with `", "` and there was no way to ask for no separator at all.
+       Absent and deliberately-empty are now different questions with different answers.
+
+274. **A rehearsal has to validate what the arming gesture is about to authorise.** `validateWebhookUrl`
+     — the https and SSRF check — sat *after* the `dryRun` early return, and so did the Steam app-id
+     guard and the launcher's blank-path check. So rehearsing a graph pointed at `http://192.168.1.1/`
+     printed a cheerful "POST to …" and returned `status: 0`, and the first real fire was the first
+     time anybody looked at the URL. The rehearsal is the evidence a person reads at the
+     hold-to-confirm, so validation runs **before** the dry-run return everywhere; the dry run still
+     performs no side effect. This is the same principle as decision 206's dry-run-by-default: a
+     rehearsal that cannot fail is not a rehearsal.
+
+275. **Eight ports were reading fields their producer has never set.** Found by checking each trigger
+     against the code that emits its event rather than against the test beside it, which is the only
+     way this class of bug is findable: every one of them is a `?.` chain that yields `undefined`,
+     produces no port, and kills the branch in silence. `event.location` on a game-log event
+     (`log-bridge` sets `kind/accountId/ts/sessionId/subjectId/payload` and nothing else),
+     `payload.location.raw` (the field is `location`), `payload.destination` (it is `target`),
+     `payload.worldId` on a `location-join` line, `user.currentAvatar` on a public `PipelineUser`
+     (it is `currentAvatarImageUrl`, a thumbnail URL, which is what the `avatar` port was carrying
+     into `Look up an avatar`), `presence.world` as a location when it is a bare `WorldId`, and
+     `subjectId` as a world when the pipeline bridge fills it from `payload.userId`. Two rules came
+     out of it and both are now enforced at the port rather than assumed:
+     - **A typed id port carries an id of that kind or nothing at all.** `wrld_`, `avtr_`, `usr_`
+       are checked. This is also what finally kills the `"private"` case: `PipelineWorldId` is
+       documented as being the literal string `"private"` for a hidden instance, and one of the two
+       paths that used it had the guard and the other did not.
+     - **Test fixtures are built from the producer, not from the port.** Three of these had passing
+       tests that hand-built an event carrying `location`, `payload.destination` or
+       `user.currentAvatar` — shapes nothing in the daemon emits. The suite was pinning the broken
+       field paths in place. Same lesson as decision 256, in a different subsystem: a test can encode
+       a bug as faithfully as a comment.
+
+276. **Two findings were deliberately not fixed, and here is why.** Both are real and both would need
+     a design answer rather than a correction, so they are written down instead of guessed at.
+     - `graphRun.loops` is keyed by node id across every in-flight run, so two parallel runs of the
+       same graph on the same `For each` collapse to one badge that flickers between their positions.
+       There is one card per node and two runs, so no keying fixes it; the card would have to know
+       which run it is drawing. Left alone rather than picking a run arbitrarily.
+     - `innermostLoop` returns the first candidate when a node sits in two **sibling** bodies, which
+       is document order and therefore arbitrary. It is a genuinely ambiguous document — a `Collect`
+       fed from two loops has no innermost — and the honest fix is for the save-time check to refuse
+       it, which is a new rule and not a bug fix.
+     One more that is a fix but is worth naming because it is invisible: store keys longer than 400
+     characters were truncated with no disambiguation, so two keys sharing a 400-character prefix
+     silently became one row. The tail is a hash now.
+
 ---
 
 ## Gotchas
@@ -6018,6 +6145,55 @@ your real credential store.
 
 Verified live on Windows: three ports bound, `state.json` written, Credential Manager backend
 active, wrong `Host` 403, wrong `Origin` 403, missing token 401, proxy 501, UI 200.
+
+- **The node graph's failure mode is silence, and a sweep found forty-nine of them.** Three readers
+  over the engine, the UI, and the two halves of the builtin set on 2026-08-24. Almost nothing found
+  threw: the engine's one gating rule is *a missing key*, so a port that is never produced is
+  indistinguishable from a condition that answered false, and the run walks calmly around the branch
+  and reports `graph.run.finished`. That is the right rule and it is also why this class of bug does
+  not surface — the feed says the automation ran. Anything that reads a field off a bus event, or
+  that decides whether a node is ready, is worth checking against the code that *produces* the thing
+  rather than against the test beside it. Decisions 268 to 276.
+
+- **A test fixture built from the port instead of from the producer pins the bug in place.** Three
+  triggers had passing tests that hand-built a bus event carrying `location` at the top level,
+  `payload.destination`, or `user.currentAvatar`. No producer in the daemon emits any of those
+  shapes: `log-bridge` sets `kind/accountId/ts/sessionId/subjectId/payload` and nothing more, the
+  parser's field is `target`, and a public `PipelineUser` has `currentAvatarImageUrl`. Every one of
+  the three nodes was dead in production and green in CI. This is the second time the same lesson has
+  been written down here (decision 256 was the first, in presence), which is itself the point: it is
+  not a mistake anybody makes once. **Build the fixture from the emitting side.**
+
+- **`signature !== signature` compiled, linted, typechecked, and was a no-op.** In a Svelte effect
+  meant to fire `useUpdateNodeInternals` when a card's handles change. Neither Biome nor `tsc` nor
+  `svelte-check` has anything to say about comparing a value with itself, and the effect it disabled
+  is one whose absence shows up as a port you can see and cannot drag from — no error, no warning.
+  Worth knowing for what it says about the gates: all five of them pass on code that does nothing.
+  (This one was a deliberate A/B by another session, caught mid-experiment; the shape is the lesson,
+  not the incident.)
+
+- **`response.text()` then `.slice()` is not a cap.** Two places had it — the API node's wiring and
+  the webhook action's error excerpt — and in the second the cap was dead code twice over, an 8 KiB
+  slice followed immediately by a 200-character one. `text()` buffers the whole body first, so both
+  bounded what the graph *saw* while the daemon held everything. For a project whose headline number
+  is 50-80MB idle, a redirected host answering with a 200MB error page is the whole budget. Read
+  through `response.body` and cancel at the ceiling.
+
+- **A UDP socket's `error` event and its `send` callback are two paths to the same handler.** In
+  `sendUdp`, `finish` was registered as both, so a datagram that completed and then drew an
+  asynchronous error called `socket.close()` twice — and the second one throws
+  `ERR_SOCKET_DGRAM_NOT_RUNNING` **from inside an event handler**, which is an uncaught exception
+  rather than a rejected promise. One misaddressed OSC send takes the daemon down. Any callback that
+  is both a completion and an error path needs a settled flag.
+
+- **The daemon never applies a config `default`, and three separate bugs came from assuming it
+  does.** It is the editor's job, done once when a node is created, so any document that arrived by
+  import, by hand, or from an older build reaches the engine with the field simply absent. A `Wait`
+  with no `durationMs` was read as zero and did not wait; a `Maths` node in `round (A only)` mode
+  bailed out because `B` was missing; `Take from list` with a count of 0 returned ten items, because
+  the helper read 0 as "no number I like" and fell back. `min:` and `default:` in a config field are
+  statements about the inspector, not about the runtime. **If the engine needs a value, the engine
+  has to supply it.**
 
 ## Open questions
 

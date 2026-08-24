@@ -11,7 +11,7 @@
  */
 
 import type { NodeDefinition, PortDefinition } from "@vrcz/plugin-api/nodes";
-import { AFTER_PORT, ERROR_PORT } from "@vrcz/plugin-api/nodes";
+import { AFTER_PORT, ERROR_PORT, visibleInputs } from "@vrcz/plugin-api/nodes";
 import { FOREACH_AFTER_PORTS } from "@vrcz/shared";
 import { FOREACH_TYPE } from "./loops.ts";
 
@@ -129,6 +129,14 @@ export interface PortRow {
 export interface PortRows {
   readonly inputs: readonly PortRow[];
   readonly outputs: readonly PortRow[];
+  /**
+   * Declared inputs beyond the ones listed, for a node whose slot count is a slider.
+   *
+   * Listed as a count rather than as twenty-three more rows: the card is a preview, and a preview
+   * that is mostly empty slots teaches nothing about the node. The number is still worth saying,
+   * because "this one can take more" is exactly the fact somebody would otherwise never find.
+   */
+  readonly moreInputs: number;
 }
 
 function rowOf(port: PortDefinition): PortRow {
@@ -159,8 +167,12 @@ export function detailPorts(qualifiedId: string, definition: NodeDefinition): Po
     qualifiedId === FOREACH_TYPE
       ? definition.outputs.filter((port) => FOREACH_AFTER_PORTS.includes(port.id))
       : [];
+  // The empty config is the point: nothing has been created yet, so this is the node as it will
+  // arrive on the canvas — which for a variadic node is its default number of slots, not all of them.
+  const shown = executable ? visibleInputs(definition, {}) : [];
 
   return {
+    moreInputs: executable ? definition.inputs.length - shown.length : 0,
     inputs: [
       ...(executable
         ? [
@@ -173,7 +185,7 @@ export function detailPorts(qualifiedId: string, definition: NodeDefinition): Po
             },
           ]
         : []),
-      ...(executable ? definition.inputs.map(rowOf) : []),
+      ...shown.map(rowOf),
     ],
     outputs: [
       ...definition.outputs.filter((port) => !after.includes(port)).map(rowOf),

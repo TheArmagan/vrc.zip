@@ -274,17 +274,23 @@ export function readPath(value: unknown, path: string): unknown {
   return current;
 }
 
+/** `a` through `z`, as twenty-six declared inputs. See `variadicInputs` for why all of them exist. */
+const TEMPLATE_SLOTS = Array.from({ length: 26 }, (_, index) => {
+  const letter = String.fromCharCode(97 + index);
+  return { id: letter, label: letter.toUpperCase(), type: "json" as const };
+});
+
+/** How many slots a `Compose text` node starts with. Three, which is what it always had. */
+const TEMPLATE_DEFAULT_SLOTS = 3;
+
 const TEMPLATE: NodeDefinition = {
   id: "template",
   kind: "action",
   title: "Compose text",
   description: "Builds a line of text from the values wired into it.",
   category: "Data",
-  inputs: [
-    { id: "a", label: "A", type: "json" },
-    { id: "b", label: "B", type: "json" },
-    { id: "c", label: "C", type: "json" },
-  ],
+  inputs: TEMPLATE_SLOTS,
+  variadicInputs: "slots",
   outputs: [{ id: "text", label: "Text", type: "string" }],
   config: [
     {
@@ -292,21 +298,94 @@ const TEMPLATE: NodeDefinition = {
       id: "template",
       label: "Text",
       placeholder: "{a} joined {b}",
-      description: "Write {a}, {b} and {c} where the wired values should go.",
+      description:
+        "Write {a}, {b} and so on where the wired values should go. A number can be formatted: {a:2f} for two decimals, {a:,} to group thousands, {a:%} for a percentage, {a:+} to always show the sign.",
       required: true,
+    },
+    {
+      kind: "slider",
+      id: "slots",
+      label: "Slots",
+      min: 1,
+      max: TEMPLATE_SLOTS.length,
+      step: 1,
+      default: TEMPLATE_DEFAULT_SLOTS,
+      description: "How many values this node takes. It cannot go below the ones already wired.",
     },
   ],
   body: [{ kind: "config", field: "template", fallback: "…" }],
 };
 
-/** `{a}`, `{b}`, `{c}`, and `{{` for a literal brace. An unknown slot is left exactly as typed. */
+/**
+ * A format spec: `{a:2f}`, `{a:,}`, `{a:+1%}`.
+ *
+ * In order: an optional `+` to always show the sign, an optional `,` to group thousands, and
+ * optionally a digit count followed by `f` for fixed decimals or `%` for a percentage. Every part is
+ * optional but the spec as a whole must say *something*, which is what the check below enforces —
+ * `{a:}` means nothing and is therefore a typo rather than a request.
+ */
+const FORMAT_SPEC = /^(\+?)(,?)(?:(\d*)([f%]))?$/;
+
+/**
+ * The locale is fixed, and that is a decision rather than an oversight.
+ *
+ * A graph is a document. The line it composes goes to a webhook, a feed row, a notification — and it
+ * must not read differently because the machine running the daemon is set to German. If somebody
+ * wants a decimal comma they can type one; what they cannot do is opt out of a machine setting they
+ * did not know was in play.
+ */
+const FORMAT_LOCALE = "en-US";
+
+/**
+ * One value formatted by a spec, or null when the spec is not one.
+ *
+ * Null means "leave the slot exactly as the author typed it", which is the same thing an unknown
+ * slot does — a typo in the spec has to be visible in the output, because the alternative is a graph
+ * quietly ignoring half of what was asked of it. A *non-numeric value* is different and is handled
+ * by the caller: the spec was right, the world just handed over a string, and printing the string is
+ * more useful than printing `NaN`.
+ */
+function formatNumber(value: unknown, spec: string): string | null {
+  const parts = FORMAT_SPEC.exec(spec);
+  if (parts === null) return null;
+  const [, sign, group, digits, style] = parts;
+  if (sign === "" && group === "" && style === undefined) return null;
+
+  const number = asNumber(value);
+  if (number === null) return asText(value);
+
+  const places = digits === undefined || digits === "" ? 0 : Number(digits);
+  return new Intl.NumberFormat(FORMAT_LOCALE, {
+    ...(style === "%" ? { style: "percent" as const } : {}),
+    useGrouping: group === ",",
+    // Without a style there is no rounding to do, so both ends open: the point of `{a:,}` on its own
+    // is grouping, and silently truncating 1234.5678 to `1,235` would be a second thing happening.
+    ...(style === undefined
+      ? { maximumFractionDigits: 20 }
+      : { minimumFractionDigits: places, maximumFractionDigits: places }),
+    // `exceptZero` rather than `always`: `+0` reads as a bug in whatever produced it.
+    ...(sign === "+" ? { signDisplay: "exceptZero" as const } : {}),
+  }).format(number);
+}
+
+/**
+ * `{a}` through `{z}`, `{{` for a literal brace, and an optional `:spec` for numbers.
+ *
+ * An unknown slot is left exactly as typed, and so is an unreadable spec. Both are the author's
+ * text rather than the world's, and a template that silently drops the parts it did not understand
+ * is one nobody can debug.
+ */
 export function fillTemplate(template: string, inputs: PortValues): string {
-  return template.replace(/\{\{|\}\}|\{([a-z])\}/g, (match, slot: string | undefined) => {
-    if (match === "{{") return "{";
-    if (match === "}}") return "}";
-    if (slot === undefined || !(slot in inputs)) return match;
-    return asText(inputs[slot]);
-  });
+  return template.replace(
+    /\{\{|\}\}|\{([a-z])(?::([^}]*))?\}/g,
+    (match, slot: string | undefined, spec: string | undefined) => {
+      if (match === "{{") return "{";
+      if (match === "}}") return "}";
+      if (slot === undefined || !(slot in inputs)) return match;
+      if (spec === undefined) return asText(inputs[slot]);
+      return formatNumber(inputs[slot], spec) ?? match;
+    },
+  );
 }
 
 /* -------------------------------------------------------------------------------------------- */

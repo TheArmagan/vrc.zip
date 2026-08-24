@@ -31,6 +31,7 @@ import {
   isPortType,
   type NodeDefinition,
   type PortType,
+  visibleInputCount,
 } from "@vrcz/plugin-api/nodes";
 import type { GraphDocument, GraphEdge as WireEdge, GraphNode as WireNode } from "@vrcz/shared";
 import {
@@ -204,8 +205,53 @@ $effect(() => {
   // re-runs for state it touched itself.
   void graphs.nodeTypes.size;
   applyProblems();
+  applyVariadicFloors();
   applyEdgeStyles();
 });
+
+/**
+ * Raises a variadic node's slot count to cover the wires already in it.
+ *
+ * A node like `Compose text` declares twenty-six inputs and draws as many as its `slots` field says.
+ * Nothing stops that field from saying fewer than the graph is using — an import, a hand-edited
+ * document, a slider dragged down — and the result would be an edge feeding a port that is not on
+ * the card: a graph doing something with no way to see that it is.
+ *
+ * So the floor is enforced here rather than only where the slider moves, and it *rewrites the stored
+ * value* instead of quietly drawing something else. The value is presentational — the daemon runs
+ * every wired input regardless — so correcting it changes nothing about what the graph does, and
+ * leaving it wrong would make the slider lie about where it is.
+ */
+function applyVariadicFloors(): void {
+  let changed = false;
+  const next = nodes.map((node) => {
+    const data = node.data as {
+      qualifiedId: string;
+      config: Record<string, string | number | boolean>;
+    };
+    const definition = graphs.definition(data.qualifiedId);
+    if (definition === null || definition.kind === "trigger") return node;
+    const field = definition.variadicInputs;
+    if (field === undefined) return node;
+    const count = visibleInputCount(definition, data.config, wiredInputFloor(definition, node.id));
+    if (data.config[field] === count) return node;
+    changed = true;
+    return { ...node, data: { ...node.data, config: { ...data.config, [field]: count } } };
+  });
+  if (changed) nodes = next;
+}
+
+/** The one-based index of the last declared input with an edge in it, or 0 for none. */
+function wiredInputFloor(definition: NodeDefinition, nodeId: string): number {
+  if (definition.kind === "trigger") return 0;
+  let floor = 0;
+  for (const edge of edges) {
+    if (edge.target !== nodeId || edge.targetHandle == null) continue;
+    const index = definition.inputs.findIndex((port) => port.id === edge.targetHandle);
+    if (index >= 0) floor = Math.max(floor, index + 1);
+  }
+  return floor;
+}
 
 /** Marks each node that breaks a loop rule, in the words the daemon would use at run time. */
 function applyProblems(): void {
@@ -1284,6 +1330,31 @@ async function saveSecret(fieldId: string): Promise<void> {
                 onchange={(event: Event) =>
                   setConfig(field.id, (event.currentTarget as HTMLInputElement).checked)}
               />
+            {:else if field.kind === "slider"}
+              <!--
+                The number is beside the track rather than only in a tooltip: this one governs how
+                many ports the card has, and dragging it while watching the node grow is the whole
+                interaction. A value that only appears on hover would mean looking in two places.
+              -->
+              {@const current = Number(
+                (selected.data as { config: Record<string, unknown> }).config[field.id] ??
+                  field.default ??
+                  field.min,
+              )}
+              <div class="flex items-center gap-3">
+                <input
+                  id={`cfg-${field.id}`}
+                  class="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+                  type="range"
+                  min={field.min}
+                  max={field.max}
+                  step={field.step ?? 1}
+                  value={current}
+                  oninput={(event: Event) =>
+                    setConfig(field.id, Number((event.currentTarget as HTMLInputElement).value))}
+                />
+                <span class="w-8 shrink-0 text-right text-sm tabular-nums">{current}</span>
+              </div>
             {:else if field.kind === "account"}
               <!--
                 A picker rather than a text box, because nobody types an account id. The blank

@@ -30,7 +30,7 @@
 <script lang="ts">
 import CircleAlertIcon from "@lucide/svelte/icons/circle-alert";
 import { Handle, type NodeProps, Position } from "@xyflow/svelte";
-import { AFTER_PORT, ERROR_PORT, evaluateNodeBody } from "@vrcz/plugin-api/nodes";
+import { AFTER_PORT, ERROR_PORT, evaluateNodeBody, visibleInputs } from "@vrcz/plugin-api/nodes";
 import { FOREACH_AFTER_PORTS } from "@vrcz/shared";
 import { iconFor } from "$lib/graphs/icons.ts";
 import { familyColor, familyOf, isListPort, portColor } from "$lib/graphs/visuals.ts";
@@ -67,9 +67,14 @@ const owner = $derived(type?.owner ?? "vrcz");
 const family = $derived(familyOf(definition?.category, owner));
 const Icon = $derived(iconFor(definition?.category, owner));
 
-const inputs = $derived(
-  definition === null || definition.kind === "trigger" ? [] : definition.inputs,
-);
+/**
+ * The inputs this instance draws, which is not always every input the type declares.
+ *
+ * `Compose text` declares twenty-six and shows three until somebody asks for more. See
+ * `variadicInputs` in `@vrcz/plugin-api` for why the ports are all real and only the drawing varies.
+ * The editor keeps the count above whatever is wired, so this can never hide a port with an edge.
+ */
+const inputs = $derived(definition === null ? [] : visibleInputs(definition, node.config));
 const outputs = $derived(definition?.outputs ?? []);
 const body = $derived(
   definition?.body === undefined ? "" : evaluateNodeBody(definition.body, node.config, outputs),

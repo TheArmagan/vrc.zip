@@ -148,6 +148,13 @@ $effect(() => {
               </div>
             </div>
           {/each}
+          {#if section.title === "Takes" && ports.moreInputs > 0}
+            <!-- "This one can take more" is a fact nobody finds any other way, and twenty-three
+                 empty slots would teach less than the sentence does. -->
+            <p class="text-[10px] text-muted-foreground">
+              {ports.moreInputs} more slots, on a slider in the inspector.
+            </p>
+          {/if}
         </div>
       </div>
     {/if}

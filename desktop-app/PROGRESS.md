@@ -4533,6 +4533,38 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
        when it opened; a list scrolling underneath leaves it pointing at a row that has moved. The
        next `mouseenter` re-measures, which is a frame later at most.
 
+246. **`Compose text` takes twenty-six values and can format the numbers among them.** Three slots
+     meant a line of any length was two or three of these chained through each other, and every
+     number arrived at its full float precision — `You have 1234.5600000000001 credits`.
+     - **All twenty-six inputs are declared; only the drawing varies.** A node's ports are its
+       identity: they are hashed, a saved edge names one by id, and the daemon checks every edge
+       against them. Declaring them lazily from an instance's config would mean a definition whose
+       hash depends on its config, which is a definition that is not one thing. So
+       `variadicInputs` names a config field, and `visibleInputCount` in `@vrcz/plugin-api` is the
+       one place that answers how many to draw. An edge into `q` is valid whatever the slider says.
+     - **The count cannot be dragged below what is wired.** The alternative was deleting the
+       author's edges, and this editor has no undo. The floor is enforced in two places for one
+       reason: at the slider, so the feedback is immediate, and in the editor's presentation pass,
+       so an imported or hand-edited document is repaired rather than drawn wrong. The pass
+       *rewrites the stored value* rather than quietly drawing something else — the value is
+       presentational, the daemon runs every wired input regardless, and a slider sitting somewhere
+       other than where it is is worse than a corrected number.
+     - **`slider` is a new config-field kind, and the difference from `number` is meaning, not the
+       control.** A slider says the bounds are the interesting part and the author is choosing a
+       point on a scale. `min` and `max` are therefore required: a slider without ends is a text box
+       with a worse affordance.
+     - **`{a:2f}`, `{a:,}`, `{a:%}`, `{a:+}`, and any combination.** An unreadable spec is left
+       exactly as typed, the same as an unknown slot — both are the author's own text, and a
+       template that silently drops what it did not understand is one nobody can debug. A value that
+       is *not a number* is different and falls through as its plain text: the spec was right, the
+       world handed over a string, and printing the string beats printing `NaN`.
+     - **The locale is pinned to `en-US`.** A graph is a document, and the line it composes goes to
+       a webhook or a notification. It must not read differently because the daemon happens to be
+       running on a machine set to German — somebody who wants a decimal comma can type one, but
+       nobody should be opted into a machine setting they did not know was in play.
+     - Growing the input list moves `Compose text`'s definition hash, so a saved graph using one
+       shows the "node changed" badge until it is re-saved. Same cost as decision 240, same call.
+
 ---
 
 ## Gotchas

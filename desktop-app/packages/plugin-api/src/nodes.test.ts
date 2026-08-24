@@ -11,6 +11,8 @@ import {
   nodeDefinitionHash,
   PORT_TYPES,
   type PortType,
+  visibleInputCount,
+  visibleInputs,
 } from "./nodes.ts";
 
 describe("assignable", () => {
@@ -252,3 +254,63 @@ describe("canonicalNodeDefinition / nodeDefinitionHash", () => {
 // matrix decision would still typecheck here — which is why the matrix test above exists at runtime.
 const _member: PortType = "user";
 void _member;
+
+describe("variadic inputs", () => {
+  const compose: NodeDefinition = {
+    kind: "action",
+    id: "compose",
+    title: "Compose",
+    variadicInputs: "slots",
+    inputs: [
+      { id: "a", label: "A", type: "json" },
+      { id: "b", label: "B", type: "json" },
+      { id: "c", label: "C", type: "json" },
+      { id: "d", label: "D", type: "json" },
+    ],
+    outputs: [{ id: "text", label: "Text", type: "string" }],
+    config: [{ kind: "slider", id: "slots", label: "Slots", min: 1, max: 4, default: 2 }],
+  };
+
+  test("a node with no variadic field shows every input it declares", () => {
+    const plain: NodeDefinition = {
+      kind: "action",
+      id: "plain",
+      title: "Plain",
+      inputs: compose.kind === "action" ? compose.inputs : [],
+      outputs: [],
+    };
+    expect(visibleInputCount(plain, {})).toBe(4);
+  });
+
+  test("the config decides, and the declared count is the ceiling", () => {
+    expect(visibleInputCount(compose, { slots: 3 })).toBe(3);
+    expect(visibleInputCount(compose, { slots: 99 })).toBe(4);
+    expect(visibleInputCount(compose, { slots: 0 })).toBe(1);
+  });
+
+  test("a missing or nonsense value falls back to the field's own default", () => {
+    // The config of a node created by an older build, or one hand-edited in an exported document.
+    expect(visibleInputCount(compose, {})).toBe(2);
+    expect(visibleInputCount(compose, { slots: "three" })).toBe(2);
+  });
+
+  test("a wired port is a floor the count cannot be dragged below", () => {
+    // Hiding a port that has an edge in it would be a graph doing something with no way to see it,
+    // and this editor has no undo to recover the deleted wire the other approach would cost.
+    expect(visibleInputCount(compose, { slots: 1 }, 3)).toBe(3);
+    expect(visibleInputCount(compose, { slots: 4 }, 2)).toBe(4);
+  });
+
+  test("a trigger has no inputs to vary", () => {
+    const trigger: NodeDefinition = { kind: "trigger", id: "t", title: "t", outputs: [] };
+    expect(visibleInputCount(trigger, {})).toBe(0);
+    expect(visibleInputs(trigger, {})).toEqual([]);
+  });
+
+  test("the ports themselves are unchanged, which is what keeps a saved edge valid", () => {
+    // Only the drawing varies. Every declared port exists, always, so an edge into `d` is legal
+    // whatever the slider says -- and the hash does not depend on an instance's config.
+    expect(visibleInputs(compose, { slots: 2 }).map((port) => port.id)).toEqual(["a", "b"]);
+    expect(compose.kind === "action" && compose.inputs).toHaveLength(4);
+  });
+});

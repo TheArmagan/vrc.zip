@@ -204,6 +204,27 @@ export type NodeConfigField =
       readonly required?: boolean;
     }
   | {
+      /**
+       * A number with a range, dragged rather than typed.
+       *
+       * The difference from `number` is not the control, it is what the value *means*. A slider says
+       * the bounds are the interesting part of the field — every value between them is legal and the
+       * author is choosing a point on a scale rather than entering a quantity. Use `number` when the
+       * value has a unit and no natural ceiling.
+       *
+       * `min` and `max` are required for exactly that reason: a slider without ends is a text box
+       * with a worse affordance.
+       */
+      readonly kind: "slider";
+      readonly id: string;
+      readonly label: string;
+      readonly description?: string;
+      readonly min: number;
+      readonly max: number;
+      readonly step?: number;
+      readonly default?: number;
+    }
+  | {
       readonly kind: "boolean";
       readonly id: string;
       readonly label: string;
@@ -389,6 +410,61 @@ export interface TriggerNodeDefinition extends NodeDefinitionBase {
 export interface ExecutableNodeDefinition extends NodeDefinitionBase {
   readonly kind: "action" | "condition";
   readonly inputs: readonly PortDefinition[];
+  /**
+   * The id of a numeric config field saying how many of the declared inputs are *in use*.
+   *
+   * A node's ports are part of its identity: they are hashed, a saved edge references one by id, and
+   * the daemon checks every edge against them. So this does not change what the ports are — all of
+   * them exist, always, and an edge into any of them is valid. It changes only how many the editor
+   * draws, counting from the first.
+   *
+   * That is the whole trick behind a node like `Compose text`, which declares twenty-six inputs and
+   * shows three. Declaring them lazily instead would mean a definition whose hash depends on an
+   * instance's config, which is a definition that is not one thing.
+   *
+   * **The editor must never hide a port that has an edge in it.** A wire into an invisible port is a
+   * graph doing something with no way to see that it is; {@link visibleInputCount} is where that
+   * floor lives, so every consumer gets the same answer.
+   */
+  readonly variadicInputs?: string;
+}
+
+/**
+ * How many inputs to draw for one instance of a node.
+ *
+ * `wired` is the highest one-based slot with an edge in it, which acts as a floor: the count can be
+ * dragged down but never below what the graph is already using. Refusing to shrink is the right
+ * failure here — the alternative is silently deleting somebody's wires, and this editor has no undo.
+ */
+export function visibleInputCount(
+  definition: NodeDefinition,
+  config: NodeConfigValues,
+  wired = 0,
+): number {
+  if (definition.kind === "trigger") return 0;
+  const field = definition.variadicInputs;
+  if (field === undefined) return definition.inputs.length;
+  const raw = config[field];
+  const asked = typeof raw === "number" && Number.isFinite(raw) ? Math.floor(raw) : Number.NaN;
+  const chosen = Number.isNaN(asked) ? defaultCountOf(definition, field) : asked;
+  return Math.min(definition.inputs.length, Math.max(1, wired, chosen));
+}
+
+function defaultCountOf(definition: NodeDefinition, field: string): number {
+  const declared = definition.config?.find((entry) => entry.id === field);
+  return declared !== undefined && "default" in declared && typeof declared.default === "number"
+    ? declared.default
+    : 1;
+}
+
+/** The inputs an instance actually shows. See {@link visibleInputCount}. */
+export function visibleInputs(
+  definition: NodeDefinition,
+  config: NodeConfigValues,
+  wired = 0,
+): readonly PortDefinition[] {
+  if (definition.kind === "trigger") return [];
+  return definition.inputs.slice(0, visibleInputCount(definition, config, wired));
 }
 
 export type NodeDefinition = TriggerNodeDefinition | ExecutableNodeDefinition;

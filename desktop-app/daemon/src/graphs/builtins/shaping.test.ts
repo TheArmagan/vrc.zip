@@ -127,6 +127,66 @@ describe("compose text", () => {
       text: '{"x":1}',
     });
   });
+
+  test("takes twenty-six slots, so a long line does not need three of these chained", () => {
+    expect(fillTemplate("{x}{y}{z}", { x: 1, y: 2, z: 3 })).toBe("123");
+  });
+});
+
+describe("compose text: formatting a number", () => {
+  test("fixed decimals, which is the one everybody wants", () => {
+    expect(fillTemplate("{a:2f}", { a: 12.3456 })).toBe("12.35");
+    expect(fillTemplate("{a:0f}", { a: 3.7 })).toBe("4");
+    expect(fillTemplate("{a:f}", { a: 3.7 })).toBe("4");
+    expect(fillTemplate("{a:2f}", { a: 5 })).toBe("5.00");
+  });
+
+  test("grouping on its own does not also round", () => {
+    // `{a:,}` asks for separators. Truncating the fraction as well would be a second thing
+    // happening that nobody asked for.
+    expect(fillTemplate("{a:,}", { a: 1234567.25 })).toBe("1,234,567.25");
+    expect(fillTemplate("{a:,2f}", { a: 1234567.256 })).toBe("1,234,567.26");
+  });
+
+  test("percent multiplies, so the value stays the fraction it was", () => {
+    expect(fillTemplate("{a:%}", { a: 0.256 })).toBe("26%");
+    expect(fillTemplate("{a:1%}", { a: 0.256 })).toBe("25.6%");
+  });
+
+  test("a forced sign shows on a gain and never on zero", () => {
+    expect(fillTemplate("{a:+}", { a: 5 })).toBe("+5");
+    expect(fillTemplate("{a:+}", { a: -5 })).toBe("-5");
+    // `+0` reads as a bug in whatever produced it rather than as a delta of nothing.
+    expect(fillTemplate("{a:+}", { a: 0 })).toBe("0");
+    expect(fillTemplate("{a:+,2f}", { a: 1234.5 })).toBe("+1,234.50");
+  });
+
+  test("a numeric string formats, because JSON is full of them", () => {
+    expect(fillTemplate("{a:2f}", { a: "12.3456" })).toBe("12.35");
+  });
+
+  test("a value that is not a number falls through as its plain text", () => {
+    // The spec was right and the world handed over a string. Printing it beats printing NaN.
+    expect(fillTemplate("{a:2f}", { a: "Ada" })).toBe("Ada");
+    expect(fillTemplate("{a:2f}", { a: null })).toBe("");
+  });
+
+  test("a spec that is not one is left exactly as typed", () => {
+    // The author's own text, unlike the value. A template that silently drops what it did not
+    // understand is one nobody can debug.
+    expect(fillTemplate("{a:zzz}", { a: 12.3456 })).toBe("{a:zzz}");
+    expect(fillTemplate("{a:}", { a: 12.3456 })).toBe("{a:}");
+  });
+
+  test("the locale is fixed, not the machine's", () => {
+    // A graph is a document: the line it composes must not read differently because the daemon is
+    // running on a machine set to German.
+    expect(fillTemplate("{a:,2f}", { a: 1234.5 })).toBe("1,234.50");
+  });
+
+  test("an unwired slot with a spec is still left as typed", () => {
+    expect(fillTemplate("{a:2f} and {b:2f}", { a: 1 })).toBe("1.00 and {b:2f}");
+  });
 });
 
 describe("lists", () => {

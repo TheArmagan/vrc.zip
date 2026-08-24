@@ -29,7 +29,7 @@
 -->
 <script lang="ts">
 import CircleAlertIcon from "@lucide/svelte/icons/circle-alert";
-import { Handle, type NodeProps, Position } from "@xyflow/svelte";
+import { Handle, type NodeProps, Position, useUpdateNodeInternals } from "@xyflow/svelte";
 import {
   AFTER_PORT,
   ERROR_PORT,
@@ -134,6 +134,36 @@ const afterPorts = $derived(
     : [],
 );
 const mainPorts = $derived(outputs.filter((port) => !afterPorts.includes(port)));
+
+/**
+ * Tell Svelte Flow when this card's set of handles changes.
+ *
+ * **Without this, the second row of an extractor draws a port nothing can be dragged out of.** Svelte
+ * Flow measures a node's handles into `handleBounds` once and re-measures only when the node's
+ * *dimensions* change. Our ports are added by config, not by code — a row added in the inspector puts
+ * a new `<Handle>` on the card — and the card is a fixed width whose height is set by the taller of
+ * its two columns. An extractor has two rows on the left (`run after` and `From`), so claiming the
+ * second output slot adds a row to the right-hand column without making the card any taller. Nothing
+ * changed size, nothing was re-measured, and a handle absent from `handleBounds` is a handle the
+ * connection code cannot start a wire from. The first port worked because it was there at mount.
+ *
+ * `useUpdateNodeInternals` is the documented answer for exactly this — programmatically added
+ * handles — and it forces the re-measure on the next frame. The signature is the ids in order, so it
+ * fires when a port appears, disappears, or moves, and not on a relabel.
+ */
+const updateInternals = useUpdateNodeInternals();
+const handleSignature = $derived(
+  `${inputs.map((port) => port.id).join(",")}|${outputs.map((port) => port.id).join(",")}`,
+);
+
+$effect(() => {
+  // Read it into the effect's dependencies first: `updateInternals` is a plain function and reading
+  // nothing reactive inside would make this run once and never again. A `$derived` only propagates
+  // when its value actually changed, so re-running *is* the signal — there is nothing to compare
+  // against here, and comparing the signature with itself is a condition that is never true.
+  void handleSignature;
+  updateInternals(id);
+});
 
 /** Where the loop this card draws is up to, or null when it is not running. */
 const position = $derived(graphRun.loops.get(id) ?? null);

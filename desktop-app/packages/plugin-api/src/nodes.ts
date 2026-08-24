@@ -120,9 +120,22 @@ export function isPortType(value: unknown): value is PortType {
 }
 
 /**
+ * The domain types: an id with host-known meaning. Every one of them **is** a string underneath,
+ * which is what rule 4 is about.
+ */
+const ID_TYPES: readonly BasePortType[] = [
+  "friend",
+  "user",
+  "world",
+  "instance",
+  "group",
+  "avatar",
+];
+
+/**
  * Can a value of `from` flow into a port of `to`?
  *
- * **Three widening rules**, plus identity:
+ * **Four widening rules**, plus identity:
  *
  * 1. `friend <: user` — a friend is a user you also have a relationship with, so anything that takes
  *    a user takes a friend. Not the reverse: a node that needs friendship (unfriend, favourite) must
@@ -133,10 +146,17 @@ export function isPortType(value: unknown): value is PortType {
  * 3. `list<A> <: list<B>` when `A <: B` — lists widen exactly as their elements do, and no further.
  *    A list is never a scalar and a scalar is never a list, in either direction: "it is one thing or
  *    several" is the distinction the type exists to draw.
+ * 4. **`user <: string`, and the same for every other id type.** A `user` is a user *id*, not a user
+ *    object — the doc on `BASE_PORT_TYPES` has always said so — and an id is a string. Refusing that
+ *    edge meant a graph could not put somebody's id in a message, in a webhook body, or into a raw
+ *    endpoint's parameter without a conversion node whose only job was to restate a fact the type
+ *    already carried. **Not the reverse**, which is the half that matters: a `string` still cannot
+ *    become a `user`, so "this port needs a person" keeps refusing a world id at edit time. Use the
+ *    `A user` node to say a string really is one.
  *
- * PLAN.md is emphatic about why the list stops there: **every additional rule is an explanation you
- * owe a user whose edge just got refused.** Three rules still fit in a sentence, and the third is
- * the one people already expect from every other type system they have used.
+ * PLAN.md is emphatic about why the list stays short: **every additional rule is an explanation you
+ * owe a user whose edge just got refused.** These four still fit in a sentence each, and rule 4 is
+ * the one nobody has to be taught, because it is what the types already meant.
  *
  * The port compatibility matrix in the docs is generated from this function, so it is the single
  * source of truth and cannot describe a rule that isn't implemented.
@@ -150,6 +170,7 @@ export function assignable(from: PortType, to: PortType): boolean {
   // `list<friend>` cannot slip into a `user` port on the strength of rule 1.
   if (fromElement === null || toElement === null) {
     if (fromElement !== null || toElement !== null) return false;
+    if (to === "string") return ID_TYPES.includes(from as BasePortType);
     return from === "friend" && to === "user";
   }
   return assignable(fromElement, toElement);

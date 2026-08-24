@@ -112,49 +112,44 @@ export function nodeIdFor(operationId: string): string {
 }
 
 /**
- * The port type for a path parameter, by name.
+ * The port type for a path parameter, which is whatever the spec says it is and nothing cleverer.
  *
- * `userId` is a `user`, not a string, and that is the difference between an edge the lattice checks
- * and one it waves through. The names are VRChat's own and stable across the spec; anything this
- * does not recognise stays a `string`, which is honest rather than clever.
+ * **This used to map `userId` to `user`, `worldId` to `world`, and so on**, on the grounds that the
+ * lattice would then check the edge. In practice it made these nodes awkward to feed: a raw endpoint
+ * is where a graph ends up precisely when it is holding an id it computed — off a payload, out of
+ * `Read field`, from a webhook — and every one of those is a `string`. A `user` port refused all of
+ * them, so reaching a raw endpoint meant a converter node in front of every parameter.
+ *
+ * A `string` port takes both halves now: a plain id straight from wherever it came, and a typed one,
+ * because a `user` **is** a string and rule 4 of the lattice says so. Nothing lost, because there
+ * was never anything to check here — the curated nodes (`Look up a user`, `Invite someone`) are
+ * where a typed port earns its keep, and they still have them.
  */
 export function portTypeFor(param: ApiOperationParam): PortType {
   if (param.type === "number") return "number";
   if (param.type === "boolean") return "boolean";
-  switch (param.name) {
-    case "userId":
-    case "ownerId":
-      return "user";
-    case "worldId":
-      return "world";
-    case "avatarId":
-      return "avatar";
-    case "groupId":
-      return "group";
-    case "instanceId":
-      return "instance";
-    default:
-      return "string";
-  }
+  return "string";
 }
 
 /**
- * The placeholder for a path parameter's box, which is the only hint about what belongs in it.
+ * The id prefix a parameter expects, by VRChat's own name for it.
  *
- * VRChat's own descriptions say "Must be a valid user ID" without saying what one looks like, and
- * the prefix is the half somebody typing into an empty box actually needs.
+ * Only a hint for the box's placeholder now that the ports are all `string`. The names are VRChat's
+ * own and stable across the spec; anything this does not recognise gets no placeholder, which is
+ * honest rather than clever.
  */
-function placeholderFor(type: PortType): string {
-  switch (type) {
-    case "user":
+function idHintFor(name: string): string {
+  switch (name) {
+    case "userId":
+    case "ownerId":
       return "usr_…";
-    case "world":
+    case "worldId":
       return "wrld_…";
-    case "avatar":
+    case "avatarId":
       return "avtr_…";
-    case "group":
+    case "groupId":
       return "grp_…";
-    case "instance":
+    case "instanceId":
       return "wrld_…:12345~region(eu)";
     default:
       return "";
@@ -222,7 +217,7 @@ function configFor(operation: ApiOperation): NodeConfigField[] {
       add({ kind: "boolean", ...common, default: false });
       continue;
     }
-    const placeholder = placeholderFor(portTypeFor(param));
+    const placeholder = idHintFor(param.name);
     add({ kind: "text", ...common, ...(placeholder === "" ? {} : { placeholder }) });
   }
 

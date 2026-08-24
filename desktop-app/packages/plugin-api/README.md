@@ -30,7 +30,7 @@ import {
   grantHash,           // the stable digest that decides when consent is re-asked
   parseEnvelope,       // parse an untrusted wire frame without throwing
   validateUINode,      // validate a UI tree, with depth and size caps
-  assignable,          // the port-type lattice's three widening rules
+  assignable,          // the port-type lattice's four widening rules
 } from "@vrcz/plugin-api";
 ```
 

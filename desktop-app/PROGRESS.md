@@ -5018,6 +5018,41 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      - Restamps all 286 `nodeDefinitionHash`es, so saved graphs using an API node are flagged as
        changed. Same trade as decision 262 and accepted for the same reason.
 
+266. **API path parameters are plain `string` ports, and the lattice grew a fourth rule: an id is a
+     string.** `portTypeFor` used to map `userId` to `user`, `worldId` to `world` and so on. It read
+     well and it made these nodes awkward to feed: a raw endpoint is where a graph ends up precisely
+     *because* it is holding an id it computed — off a payload, out of `Read field`, from a webhook —
+     and every one of those is a `string`. A `user` port refused all of them, so every parameter
+     needed a converter in front of it.
+     - **The port type change alone would have been a regression**, and that is why the lattice moved
+       with it: a trigger's `user` output could no longer reach a `string` parameter. So
+       `assignable` now says `user <: string`, and the same for `friend`, `world`, `instance`,
+       `group` and `avatar`. Both halves flow in now.
+     - **It is a widening, so nothing that connected before stops connecting.** And the reverse stays
+       refused, which is the half that was ever load-bearing: a `string` is not a `user`, so "this
+       port needs a person" still refuses a world id at edit time, and `A user` is how an author says
+       a string really is one. An id does not become a *different* id either.
+     - This is the second time the "exactly N rules" section has been amended (rule 3 arrived with
+       `foreach`), and it stays a deliberate, documented act: `nodes.test.ts` asserts the whole
+       matrix against a hand-written set precisely so a new rule cannot land in a diff nobody read.
+       `docs/nodes.md`, the cheat sheet, the README and the generated `ports.md` all moved together.
+     - The id-name mapping was not wasted: it is the box's **placeholder** now (`usr_…`, `wrld_…`),
+       which is where it was actually useful. VRChat's own description says "Must be a valid user ID"
+       without ever saying what one looks like.
+
+267. **A card whose handles come from config has to tell Svelte Flow when they change.** Svelte Flow
+     measures a node's handles into `handleBounds` and re-measures on a *dimension* change. Our ports
+     are added by config rather than by code, and an extractor's card is a fixed width whose height
+     is the taller of its two columns — so claiming the second output slot adds a row on the right
+     without making the card any taller. `XYHandle.onPointerDown` looks the handle up in
+     `handleBounds` and returns silently when it is not there, so the symptom is a port that draws
+     correctly and cannot be dragged out of. `GraphNodeCard` now calls `useUpdateNodeInternals` from
+     an effect keyed on the ids of its visible ports.
+     - **Honest about what was verified.** The mechanism is in the library source, and the second and
+       third outputs of an extractor connect in the running app with this in place. A clean
+       before/after was not obtained: the file was being edited by another session while the test ran,
+       so the "without the fix" pass cannot be trusted to have run without it.
+
 ---
 
 ## Gotchas

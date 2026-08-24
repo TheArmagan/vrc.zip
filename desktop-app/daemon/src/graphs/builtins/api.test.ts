@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { API_OPERATIONS } from "@vrcz/api/operations";
-import { validateNodeDefinition } from "@vrcz/plugin-api/nodes";
+import { assignable, validateNodeDefinition } from "@vrcz/plugin-api/nodes";
 import { EventBus } from "../../bus/event-bus.ts";
 import {
   buildBody,
@@ -88,14 +88,17 @@ describe("the catalogue", () => {
 describe("the generated shape", () => {
   const getUser = API_OPERATIONS.find((operation) => operation.operationId === "getUser");
 
-  test("a path parameter is a typed input, not a string", () => {
-    // `userId` is a `user`, which is the difference between an edge the lattice checks and one it
-    // waves through.
+  test("a path parameter is a plain string port, and takes a typed id anyway", () => {
+    // It used to be a `user`, and that refused every id a graph had actually computed — a raw
+    // endpoint is where you end up holding a string. `user` still flows in, because rule 4 of the
+    // lattice says an id is a string, so nothing that worked before stopped working.
     expect(getUser).toBeDefined();
     if (getUser === undefined) return;
     const definition = definitionFor(getUser);
     const inputs = "inputs" in definition ? definition.inputs : [];
-    expect(inputs.map((port) => [port.id, port.type])).toEqual([["userId", "user"]]);
+    expect(inputs.map((port) => [port.id, port.type])).toEqual([["userId", "string"]]);
+    expect(assignable("user", "string")).toBe(true);
+    expect(assignable("string", "string")).toBe(true);
   });
 
   test("a path parameter is also a box, and neither half is marked required", () => {
@@ -161,12 +164,25 @@ describe("the generated shape", () => {
     expect(config.some((field) => field.id === "n")).toBe(true);
   });
 
-  test("port types are mapped by the id's name", () => {
+  test("port types follow the spec's own type and nothing cleverer", () => {
+    // The id-name mapping is gone. What it bought was a check these nodes never needed, and what it
+    // cost was every string id being refused at the port that most often receives one.
     const param = { required: true, description: "", enumValues: [], defaultValue: null } as const;
-    expect(portTypeFor({ ...param, name: "userId", in: "path", type: "string" })).toBe("user");
-    expect(portTypeFor({ ...param, name: "worldId", in: "path", type: "string" })).toBe("world");
+    expect(portTypeFor({ ...param, name: "userId", in: "path", type: "string" })).toBe("string");
+    expect(portTypeFor({ ...param, name: "worldId", in: "path", type: "string" })).toBe("string");
     expect(portTypeFor({ ...param, name: "printId", in: "path", type: "string" })).toBe("string");
     expect(portTypeFor({ ...param, name: "n", in: "query", type: "number" })).toBe("number");
+  });
+
+  test("the box still hints at what kind of id it wants", () => {
+    // The one thing the name mapping was good for, kept where it is actually read: an empty box
+    // beside "Must be a valid user ID" says nothing about what a user id looks like.
+    const withWorld = API_OPERATIONS.find((operation) =>
+      operation.params.some((param) => param.in === "path" && param.name === "worldId"),
+    );
+    if (withWorld === undefined) return;
+    const field = (definitionFor(withWorld).config ?? []).find((entry) => entry.id === "worldId");
+    expect(field?.kind === "text" ? field.placeholder : "").toBe("wrld_…");
   });
 });
 

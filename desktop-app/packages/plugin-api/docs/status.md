@@ -59,7 +59,7 @@ hostile input. See [protocol.md](./protocol.md).
 **The UI vocabulary.** The full `UINode` union with `validateUINode`, depth and count caps. The
 *renderer* that would draw it does not exist. See [ui.md](./ui.md).
 
-**The node model.** Port types, the three widening rules, `assignable`, config schemas, the body
+**The node model.** Port types, the four widening rules, `assignable`, config schemas, the body
 template, trigger inversion, and the definition hash. Nothing registers them yet. See
 [nodes.md](./nodes.md).
 

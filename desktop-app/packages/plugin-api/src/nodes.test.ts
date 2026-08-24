@@ -25,12 +25,17 @@ describe("assignable", () => {
     for (const t of PORT_TYPES) expect(assignable(t, t)).toBe(true);
   });
 
-  test("the two scalar widening rules hold", () => {
+  test("the three scalar widening rules hold", () => {
     expect(assignable("friend", "user")).toBe(true);
     for (const t of PORT_TYPES) expect(assignable(t, "json")).toBe(true);
+    // An id is a string, because that is what a domain type has always been: `user` is a user id,
+    // not a user object. Refusing this meant a conversion node in front of every raw endpoint.
+    for (const t of ["friend", "user", "world", "instance", "group", "avatar"] as const) {
+      expect(assignable(t, "string")).toBe(true);
+    }
   });
 
-  test("neither scalar rule holds in reverse", () => {
+  test("no scalar rule holds in reverse", () => {
     // A node that needs friendship must be able to refuse a stranger at edit time.
     expect(assignable("user", "friend")).toBe(false);
     // `json` into a typed port is the unchecked cast that makes the type system decorative.
@@ -38,6 +43,14 @@ describe("assignable", () => {
       if (t === "json") continue;
       expect(assignable("json", t)).toBe(false);
     }
+    // And the half of rule 4 that matters: a string is not an id. "This port needs a person" still
+    // refuses a world id at edit time, and `A user` is how you say a string really is one.
+    for (const t of ["friend", "user", "world", "instance", "group", "avatar"] as const) {
+      expect(assignable("string", t)).toBe(false);
+    }
+    // Nor does an id become a different id by way of string.
+    expect(assignable("world", "user")).toBe(false);
+    expect(assignable("group", "avatar")).toBe(false);
   });
 
   test("lists widen exactly as their elements do", () => {
@@ -58,14 +71,18 @@ describe("assignable", () => {
   });
 
   test("nothing else widens — asserted over the whole matrix", () => {
-    // The point of this test is to fail loudly the day someone adds a fourth rule. PLAN.md: every
+    // The point of this test is to fail loudly the day someone adds a rule. PLAN.md: every
     // additional rule is an explanation you owe a user whose edge just got refused, so a new one is
-    // a decision that gets made deliberately, not one that lands in a diff nobody read. It did its
-    // job when the third rule landed, which is why the expected set is spelled out rather than
-    // derived from `assignable` — a set built from the function under test proves nothing.
+    // a decision that gets made deliberately, not one that lands in a diff nobody read. It has now
+    // done its job twice — for rule 3 (lists) and rule 4 (an id is a string) — which is why the
+    // expected set is spelled out rather than derived from `assignable`: a set built from the
+    // function under test proves nothing.
+    const ids = ["friend", "user", "world", "instance", "group", "avatar"] as const;
     const expected = new Set([
       "friend->user",
       "list<friend>->list<user>",
+      ...ids.map((type) => `${type}->string`),
+      ...ids.map((type) => `list<${type}>->list<string>`),
       ...BASE_PORT_TYPES.filter((type) => type !== "json").map(
         (type) => `list<${type}>->list<json>`,
       ),
@@ -87,9 +104,11 @@ describe("assignable", () => {
       for (const to of PORT_TYPES) if (assignable(from, to)) accepted++;
     const n = PORT_TYPES.length;
     const bases = BASE_PORT_TYPES.length;
+    const ids = 6; // friend, user, world, instance, group, avatar
     // identity (n) + X->json for every X but json (n-1) + friend->user (1)
     // + list<X>->list<json> for every X but json (bases-1) + list<friend>->list<user> (1)
-    expect(accepted).toBe(n + (n - 1) + 1 + (bases - 1) + 1);
+    // + id->string for every id type (ids) + the same elementwise for lists (ids)
+    expect(accepted).toBe(n + (n - 1) + 1 + (bases - 1) + 1 + ids + ids);
   });
 
   test("nesting is not a port type", () => {

@@ -17,11 +17,12 @@
  * the runtime asking you "has it happened yet?" — is both wrong for events and a rate-limit hazard
  * multiplied by every graph the user has saved.
  *
- * ## The port lattice has exactly two widening rules
+ * ## The port lattice has exactly four widening rules
  *
- * `friend <: user` and `X <: json`. That is all. Every additional rule would be an explanation you
- * owe a user whose edge just got refused — so an output typed `user` flows into an input typed
- * `user` or `json`, and nothing else.
+ * `friend <: user`, `X <: json`, `list<A> <: list<B>` when `A <: B`, and `id <: string` — a `user`
+ * is a user id, and an id is a string. That is all. Every additional rule would be an explanation
+ * you owe a user whose edge just got refused, so an output typed `user` flows into an input typed
+ * `user`, `string` or `json`, and nothing else. None of them runs in reverse.
  *
  * **Phase 4 owns the editor.** Registration, arming and execution are real today; there is no
  * canvas yet to wire them on.

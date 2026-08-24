@@ -11,12 +11,12 @@ user whose edge just got refused.
 
 | from \ to | `friend` | `user` | `world` | `instance` | `group` | `avatar` | `string` | `number` | `boolean` | `json` |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| **`friend`** | yes | yes | — | — | — | — | — | — | — | yes |
-| **`user`** | — | yes | — | — | — | — | — | — | — | yes |
-| **`world`** | — | — | yes | — | — | — | — | — | — | yes |
-| **`instance`** | — | — | — | yes | — | — | — | — | — | yes |
-| **`group`** | — | — | — | — | yes | — | — | — | — | yes |
-| **`avatar`** | — | — | — | — | — | yes | — | — | — | yes |
+| **`friend`** | yes | yes | — | — | — | — | yes | — | — | yes |
+| **`user`** | — | yes | — | — | — | — | yes | — | — | yes |
+| **`world`** | — | — | yes | — | — | — | yes | — | — | yes |
+| **`instance`** | — | — | — | yes | — | — | yes | — | — | yes |
+| **`group`** | — | — | — | — | yes | — | yes | — | — | yes |
+| **`avatar`** | — | — | — | — | — | yes | yes | — | — | yes |
 | **`string`** | — | — | — | — | — | — | yes | — | — | yes |
 | **`number`** | — | — | — | — | — | — | — | yes | — | yes |
 | **`boolean`** | — | — | — | — | — | — | — | — | yes | yes |

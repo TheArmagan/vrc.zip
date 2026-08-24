@@ -78,7 +78,7 @@ up, invite them, boop them — and `Me` is everything aimed at the user's own ac
 their friends list, their favourites, the group badge on their profile. It is a distinction worth
 copying if your plugin does both, because it is the one a person checks before arming a graph.
 
-## The lattice: exactly three widening rules
+## The lattice: exactly four widening rules
 
 `assignable(from, to)` answers "can a value of `from` flow into a port of `to`?" It is identity, plus:
 
@@ -90,15 +90,24 @@ copying if your plugin does both, because it is the one a person checks before a
    is telling the user *before* they save.
 3. **`list<A> <: list<B>` when `A <: B`** — lists widen exactly as their elements do, and no further.
    A list is never a scalar and a scalar is never a list, in either direction.
+4. **`user <: string`, and the same for every other id type** — `user` is a user *id*, not a user
+   object, and an id is a string. Not the reverse: a `string` cannot become a `user`, so "this port
+   needs a person" still refuses a world id at edit time. The `A user` node is how you say a string
+   really is one.
 
 That is the whole list, and it stops there deliberately. **Every additional rule is an explanation you
-owe a user whose edge just got refused.** Three rules still fit in a sentence, and the third is the
-one people already expect from every other type system they have used.
+owe a user whose edge just got refused.** Four rules still fit in a sentence each, and the last two are
+the ones people already expect: lists widen as their elements do, and an id is text.
 
 > This section said **two** rules until Phase 4. The third arrived with `foreach` and the list nodes,
 > which needed *some* answer: the alternatives were a flat enumeration of `friendList` / `userList`
 > that grows every time a scalar is added, or "a list is `json`", which hands back exactly the
 > property the lattice exists to hold.
+>
+> The fourth arrived with the generated `(API)` nodes. Their path parameters used to be typed
+> (`userId` was a `user`), which refused every id a graph had actually computed — a raw endpoint is
+> where you end up holding a `string`. The parameters are plain `string` ports now, and this rule is
+> what keeps a typed producer flowing into one.
 
 ### Compatibility matrix
 
@@ -107,12 +116,12 @@ that isn't implemented.
 
 | from \ to | friend | user | world | instance | group | avatar | string | number | boolean | json |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| **friend** | yes | yes | — | — | — | — | — | — | — | yes |
-| **user** | — | yes | — | — | — | — | — | — | — | yes |
-| **world** | — | — | yes | — | — | — | — | — | — | yes |
-| **instance** | — | — | — | yes | — | — | — | — | — | yes |
-| **group** | — | — | — | — | yes | — | — | — | — | yes |
-| **avatar** | — | — | — | — | — | yes | — | — | — | yes |
+| **friend** | yes | yes | — | — | — | — | yes | — | — | yes |
+| **user** | — | yes | — | — | — | — | yes | — | — | yes |
+| **world** | — | — | yes | — | — | — | yes | — | — | yes |
+| **instance** | — | — | — | yes | — | — | yes | — | — | yes |
+| **group** | — | — | — | — | yes | — | yes | — | — | yes |
+| **avatar** | — | — | — | — | — | yes | yes | — | — | yes |
 | **string** | — | — | — | — | — | — | yes | — | — | yes |
 | **number** | — | — | — | — | — | — | — | yes | — | yes |
 | **boolean** | — | — | — | — | — | — | — | — | yes | yes |

@@ -242,16 +242,23 @@ function dotStyle(portType: string): string {
   <div class="flex justify-between gap-4 px-3 py-2 text-[11px]">
     <div class="flex min-w-0 flex-col gap-1.5">
       <!--
-        The input every node has and none declares. It carries no value: an edge into it says
-        "not until that one has run", which is the only way to sequence a node whose inputs all
-        come from value literals — those have no path from the trigger otherwise.
+        The input every node has and none declares. An edge into it says "not until that one has
+        run", which is the only way to sequence a node whose inputs all come from value literals —
+        those have no path from the trigger otherwise.
+
+        What it carries is ignored, with one exception the tooltip states: a `false` stops this node
+        the way an unproduced port does, so a `Compare` dropped straight on here filters rather than
+        being an edge that changes nothing. Decision 281.
 
         It reads "run after" rather than "after", which is what it said until the loop's own
         after-the-loop output was sitting three inches away also saying "after". One word for two
         opposite things on one screen is a collision, not a synonym.
       -->
       {#if executable}
-        <div class="relative flex items-center gap-1.5 text-muted-foreground">
+        <div
+          class="relative flex items-center gap-1.5 text-muted-foreground"
+          title="run after: not until that one has run. A plain no stops this node."
+        >
           <Handle
             type="target"
             position={Position.Left}

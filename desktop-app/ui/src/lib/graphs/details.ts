@@ -187,7 +187,8 @@ export function detailPorts(qualifiedId: string, definition: NodeDefinition): Po
               id: AFTER_PORT,
               label: "run after",
               type: "",
-              description: "Carries no value. An edge into it means: not until that one has run.",
+              description:
+                "An edge into it means: not until that one has run. Whatever it carries is ignored, except a plain no, which stops this node from running at all.",
               role: "sequence" as const,
             },
           ]

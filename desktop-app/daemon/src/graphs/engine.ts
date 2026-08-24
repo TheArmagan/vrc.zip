@@ -21,6 +21,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { NodeConfigValues, NodeDefinition, PortValues } from "@vrcz/plugin-api/nodes";
+import { AFTER_PORT } from "@vrcz/plugin-api/nodes";
 import {
   foreachBodies,
   type GraphDocument,
@@ -1143,11 +1144,25 @@ function settled(nodeId: string, state: RunState): boolean {
  * The one rule. An edge is dead when its source was skipped, or when the source produced nothing
  * for that port — which is how a false condition, an untaken branch and an unfailed error port all
  * stop the run without any of them being a special case here.
+ *
+ * **And a `false` that arrives on `run after` is dead too.** That is the one exception, decision
+ * 279, and it is narrower than it looks: `after` is the only port in the whole vocabulary whose
+ * meaning is *permission to run* rather than a value, `AFTER_PORT`'s own doc has always said an
+ * edge into it "reads exactly as: only after that succeeded", and `false` is the answer "it did
+ * not". Every other port keeps carrying `false` as an ordinary value, because everywhere else it
+ * is one.
+ *
+ * Without it, a `Compare` wired into `run after` is an edge that changes nothing at all — the node
+ * always produces `result`, true or false, so the edge is never dead and the run always continues.
+ * An author drawing that wire means "only when this is true" and there is no second reading of it
+ * worth serving; the alternative was a graph that looks like it filters and does not, which is the
+ * same silence decision 278 was about.
  */
 function isDead(edge: GraphEdge, state: RunState): boolean {
   if (state.skipped.includes(edge.from.node)) return true;
   const produced = state.outputs[edge.from.node];
-  return produced === undefined || !(edge.from.port in produced);
+  if (produced === undefined || !(edge.from.port in produced)) return true;
+  return edge.to.port === AFTER_PORT && produced[edge.from.port] === false;
 }
 
 function gatherInputs(edges: readonly GraphEdge[], state: RunState): PortValues {

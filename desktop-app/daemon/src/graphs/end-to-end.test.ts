@@ -94,6 +94,11 @@ const DOCUMENT: GraphDocument = {
     { id: "e9", from: { node: "groupName", port: "o1" }, to: { node: "text", port: "b" } },
     { id: "e10", from: { node: "join", port: "name" }, to: { node: "text", port: "a" } },
     { id: "e11", from: { node: "text", port: "text" }, to: { node: "notify", port: "text" } },
+    // The world check, and it is the whole graph's filter: `Compare` answers, and the invite runs
+    // only if the answer was yes. Decision 281 is what gives this edge that meaning — without it
+    // `Compare` produces `result` either way, the edge is never dead, and the invite fires in every
+    // world while looking on the canvas exactly as it does now.
+    { id: "e12", from: { node: "same", port: "result" }, to: { node: "invite", port: "after" } },
   ],
 };
 
@@ -104,7 +109,14 @@ interface Ran {
   readonly errors: string[];
 }
 
-async function run(): Promise<Ran> {
+/**
+ * One player-join, in whichever world the running client is standing in.
+ *
+ * The world is the parameter because it is the only thing the graph is asking about: same document,
+ * same event, one different room, and the answer has to be an invite or nothing at all.
+ */
+async function run(world = WORLD): Promise<Ran> {
+  const location = `${world}:47118~region(eu)`;
   const store = Store.open(MEMORY);
   store.upsertAccount({
     id: ACCOUNT,
@@ -139,9 +151,9 @@ async function run(): Promise<Ran> {
     reads: {
       user: async () => await Promise.resolve({}),
       world: async () => await Promise.resolve({}),
-      instance: async (accountId, location) => {
-        reads.push(`instance ${accountId} ${location}`);
-        return await Promise.resolve({ worldId: WORLD, userCount: 12, capacity: 32 });
+      instance: async (accountId, asked) => {
+        reads.push(`instance ${accountId} ${asked}`);
+        return await Promise.resolve({ worldId: world, userCount: 12, capacity: 32 });
       },
       avatar: async () => await Promise.resolve({}),
       group: async (accountId, groupId) => {
@@ -154,7 +166,7 @@ async function run(): Promise<Ran> {
     // The join line says nothing about where it happened, so the instance is the running client's
     // own room. This is the seam that answers that, and without it the extractor gets nothing to
     // extract from — which is a different failure from the one this file is about.
-    triggerContext: { location: () => LOCATION, isFriend: () => false },
+    triggerContext: { location: () => location, isFriend: () => false },
   });
 
   const engine = new GraphEngine({
@@ -204,7 +216,7 @@ async function run(): Promise<Ran> {
 }
 
 describe("the exported avtr.zip invite graph", () => {
-  test("a player join reaches the toast, through both extractors", async () => {
+  test("in the named world, a player join reaches the toast through both extractors", async () => {
     const ran = await run();
     expect(ran.errors).toEqual([]);
     // Decision 278: both extractors were handed an id rather than an object, and both looked it up.
@@ -214,5 +226,27 @@ describe("the exported avtr.zip invite graph", () => {
     expect(ran.toasts[0]?.body).toBe(
       "User Ada automatically invited to avtr.zip group! After they joined the instance.",
     );
+  });
+
+  test("in any other world, nobody is invited and nothing is shown", async () => {
+    // Decision 281. The `Compare` is wired straight into the invite's `run after`, and this is the
+    // assertion that says that edge does something: same document, same join, one different room.
+    const ran = await run("wrld_ffffffff-0000-0000-0000-000000000000");
+    expect(ran.errors).toEqual([]);
+    expect(ran.invites).toEqual([]);
+    expect(ran.toasts).toEqual([]);
+    /*
+     * Both reads still happen, and that is the walk being right rather than wasteful.
+     *
+     * The instance is read because the graph has to look before it can decide. The group is read
+     * because `Compose text` sits on a path from the trigger that the gate is not on — its `A` port
+     * comes from the join's `Name` — so the line is composed and then handed to a notification that
+     * skips. Nothing downstream is wrong; it is one lookup per join spent on a message nobody sees,
+     * and moving the world check in front of the composer is the author's call, not the engine's.
+     */
+    expect(ran.reads).toEqual([
+      `instance ${ACCOUNT} wrld_ffffffff-0000-0000-0000-000000000000:47118~region(eu)`,
+      `group ${ACCOUNT} ${GROUP}`,
+    ]);
   });
 });

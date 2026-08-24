@@ -5279,6 +5279,32 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      one moves a file into a folder the user did not choose, which is a real decision, unlike
      refreshing a copy they already agreed to have.
 
+281. **A `false` arriving on `run after` is dead, and that port is the only one where it is.** The
+     follow-up to 278, from the same graph. The author wired `Compare → Result` straight into the
+     invite's `run after` to mean "only in this world", and the invite kept firing everywhere: the
+     edge was a no-op, because `Compare` is an action that always produces `result`, so the edge was
+     never dead and the walk always continued. A wire that looks like a filter and filters nothing —
+     the same class of silence as 278, one port along.
+     - **Why `after` and nothing else.** It is the one port in the vocabulary whose meaning is
+       *permission to run* rather than a value, and `AFTER_PORT`'s own doc has said since Phase 4
+       that an edge into it "reads exactly as: only after that succeeded". `false` is the answer
+       "it did not". Everywhere else `false` stays an ordinary value — a graph that compares,
+       formats or stores a boolean must keep getting it — and there is a test that says so.
+     - **Only a boolean `false`.** `0`, `""` and `null` still run. Those are values that happen to
+       be falsy, and a node sequenced after a counter that reached zero is not one anybody asked to
+       have skipped.
+     - **One rule, one place**: three lines in `isDead`, so `#pickNext`, `#stuckNodes` and the walk
+       all get it at once, and a plugin's node gets it without doing anything.
+     - **What it changes for graphs that already exist.** An edge from a boolean output into
+       `run after` now means "only if yes" where it used to mean "afterwards, either way" —
+       `Notify → Shown` into a following node's `run after` is the realistic case. That reading is
+       the one the port has always claimed, and the skip is visible in the run inspector rather than
+       silent, which is the trade being made.
+     - Still the author's call and still not the engine's: in that graph `Compose text` sits on a
+       path from the trigger that the gate is not on, so the group is looked up and a line composed
+       on every join in every world before the notification skips. Correct, and one wasted request
+       per join. Moving the check in front of the composer is a graph edit.
+
 ---
 
 ## Gotchas

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { NodeDefinition, PortValues } from "@vrcz/plugin-api/nodes";
+import { AFTER_PORT } from "@vrcz/plugin-api/nodes";
 import type { GraphDocument, GraphEdge, GraphNode } from "@vrcz/shared";
 import type { BusEvent } from "../bus/event-bus.ts";
 import { EventBus } from "../bus/event-bus.ts";
@@ -356,6 +357,85 @@ describe("the walk", () => {
     await h.engine.fire(id, "n1", { out: null });
 
     expect(h.provider.order).toEqual(["check", "after"]);
+  });
+
+  /*
+   * Decision 281: `run after` is the one port where a `false` is a refusal rather than a value.
+   *
+   * An action's boolean output dropped straight on `run after` is the shortest way to say "only
+   * when this is true", and it used to be an edge that changed nothing at all — the node always
+   * produces the port, so the edge was never dead and the run always continued.
+   */
+  test("a false on run after stops the node, like an unproduced port", async () => {
+    const h = harness();
+    h.provider
+      .trigger("t")
+      .node("check", "action", () => ({ out: false }))
+      .node("after", "action", () => ({ out: 1 }));
+    const id = h.graph({
+      nodes: [node("n1", "t"), node("n2", "check"), node("n3", "after")],
+      edges: [edge("e1", "n1", "n2"), edge("e2", "n2", "n3", "out", AFTER_PORT)],
+    });
+
+    await h.engine.fire(id, "n1", { out: null });
+
+    expect(h.provider.order).toEqual(["check"]);
+    expect(kinds(h.events)).toEqual(["graph.run.finished"]);
+  });
+
+  test("a true on run after lets it through", async () => {
+    const h = harness();
+    h.provider
+      .trigger("t")
+      .node("check", "action", () => ({ out: true }))
+      .node("after", "action", () => ({ out: 1 }));
+    const id = h.graph({
+      nodes: [node("n1", "t"), node("n2", "check"), node("n3", "after")],
+      edges: [edge("e1", "n1", "n2"), edge("e2", "n2", "n3", "out", AFTER_PORT)],
+    });
+
+    await h.engine.fire(id, "n1", { out: null });
+
+    expect(h.provider.order).toEqual(["check", "after"]);
+  });
+
+  test("false is still an ordinary value on every other port", async () => {
+    // The rule is about `run after` and nothing else. A graph that carries a boolean around and
+    // compares it, formats it, or stores it must keep getting `false` rather than a skip.
+    const h = harness();
+    h.provider
+      .trigger("t")
+      .node("check", "action", () => ({ out: false }))
+      .node("after", "action", (inputs) => ({ out: `saw:${String(inputs.in)}` }));
+    const id = h.graph({
+      nodes: [node("n1", "t"), node("n2", "check"), node("n3", "after")],
+      edges: [edge("e1", "n1", "n2"), edge("e2", "n2", "n3")],
+    });
+
+    await h.engine.fire(id, "n1", { out: null });
+
+    expect(h.provider.order).toEqual(["check", "after"]);
+    expect(h.provider.executed[1]?.inputs).toEqual({ in: false });
+  });
+
+  test("only a boolean false refuses: zero, empty and null still run", async () => {
+    // `false` is the answer "no". `0` and `""` are values that happen to be falsy, and a node
+    // sequenced after a counter that reached zero is not a node the author wanted skipped.
+    for (const value of [0, "", null]) {
+      const h = harness();
+      h.provider
+        .trigger("t")
+        .node("check", "action", () => ({ out: value }))
+        .node("after", "action", () => ({ out: 1 }));
+      const id = h.graph({
+        nodes: [node("n1", "t"), node("n2", "check"), node("n3", "after")],
+        edges: [edge("e1", "n1", "n2"), edge("e2", "n2", "n3", "out", AFTER_PORT)],
+      });
+
+      await h.engine.fire(id, "n1", { out: null });
+
+      expect(h.provider.order).toEqual(["check", "after"]);
+    }
   });
 
   test("a branch takes one side and skips the other", async () => {

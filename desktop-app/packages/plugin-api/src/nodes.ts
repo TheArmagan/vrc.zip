@@ -49,6 +49,13 @@ export const ERROR_PORT = "error";
  * It is an ordinary edge in every other respect: if the node upstream produced nothing on the port
  * it was wired from, the edge is dead and this node skips — which reads exactly as "only after that
  * succeeded".
+ *
+ * **A `false` arriving here is dead for the same reason**, and this is the one port where that is
+ * true. Everywhere else `false` is a value a graph carries around; here the value *is* the
+ * permission, so "no" and "nothing" are the same answer. It is what makes a `Compare` wired
+ * straight into `run after` mean "only when this is true" rather than being an edge that changes
+ * nothing — see decision 281. The engine owns the rule (`isDead`), so a plugin's node gets it
+ * without doing anything.
  */
 export const AFTER_PORT = "after";
 

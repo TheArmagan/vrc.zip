@@ -28,11 +28,13 @@ import SectionHeader from "$lib/components/SectionHeader.svelte";
 import StoresPanel from "$lib/components/graphs/StoresPanel.svelte";
 import { Button } from "$lib/components/ui/button/index.js";
 import { Input } from "$lib/components/ui/input/index.js";
+import * as Select from "$lib/components/ui/select/index.js";
 import { Skeleton } from "$lib/components/ui/skeleton/index.js";
 import { Switch } from "$lib/components/ui/switch/index.js";
 import { Textarea } from "$lib/components/ui/textarea/index.js";
 import { graphState, watchesFor } from "$lib/graphs/graph-state.ts";
 import { hrefFor } from "$lib/router.ts";
+import { app } from "$lib/state/app.svelte.ts";
 import { graphs } from "$lib/state/graphs.svelte.ts";
 
 let { graphId }: { graphId: string | null } = $props();
@@ -45,6 +47,8 @@ let newName = $state("");
 let templates = $state<GraphTemplate[]>([]);
 /** Which template the new graph starts from. Empty means a blank canvas. */
 let fromTemplate = $state("");
+/** The default account the new graph starts with. Empty means it has none. */
+let newAccountId = $state("");
 /** What an import could not find on this machine. Kept until the user starts something else. */
 let importNote = $state<string | null>(null);
 let fileInput = $state<HTMLInputElement | null>(null);
@@ -56,6 +60,42 @@ let fileInput = $state<HTMLInputElement | null>(null);
  * exactly the list you are naming it against.
  */
 let editing = $state<{ id: string; name: string; description: string } | null>(null);
+
+/**
+ * "This graph has no default account".
+ *
+ * A sentinel rather than the empty string for the same reason `AccountFilter` needs one: bits-ui
+ * reads `""` as *nothing is selected*, so an item with that value can never show as chosen. The
+ * wire value stays `null`, which is what the daemon means by it, and the translation happens at
+ * the two edges below.
+ */
+const NO_ACCOUNT = "none";
+
+/**
+ * What the picker says a graph acts as.
+ *
+ * An id that no longer names an account is a normal state, not an error: `accountId` is cleared
+ * when the account is removed, but a graph saved by an older build, or imported, can still carry
+ * one. Saying so is more use than falling back to "No default", which would read as if the graph
+ * had never had one.
+ */
+function accountLabel(accountId: string | null): string {
+  if (accountId === null) return "No default";
+  return app.accountById(accountId)?.displayName ?? "Account not signed in";
+}
+
+/**
+ * Sets the account a graph's nodes act as unless they name one themselves.
+ *
+ * Saved immediately, like Enabled and Armed and unlike the name: it is a setting rather than a
+ * draft, and there is nothing to cancel. Name and description are deliberately not sent, so
+ * choosing an account here cannot overwrite a rename somebody is typing on another card.
+ */
+async function setAccount(graph: GraphSummary, next: string): Promise<void> {
+  const accountId = next === NO_ACCOUNT ? null : next;
+  if (accountId === graph.accountId) return;
+  await act(graph.id, () => api.graphs.update(graph.id, { accountId }));
+}
 
 $effect(() => {
   if (!graphs.loaded) void graphs.load();
@@ -94,12 +134,14 @@ async function create(): Promise<void> {
     const template = templates.find((entry) => entry.id === fromTemplate);
     const created = await api.graphs.create({
       name,
+      ...(newAccountId === "" ? {} : { accountId: newAccountId }),
       ...(template === undefined
         ? {}
         : { description: template.description, definition: template.definition }),
     });
     creating = false;
     newName = "";
+    newAccountId = "";
     await graphs.load();
     // Straight into the editor: a graph with no nodes is not something to admire in a list.
     window.location.hash = hrefFor("graphs", created.id);
@@ -289,6 +331,25 @@ async function runNow(graph: GraphSummary): Promise<void> {
             {/if}
           {/if}
 
+          {#if app.accounts.length > 0}
+            <!--
+              The account the graph's nodes act as unless a node names one itself. Set here because
+              a graph that sends anything needs one, and finding that out after wiring the canvas is
+              finding it out too late.
+            -->
+            <label class="text-sm font-medium" for="graph-account">Acts as</label>
+            <select
+              id="graph-account"
+              class="rounded border border-input bg-background px-2 py-2 text-sm"
+              bind:value={newAccountId}
+            >
+              <option value="">No default account</option>
+              {#each app.accounts as account (account.id)}
+                <option value={account.id}>{account.displayName}</option>
+              {/each}
+            </select>
+          {/if}
+
           <div class="flex gap-2">
             <Button disabled={newName.trim() === "" || busy === "*"} onclick={() => void create()}>
               Create
@@ -298,6 +359,7 @@ async function runNow(graph: GraphSummary): Promise<void> {
               onclick={() => {
                 creating = false;
                 newName = "";
+                newAccountId = "";
               }}
             >
               Cancel
@@ -460,6 +522,34 @@ async function runNow(graph: GraphSummary): Promise<void> {
                   disabled={busy === graph.id}
                   onconfirm={() => void act(graph.id, () => api.graphs.setArmed(graph.id, true))}
                 />
+              {/if}
+
+              <!--
+                Whose account the graph acts as. Beside the two switches rather than behind Open,
+                because it is the third thing that decides what a run actually does: enabled says it
+                runs, armed says it reaches other people, and this says who they hear from. A node
+                that names its own account still wins; this is only the fallback.
+              -->
+              {#if app.accounts.length > 0}
+                <div class="flex items-center gap-2 text-sm">
+                  <span class="text-muted-foreground">Acts as</span>
+                  <Select.Root
+                    type="single"
+                    disabled={busy === graph.id}
+                    value={graph.accountId ?? NO_ACCOUNT}
+                    onValueChange={(next: string) => void setAccount(graph, next)}
+                  >
+                    <Select.Trigger size="sm" class="w-44 shrink-0" aria-label="Default account">
+                      <span class="truncate">{accountLabel(graph.accountId)}</span>
+                    </Select.Trigger>
+                    <Select.Content>
+                      <Select.Item value={NO_ACCOUNT} label="No default account" />
+                      {#each app.accounts as account (account.id)}
+                        <Select.Item value={account.id} label={account.displayName} />
+                      {/each}
+                    </Select.Content>
+                  </Select.Root>
+                </div>
               {/if}
 
               <!--

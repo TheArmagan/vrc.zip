@@ -5180,6 +5180,28 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      characters were truncated with no disambiguation, so two keys sharing a 400-character prefix
      silently became one row. The tail is a hash now.
 
+277. **A graph's default account is reachable from the UI.** `graphs.account_id` has existed since
+     decision 207 and the engine has resolved against it since — `actingAccount()` takes the node's
+     own account, then the graph's — but nothing in the UI ever set it, so every graph created
+     through the app had `null` there and every node that did not name an account itself fell back
+     to whatever the action decided. The gap was in the client alone: `GraphCreate`, `GraphUpdate`
+     and the `PUT /api/graphs/:id` body handler all carried `accountId` already.
+     - **On the card, beside Enabled and Armed**, not in the editor and not behind the rename form.
+       It is the third thing that decides what a run does: enabled says it runs, armed says it
+       reaches other people, and this says who they hear from. Saved on change like the two
+       switches, since it is a setting rather than a draft.
+     - **Name and description are not sent with it**, the same rule the rename already follows: a
+       save that carries fields you did not touch is how one card overwrites another's edit.
+     - **In the New graph form too.** A graph that sends anything needs an account, and finding that
+       out after wiring the canvas is finding it out too late.
+     - An id naming no signed-in account reads as "Account not signed in" rather than falling back
+       to "No default account". `accountId` is cleared when an account is removed, but an imported
+       graph or one from an older build can still carry one, and saying so is more use than
+       pretending it was never set.
+     - The "no default" option needs a sentinel (`"none"`), because bits-ui reads `""` as *nothing
+       is selected* and an item with that value can never show as chosen. Same workaround as
+       `AccountFilter`, and the wire value stays `null` either way.
+
 ---
 
 ## Gotchas

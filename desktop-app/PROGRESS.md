@@ -4504,6 +4504,35 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
        starting and ending. `When a friend comes online` and `… goes offline` already existed and
        are unchanged.
 
+245. **The palette tells you what a node is, and it can be made wider.** Two answers to one problem:
+     four hundred nodes in a 224-pixel column, one line each, with the description hidden in a
+     `title` attribute the OS drew half a second later in its own font and nowhere at all to put the
+     ports. Recognising a node you already know worked; finding one you do not was the case the
+     palette exists for and it was the case it failed at.
+     - **A detail card beside the row**, after a 240 ms rest — and with no delay at all once one is
+       already open, or when the arrows moved the highlight. Re-arming the delay per row is exactly
+       what makes a hover card feel like it is lagging a step behind the pointer. `NodePreview`
+       holds those four rules and both lists share it, because the palette and the wire-drop picker
+       are the same list twice.
+     - **It lists `run after` and `on error`, which no `NodeDefinition` declares.** Every executable
+       card on the canvas draws them, so a preview built from the definition alone shows a node with
+       fewer ports than the thing being previewed — and somebody reading it to decide whether a node
+       can be sequenced would get a no. `detailPorts` adds them back, and makes the same
+       per-item/after-the-loop split the card makes.
+     - **Not the config fields.** Those are what the inspector asks *after* the node exists. Listing
+       them would answer "what will I have to fill in" and push the ports, which is what the reader
+       is actually asking about, off the bottom of the card.
+     - **The sidebar drags, between 168 and 520 pixels, remembered in `prefs`.** Not to zero: there
+       is no button that brings the palette back, so a sidebar that can be dragged shut is one
+       somebody loses. Double-click or Home resets it. The grip *is* the border rather than sitting
+       beside one — two lines a pixel apart where one of them moves is the usual tell of a
+       hand-rolled splitter. Pointer capture, because `SvelteFlow` starts a pan on `pointerdown`
+       anywhere in the canvas and a drag that strayed two pixels right would otherwise take the
+       viewport with it.
+     - **Scrolling closes the card rather than moving it.** It is anchored to a rectangle measured
+       when it opened; a list scrolling underneath leaves it pointing at a row that has moved. The
+       next `mouseenter` re-measures, which is a frame later at most.
+
 ---
 
 ## Gotchas

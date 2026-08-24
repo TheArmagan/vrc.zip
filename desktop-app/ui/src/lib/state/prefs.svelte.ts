@@ -8,12 +8,14 @@
  */
 
 import { familyOf } from "../api.ts";
+import { clampSidebarWidth, SIDEBAR_DEFAULT_WIDTH } from "../graphs/details.ts";
 
 const KEY = "vrcz.prefs";
 
 interface StoredPrefs {
   notifyFamilies?: string[];
   denseFeed?: boolean;
+  graphSidebarWidth?: number;
 }
 
 /** Friend presence and inbound notifications are the two things worth interrupting someone for. */
@@ -33,11 +35,18 @@ function read(): StoredPrefs {
 class Prefs {
   #notifyFamilies = $state<string[]>([]);
   #denseFeed = $state(false);
+  #graphSidebarWidth = $state(SIDEBAR_DEFAULT_WIDTH);
 
   constructor() {
     const stored = read();
     this.#notifyFamilies = stored.notifyFamilies ?? [...DEFAULT_FAMILIES];
     this.#denseFeed = stored.denseFeed ?? false;
+    // Clamped on the way in as well as on the way out: the stored value is whatever was in
+    // `localStorage`, which is to say whatever a previous build wrote or a user typed into devtools.
+    this.#graphSidebarWidth =
+      stored.graphSidebarWidth === undefined
+        ? SIDEBAR_DEFAULT_WIDTH
+        : clampSidebarWidth(stored.graphSidebarWidth);
   }
 
   get notifyFamilies(): readonly string[] {
@@ -50,6 +59,16 @@ class Prefs {
 
   setDenseFeed(dense: boolean): void {
     this.#denseFeed = dense;
+    this.#persist();
+  }
+
+  /** How wide the graph editor's node palette is, in pixels. */
+  get graphSidebarWidth(): number {
+    return this.#graphSidebarWidth;
+  }
+
+  setGraphSidebarWidth(px: number): void {
+    this.#graphSidebarWidth = clampSidebarWidth(px);
     this.#persist();
   }
 
@@ -71,7 +90,11 @@ class Prefs {
     try {
       localStorage.setItem(
         KEY,
-        JSON.stringify({ notifyFamilies: this.#notifyFamilies, denseFeed: this.#denseFeed }),
+        JSON.stringify({
+          notifyFamilies: this.#notifyFamilies,
+          denseFeed: this.#denseFeed,
+          graphSidebarWidth: this.#graphSidebarWidth,
+        }),
       );
     } catch {
       /* private mode — the in-memory value still holds for this session */

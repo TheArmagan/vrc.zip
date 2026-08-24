@@ -136,6 +136,20 @@ export function isListPort(type: string): boolean {
 }
 
 /**
+ * The dot that stands for a port: filled for one of something, hollow for several.
+ *
+ * `background` is what shows through the hollow ones, so it has to be whatever surface the dot is
+ * sitting on — the card on the canvas, the popover of the detail panel. A hollow dot drawn against
+ * the wrong surface is a filled dot in the wrong colour.
+ */
+export function portDotStyle(type: string, background = "var(--card)"): string {
+  const color = portColor(type);
+  return isListPort(type)
+    ? `width:10px;height:10px;border:2px solid ${color};background:${background};`
+    : `width:10px;height:10px;border:1px solid ${color};background:${color};`;
+}
+
+/**
  * A port type's element, or the type itself when it is a scalar.
  *
  * The cast is safe rather than convenient: `listElement` reads the string and nothing else, and it

@@ -34,8 +34,10 @@
 <script lang="ts">
 import { AFTER_PORT, assignable, ERROR_PORT, isPortType } from "@vrcz/plugin-api/nodes";
 import type { NodeDefinition, PortDefinition } from "@vrcz/plugin-api/nodes";
+import NodeDetails from "$lib/components/graphs/NodeDetails.svelte";
 import { Input } from "$lib/components/ui/input/index.js";
 import { iconFor } from "$lib/graphs/icons.ts";
+import { NodePreview } from "$lib/graphs/node-preview.svelte.ts";
 import { familyColor, familyOf, portColor } from "$lib/graphs/visuals.ts";
 import { graphs, type NodeType } from "$lib/state/graphs.svelte.ts";
 
@@ -78,6 +80,14 @@ let search = $state<HTMLInputElement | null>(null);
 let active = $state(0);
 /** The rendered rows, so the highlighted one can be scrolled back into view. */
 let rows = $state.raw<(HTMLButtonElement | null)[]>([]);
+/**
+ * The detail card for the row under the pointer. Its own instance, not the editor's.
+ *
+ * This list is the one where the detail matters most: the palette is browsed, this is answered
+ * under time pressure with a wire attached to the cursor, and "what does `Read field` actually
+ * give me" is exactly the question in the way.
+ */
+const preview = new NodePreview();
 /*
  * Seeded from where the pointer was and clamped by the effect below once there is a box to measure.
  * The initial read is deliberate — this is a menu opened at a point, not one that follows it — which
@@ -133,6 +143,14 @@ function onSearchKey(event: KeyboardEvent): void {
     // Wraps, because a list this long is quicker to reach from the other end and there is nothing
     // below the last row to fall into.
     active = (active + step + visible.length) % visible.length;
+    const moved = visible[active];
+    if (moved !== undefined) {
+      preview.focus(rows[active] ?? null, {
+        qualifiedId: moved.choice.qualifiedId,
+        definition: moved.choice.definition,
+        owner: moved.choice.owner,
+      });
+    }
     return;
   }
   if (event.key === "Enter") {
@@ -277,7 +295,12 @@ const choices = $derived.by(() => {
       </p>
     {/if}
   </div>
-  <div class="flex-1 overflow-y-auto p-1">
+  <div
+    class="flex-1 overflow-y-auto p-1"
+    role="presentation"
+    onscroll={() => preview.hide()}
+    onmouseleave={() => preview.hide()}
+  >
     {#each choices.slice(0, LIMIT) as row, index (row.choice.qualifiedId)}
       {@const Icon = iconFor(row.choice.definition.category, row.choice.owner)}
       <button
@@ -287,7 +310,14 @@ const choices = $derived.by(() => {
           ? 'bg-accent'
           : ''}"
         onclick={() => onpick(row.choice)}
-        onmouseenter={() => (active = index)}
+        onmouseenter={(event) => {
+          active = index;
+          preview.hover(event.currentTarget, {
+            qualifiedId: row.choice.qualifiedId,
+            definition: row.choice.definition,
+            owner: row.choice.owner,
+          });
+        }}
       >
         <Icon
           class="mt-0.5 size-3.5 shrink-0"
@@ -313,3 +343,13 @@ const choices = $derived.by(() => {
     {/if}
   </div>
 </div>
+
+<!-- Outside the popup, because it is `position: fixed` and the popup clips its own overflow. -->
+{#if preview.current !== null}
+  <NodeDetails
+    qualifiedId={preview.current.qualifiedId}
+    definition={preview.current.definition}
+    owner={preview.current.owner}
+    anchor={preview.current.anchor}
+  />
+{/if}

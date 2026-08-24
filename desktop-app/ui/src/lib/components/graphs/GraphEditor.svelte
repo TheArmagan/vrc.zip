@@ -50,6 +50,7 @@ import ErrorNote from "$lib/components/ErrorNote.svelte";
 import CanvasMenu, { type MenuItem } from "$lib/components/graphs/CanvasMenu.svelte";
 import GraphNodeCard from "$lib/components/graphs/GraphNodeCard.svelte";
 import LoopRegions from "$lib/components/graphs/LoopRegions.svelte";
+import NodeDetails from "$lib/components/graphs/NodeDetails.svelte";
 import NodePicker, {
   type PickerChoice,
   type PickerSource,
@@ -58,13 +59,16 @@ import RelativeTime from "$lib/components/RelativeTime.svelte";
 import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
 import { Input } from "$lib/components/ui/input/index.js";
+import { clampSidebarWidth, SIDEBAR_DEFAULT_WIDTH } from "$lib/graphs/details.ts";
 import { iconFor } from "$lib/graphs/icons.ts";
 import { loopProblems } from "$lib/graphs/loops.ts";
+import { NodePreview } from "$lib/graphs/node-preview.svelte.ts";
 import { familyColor, familyOf, portColor } from "$lib/graphs/visuals.ts";
 import { hrefFor } from "$lib/router.ts";
 import { app } from "$lib/state/app.svelte.ts";
 import { graphRun } from "$lib/state/graph-run.svelte.ts";
 import { graphs } from "$lib/state/graphs.svelte.ts";
+import { prefs } from "$lib/state/prefs.svelte.ts";
 import { theme } from "$lib/state/theme.svelte.ts";
 
 let { graphId }: { graphId: string } = $props();
@@ -93,6 +97,18 @@ let paletteRows = $state.raw<(HTMLButtonElement | null)[]>([]);
  * is built from. Everything else starts open, because it is short and it is what people came for.
  */
 let collapsed = $state<Record<string, boolean>>({});
+/**
+ * The detail card that appears when you stop on a palette row. See `node-preview.svelte.ts`.
+ *
+ * One per editor rather than a module singleton: the picker gets its own, and two lists sharing one
+ * card would mean whichever was hovered last wins even after it closed.
+ */
+const preview = new NodePreview();
+/** The palette's width, dragged by the handle on its right edge and remembered across sessions. */
+let sidebarWidth = $state(prefs.graphSidebarWidth);
+let resizing = $state(false);
+/** The palette element, so a drag can measure the width from its own left edge rather than 0. */
+let aside = $state<HTMLElement | null>(null);
 /** What each node of this graph is remembering, so the inspector can offer to forget it. */
 let memory = $state<GraphMemoryEntry[]>([]);
 let running = $state(false);
@@ -264,11 +280,11 @@ const palette = $derived.by(() => {
  * an API group happened to be shut.
  */
 const paletteWalk = $derived.by(() => {
-  const walk: { qualifiedId: string; definition: NodeDefinition }[] = [];
+  const walk: { qualifiedId: string; definition: NodeDefinition; owner: string }[] = [];
   for (const group of palette) {
     if (!searching && isCollapsed(group.owner)) continue;
     for (const type of group.types) {
-      walk.push({ qualifiedId: type.qualifiedId, definition: type.definition });
+      walk.push({ qualifiedId: type.qualifiedId, definition: type.definition, owner: type.owner });
     }
   }
   return walk;
@@ -295,6 +311,7 @@ $effect(() => {
 function onPaletteKey(event: KeyboardEvent): void {
   if (event.key === "Escape") {
     paletteQuery = "";
+    preview.hide();
     return;
   }
   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -303,12 +320,75 @@ function onPaletteKey(event: KeyboardEvent): void {
     if (count === 0) return;
     const step = event.key === "ArrowDown" ? 1 : -1;
     paletteActive = (paletteActive + step + count) % count;
+    // Arrowing is a deliberate act, so the detail card follows it with no delay. Read synchronously
+    // rather than after a tick: arrowing does not change the list, so the buttons are already there.
+    const moved = paletteWalk[paletteActive];
+    if (moved !== undefined) preview.focus(paletteRows[paletteActive] ?? null, moved);
     return;
   }
   if (event.key === "Enter") {
     event.preventDefault();
     const row = paletteWalk[paletteActive];
     if (row !== undefined) void addNode(row.qualifiedId, row.definition);
+  }
+}
+
+/* ---------------------------------------------------------------------------------------------- */
+/* The palette's width                                                                              */
+/* ---------------------------------------------------------------------------------------------- */
+
+/**
+ * Dragging the edge between the palette and the canvas.
+ *
+ * Pointer capture rather than window listeners, which is what makes the drag survive the pointer
+ * crossing the canvas: `SvelteFlow` starts a pan on `pointerdown` anywhere in it, and without
+ * capture the viewport would slide out from under a drag that strayed two pixels too far right.
+ *
+ * The width is written to `prefs` on release rather than on every move. A drag is sixty writes a
+ * second and `localStorage` is synchronous.
+ */
+function startResize(event: PointerEvent): void {
+  event.preventDefault();
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+  resizing = true;
+  preview.hide();
+}
+
+function onResizeMove(event: PointerEvent): void {
+  if (!resizing || aside === null) return;
+  sidebarWidth = clampSidebarWidth(event.clientX - aside.getBoundingClientRect().left);
+}
+
+function endResize(event: PointerEvent): void {
+  if (!resizing) return;
+  resizing = false;
+  (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId);
+  prefs.setGraphSidebarWidth(sidebarWidth);
+}
+
+/** Double-click the edge to put it back. The way out of a width somebody dragged and regretted. */
+function resetWidth(): void {
+  sidebarWidth = SIDEBAR_DEFAULT_WIDTH;
+  prefs.setGraphSidebarWidth(sidebarWidth);
+}
+
+/**
+ * The separator is focusable, so it answers the arrows too.
+ *
+ * Not decoration: a drag is the one gesture in this editor that has no keyboard equivalent at all,
+ * and a `separator` with `aria-valuenow` that ignores `ArrowLeft` is a lie told to a screen reader.
+ */
+function onResizeKey(event: KeyboardEvent): void {
+  const step = event.shiftKey ? 48 : 16;
+  if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+    event.preventDefault();
+    sidebarWidth = clampSidebarWidth(sidebarWidth + (event.key === "ArrowRight" ? step : -step));
+    prefs.setGraphSidebarWidth(sidebarWidth);
+    return;
+  }
+  if (event.key === "Home") {
+    event.preventDefault();
+    resetWidth();
   }
 }
 
@@ -931,10 +1011,16 @@ async function saveSecret(fieldId: string): Promise<void> {
 {#if loadError !== null}
   <div class="p-4"><ErrorNote message={loadError} /></div>
 {:else}
-  <div class="flex min-h-0 flex-1">
+  <!-- `select-none` only while a drag is live: the cursor is over the canvas half the time and a
+       drag that highlights every node title on the way is the usual tell of a hand-rolled splitter. -->
+  <div class="flex min-h-0 flex-1" class:select-none={resizing}>
     <!-- The palette. Grouped by owner, built-ins first: two plugins both contributing a "Send"
          node is a flat list where nobody can tell whose is whose. -->
-    <aside class="flex w-56 shrink-0 flex-col border-r border-border">
+    <aside
+      bind:this={aside}
+      class="flex shrink-0 flex-col"
+      style="width: {sidebarWidth}px"
+    >
       <div class="border-b border-border p-2">
         <Input
           bind:value={paletteQuery}
@@ -943,7 +1029,17 @@ async function saveSecret(fieldId: string): Promise<void> {
           onkeydown={onPaletteKey}
         />
       </div>
-      <div class="flex-1 overflow-y-auto p-2">
+      <!--
+        `onscroll` closes the detail card rather than moving it. The card is anchored to a rectangle
+        measured when it opened, and a list scrolling underneath leaves it pointing at a row that is
+        no longer there. The next `mouseenter` re-measures, which is one frame later at most.
+      -->
+      <div
+        class="flex-1 overflow-y-auto p-2"
+        role="presentation"
+        onscroll={() => preview.hide()}
+        onmouseleave={() => preview.hide()}
+      >
       {#each palette as group (group.owner)}
         {@const shut = searching ? false : isCollapsed(group.owner)}
         <!-- Where this group's first row sits in `paletteWalk`. A lookup rather than a counter,
@@ -977,9 +1073,18 @@ async function saveSecret(fieldId: string): Promise<void> {
                 paletteActive
                   ? 'bg-accent'
                   : ''}"
-                title={type.definition.description ?? type.qualifiedId}
                 onclick={() => void addNode(type.qualifiedId, type.definition)}
-                onmouseenter={() => (paletteActive = position)}
+                onmouseenter={(event) => {
+                  paletteActive = position;
+                  // The whole node, beside the row. This replaced a `title` attribute holding the
+                  // description: same information, half a second later, in the OS's own font, with
+                  // nowhere to put the ports.
+                  preview.hover(event.currentTarget, {
+                    qualifiedId: type.qualifiedId,
+                    definition: type.definition,
+                    owner: type.owner,
+                  });
+                }}
               >
                 <Icon
                   class="size-3.5 shrink-0"
@@ -997,6 +1102,35 @@ async function saveSecret(fieldId: string): Promise<void> {
       {/each}
       </div>
     </aside>
+
+    <!--
+      The palette's right edge, which is both the border and the grip.
+
+      Four pixels wide and border-coloured, so at rest it reads as the rule it replaced — the `aside`
+      gave up its `border-r` to this element rather than sitting beside one, because a separate
+      border and a separate handle is two lines a pixel apart and one of them moves.
+    -->
+    <!--
+      A focusable `separator` is the window-splitter pattern from ARIA itself: the role becomes
+      interactive precisely when it is given a tabindex and a value, which is what it has here.
+      Svelte's rule reads the role in isolation and cannot see that.
+    -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+    <div
+      class="w-1 shrink-0 cursor-col-resize bg-border transition-colors hover:bg-primary focus-visible:bg-primary focus-visible:outline-none"
+      class:bg-primary={resizing}
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Palette width"
+      aria-valuenow={sidebarWidth}
+      tabindex="0"
+      onpointerdown={startResize}
+      onpointermove={onResizeMove}
+      onpointerup={endResize}
+      onpointercancel={endResize}
+      ondblclick={resetWidth}
+      onkeydown={onResizeKey}
+    ></div>
 
     <!--
       `colorMode` is not decoration: Svelte Flow ships its own light and dark palettes, and without
@@ -1060,6 +1194,19 @@ async function saveSecret(fieldId: string): Promise<void> {
         />
       {/if}
     </div>
+
+    <!--
+      Rendered here rather than inside the palette because it is `position: fixed` and has to escape
+      the sidebar's `overflow-y-auto`, which would otherwise clip it to a 224-pixel column.
+    -->
+    {#if preview.current !== null}
+      <NodeDetails
+        qualifiedId={preview.current.qualifiedId}
+        definition={preview.current.definition}
+        owner={preview.current.owner}
+        anchor={preview.current.anchor}
+      />
+    {/if}
 
     <aside class="w-72 shrink-0 overflow-y-auto border-l border-border p-3">
       {#if saveError !== null}

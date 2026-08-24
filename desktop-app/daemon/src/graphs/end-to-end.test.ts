@@ -99,6 +99,15 @@ const DOCUMENT: GraphDocument = {
     // `Compare` produces `result` either way, the edge is never dead, and the invite fires in every
     // world while looking on the canvas exactly as it does now.
     { id: "e12", from: { node: "same", port: "result" }, to: { node: "invite", port: "after" } },
+    /*
+     * And the group lookup waits on the invite, which is what keeps the wrong world free.
+     *
+     * `Compose text` takes the joiner's name straight from the trigger, so it sits on a path the
+     * world check is not on: without this edge the group is looked up and a line composed on every
+     * join anywhere, and only the notification at the end skips. One request per join at a trigger
+     * capped at 120 a minute is a real cost for a message nobody sees.
+     */
+    { id: "e13", from: { node: "invite", port: "sent" }, to: { node: "groupName", port: "after" } },
   ],
 };
 
@@ -236,17 +245,15 @@ describe("the exported avtr.zip invite graph", () => {
     expect(ran.invites).toEqual([]);
     expect(ran.toasts).toEqual([]);
     /*
-     * Both reads still happen, and that is the walk being right rather than wasteful.
+     * Exactly one read, and it is the one the graph cannot avoid.
      *
-     * The instance is read because the graph has to look before it can decide. The group is read
-     * because `Compose text` sits on a path from the trigger that the gate is not on — its `A` port
-     * comes from the join's `Name` — so the line is composed and then handed to a notification that
-     * skips. Nothing downstream is wrong; it is one lookup per join spent on a message nobody sees,
-     * and moving the world check in front of the composer is the author's call, not the engine's.
+     * The instance is read because the graph has to look before it can decide. The group is not,
+     * and that is edge `e13` doing its job: the composer's other input comes straight from the
+     * trigger, so without it the name would be looked up and a line built for a notification that
+     * then skips — every join, in every world, at a trigger capped at 120 a minute.
      */
     expect(ran.reads).toEqual([
       `instance ${ACCOUNT} wrld_ffffffff-0000-0000-0000-000000000000:47118~region(eu)`,
-      `group ${ACCOUNT} ${GROUP}`,
     ]);
   });
 });

@@ -5300,10 +5300,15 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
        `Notify → Shown` into a following node's `run after` is the realistic case. That reading is
        the one the port has always claimed, and the skip is visible in the run inspector rather than
        silent, which is the trade being made.
-     - Still the author's call and still not the engine's: in that graph `Compose text` sits on a
-       path from the trigger that the gate is not on, so the group is looked up and a line composed
-       on every join in every world before the notification skips. Correct, and one wasted request
-       per join. Moving the check in front of the composer is a graph edit.
+     - **The graph still needed one edge, and that part was never the engine's.** `Compose text`
+       takes the joiner's name straight from the trigger, so it sits on a path the world check is
+       not on: the group was looked up and a line composed on every join in every world, and only
+       the notification at the end skipped. Correct, and one wasted request per join at a trigger
+       capped at 120 a minute. `Invite → Sent` into the group extractor's `run after` is the fix,
+       and `end-to-end.test.ts` now asserts the *count* of VRChat reads in each room rather than
+       only what came out the far end — one read in the wrong world, two in the right one. A rule
+       about what runs is only half of it; what a run costs is the other half, and this file is the
+       only place that can see it.
 
 ---
 

@@ -25,6 +25,7 @@ import {
 } from "./actions.ts";
 import { apiNodes, type GraphApiCall } from "./api.ts";
 import { collectionNodes } from "./collections.ts";
+import { composeNodes } from "./compose.ts";
 import { dataStoreNodes, type GraphDataStore } from "./data-store.ts";
 import { extractNodes } from "./extract.ts";
 import { type GraphLaunchVrchat, type GraphSelf, meNodes } from "./me.ts";
@@ -259,6 +260,7 @@ export function createBuiltinNodes(deps: BuiltinNodeDeps = {}): BuiltinNodes {
     ...shapingNodes(),
     ...extractNodes(),
     ...collectionNodes(),
+    ...composeNodes(),
     ...operatorNodes(clockFn),
     ...valueNodes(clockFn),
     ...resolverNodes(deps.reads),

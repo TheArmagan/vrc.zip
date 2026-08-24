@@ -445,13 +445,20 @@ const DESKTOP: NodeDefinition = {
       description:
         "Anything at all, handed back to the press trigger untouched. Not shown to anybody: this is how a press minutes later knows what it was about.",
     },
+    {
+      id: "silent",
+      label: "No sound",
+      type: "boolean",
+      description:
+        "Overrides the switch below. Wire a condition in to keep one notification quiet without the rest of them being.",
+    },
     ...DESKTOP_BUTTON_PORTS,
   ],
   // The count comes from the buttons themselves rather than a second number to keep in step with
-  // them; the five fixed ports above are never hidden. Each button is worth two ports, which is what
+  // them; the six fixed ports above are never hidden. Each button is worth two ports, which is what
   // the stride says. See `visibleInputCount`.
   variadicInputs: "buttons",
-  variadicInputsBase: 5,
+  variadicInputsBase: 6,
   variadicInputsStride: 2,
   outputs: [
     {
@@ -1049,11 +1056,14 @@ export function actionNodes(deps: ActionDeps): BuiltinNode[] {
         const scenario = configText(config, "scenario");
         const expires = configNumber(config, "expires", 0);
         const carried = portableJson(inputs.data);
+        // Only a real boolean overrides the switch. A `boolean` port cannot carry anything else —
+        // `json` into a typed port is refused at the wire — so anything else is an unwired port.
+        const silent = typeof inputs.silent === "boolean" ? inputs.silent : config.silent === true;
         const result = await deps.notify({
           ...(named === "" ? {} : { id: named }),
           title,
           body: message,
-          ...(config.silent === true ? { silent: true } : {}),
+          ...(silent ? { silent: true } : {}),
           ...(tag === "" ? {} : { tag }),
           ...(buttons.length === 0 ? {} : { buttons }),
           ...(image === "" ? {} : { image }),

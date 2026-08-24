@@ -168,11 +168,12 @@ Thirteen kinds:
 | `buttons` | `max?`, `actions?: { value, label, argumentLabel?, placeholder?, reportsPress? }[]`, `default?: string` | A list of buttons, a row at a time. The value is JSON in a string. See below. |
 | `fields` | `options` **required** `{ value, label, list? }[]`, `max?`, `default?: string` | A list of fields to pull out of a value, picked from a catalogue you declare. Each row claims an output slot. See below. |
 | `paths` | `placeholder?`, `max?`, `default?: string` | The same rows with the path typed by hand, for a value nothing has a schema for. |
+| `keys` | `placeholder?`, `max?`, `default?: string` | A list of keys, each claiming an **input** slot. The mirror of `paths`. See below. |
 
 Every kind also carries `id`, `label` (both required) and `description?`.
 
-**Three kinds are repeatable — `buttons`, `fields`, `paths` — and all three store a JSON array in a
-string.** That is deliberate rather than a shortcut: a config value is `string | number | boolean` in
+**Four kinds are repeatable — `buttons`, `fields`, `paths`, `keys` — and all four store a JSON array
+in a string.** That is deliberate rather than a shortcut: a config value is `string | number | boolean` in
 four places at once (the wire type, the definition hash, the secret substitution, the validator), and
 widening it for one field would touch all four. The same trade `duration` makes by storing
 milliseconds in a `number`.
@@ -216,6 +217,14 @@ option tells the host the field holds several of something and the row belongs o
 `options` is **not hashed** (a definition is pinned by its config field *kinds*), so a catalogue that
 grows does not mark every saved graph stale. `slotRowLabel(row)` gives a port's name: the author's
 override, then the path's last segment, then the slot id.
+
+**`keys` is the same row pointed the other way, and it decides what a node *takes*.** Each row is a
+key and claims one input slot, which the host draws wearing that key — see
+[`variadicInputSlots`](#ports-the-author-chooses). Read them with the same `parseSlotRows`, where
+`row.path` is the key rather than a path, and name the port with `keyRowLabel(row)`: the author's
+override, then the key **whole**, then the slot id. Whole, unlike `slotRowLabel`, because a key of
+`user.name` means a field called exactly that rather than a route to a nested one. A row's `list` is
+unused here.
 
 In your handler, key the outputs by `row.slot` and read the **slot's declared type**, not the row's
 `list` flag — the slot is what an edge is wired to and what the type check ran against, and a
@@ -366,6 +375,8 @@ interface ExecutableNodeDefinition extends NodeDefinitionBase {
   readonly variadicInputs?: string;       // a config field saying how many inputs are in use
   readonly variadicInputsBase?: number;   // how many come before the variadic run
   readonly variadicInputsStride?: number; // how many ports one unit of the field claims
+  readonly variadicInputSlots?: string;   // a `keys` field whose rows claim inputs by name
+  readonly variadicInputSlotsBase?: number;
   readonly variadicOutputs?: string;      // a `fields` or `paths` field whose rows claim outputs
   readonly variadicOutputsBase?: number;
 }
@@ -423,15 +434,42 @@ visibleOutputs(EXTRACT, { fields: '[{"slot":"l1","path":"tags","label":"Tags"}]'
 // -> [{ id: "l1", label: "Tags", type: "list<json>" }]
 ```
 
-Claiming a **named** slot rather than counting from the first is the one place the output mechanism
-differs from the input one, and it is not a style choice. Rows are added and removed in the middle of
-the list; with a positional rule, deleting the first of six rows would silently re-point the five
-wires below it at a different value — a graph that does something else after an edit nobody thought
-was an edit.
+Claiming a **named** slot rather than counting from the first is not a style choice. Rows are added
+and removed in the middle of the list; with a positional rule, deleting the first of six rows would
+silently re-point the five wires below it at a different value — a graph that does something else
+after an edit nobody thought was an edit.
 
 Declare the slots in banks by type. Ten `json` and five `list<json>` is what the host's own
 extractors use, and the list bank is what makes a field holding several of something arrive on a port
 a `For each` will accept.
+
+`variadicInputSlots` is the same mechanism on the other side: a `keys` field whose rows each claim one
+**input** slot, drawn wearing the key. Use it where the ports are the author's own vocabulary rather
+than a count — the host's `Compose JSON` is one port per key of the object it builds:
+
+```ts
+const COMPOSE: ExecutableNodeDefinition = {
+  kind: "action",
+  id: "compose-json",
+  title: "Compose JSON",
+  // One bank, all `json`: the object being built has no schema for a type check to be against.
+  inputs: [
+    { id: "v1", label: "Value 1", type: "json" },
+    { id: "v2", label: "Value 2", type: "json" },
+  ],
+  outputs: [{ id: "value", label: "Object", type: "json" }],
+  variadicInputSlots: "keys",
+  config: [{ kind: "keys", id: "keys", label: "Keys" }],
+};
+
+visibleInputs(COMPOSE, { keys: '[{"slot":"v2","path":"displayName"}]' });
+// -> [{ id: "v2", label: "displayName", type: "json" }]
+```
+
+`wired` here is the list of port **ids** with an edge rather than a count — position means nothing
+when a row claims a slot by name — and it is the same floor: a port with a wire in it is drawn
+whatever the rows say. A definition setting both input mechanisms is not a supported shape; this one
+wins.
 
 ### A worked pair
 

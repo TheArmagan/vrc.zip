@@ -343,6 +343,24 @@ describe("the desktop notification", () => {
     ]);
   });
 
+  test("a wired No sound overrides the switch, in both directions", async () => {
+    // The point of the port: one notification in a graph can be quiet without the rest of them
+    // being, and a graph that decided to be loud this once can say so too.
+    const h = harness();
+    await h.run("desktop-notification", { text: "hi", silent: true }, { silent: false });
+    expect(h.toasts[0]?.silent).toBe(true);
+    await h.run("desktop-notification", { text: "hi", silent: false }, { silent: true });
+    expect(h.toasts[1]?.silent).toBeUndefined();
+  });
+
+  test("an unwired No sound leaves the switch alone", async () => {
+    const h = harness();
+    await h.run("desktop-notification", { text: "hi" }, { silent: true });
+    expect(h.toasts[0]?.silent).toBe(true);
+    await h.run("desktop-notification", { text: "hi" }, {});
+    expect(h.toasts[1]?.silent).toBeUndefined();
+  });
+
   test("a notification carries whatever it was handed", async () => {
     // The point of the port: a press arriving minutes later has the invite it was about, rather
     // than a name the graph has to go and look up again.

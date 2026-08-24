@@ -6,6 +6,7 @@ import {
   evaluateNodeBody,
   isPortType,
   isTriggerDefinition,
+  keyRowLabel,
   listElement,
   type NodeDefinition,
   nodeDefinitionHash,
@@ -399,6 +400,15 @@ describe("slot rows", () => {
     );
     expect(slotRowLabel({ slot: "o3", path: "", label: "", list: false })).toBe("o3");
   });
+
+  test("a key row's label is the override, the key whole, then the slot", () => {
+    expect(keyRowLabel({ slot: "v1", path: "user.name", label: "Who", list: false })).toBe("Who");
+    // Not `name`: a key with a dot in it is a field called `user.name`, not a route to one.
+    expect(keyRowLabel({ slot: "v1", path: "user.name", label: "  ", list: false })).toBe(
+      "user.name",
+    );
+    expect(keyRowLabel({ slot: "v2", path: "  ", label: "", list: false })).toBe("v2");
+  });
 });
 
 describe("variadic outputs", () => {
@@ -492,6 +502,78 @@ describe("variadic outputs", () => {
   });
 });
 
+describe("variadic input slots", () => {
+  const compose: NodeDefinition = {
+    kind: "action",
+    id: "compose-json",
+    title: "Compose JSON",
+    inputs: [
+      { id: "v1", label: "Value 1", type: "json" },
+      { id: "v2", label: "Value 2", type: "json" },
+      { id: "v3", label: "Value 3", type: "json" },
+    ],
+    outputs: [{ id: "value", label: "Object", type: "json" }],
+    variadicInputSlots: "keys",
+    config: [{ kind: "keys", id: "keys", label: "Keys" }],
+  };
+
+  const rows = (...list: { slot: string; path: string; label?: string }[]): string =>
+    JSON.stringify(list);
+
+  test("a row claims its slot and the key names the port", () => {
+    const shown = visibleInputs(compose, {
+      keys: rows({ slot: "v2", path: "displayName" }, { slot: "v1", path: "status" }),
+    });
+    expect(shown.map((port) => [port.id, port.label])).toEqual([
+      ["v2", "displayName"],
+      ["v1", "status"],
+    ]);
+  });
+
+  test("the port wears the key whole, dots included", () => {
+    // The difference from an extractor's label rule, and it is deliberate: `user.name` as a *key*
+    // means a field actually called that, so trimming it to `name` would name the port something
+    // the object does not contain.
+    const shown = visibleInputs(compose, { keys: rows({ slot: "v1", path: "user.name" }) });
+    expect(shown[0]?.label).toBe("user.name");
+  });
+
+  test("no rows means no ports, and the count agrees", () => {
+    expect(visibleInputs(compose, {})).toEqual([]);
+    expect(visibleInputs(compose, { keys: "[]" })).toEqual([]);
+    expect(visibleInputCount(compose, { keys: "[]" })).toBe(0);
+  });
+
+  test("a slot the node does not have is skipped, and so is a second claim on one", () => {
+    // Both are shapes a round-tripped document holds and neither can be drawn.
+    expect(visibleInputs(compose, { keys: rows({ slot: "v9", path: "a" }) })).toEqual([]);
+    const twice = visibleInputs(compose, {
+      keys: rows({ slot: "v1", path: "a" }, { slot: "v1", path: "b" }),
+    });
+    expect(twice.map((port) => port.id)).toEqual(["v1"]);
+  });
+
+  test("a wired slot is drawn whatever the rows say", () => {
+    // The floor, exactly as the outputs have it: deleting the row that named a port must leave the
+    // wire on screen to be dealt with rather than hide an edge that is still there.
+    const shown = visibleInputs(compose, { keys: "[]" }, ["v3"]);
+    expect(shown.map((port) => [port.id, port.label])).toEqual([["v3", "Value 3"]]);
+    const claimed = visibleInputs(compose, { keys: rows({ slot: "v1", path: "a" }) }, ["v1"]);
+    expect(claimed.map((port) => port.id)).toEqual(["v1"]);
+  });
+
+  test("fixed inputs before the slots are always drawn", () => {
+    const withFixed: NodeDefinition = { ...compose, variadicInputSlotsBase: 1 } as NodeDefinition;
+    // `v1` is a fixed port now, so no row can claim it and nothing can hide it.
+    expect(visibleInputs(withFixed, {}).map((port) => port.id)).toEqual(["v1"]);
+    expect(visibleInputs(withFixed, { keys: rows({ slot: "v1", path: "a" }) }).length).toBe(1);
+  });
+
+  test("the declared ports do not move, which is what keeps a saved edge valid", () => {
+    expect(canonicalNodeDefinition(compose)).toContain("in:v1:json:0,in:v2:json:0,in:v3:json:0");
+  });
+});
+
 describe("config field kinds", () => {
   const withField = (field: unknown): unknown => ({
     id: "n",
@@ -513,6 +595,7 @@ describe("config field kinds", () => {
       { kind: "buttons", id: "b", label: "B" },
       { kind: "fields", id: "f", label: "F", options: [{ value: "a", label: "A" }] },
       { kind: "paths", id: "p", label: "P" },
+      { kind: "keys", id: "k", label: "K" },
     ]) {
       const result = validateNodeDefinition(withField(field));
       expect(result.ok).toBe(true);

@@ -401,6 +401,30 @@ export type NodeConfigField =
       readonly placeholder?: string;
       readonly max?: number;
       readonly default?: string;
+    }
+  | {
+      /**
+       * A list of keys, each claiming one **input** slot. The mirror of `paths`.
+       *
+       * `fields` and `paths` decide what a node gives; this decides what it takes. Same row, same
+       * parser, same reason for the slot to live in the row — read the other direction: the string
+       * is a key to write rather than a path to read, and the port it claims is on the left of the
+       * card instead of the right. See {@link variadicInputSlots}.
+       *
+       * The repeatable field behind `Compose JSON`, and the answer to what a fixed-slot node looks
+       * like when it grows up: `Make an object` is three ports and three key boxes, most of them
+       * empty, and the number of keys is a thing the author is deciding rather than the schema.
+       *
+       * The stored value is a JSON array in a string, for the four reasons `buttons` is — read it
+       * with {@link parseSlotRows}. A row's `list` is unused: a key is a key whatever it holds.
+       */
+      readonly kind: "keys";
+      readonly id: string;
+      readonly label: string;
+      readonly description?: string;
+      readonly placeholder?: string;
+      readonly max?: number;
+      readonly default?: string;
     };
 
 /** One row of a `buttons` field. `id` is what an activation reports, so it is not the label. */
@@ -457,7 +481,11 @@ export function parseButtonRows(value: unknown): ButtonRow[] {
 }
 
 /**
- * One row of a `fields` or `paths` field: a path out of a value, and the output slot it claims.
+ * One row of a `fields`, `paths` or `keys` field: a string, and the port slot it claims.
+ *
+ * The string is a **path out of** the incoming value for the first two, and a **key written into**
+ * the outgoing one for `keys` — the same row read in either direction, which is why one shape and one
+ * parser serve both. `path` keeps its name because renaming it would break every saved extractor.
  *
  * **The row stores its slot, and that is the whole design.** A saved edge points at a port id, so
  * handing slots out by row position would mean that deleting the first row silently re-points every
@@ -467,11 +495,13 @@ export function parseButtonRows(value: unknown): ButtonRow[] {
  *
  * `label` blank means "derive it", which is the normal case: the picker writes the catalogue's
  * friendly name in when a field is chosen, and clearing the box falls back to the path's last
- * segment. `list` says the value is several of something and therefore belongs on a list slot.
+ * segment. `list` says the value is several of something and therefore belongs on a list slot; a
+ * `keys` row leaves it false, since a key is a key whatever it holds.
  */
 export interface SlotRow {
-  /** The output port id this row produces on: `o1`, `l2`. Blank for a row mid-edit. */
+  /** The port id this row claims: `o1`, `l2` for an output, `v3` for an input. Blank mid-edit. */
   readonly slot: string;
+  /** A path out of the value for `fields`/`paths`, the key to write for `keys`. */
   readonly path: string;
   readonly label: string;
   readonly list: boolean;
@@ -526,6 +556,21 @@ export function slotRowLabel(row: SlotRow): string {
     .split(".")
     .filter((segment) => segment !== "");
   return segments[segments.length - 1] ?? row.slot;
+}
+
+/**
+ * What a `keys` row's port is called: the author's override, the key, or the slot id.
+ *
+ * The key **whole**, unlike {@link slotRowLabel}, and that is the difference rather than an
+ * inconsistency. A path is a route through a value and its last segment is the part worth reading; a
+ * key is a name, and `user.name` as a key means a field actually called `user.name`. Cutting it down
+ * to `name` would label the port as something the object does not contain.
+ */
+export function keyRowLabel(row: SlotRow): string {
+  const chosen = row.label.trim();
+  if (chosen !== "") return chosen;
+  const key = row.path.trim();
+  return key === "" ? row.slot : key;
 }
 
 /** A configured instance's values, keyed by field id. Integer unix-ms for `duration` fields. */
@@ -677,6 +722,27 @@ export interface ExecutableNodeDefinition extends NodeDefinitionBase {
    */
   readonly variadicInputsStride?: number;
   /**
+   * The id of a `keys` config field whose rows each **claim one input slot**.
+   *
+   * The mirror of {@link variadicOutputs}, and it exists for the same reason and works the same way:
+   * every port is declared, always, and the config decides which are drawn and what they are called.
+   * A row claims a named slot rather than counting from the first, so a row deleted from the middle
+   * frees its own port instead of re-pointing every wire below it.
+   *
+   * The difference from {@link variadicInputs} is the difference between "how many" and "which".
+   * A slider says a node takes four values; a `keys` field says a node takes `title`, `body` and
+   * `url` — and the ports wear those names, which is the whole point of a node like `Compose JSON`.
+   * A definition setting both is not a shape this supports: this one wins.
+   */
+  readonly variadicInputSlots?: string;
+  /**
+   * How many of the declared inputs come *before* the slots and are therefore always drawn.
+   *
+   * Defaults to zero. Set it on a node whose slots follow a fixed input or two, so a config field
+   * about something else cannot hide them.
+   */
+  readonly variadicInputSlotsBase?: number;
+  /**
    * The id of a `fields` or `paths` config field whose rows say which outputs are *in use*.
    *
    * The output half of {@link variadicInputs}, and it exists for the same reason: a node's ports are
@@ -703,6 +769,27 @@ export interface ExecutableNodeDefinition extends NodeDefinitionBase {
 }
 
 /**
+ * What "already has an edge in it" is allowed to look like.
+ *
+ * A number for the positional mechanism — the highest one-based port with a wire — and a list of port
+ * ids for the slot one, where position means nothing. Callers hand over whichever they have and the
+ * two functions below translate; the alternative was two parameters, one of which is always ignored.
+ */
+export type WiredInputs = number | readonly string[];
+
+/** The positional floor, from either shape of {@link WiredInputs}. */
+function inputFloor(definition: NodeDefinition, wired: WiredInputs): number {
+  if (typeof wired === "number") return wired;
+  if (definition.kind === "trigger") return 0;
+  let floor = 0;
+  for (const id of wired) {
+    const index = definition.inputs.findIndex((port) => port.id === id);
+    if (index >= 0) floor = Math.max(floor, index + 1);
+  }
+  return floor;
+}
+
+/**
  * How many inputs to draw for one instance of a node.
  *
  * `wired` is the highest one-based slot with an edge in it, which acts as a floor: the count can be
@@ -712,9 +799,15 @@ export interface ExecutableNodeDefinition extends NodeDefinitionBase {
 export function visibleInputCount(
   definition: NodeDefinition,
   config: NodeConfigValues,
-  wired = 0,
+  wired: WiredInputs = 0,
 ): number {
   if (definition.kind === "trigger") return 0;
+  // A node whose inputs are claimed by name has no count of its own to compute: the answer is how
+  // many slots the rows claimed, which is a list rather than a run from the first port.
+  if (definition.variadicInputSlots !== undefined) {
+    return visibleInputs(definition, config, wired).length;
+  }
+  const floorFor = inputFloor(definition, wired);
   const field = definition.variadicInputs;
   if (field === undefined) return definition.inputs.length;
   const raw = config[field];
@@ -746,7 +839,7 @@ export function visibleInputCount(
    * next button's label showing on its own, which reads as a half-drawn button rather than as the
    * one wired port it actually is.
    */
-  const floor = wired > base ? base + Math.ceil((wired - base) / stride) * stride : wired;
+  const floor = floorFor > base ? base + Math.ceil((floorFor - base) / stride) * stride : floorFor;
   return Math.min(definition.inputs.length, Math.max(1, floor, chosen));
 }
 
@@ -768,14 +861,49 @@ function defaultCountOf(definition: NodeDefinition, field: string): number {
     : 1;
 }
 
-/** The inputs an instance actually shows. See {@link visibleInputCount}. */
+/**
+ * The inputs an instance actually shows.
+ *
+ * Two mechanisms and one entry point. {@link variadicInputs} counts from the first port, which is
+ * what a slider or a list of buttons asks for; {@link variadicInputSlots} has each config row claim a
+ * named port and rename it, which is what a node whose inputs *are* the author's keys asks for. The
+ * second wins where a definition somehow declares both.
+ *
+ * The slot branch keeps the floor `visibleOutputs` has, for the same reason: a port with an edge in
+ * it is drawn whatever the rows say, so deleting a row leaves its wire on screen to be dealt with
+ * rather than hiding an edge that is still there.
+ */
 export function visibleInputs(
   definition: NodeDefinition,
   config: NodeConfigValues,
-  wired = 0,
+  wired: WiredInputs = 0,
 ): readonly PortDefinition[] {
   if (definition.kind === "trigger") return [];
-  return definition.inputs.slice(0, visibleInputCount(definition, config, wired));
+  const slotField = definition.variadicInputSlots;
+  if (slotField === undefined) {
+    return definition.inputs.slice(0, visibleInputCount(definition, config, wired));
+  }
+
+  const base = definition.variadicInputSlotsBase ?? 0;
+  const slots = new Map(definition.inputs.slice(base).map((port) => [port.id, port]));
+  const shown: PortDefinition[] = [...definition.inputs.slice(0, base)];
+  const claimed = new Set<string>();
+
+  for (const row of parseSlotRows(config[slotField])) {
+    const port = slots.get(row.slot);
+    if (port === undefined || claimed.has(row.slot)) continue;
+    claimed.add(row.slot);
+    shown.push({ ...port, label: keyRowLabel(row) });
+  }
+  if (typeof wired !== "number") {
+    for (const id of wired) {
+      const port = slots.get(id);
+      if (port === undefined || claimed.has(id)) continue;
+      claimed.add(id);
+      shown.push(port);
+    }
+  }
+  return shown;
 }
 
 /**
@@ -965,6 +1093,7 @@ const CONFIG_KINDS = [
   "buttons",
   "fields",
   "paths",
+  "keys",
 ] as const;
 
 /** `publisher.name`-ish: an identifier a graph can store and a person can read in an error. */

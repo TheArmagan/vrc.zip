@@ -246,6 +246,7 @@ export {
   evaluateNodeBody,
   isPortType,
   isTriggerDefinition,
+  keyRowLabel,
   LIST_PORT_TYPES,
   type ListPortType,
   listElement,
@@ -276,4 +277,5 @@ export {
   visibleInputCount,
   visibleInputs,
   visibleOutputs,
+  type WiredInputs,
 } from "./nodes.ts";

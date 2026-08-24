@@ -220,6 +220,7 @@ $effect(() => {
   applyProblems();
   applyVariadicFloors();
   applyWiredOutputs();
+  applyWiredInputs();
   applyEdgeStyles();
 });
 
@@ -291,6 +292,36 @@ function applyWiredOutputs(): void {
     if (current.length === wired.length && current.every((id, i) => id === wired[i])) return node;
     changed = true;
     return { ...node, data: { ...node.data, wiredOutputs: wired } };
+  });
+  if (changed) nodes = next;
+}
+
+/**
+ * The same, for a node whose *inputs* are claimed by name — `Compose JSON` and anything like it.
+ *
+ * A separate pass rather than a branch in the one above, because the two mechanisms coexist on
+ * different nodes and neither list is worth computing for a node that has no slots of that side. The
+ * positional variadics need none of this: their floor is a count, written back into the config by
+ * `applyVariadicFloors`.
+ */
+function applyWiredInputs(): void {
+  let changed = false;
+  const next = nodes.map((node) => {
+    const data = node.data as { qualifiedId: string; wiredInputs?: readonly string[] };
+    const definition = graphs.definition(data.qualifiedId);
+    if (definition === null || definition.kind === "trigger") return node;
+    if (definition.variadicInputSlots === undefined) return node;
+    const wired = [
+      ...new Set(
+        edges
+          .filter((edge) => edge.target === node.id && edge.targetHandle != null)
+          .map((edge) => edge.targetHandle as string),
+      ),
+    ].sort();
+    const current = data.wiredInputs ?? [];
+    if (current.length === wired.length && current.every((id, i) => id === wired[i])) return node;
+    changed = true;
+    return { ...node, data: { ...node.data, wiredInputs: wired } };
   });
   if (changed) nodes = next;
 }
@@ -678,10 +709,17 @@ const onconnectend: OnConnectEnd = (event, state) => {
   if (type === null) return;
   const pointer = "clientX" in event ? event : event.changedTouches[0];
   if (pointer === undefined) return;
+  /*
+   * Svelte Flow's own answer first: `to` is where the wire was let go, in flow coordinates, computed
+   * from the transform it is drawing with. Falling back to `0,0` used to mean a released wire could
+   * drop its node at the graph's origin — off screen, and nowhere near the gesture — so the fallback
+   * is the same conversion the double-click uses rather than a corner of the document.
+   */
+  const at = state.to ?? toFlow(pointer.clientX, pointer.clientY) ?? freeSpot();
   picking = {
     screenX: pointer.clientX,
     screenY: pointer.clientY,
-    at: state.to ?? { x: 0, y: 0 },
+    at,
     wire: { nodeId, portId, portType: type, side },
   };
 };
@@ -824,20 +862,9 @@ function onCanvasDoubleClick(event: MouseEvent): void {
   if (!(target instanceof Element)) return;
   // The pane is the element Svelte Flow puts under everything drawn on the canvas.
   if (target.closest(".svelte-flow__pane") === null) return;
-  const box = canvas?.getBoundingClientRect();
-  if (box === undefined) return;
-  picking = {
-    screenX: event.clientX,
-    screenY: event.clientY,
-    // Screen to flow by hand: `useSvelteFlow()` needs the flow's own context, which this component
-    // is the parent of rather than inside. One subtraction and a divide is cheaper than wrapping
-    // the whole editor in a provider to reach a helper.
-    at: {
-      x: (event.clientX - box.left - viewport.x) / viewport.zoom,
-      y: (event.clientY - box.top - viewport.y) / viewport.zoom,
-    },
-    wire: null,
-  };
+  const at = toFlow(event.clientX, event.clientY);
+  if (at === null) return;
+  picking = { screenX: event.clientX, screenY: event.clientY, at, wire: null };
 }
 
 /** Creates the chosen node where the gesture landed, and wires it up when a wire was attached. */
@@ -865,25 +892,58 @@ function pick(choice: PickerChoice): void {
 const CARD = { width: 230, height: 120 };
 
 /**
+ * The transform actually on screen, read off the element wearing it.
+ *
+ * **Not the bound `viewport`, and that is the whole point.** `fitView` sets the view on mount without
+ * the binding hearing about it, so on a graph nobody has panned yet `viewport` is still `0,0,1` while
+ * the canvas is showing something else entirely — every conversion built on it was out by the fit,
+ * which is why a double-clicked node landed somewhere other than under the cursor. The layer's own
+ * `transform` cannot be stale: it is what the browser is drawing.
+ *
+ * Falls back to the binding when the element or the matrix is not there to be read, which is jsdom
+ * and the frame before the flow has mounted.
+ */
+function flowTransform(): { x: number; y: number; zoom: number } {
+  const layer = canvas?.querySelector<HTMLElement>(".svelte-flow__viewport");
+  if (layer == null) return viewport;
+  try {
+    const matrix = new DOMMatrixReadOnly(getComputedStyle(layer).transform);
+    if (matrix.a === 0) return viewport;
+    return { x: matrix.e, y: matrix.f, zoom: matrix.a };
+  } catch {
+    return viewport;
+  }
+}
+
+/** A point on the screen, in flow coordinates. Null before the canvas exists. */
+function toFlow(clientX: number, clientY: number): { x: number; y: number } | null {
+  const box = canvas?.getBoundingClientRect();
+  if (box === undefined) return null;
+  const transform = flowTransform();
+  return {
+    x: (clientX - box.left - transform.x) / transform.zoom,
+    y: (clientY - box.top - transform.y) / transform.zoom,
+  };
+}
+
+/**
  * Where a node goes when the gesture that made it did not say.
  *
  * The palette and its Enter key have no position to offer, and the old answer was a fixed spot near
  * the graph's origin — which is *nowhere* the moment somebody has panned away from it. Adding a node
  * and seeing nothing appear is the bug: the node was there, several screens to the left.
  *
- * So the middle of whatever is on screen, in flow coordinates, and then stepped diagonally past
- * anything already sitting there. The step is what keeps a run of adds readable; without it four
- * nodes from the palette are one node with three hidden underneath it.
+ * So the middle of what is on screen, with the card *centred* on it rather than hung off it by a
+ * corner, and then stepped diagonally past anything already sitting there. The step is what keeps a
+ * run of adds readable; without it four nodes from the palette are one node with three underneath.
  */
 function freeSpot(): { x: number; y: number } {
   const box = canvas?.getBoundingClientRect();
+  const middle = box === undefined ? null : toFlow(box.left + box.width / 2, box.top + box.height / 2);
   const center =
-    box === undefined
+    middle === null
       ? { x: 120, y: 80 }
-      : {
-          x: (box.width / 2 - viewport.x) / viewport.zoom - CARD.width / 2,
-          y: (box.height / 2 - viewport.y) / viewport.zoom - CARD.height / 2,
-        };
+      : { x: middle.x - CARD.width / 2, y: middle.y - CARD.height / 2 };
   const step = 32;
   // Bounded: a canvas crowded enough to exhaust this wants the last offset, not a hang.
   for (let taken = 0; taken < 40; taken += 1) {
@@ -1081,6 +1141,31 @@ function slotRowsOf(fieldId: string): SlotRow[] {
 
 function setSlotRows(fieldId: string, rows: readonly SlotRow[]): void {
   setConfig(fieldId, JSON.stringify(rows));
+}
+
+/**
+ * The **input** slots no row has claimed, in the order the node declares them.
+ *
+ * The mirror of `freeSlots` below, and there is only one bank: an input slot claimed by a key is
+ * `json`, because the object being built has no schema for a type check to be against.
+ */
+function freeInputSlots(definition: NodeDefinition, rows: readonly SlotRow[]): string[] {
+  if (definition.kind === "trigger" || definition.variadicInputSlots === undefined) return [];
+  const base = definition.variadicInputSlotsBase ?? 0;
+  const taken = new Set(rows.map((row) => row.slot));
+  return definition.inputs
+    .slice(base)
+    .filter((port) => !taken.has(port.id))
+    .map((port) => port.id);
+}
+
+/** Adds a key row on the lowest free input slot, or does nothing when they are all claimed. */
+function addKeyRow(fieldId: string): void {
+  if (selectedDefinition === null) return;
+  const rows = slotRowsOf(fieldId);
+  const slot = freeInputSlots(selectedDefinition, rows)[0];
+  if (slot === undefined) return;
+  setSlotRows(fieldId, [...rows, { slot, path: "", label: "", list: false }]);
 }
 
 /**
@@ -1905,6 +1990,64 @@ async function saveSecret(fieldId: string): Promise<void> {
                 {#if roomForValue === 0 && roomForList === 0}
                   <span class="text-xs text-muted-foreground">
                     Every port on this node is in use. Wire a second one from the same value.
+                  </span>
+                {/if}
+              </div>
+            {:else if field.kind === "keys"}
+              <!--
+                The input mirror of the block above, and deliberately the smaller of the two. A key
+                needs one box: there is no catalogue to pick from, no path to derive a name out of,
+                and no bank to choose, because the port a key claims carries whatever it is given.
+                The key *is* the port's label, which is the whole reason this field exists.
+              -->
+              {@const rows = slotRowsOf(field.id)}
+              {@const room = freeInputSlots(selectedDefinition, rows).length}
+              <div class="flex flex-col gap-2">
+                <!-- Keyed by index for the reason the button rows are: two rows can hold the same
+                     key for as long as it takes to finish typing, and a duplicate key in an
+                     `{#each}` is a hard runtime error in Svelte 5 rather than a warning. -->
+                {#each rows as row, index (index)}
+                  {@const duplicate = rows.some(
+                    (other, i) => i !== index && other.path.trim() === row.path.trim(),
+                  )}
+                  <div class="rounded border border-border p-2">
+                    <div class="flex items-center gap-1">
+                      <Input
+                        class="h-7 text-sm"
+                        placeholder={field.placeholder ?? "key"}
+                        value={row.path}
+                        oninput={(event: Event) =>
+                          updateSlotRow(field.id, index, {
+                            path: (event.currentTarget as HTMLInputElement).value,
+                          })}
+                      />
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        class="size-7 shrink-0"
+                        title="Remove this key"
+                        onclick={() => removeSlotRow(field.id, index)}
+                      >
+                        <TrashIcon class="size-4" />
+                      </Button>
+                    </div>
+                    {#if duplicate && row.path.trim() !== ""}
+                      <!-- A warning rather than a refusal, for the same reason the button ids get
+                           one: the box has to be typeable through a state where two rows match. -->
+                      <span class="text-xs text-destructive">
+                        Another key is called this. Only the first one will be used.
+                      </span>
+                    {/if}
+                    <div class="mt-1 font-mono text-[10px] text-muted-foreground">{row.slot}</div>
+                  </div>
+                {/each}
+                {#if room > 0}
+                  <Button size="sm" variant="secondary" onclick={() => addKeyRow(field.id)}>
+                    Add a key
+                  </Button>
+                {:else}
+                  <span class="text-xs text-muted-foreground">
+                    Every port on this node is in use. Compose a second object and merge them.
                   </span>
                 {/if}
               </div>

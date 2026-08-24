@@ -235,7 +235,8 @@ const MAKE_OBJECT: NodeDefinition = {
   id: "make-object",
   kind: "action",
   title: "Make an object",
-  description: "Builds an object from up to three named values. A webhook body, usually.",
+  description:
+    "Builds an object from up to three named values. Compose JSON does any number, on ports named after the keys.",
   category: CATEGORY,
   inputs: [
     { id: "a", label: "A", type: "json" },

@@ -71,6 +71,13 @@ interface GraphNodeData {
    * see that it is.
    */
   readonly wiredOutputs?: readonly string[] | undefined;
+  /**
+   * The same, for a node whose *inputs* are named in the inspector rather than counted.
+   *
+   * Only `Compose JSON` and anything like it gets this. A positionally variadic node needs none: its
+   * floor is a count the editor writes back into the config.
+   */
+  readonly wiredInputs?: readonly string[] | undefined;
   [key: string]: unknown;
 }
 
@@ -89,8 +96,14 @@ const Icon = $derived(iconFor(definition?.category, owner));
  * `Compose text` declares twenty-six and shows three until somebody asks for more. See
  * `variadicInputs` in `@vrcz/plugin-api` for why the ports are all real and only the drawing varies.
  * The editor keeps the count above whatever is wired, so this can never hide a port with an edge.
+ *
+ * `wiredInputs` is the floor for the *other* mechanism, where each config row claims a port by name:
+ * there is no count to raise, so the ids arrive the way `wiredOutputs` does. Empty for every node
+ * that counts instead, which is all of them but `Compose JSON`.
  */
-const inputs = $derived(definition === null ? [] : visibleInputs(definition, node.config));
+const inputs = $derived(
+  definition === null ? [] : visibleInputs(definition, node.config, node.wiredInputs ?? []),
+);
 /**
  * The outputs this instance draws, which for an extractor is one per configured row.
  *

@@ -27,6 +27,8 @@ repeatable config kinds. The field catalogues are generated from the pinned spec
 **Decision 254 finishes the desktop notification.** Every part of a button is wireable, not just its
 text, and a notification can carry arbitrary JSON that comes back with the press. Decision 255 makes
 the palette drop a new node where the canvas is, not where the graph's origin is.
+**Decision 258 is the input half of that mechanism.** `Compose JSON` builds an object from a list of
+keys, one input port per key, over a `variadicInputSlots` mechanism and a `keys` config kind.
 **Current phase:** Phase 4 is **complete** — 4.1 through 4.6, built on 2026-08-23 from the spec the
 planning pass of the same day produced (decision 206). Graphs are stored, run, edited on a canvas,
 armed behind a hold, and shared as files. What remains in the plan is Phase 5, packaging and polish,
@@ -4859,6 +4861,49 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      graph that never ran and one that ran at the epoch are different sentences. `lastRunAt` stops
      being list-only as a side effect — it is on the row now, so an enable, an arm or a save answers
      with it too.
+
+258. **`Compose JSON`, and the input half of the variadic mechanism.** `Make an object` is three
+     ports called A, B and C and three boxes saying what each one is called: six controls for three
+     keys, a cap nobody chose, and a card where nothing says which wire is the title. This is that
+     shape said properly — a list of keys, one input port per key, each wearing the key's own name.
+     It is the mirror of decision 253's extractors, which is exactly how it is built.
+     - **`variadicInputSlots` and a `keys` config kind**, reusing `SlotRow` and `parseSlotRows`
+       unchanged. The row is the same thing read in the other direction: a string and the port slot it
+       claims, where the string is a key to write rather than a path to read. `row.path` keeps its
+       name because renaming it would break every saved extractor, and the ambiguity is paid for in
+       one sentence of documentation rather than in a second parser.
+     - **`keyRowLabel` is not `slotRowLabel`, and the difference is the point.** A path's *last
+       segment* is the readable half of `friends[0].displayName`; a key is a name, so `user.name`
+       means a field called exactly that. Trimming it to `name` would label the port as something the
+       object does not contain. Keys are literal everywhere for the same reason — nesting is a second
+       `Compose JSON` wired into the first, which is the same answer said in the canvas.
+     - **A key with nothing wired is left out rather than set to null.** An absent field and a null
+       field mean different things to VRChat's API and to a webhook, and inventing one would be the
+       node deciding which the author meant. A deliberate null is a `JSON value` node wired in.
+     - **Built through `Object.fromEntries`, not by assigning into a literal.** `out[key] = value`
+       with a key of `__proto__` walks into the setter on `Object.prototype` and changes the object's
+       prototype instead of adding a field — and these keys are typed by a person into a document
+       that is exported and imported again, which is the path that eventually carries one.
+     - `visibleInputs` now takes `number | readonly string[]`: a count for the positional mechanism, a
+       list of port ids for the slot one, where position means nothing. The editor grew an
+       `applyWiredInputs` pass beside `applyWiredOutputs` so the floor works on the left of a card
+       too — verified by hand: deleting a wired key's row leaves the port drawn under its placeholder
+       name with the edge still on it, rather than hiding an edge that is still there.
+
+259. **A notification's `No sound` is wireable**, like its title and its buttons before it. Only a
+     real boolean on the port overrides the switch, which is not a coercion decision so much as an
+     observation: `json` into a typed port is refused at the wire, so anything that is not a boolean
+     is an unwired port rather than a value to interpret.
+
+260. **The canvas reads its transform off the element wearing it, not off the bound `viewport`.**
+     `fitView` sets the view on mount without the binding hearing about it, so on a graph nobody had
+     panned yet `viewport` was still `0,0,1` while the canvas showed something else entirely — and
+     every conversion built on it was out by the fit. That is why a double-clicked node landed
+     somewhere other than under the cursor. `flowTransform()` reads the `.svelte-flow__viewport`
+     layer's own matrix, which cannot be stale because it is what the browser is drawing, and one
+     `toFlow()` serves the double-click, the dropped wire's fallback, and the palette's centring.
+     A released wire also stopped falling back to the graph's origin when Svelte Flow had no position
+     to offer: `0,0` is off screen and nowhere near the gesture.
 
 ---
 

@@ -4684,6 +4684,31 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
        matched to the pairing's own. The plugin-install toast has the same button. `tray.ts` keeps
        its balloon, which is right: that one is a reply to a click on that icon.
 
+251. **The notify node grew everything the notifier learned, and a press is a trigger of its own.**
+     `Notify on this computer` now takes a wired title and picture, a tag, a silent switch, buttons,
+     a scenario, a duration and an expiry, and answers with `Shown`, `Notification` and `Dropped`.
+     - **`When a notification is pressed` is a trigger, not an output.** A press happens minutes
+       later, from the Action Center, or never — an action node that waited for one would hold a
+       graph run open for the length of a person's attention. As a trigger it can also be a
+       *different graph*: "toast me when someone comes online" and "invite them when I press Accept"
+       are two automations sharing a notification, which is exactly what a tag filter is for.
+     - **A new `buttons` config kind, and its value is a JSON array in a string.** The editor draws
+       a row per button with a label, an action and an argument box that only appears for an action
+       that takes one. The value stays scalar because a config value is `string | number | boolean`
+       in four places at once — the wire type, the definition hash, the secret substitution and the
+       validator — and widening it for one field would touch all four. Same trade `duration` makes
+       by storing milliseconds in a `number`. `parseButtonRows` answers an empty list for anything
+       malformed, because that string is round-tripped through export, hand-editing and import.
+     - **Button labels are wireable**, so a toast can say "Accept from Ada" rather than "Accept".
+       Five label ports are declared and only as many as there are buttons are drawn — the
+       `Compose text` trick, since ports are part of a node's identity and cannot depend on config.
+       `variadicInputs` learned to count a `buttons` field's rows, and `variadicInputsBase` keeps
+       the three fixed ports in front of them from ever being hidden. The editor's write-back of the
+       computed count is now guarded to numeric fields only: storing a port count over a `buttons`
+       value would have deleted every button on the node.
+     - An expiry of zero is left off rather than sent, because zero means "leave it in the Action
+       Center" and sending it would remove the notification the instant it was raised.
+
 ---
 
 ## Gotchas

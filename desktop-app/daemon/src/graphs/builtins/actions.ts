@@ -24,9 +24,14 @@
  * to sign with: a URL typed into a node is not a registration, so there is nothing to HMAC against.
  */
 
-import type { NodeConfigValues, NodeDefinition } from "@vrcz/plugin-api/nodes";
-import { APP_NAME, APP_VERSION } from "@vrcz/shared";
-import type { EventBus } from "../../bus/event-bus.ts";
+import {
+  type NodeConfigValues,
+  type NodeDefinition,
+  type PortValues,
+  parseButtonRows,
+} from "@vrcz/plugin-api/nodes";
+import { APP_NAME, APP_VERSION, DESKTOP_ACTIVATION_KIND } from "@vrcz/shared";
+import type { BusEvent, EventBus } from "../../bus/event-bus.ts";
 import { validateWebhookUrl } from "../../webhooks/url.ts";
 import type { ExecuteContext } from "../types.ts";
 import { ME_CATEGORY } from "./me.ts";
@@ -64,17 +69,51 @@ export interface GraphSocialActions {
 export type GraphFetch = (url: string, init: RequestInit) => Promise<Response>;
 
 /**
+ * What a button on a notification does, beyond telling the graph it was pressed.
+ *
+ * A mirror of `ButtonAction` in `os/desktop-notification.ts`, declared here for the same reason
+ * `GraphSocialActions` is: `graphs/` does not import `os/`. The two are held together structurally
+ * rather than by a shared import — `app.ts` assigns the real notifier to {@link GraphNotify}, so a
+ * vocabulary that drifted apart is a compile error at the composition root.
+ */
+export type GraphButtonAction = "signal" | "url" | "screen" | "dismiss" | "snooze";
+
+export interface GraphNotification {
+  title: string;
+  body: string;
+  silent?: boolean;
+  tag?: string;
+  buttons?: readonly {
+    id: string;
+    label: string;
+    action?: GraphButtonAction;
+    argument?: string;
+  }[];
+  image?: string;
+  scenario?: "default" | "reminder" | "alarm" | "incomingCall";
+  duration?: "short" | "long";
+  expiresInMs?: number;
+  click?: { action: GraphButtonAction; argument?: string };
+}
+
+/**
  * Raising an OS notification, as the graph runtime needs it.
  *
  * Structurally satisfied by `os/desktop-notification.ts`, which never rejects and answers with
  * whether the toast was actually shown. Both halves of that matter here: a graph must not fail
  * because the machine has notifications switched off, and it is entitled to *know* that nothing
  * appeared rather than being told it worked.
+ *
+ * `ignored` is the third half. A notification asked for buttons on a machine that cannot draw them
+ * still appears, without them — so the node can say which parts of what it was asked for did not
+ * survive this platform, instead of reporting a plain success that is only mostly true.
  */
-export type GraphNotify = (notification: {
-  title: string;
-  body: string;
-}) => Promise<{ shown: boolean; reason?: string }>;
+export type GraphNotify = (notification: GraphNotification) => Promise<{
+  shown: boolean;
+  reason?: string;
+  id?: string;
+  ignored?: readonly string[];
+}>;
 
 export interface ActionDeps {
   readonly bus: EventBus;
@@ -321,13 +360,53 @@ const XSOVERLAY: NodeDefinition = {
  * and the daemon's notifier reports all three as *not shown* instead of throwing. So a graph that
  * genuinely has to reach somebody can wire this into a condition and fall through to Discord.
  */
+/** Five, because Windows shows five and drops the whole set when it is handed a sixth. */
+const DESKTOP_BUTTONS = 5;
+
+/**
+ * The label ports, one per possible button.
+ *
+ * All five are declared and only as many as there are buttons are drawn — the same trick
+ * `Compose text` uses for its twenty-six slots, and for the same reason: a node's ports are part of
+ * its identity, so they cannot depend on an instance's config. See `variadicInputs`.
+ *
+ * They exist because a button's text is the half of it that is about *this* notification. "Accept"
+ * is a label; "Accept from Kirac" is an answer to something, and a graph that knows who is asking
+ * should be able to say so.
+ */
+const DESKTOP_LABEL_PORTS = Array.from({ length: DESKTOP_BUTTONS }, (_, index) => ({
+  id: `button${String(index + 1)}`,
+  label: `Button ${String(index + 1)} says`,
+  type: "string" as const,
+  description: "Overrides that button's text for this notification.",
+}));
+
 const DESKTOP: NodeDefinition = {
   id: "desktop-notification",
   kind: "action",
   title: "Notify on this computer",
   description: "Raises an ordinary desktop notification. The VR overlay node is the headset half.",
   category: "Send",
-  inputs: [{ id: "text", label: "Message", type: "string", required: true }],
+  inputs: [
+    { id: "text", label: "Message", type: "string", required: true },
+    {
+      id: "title",
+      label: "Title",
+      type: "string",
+      description: "Overrides the title below, so it can name whoever this is about.",
+    },
+    {
+      id: "image",
+      label: "Picture",
+      type: "string",
+      description: "A file on this computer, or a VRChat image URL. Windows only.",
+    },
+    ...DESKTOP_LABEL_PORTS,
+  ],
+  // The count comes from the buttons themselves rather than a second number to keep in step with
+  // them; the three fixed ports above are never hidden. See `visibleInputCount`.
+  variadicInputs: "buttons",
+  variadicInputsBase: 3,
   outputs: [
     {
       id: "shown",
@@ -335,11 +414,169 @@ const DESKTOP: NodeDefinition = {
       type: "boolean",
       description: "False when the system refused it or has notifications switched off.",
     },
+    {
+      id: "id",
+      label: "Notification",
+      type: "string",
+      description: "Names this notification. The press trigger reports the same value back.",
+    },
+    {
+      id: "dropped",
+      label: "Dropped",
+      type: "list<string>",
+      description: "Anything this computer could not do: buttons and pictures are Windows only.",
+    },
   ],
-  config: [{ kind: "text", id: "title", label: "Title", default: "vrc.zip" }],
+  config: [
+    { kind: "text", id: "title", label: "Title", default: "vrc.zip" },
+    {
+      kind: "text",
+      id: "tag",
+      label: "Tag",
+      placeholder: "friend-online",
+      description:
+        "Names this kind of notification. A second one with the same tag replaces the first instead of stacking up, and the press trigger can listen for just this tag.",
+    },
+    {
+      kind: "boolean",
+      id: "silent",
+      label: "No sound",
+      default: false,
+      description: "It still appears. Windows and Linux only.",
+    },
+    {
+      kind: "buttons",
+      id: "buttons",
+      label: "Buttons",
+      max: DESKTOP_BUTTONS,
+      description:
+        "Windows only, and at most five. Every press reaches the press trigger; the action is what happens as well.",
+      actions: [
+        { value: "signal", label: "Tell the graph" },
+        {
+          value: "url",
+          label: "Open a link",
+          argumentLabel: "Link",
+          placeholder: "https://vrchat.com/home/user/usr_…",
+        },
+        {
+          value: "screen",
+          label: "Open vrc.zip",
+          argumentLabel: "Screen",
+          placeholder: "/friends",
+        },
+        {
+          value: "snooze",
+          label: "Show it again later",
+          argumentLabel: "Minutes",
+          placeholder: "10",
+        },
+        { value: "dismiss", label: "Just close it" },
+      ],
+    },
+    {
+      kind: "text",
+      id: "image",
+      label: "Picture",
+      placeholder: "https://api.vrchat.cloud/…",
+      description:
+        "A file on this computer, or a VRChat image URL that vrc.zip fetches. Shown as the round icon beside the text. Windows only.",
+    },
+    {
+      kind: "select",
+      id: "scenario",
+      label: "Kind",
+      default: "default",
+      description: "A reminder or an alarm stays on screen until it is answered. Windows only.",
+      options: [
+        { value: "default", label: "ordinary" },
+        { value: "reminder", label: "a reminder" },
+        { value: "alarm", label: "an alarm" },
+        { value: "incomingCall", label: "an incoming call" },
+      ],
+    },
+    {
+      kind: "select",
+      id: "duration",
+      label: "On screen for",
+      default: "short",
+      options: [
+        { value: "short", label: "the usual few seconds" },
+        { value: "long", label: "longer" },
+      ],
+    },
+    {
+      kind: "duration",
+      id: "expires",
+      label: "Forget it after",
+      description:
+        "How long it stays in the Action Center once it leaves the screen. Zero leaves it there. Windows only.",
+      default: 0,
+    },
+  ],
   body: [
     { kind: "literal", text: "notify: " },
     { kind: "port", port: "text" },
+  ],
+};
+
+/**
+ * The other end of a button.
+ *
+ * A trigger rather than an output on the action, and that is the decision worth stating. A press is
+ * not the result of raising a notification: it happens minutes later, from the Action Center, on a
+ * different day, or never. An action node that waited for one would hold a graph run open for the
+ * length of a human being's attention.
+ *
+ * As a trigger it is also free to be a *different* graph. "Show me a toast when someone comes
+ * online" and "invite them when I press Accept" are two automations that share a notification, and
+ * this is what lets them be two graphs — or one graph twice, which is the same thing said in the
+ * canvas.
+ */
+const DESKTOP_PRESSED: NodeDefinition = {
+  id: "on-notification-press",
+  kind: "trigger",
+  title: "When a notification is pressed",
+  description: "Fires when somebody presses a button on a notification vrc.zip raised.",
+  category: "Triggers",
+  outputs: [
+    {
+      id: "button",
+      label: "Button",
+      type: "string",
+      description: "The button's name. Blank when the notification itself was clicked.",
+    },
+    { id: "label", label: "It said", type: "string" },
+    { id: "tag", label: "Tag", type: "string" },
+    {
+      id: "notification",
+      label: "Notification",
+      type: "string",
+      description: "The value the notify node handed back when it raised this one.",
+    },
+    { id: "argument", label: "With", type: "string" },
+    { id: "at", label: "At", type: "number" },
+  ],
+  config: [
+    {
+      kind: "text",
+      id: "tag",
+      label: "Tag",
+      placeholder: "any",
+      description: "Only notifications carrying this tag. Leave it blank to hear every press.",
+    },
+    {
+      kind: "text",
+      id: "button",
+      label: "Button",
+      placeholder: "any",
+      description:
+        "Only this button. Leave it blank for any of them, including a click on the notification itself.",
+    },
+  ],
+  body: [
+    { kind: "literal", text: "pressed " },
+    { kind: "config", field: "button", fallback: "anything" },
   ],
 };
 
@@ -478,6 +715,73 @@ function requireAccount(context: ExecuteContext, doing: string): string {
 /* The set                                                                                        */
 /* -------------------------------------------------------------------------------------------- */
 
+/**
+ * The buttons this run should carry: the configured rows, with any wired labels put over the top.
+ *
+ * The wired label wins when there is one, and an empty wire is not one — a `Compose text` that
+ * produced nothing must not blank a button the author wrote a label for, since a button with no text
+ * is a button nobody can press.
+ */
+function desktopButtons(
+  config: NodeConfigValues,
+  inputs: PortValues,
+): { id: string; label: string; action?: GraphButtonAction; argument?: string }[] {
+  return parseButtonRows(config.buttons)
+    .slice(0, DESKTOP_BUTTONS)
+    .map((row, index) => {
+      const wired = text(inputs[`button${String(index + 1)}`]).trim();
+      return {
+        id: row.id,
+        label: wired === "" ? row.label : wired,
+        ...(isButtonAction(row.action) ? { action: row.action } : {}),
+        ...(row.argument === "" ? {} : { argument: row.argument }),
+      };
+    });
+}
+
+const BUTTON_ACTIONS: readonly GraphButtonAction[] = [
+  "signal",
+  "url",
+  "screen",
+  "dismiss",
+  "snooze",
+];
+
+/** A stored action this build does not know is treated as a plain signal, not as an error. */
+function isButtonAction(value: string): value is GraphButtonAction {
+  return (BUTTON_ACTIONS as readonly string[]).includes(value);
+}
+
+const SCENARIOS = ["default", "reminder", "alarm", "incomingCall"] as const;
+
+function isScenario(value: string): value is (typeof SCENARIOS)[number] {
+  return (SCENARIOS as readonly string[]).includes(value);
+}
+
+/** What a press event carries. Read defensively: it crosses the bus like anything else. */
+function pressOf(event: BusEvent): {
+  notificationId: string;
+  tag: string;
+  button: string;
+  label: string;
+  argument: string;
+} | null {
+  const payload = event.payload;
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return null;
+  const record = payload as Record<string, unknown>;
+  const notificationId = record.notificationId;
+  if (typeof notificationId !== "string") return null;
+  const string = (value: unknown): string => (typeof value === "string" ? value : "");
+  return {
+    notificationId,
+    tag: string(record.tag),
+    // Null is the body being clicked rather than a button, which reads as "" on a string port.
+    button: string(record.button),
+    label: string(record.label),
+    argument: string(record.argument),
+  };
+}
+
 export function actionNodes(deps: ActionDeps): BuiltinNode[] {
   const social = deps.social;
 
@@ -580,19 +884,72 @@ export function actionNodes(deps: ActionDeps): BuiltinNode[] {
     {
       definition: DESKTOP,
       execute: async (inputs, config, context) => {
-        const title = configText(config, "title") || "vrc.zip";
+        const title = text(inputs.title) || configText(config, "title") || "vrc.zip";
         const message = text(inputs.text);
+        const buttons = desktopButtons(config, inputs);
         if (context.dryRun) {
-          rehearse(deps, context, `desktop notification: ${message.slice(0, 200)}`);
-          return { shown: false };
+          const listed = buttons.length === 0 ? "" : ` [${buttons.map((b) => b.label).join(", ")}]`;
+          rehearse(deps, context, `desktop notification: ${message.slice(0, 200)}${listed}`);
+          return { shown: false, id: "", dropped: [] };
         }
         // A sentence rather than a silent false: "nothing appeared" and "this build cannot notify
         // at all" are different problems, and only one of them is the user's machine.
         if (deps.notify === undefined) {
           throw new Error("This daemon cannot raise desktop notifications.");
         }
-        const result = await deps.notify({ title, body: message });
-        return { shown: result.shown };
+
+        const tag = configText(config, "tag");
+        const image = text(inputs.image) || configText(config, "image");
+        const scenario = configText(config, "scenario");
+        const expires = configNumber(config, "expires", 0);
+        const result = await deps.notify({
+          title,
+          body: message,
+          ...(config.silent === true ? { silent: true } : {}),
+          ...(tag === "" ? {} : { tag }),
+          ...(buttons.length === 0 ? {} : { buttons }),
+          ...(image === "" ? {} : { image }),
+          ...(isScenario(scenario) && scenario !== "default" ? { scenario } : {}),
+          ...(configText(config, "duration") === "long" ? { duration: "long" as const } : {}),
+          // Zero is "leave it there", which is the absence of an expiry rather than an expiry of
+          // none — sending it would remove the notification the instant it was raised.
+          ...(expires > 0 ? { expiresInMs: expires } : {}),
+        });
+        return {
+          shown: result.shown,
+          id: result.id ?? "",
+          dropped: [...(result.ignored ?? [])],
+        };
+      },
+    },
+    {
+      definition: DESKTOP_PRESSED,
+      arm: (request) => {
+        const wantedTag = configText(request.config, "tag");
+        const wantedButton = configText(request.config, "button");
+
+        const subscription = deps.bus.subscribe(
+          (event) => {
+            const press = pressOf(event);
+            if (press === null) return;
+            if (wantedTag !== "" && press.tag !== wantedTag) return;
+            // A blank button hears everything, the body click included. A named one hears only
+            // itself — which is what makes "when Accept is pressed" one node rather than two.
+            if (wantedButton !== "" && press.button !== wantedButton) return;
+            request.fire({
+              button: press.button,
+              label: press.label,
+              tag: press.tag,
+              notification: press.notificationId,
+              argument: press.argument,
+              at: event.ts,
+            });
+          },
+          { kinds: [DESKTOP_ACTIVATION_KIND] },
+        );
+        return () => {
+          subscription.unsubscribe();
+        };
       },
     },
     {

@@ -27,9 +27,11 @@ import TrashIcon from "@lucide/svelte/icons/trash-2";
 import {
   AFTER_PORT,
   assignable,
+  type ButtonRow,
   ERROR_PORT,
   isPortType,
   type NodeDefinition,
+  parseButtonRows,
   type PortType,
   visibleInputCount,
 } from "@vrcz/plugin-api/nodes";
@@ -233,6 +235,13 @@ function applyVariadicFloors(): void {
     if (definition === null || definition.kind === "trigger") return node;
     const field = definition.variadicInputs;
     if (field === undefined) return node;
+    /*
+     * Only a numeric field gets the floor written back into it. A `buttons` field's value *is* the
+     * list, and storing a port count over it would delete every button the author added — the
+     * floor still applies when the ports are drawn, which is where `visibleInputCount` takes it.
+     */
+    const declared = definition.config?.find((entry) => entry.id === field);
+    if (declared?.kind !== "number" && declared?.kind !== "slider") return node;
     const count = visibleInputCount(definition, data.config, wiredInputFloor(definition, node.id));
     if (data.config[field] === count) return node;
     changed = true;
@@ -933,6 +942,53 @@ function setConfig(fieldId: string, value: string | number | boolean): void {
   dirty = true;
 }
 
+/**
+ * The rows of a `buttons` field, as the inspector edits them.
+ *
+ * Read back out of the stored string every time rather than kept in a draft: the config is the
+ * truth, and a second copy would be a second thing to keep in step with undo, node switching and a
+ * graph reloaded from disk.
+ */
+function buttonRowsOf(fieldId: string): ButtonRow[] {
+  if (selected === null) return [];
+  return parseButtonRows((selected.data as { config: Record<string, unknown> }).config[fieldId]);
+}
+
+/** Writes rows back. The value is JSON in a string; see the `buttons` kind in `@vrcz/plugin-api`. */
+function setButtonRows(fieldId: string, rows: readonly ButtonRow[]): void {
+  setConfig(fieldId, JSON.stringify(rows));
+}
+
+function addButtonRow(fieldId: string, max: number): void {
+  const rows = buttonRowsOf(fieldId);
+  if (rows.length >= max) return;
+  /*
+   * The id is what an activation reports back, so it has to be stable and unique for the life of
+   * the node. Derived from the highest one already in use rather than from the row count: deleting
+   * the middle row and adding another must not hand the new one an id a graph is already wired to.
+   */
+  let next = rows.length + 1;
+  while (rows.some((row) => row.id === `b${String(next)}`)) next += 1;
+  setButtonRows(fieldId, [
+    ...rows,
+    { id: `b${String(next)}`, label: "", action: "signal", argument: "" },
+  ]);
+}
+
+function updateButtonRow(fieldId: string, index: number, patch: Partial<ButtonRow>): void {
+  setButtonRows(
+    fieldId,
+    buttonRowsOf(fieldId).map((row, i) => (i === index ? { ...row, ...patch } : row)),
+  );
+}
+
+function removeButtonRow(fieldId: string, index: number): void {
+  setButtonRows(
+    fieldId,
+    buttonRowsOf(fieldId).filter((_, i) => i !== index),
+  );
+}
+
 function toDocument(): GraphDocument {
   return {
     nodes: nodes.map((node) => {
@@ -1388,6 +1444,83 @@ async function saveSecret(fieldId: string): Promise<void> {
                   <option value={stored}>{stored} (not signed in)</option>
                 {/if}
               </select>
+            {:else if field.kind === "buttons"}
+              <!--
+                A row per button, added and removed by hand. The alternative was three fixed slots
+                of label/action/argument, which is nine boxes — most of them empty — on every node
+                that has one, and a number of buttons the schema decides instead of the author.
+
+                The stored value is a JSON array in a string. A config value is
+                `string | number | boolean` everywhere it travels, and widening that for one field
+                would touch the wire type, the definition hash, the secret substitution and the
+                validator. See the `buttons` kind in `@vrcz/plugin-api`.
+              -->
+              {@const rows = buttonRowsOf(field.id)}
+              {@const max = field.max ?? 5}
+              {@const actions = field.actions ?? [{ value: "signal", label: "Tell the graph" }]}
+              <div class="flex flex-col gap-2">
+                {#each rows as row, index (row.id)}
+                  {@const chosen = actions.find((option) => option.value === row.action)}
+                  <div class="rounded border border-border p-2">
+                    <div class="flex items-center gap-1">
+                      <Input
+                        class="h-7 text-sm"
+                        placeholder="Button text"
+                        value={row.label}
+                        oninput={(event: Event) =>
+                          updateButtonRow(field.id, index, {
+                            label: (event.currentTarget as HTMLInputElement).value,
+                          })}
+                      />
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        class="size-7 shrink-0"
+                        title="Remove this button"
+                        onclick={() => removeButtonRow(field.id, index)}
+                      >
+                        <TrashIcon class="size-4" />
+                      </Button>
+                    </div>
+                    <select
+                      class="mt-1 w-full rounded border border-input bg-background px-2 py-1 text-sm"
+                      value={row.action}
+                      onchange={(event: Event) =>
+                        updateButtonRow(field.id, index, {
+                          action: (event.currentTarget as HTMLSelectElement).value,
+                        })}
+                    >
+                      {#each actions as option (option.value)}
+                        <option value={option.value}>{option.label}</option>
+                      {/each}
+                    </select>
+                    <!--
+                      The argument box appears only for an action that takes one. An always-present
+                      box beside "Tell the graph" would be asking a question with no answer.
+                    -->
+                    {#if chosen?.argumentLabel !== undefined}
+                      <Input
+                        class="mt-1 h-7 text-sm"
+                        placeholder={chosen.placeholder ?? chosen.argumentLabel}
+                        value={row.argument}
+                        oninput={(event: Event) =>
+                          updateButtonRow(field.id, index, {
+                            argument: (event.currentTarget as HTMLInputElement).value,
+                          })}
+                      />
+                    {/if}
+                  </div>
+                {/each}
+                {#if rows.length < max}
+                  <Button size="sm" variant="secondary" onclick={() => addButtonRow(field.id, max)}>
+                    Add a button
+                  </Button>
+                {:else}
+                  <span class="text-xs text-muted-foreground">
+                    {max} is as many as Windows will show.
+                  </span>
+                {/if}
+              </div>
             {:else if field.kind === "select"}
               <select
                 id={`cfg-${field.id}`}

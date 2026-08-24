@@ -1,9 +1,11 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { createSocket, type Socket } from "node:dgram";
 import type { NodeConfigValues, PortValues } from "@vrcz/plugin-api/nodes";
+import { DESKTOP_ACTIVATION_KIND } from "@vrcz/shared";
 import type { BusEvent } from "../../bus/event-bus.ts";
 import { EventBus } from "../../bus/event-bus.ts";
 import type { ExecuteContext } from "../types.ts";
+import type { GraphNotification } from "./actions.ts";
 import { splitInstance } from "./actions.ts";
 import { createBuiltinNodes } from "./index.ts";
 import { encodeOscMessage } from "./osc.ts";
@@ -41,20 +43,28 @@ interface Harness {
   readonly events: BusEvent[];
   readonly sent: { user: string; kind: string }[];
   /** Every desktop notification the run raised. Never a real toast — see the seam. */
-  readonly toasts: { title: string; body: string }[];
+  readonly toasts: GraphNotification[];
+  readonly bus: EventBus;
   run(
     type: string,
     inputs: PortValues,
     config?: NodeConfigValues,
     context?: Partial<ExecuteContext>,
   ): Promise<PortValues>;
+  /** Arms one trigger and hands back the teardown the engine would hold. */
+  arm(
+    type: string,
+    config: NodeConfigValues,
+    fire: (values: PortValues) => void,
+  ): Promise<() => Promise<void>>;
 }
 
 function harness(options: { canNotify?: boolean } = {}): Harness {
   const bus = new EventBus();
   const events: BusEvent[] = [];
   const sent: { user: string; kind: string }[] = [];
-  const toasts: { title: string; body: string }[] = [];
+  const toasts: GraphNotification[] = [];
+  let instances = 0;
   bus.subscribe((event) => {
     events.push(event);
   });
@@ -95,7 +105,13 @@ function harness(options: { canNotify?: boolean } = {}): Harness {
             toasts.push(notification);
             // `shown: false` for a blank body, standing in for an OS that refused it — the case the
             // node's `Shown` port exists to make visible.
-            return await Promise.resolve({ shown: notification.body !== "" });
+            return await Promise.resolve({
+              shown: notification.body !== "",
+              id: "toast-1",
+              // What a machine that cannot draw a button reports. Named rather than empty so the
+              // node's `Dropped` port has something to be tested against.
+              ignored: notification.buttons === undefined ? [] : ["buttons"],
+            });
           },
         }),
   });
@@ -104,6 +120,15 @@ function harness(options: { canNotify?: boolean } = {}): Harness {
     events,
     sent,
     toasts,
+    bus,
+    arm: async (type, config, fire) => {
+      instances += 1;
+      const instanceId = `inst-${String(instances)}`;
+      await nodes.arm(`vrcz/${type}`, { instanceId, graphId: "g1", nodeId: "n1", config, fire });
+      return async () => {
+        await nodes.disarm(`vrcz/${type}`, instanceId);
+      };
+    },
     run: (type, inputs, config = {}, context = {}) =>
       nodes.execute(`vrcz/${type}`, inputs, config, {
         graphId: "g1",
@@ -263,7 +288,7 @@ describe("the desktop notification", () => {
   test("raises a toast and reports that it appeared", async () => {
     const h = harness();
     const result = await h.run("desktop-notification", { text: "Ada is online" }, { title: "Ada" });
-    expect(result).toEqual({ shown: true });
+    expect(result).toEqual({ shown: true, id: "toast-1", dropped: [] });
     expect(h.toasts).toEqual([{ title: "Ada", body: "Ada is online" }]);
   });
 
@@ -272,7 +297,7 @@ describe("the desktop notification", () => {
     // The daemon's notifier reports all three as not-shown rather than throwing, so a graph that
     // genuinely has to reach somebody can wire this into a condition and fall through to Discord.
     const h = harness();
-    expect(await h.run("desktop-notification", { text: "" })).toEqual({ shown: false });
+    expect(await h.run("desktop-notification", { text: "" })).toMatchObject({ shown: false });
   });
 
   test("falls back to a title when none is configured", async () => {
@@ -281,11 +306,78 @@ describe("the desktop notification", () => {
     expect(h.toasts[0]?.title).toBe("vrc.zip");
   });
 
+  test("a wired title beats the configured one", async () => {
+    // Which is the point of the port: "vrc.zip" names the app, and "Ada is online" names what
+    // happened. Only the graph knows the second one.
+    const h = harness();
+    await h.run("desktop-notification", { text: "hello", title: "Ada" }, { title: "vrc.zip" });
+    expect(h.toasts[0]?.title).toBe("Ada");
+  });
+
+  test("buttons come off the config, and a wired label overrides one", async () => {
+    const h = harness();
+    await h.run(
+      "desktop-notification",
+      { text: "Ada wants in", button1: "Accept from Ada" },
+      {
+        buttons: JSON.stringify([
+          { id: "yes", label: "Accept", action: "signal" },
+          { id: "site", label: "Profile", action: "url", argument: "https://vrchat.com" },
+        ]),
+      },
+    );
+    expect(h.toasts[0]?.buttons).toEqual([
+      { id: "yes", label: "Accept from Ada", action: "signal" },
+      { id: "site", label: "Profile", action: "url", argument: "https://vrchat.com" },
+    ]);
+  });
+
+  test("an empty wired label leaves the authored one alone", async () => {
+    // A `Compose text` that produced nothing must not blank a button: a button with no text is a
+    // button nobody can press.
+    const h = harness();
+    await h.run(
+      "desktop-notification",
+      { text: "hi", button1: "   " },
+      { buttons: JSON.stringify([{ id: "yes", label: "Accept" }]) },
+    );
+    expect(h.toasts[0]?.buttons?.[0]?.label).toBe("Accept");
+  });
+
+  test("nonsense in the buttons field is no buttons, not a failed run", async () => {
+    // The value is round-tripped through export, hand-editing and import like any other config.
+    const h = harness();
+    await h.run("desktop-notification", { text: "hi" }, { buttons: "not json" });
+    expect(h.toasts[0]?.buttons).toBeUndefined();
+  });
+
+  test("`Dropped` names what this computer could not do", async () => {
+    // Dropped rather than refused: a cross-platform graph that asked for a button gets a
+    // notification without one, and is told which part did not survive.
+    const h = harness();
+    const result = await h.run(
+      "desktop-notification",
+      { text: "hi" },
+      { buttons: JSON.stringify([{ id: "yes", label: "Accept" }]) },
+    );
+    expect(result.dropped).toEqual(["buttons"]);
+  });
+
+  test("an expiry of zero is left off rather than sent", async () => {
+    // Zero means "leave it in the Action Center". Sending it would remove the notification the
+    // instant it was raised, which is the same bug spelled the other way round.
+    const h = harness();
+    await h.run("desktop-notification", { text: "hi" }, { expires: 0 });
+    expect(h.toasts[0]?.expiresInMs).toBeUndefined();
+    await h.run("desktop-notification", { text: "hi" }, { expires: 60_000 });
+    expect(h.toasts[1]?.expiresInMs).toBe(60_000);
+  });
+
   test("a rehearsal writes a note and raises nothing", async () => {
     const h = harness();
     expect(
       await h.run("desktop-notification", { text: "Ada is online" }, {}, { dryRun: true }),
-    ).toEqual({ shown: false });
+    ).toMatchObject({ shown: false });
     expect(h.toasts).toEqual([]);
     expect(notes(h.events)).toEqual(["desktop notification: Ada is online"]);
   });
@@ -297,6 +389,89 @@ describe("the desktop notification", () => {
     await expect(h.run("desktop-notification", { text: "hello" })).rejects.toThrow(
       /cannot raise desktop notifications/,
     );
+  });
+});
+
+describe("the notification press trigger", () => {
+  const press = (payload: Record<string, unknown>): BusEvent => ({
+    kind: DESKTOP_ACTIVATION_KIND,
+    accountId: null,
+    ts: T0,
+    subjectId: "friend-online",
+    payload,
+  });
+
+  test("fires with what was pressed", async () => {
+    const h = harness();
+    const fired: PortValues[] = [];
+    const disarm = await h.arm("on-notification-press", {}, (values) => fired.push(values));
+    h.bus.emit(
+      press({
+        notificationId: "toast-1",
+        tag: "friend-online",
+        button: "yes",
+        label: "Accept",
+        action: "signal",
+        argument: "",
+      }),
+    );
+    expect(fired).toEqual([
+      {
+        button: "yes",
+        label: "Accept",
+        tag: "friend-online",
+        notification: "toast-1",
+        argument: "",
+        at: T0,
+      },
+    ]);
+    await disarm();
+  });
+
+  test("a blank tag hears everything and a set one hears only itself", async () => {
+    const h = harness();
+    const all: PortValues[] = [];
+    const mine: PortValues[] = [];
+    const a = await h.arm("on-notification-press", {}, (values) => all.push(values));
+    const b = await h.arm("on-notification-press", { tag: "friend-online" }, (values) =>
+      mine.push(values),
+    );
+    h.bus.emit(press({ notificationId: "t1", tag: "friend-online", button: "yes" }));
+    h.bus.emit(press({ notificationId: "t2", tag: "something-else", button: "yes" }));
+    expect(all).toHaveLength(2);
+    expect(mine).toHaveLength(1);
+    await a();
+    await b();
+  });
+
+  test("a named button hears only itself, and a blank one hears the body click too", async () => {
+    const h = harness();
+    const named: PortValues[] = [];
+    const any: PortValues[] = [];
+    const a = await h.arm("on-notification-press", { button: "yes" }, (values) =>
+      named.push(values),
+    );
+    const b = await h.arm("on-notification-press", {}, (values) => any.push(values));
+    // `button: null` is the notification itself being clicked rather than a button on it.
+    h.bus.emit(press({ notificationId: "t1", tag: "", button: null }));
+    h.bus.emit(press({ notificationId: "t1", tag: "", button: "no" }));
+    h.bus.emit(press({ notificationId: "t1", tag: "", button: "yes" }));
+    expect(named).toHaveLength(1);
+    expect(any).toHaveLength(3);
+    // The body click reads as "" on a string port, which is what "no button" looks like downstream.
+    expect(any[0]?.button).toBe("");
+    await a();
+    await b();
+  });
+
+  test("a payload missing its notification id fires nothing", async () => {
+    // It crosses the bus like anything else, so it is read defensively rather than trusted.
+    const h = harness();
+    const fired: PortValues[] = [];
+    const disarm = await h.arm("on-notification-press", {}, (values) => fired.push(values));
+    h.bus.emit(press({ tag: "friend-online", button: "yes" }));
+    expect(fired).toEqual([]);
+    await disarm();
   });
 });
 

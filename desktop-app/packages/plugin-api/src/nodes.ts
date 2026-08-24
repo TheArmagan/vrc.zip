@@ -299,7 +299,100 @@ export type NodeConfigField =
       readonly label: string;
       readonly description?: string;
       readonly required?: boolean;
+    }
+  | {
+      /**
+       * A list of buttons, added and removed a row at a time.
+       *
+       * The only repeatable field there is, and it earns that by being one: three fixed slots of
+       * `label` / `action` / `argument` is nine boxes, most of them empty, on every node that has
+       * one — and the number of buttons is a thing the author is deciding, not a thing the schema
+       * knows.
+       *
+       * **The stored value is a JSON array in a string**, and that is deliberate rather than a
+       * shortcut. A config value is `string | number | boolean` everywhere — in `GraphNodeConfig` on
+       * the wire, in the content hash a definition is pinned by, in the secret substitution, in the
+       * validator. Widening that to hold an array would touch all four for one field. So the *value*
+       * stays scalar and the *editor* is what knows better, which is the same trade `duration` makes
+       * by storing milliseconds in a `number`.
+       *
+       * Parse it with {@link parseButtonRows}, which answers an empty list for anything malformed.
+       * A handler must never assume this string is well-formed: it is round-tripped through import,
+       * export and hand-editing like every other config value.
+       */
+      readonly kind: "buttons";
+      readonly id: string;
+      readonly label: string;
+      readonly description?: string;
+      /** How many rows the editor will let somebody add. Defaults to five, which is Windows' cap. */
+      readonly max?: number;
+      /**
+       * What a row's action select offers, and what the argument box beside it is called.
+       *
+       * Declared by the node rather than fixed here: this field kind is a repeatable row of
+       * label-plus-choice-plus-argument, and what the choices *mean* belongs to whoever registered
+       * the node. A plugin's own button row is not obliged to be a desktop notification's.
+       */
+      readonly actions?: readonly {
+        readonly value: string;
+        readonly label: string;
+        /** Blank hides the argument box for that action, which is right for "just tell the graph". */
+        readonly argumentLabel?: string;
+        readonly placeholder?: string;
+      }[];
+      readonly default?: string;
     };
+
+/** One row of a `buttons` field. `id` is what an activation reports, so it is not the label. */
+export interface ButtonRow {
+  readonly id: string;
+  readonly label: string;
+  readonly action: string;
+  readonly argument: string;
+}
+
+/**
+ * Reads a `buttons` field's value.
+ *
+ * Total: every malformed shape answers with an empty list rather than throwing. The value reaches
+ * here from a JSON document that was exported, hand-edited and imported again, so "somebody wrote
+ * something else in it" is an ordinary input and not an exception.
+ *
+ * Rows with a blank label are dropped, because a button with no text is a button nobody can press.
+ * A row with no id gets its index, so a list that was authored before ids existed still routes.
+ */
+export function parseButtonRows(value: unknown): ButtonRow[] {
+  if (typeof value !== "string" || value.trim() === "") return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+
+  const rows: ButtonRow[] = [];
+  const seen = new Set<string>();
+  parsed.forEach((entry, index) => {
+    if (typeof entry !== "object" || entry === null) return;
+    const row = entry as Record<string, unknown>;
+    const label = typeof row.label === "string" ? row.label.trim() : "";
+    if (label === "") return;
+    const wanted =
+      typeof row.id === "string" && row.id.trim() !== "" ? row.id.trim() : `b${String(index)}`;
+    // Two rows reporting the same id would make a graph unable to tell which was pressed, which is
+    // a bug that only shows up as "the wrong branch ran".
+    if (seen.has(wanted)) return;
+    seen.add(wanted);
+    rows.push({
+      id: wanted,
+      label,
+      action: typeof row.action === "string" && row.action !== "" ? row.action : "signal",
+      argument: typeof row.argument === "string" ? row.argument : "",
+    });
+  });
+  return rows;
+}
 
 /** A configured instance's values, keyed by field id. Integer unix-ms for `duration` fields. */
 export type NodeConfigValues = Readonly<Record<string, string | number | boolean>>;
@@ -427,6 +520,15 @@ export interface ExecutableNodeDefinition extends NodeDefinitionBase {
    * floor lives, so every consumer gets the same answer.
    */
   readonly variadicInputs?: string;
+  /**
+   * How many of the declared inputs come *before* the variadic run and are therefore always drawn.
+   *
+   * Defaults to zero, which is what `Compose text` wants: its twenty-six slots are the whole list.
+   * A node whose variadic ports follow a fixed few — a message, a title, a picture, and then one
+   * label per button — sets this to the number of fixed ones, so they cannot be hidden by a config
+   * value that is about something else entirely.
+   */
+  readonly variadicInputsBase?: number;
 }
 
 /**
@@ -445,9 +547,39 @@ export function visibleInputCount(
   const field = definition.variadicInputs;
   if (field === undefined) return definition.inputs.length;
   const raw = config[field];
-  const asked = typeof raw === "number" && Number.isFinite(raw) ? Math.floor(raw) : Number.NaN;
-  const chosen = Number.isNaN(asked) ? defaultCountOf(definition, field) : asked;
+  const base = definition.variadicInputsBase ?? 0;
+  /*
+   * Two shapes of counter, because two shapes of field ask the same question.
+   *
+   * A `number` (or a `slider`) says how many outright. A `buttons` field says it by how many rows
+   * it holds — the author is adding buttons, not choosing a port count, and asking them to keep a
+   * second number in step with the list they can see would be asking them to do the editor's job.
+   */
+  const asked =
+    typeof raw === "number" && Number.isFinite(raw)
+      ? Math.floor(raw)
+      : typeof raw === "string"
+        ? buttonRowCount(raw)
+        : Number.NaN;
+  /*
+   * An unset field falls back to the fixed ports where there are any, and to the declared default
+   * where there are not. Falling back to the default in both cases would draw one button slot on a
+   * node with no buttons — and, worse, hide the two fixed ports underneath it.
+   */
+  const fallback = base > 0 ? base : defaultCountOf(definition, field);
+  const chosen = Number.isNaN(asked) ? fallback : base + asked;
   return Math.min(definition.inputs.length, Math.max(1, wired, chosen));
+}
+
+/**
+ * How many rows a `buttons` value holds, or `NaN` for a value that is not a list at all.
+ *
+ * The distinction matters: an empty list means "no buttons" and answers zero, while a blank field or
+ * a value somebody typed by hand means "this says nothing" and has to fall through to the default.
+ * Answering zero for both would let a nonsense value collapse a node's ports.
+ */
+function buttonRowCount(raw: string): number {
+  return raw.trim().startsWith("[") ? parseButtonRows(raw).length : Number.NaN;
 }
 
 function defaultCountOf(definition: NodeDefinition, field: string): number {

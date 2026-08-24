@@ -4618,6 +4618,34 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      in `tray.test.ts` still finds it, and that test is still the one thing that proves a *sent*
      message reaches us at all.
 
+249. **Shortcuts are written over COM now, because a toast needs a property `WScript.Shell` cannot
+     write.** A Windows toast is attributed to an **AppUserModelID**, and an app that is not
+     packaged can only own one by putting `System.AppUserModel.ID` on a Start menu shortcut. The
+     PowerShell writer in `install.ts` had no way to set it, so the writer moved to
+     `os/shortcut.ts`: `IShellLinkW` + `IPersistFile` + `IPropertyStore` over `bun:ffi`, with the
+     COM primitives (GUID layout, vtable slots, the apartment) factored into `os/com.ts` because the
+     notifier needs the same three.
+     - **One writer, not two.** The install path and the notification path disagreeing about what a
+       vrc.zip shortcut is would show up as "notifications say PowerShell on his machine", which is
+       not a bug anybody would find from the outside.
+     - **`SHGetKnownFolderPath`, not `%USERPROFILE%\Desktop`.** This is what
+       `[Environment]::GetFolderPath` was calling underneath, and a desktop redirected into OneDrive
+       is the common case now. Removing the shortcuts is still PowerShell, and that asymmetry is
+       fine: deleting a file needs neither COM nor a property.
+     - **The property store is committed *before* `IPersistFile::Save`.** `Save` serialises the
+       object; a `Commit` after it writes to something nobody will store again.
+     - **`PropVariantClear` is never called on the variant we build.** It would hand our own
+       `Uint8Array` to `CoTaskMemFree`, which did not allocate it. `SetValue` copies.
+     - **When nothing is installed, the notifier writes its own.** `ensureToastShortcut()` puts one
+       in `Start Menu\Programs\vrc.zip\`, on demand rather than at startup — a daemon that never
+       notifies has no business adding itself to somebody's Start menu — and a folder rather than a
+       loose `.lnk` so `--uninstall` can remove it whole, which it now does. An installed copy's
+       shortcut is used as it is rather than rewritten: two `vrc.zip` rows in the Start menu would
+       be worse than the problem, and rewriting from a dev run would repoint it at `bun.exe`.
+     - Verified by writing a `.lnk` to `%TEMP%` and finding the id in its serialised property store.
+       The old `shortcutScript` tests went with the script; what replaced them asserts that every
+       planned shortcut carries the id and that the folders come from the shell.
+
 ---
 
 ## Gotchas

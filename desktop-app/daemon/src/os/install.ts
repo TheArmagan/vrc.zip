@@ -18,18 +18,18 @@
  * is at `%LOCALAPPDATA%\vrc.zip`, and installing into it made `--uninstall` a command that deleted
  * the user's credentials.
  *
- * ## Shortcuts are PowerShell, and the tray icon is not
+ * ## Shortcuts are COM, and they did not used to be
  *
- * A `.lnk` is a COM object: `IShellLink` plus `IPersistFile`, which over `bun:ffi` means calling
- * vtable slots by index through `CFunction`. `desktop-notification.ts` already establishes the
- * alternative, and the trade that made FFI right for the tray points the other way here. The tray
- * icon needed a PowerShell host alive for the whole session, which would have doubled the app's
- * idle footprint to draw a 16px square. This runs once, when somebody clicks Install, and then the
- * process exits.
+ * They were a PowerShell script and `WScript.Shell`, which is a perfectly good way to make a
+ * shortcut and cannot make the one this app needs. A Windows toast is attributed to an
+ * AppUserModelID, an unpackaged app can only own one by putting it on a Start menu shortcut, and
+ * `WScript.Shell` has no way to write that property. So the writer moved to `os/shortcut.ts`, over
+ * FFI, and there is exactly one of it — the alternative was an install path and a notification path
+ * with different ideas of what a vrc.zip shortcut is.
  *
- * Every path goes through the environment rather than into the script text, for the reason
- * `desktop-notification.ts` gives: PowerShell has its own quoting rules on top of the argv
- * boundary, and a folder with a quote in it would otherwise break the script or extend it.
+ * Removing them is still PowerShell, and that is not an inconsistency worth fixing: deleting a file
+ * needs neither COM nor a property, and `[Environment]::GetFolderPath` is the reason the removal
+ * finds a desktop that has been redirected into OneDrive.
  *
  * ## Why the Start menu entry is the one that matters
  *
@@ -43,6 +43,14 @@ import { join } from "node:path";
 import { APP_NAME, APP_VERSION, REPOSITORY_URL } from "@vrcz/shared";
 import { stateDir } from "../paths.ts";
 import { deleteKey, readString, writeDword, writeString } from "./registry.ts";
+import {
+  APP_USER_MODEL_ID,
+  FOLDERID_Desktop,
+  knownFolder,
+  type ShortcutOptions,
+  startMenuPrograms,
+  writeShortcut,
+} from "./shortcut.ts";
 import { setStartupEnabled } from "./startup.ts";
 
 const IS_WINDOWS = process.platform === "win32";
@@ -188,63 +196,53 @@ export function isInstalled(
 }
 
 /**
- * The PowerShell that writes the shortcuts.
+ * Where the two shortcuts go, asked of Windows rather than composed.
  *
- * Exported for the test, which asserts on the script rather than running it: what matters is that
- * no path is interpolated into it and that both folders are resolved by Windows rather than
- * assumed. `[Environment]::GetFolderPath` is the reason for the latter — a desktop redirected into
- * OneDrive is the common case now, and `%USERPROFILE%\Desktop` is simply the wrong folder there.
+ * Exported for the test, which can assert the shape of the request without writing anything: what
+ * matters is that both folders come from `SHGetKnownFolderPath` and that the Start menu entry
+ * carries the AppUserModelID, since that property is the only thing standing between this app and
+ * a toast attributed to PowerShell.
  */
-export function shortcutScript(): string[] {
-  const script = [
-    "$ErrorActionPreference='Stop'",
-    "$shell=New-Object -ComObject WScript.Shell",
-    "$target=$env:VRCZ_LNK_TARGET",
-    "$dir=Split-Path -Parent $target",
-    "function New-VrcShortcut($folder) {",
-    "  $path=Join-Path $folder 'vrc.zip.lnk'",
-    "  $link=$shell.CreateShortcut($path)",
-    "  $link.TargetPath=$target",
-    "  $link.WorkingDirectory=$dir",
-    "  $link.Description='vrc.zip'",
-    "  $link.Save()",
-    "}",
-    "if ($env:VRCZ_LNK_DESKTOP -eq '1') { New-VrcShortcut ([Environment]::GetFolderPath('Desktop')) }",
-    "if ($env:VRCZ_LNK_STARTMENU -eq '1') { New-VrcShortcut ([Environment]::GetFolderPath('Programs')) }",
-  ].join("; ");
-
-  // No `-WindowStyle Hidden`. It hides the console PowerShell *inherited*, which is the daemon's
-  // own window; see the note on `powershellToast` in `desktop-notification.ts`. `windowsHide` at
-  // the spawn covers the case where there is no console to inherit.
-  return ["powershell", "-NoProfile", "-NonInteractive", "-Command", script];
-}
-
-/** Writes the shortcuts. Best-effort: a failure here does not undo a successful copy. */
-async function writeShortcuts(
+export function shortcutPlan(
   target: string,
   desktop: boolean,
   startMenu: boolean,
-): Promise<boolean> {
-  if (!desktop && !startMenu) return true;
-  const [command, ...args] = shortcutScript();
-  if (command === undefined) return false;
-  try {
-    const child = Bun.spawn([command, ...args], {
-      stdout: "ignore",
-      stderr: "ignore",
-      stdin: "ignore",
-      windowsHide: true,
-      env: {
-        ...process.env,
-        VRCZ_LNK_TARGET: target,
-        VRCZ_LNK_DESKTOP: desktop ? "1" : "0",
-        VRCZ_LNK_STARTMENU: startMenu ? "1" : "0",
-      },
-    });
-    return (await child.exited) === 0;
-  } catch {
-    return false;
+): ShortcutOptions[] {
+  const plan: ShortcutOptions[] = [];
+  const common = {
+    target,
+    workingDirectory: join(target, ".."),
+    description: APP_NAME,
+    appUserModelId: APP_USER_MODEL_ID,
+  };
+  if (desktop) {
+    const folder = knownFolder(FOLDERID_Desktop);
+    if (folder !== null) plan.push({ ...common, path: join(folder, SHORTCUT_NAME) });
   }
+  if (startMenu) {
+    const folder = startMenuPrograms();
+    if (folder !== null) plan.push({ ...common, path: join(folder, SHORTCUT_NAME) });
+  }
+  return plan;
+}
+
+const SHORTCUT_NAME = "vrc.zip.lnk";
+
+/**
+ * Writes the shortcuts. Best-effort: a failure here does not undo a successful copy.
+ *
+ * The `.lnk` on the desktop gets the AppUserModelID too, which does nothing on its own — only the
+ * Start menu is read for it. It is written anyway so the two files are the same file in two places,
+ * rather than one of them being subtly special in a way a future reader has to discover.
+ */
+function writeShortcuts(target: string, desktop: boolean, startMenu: boolean): boolean {
+  const plan = shortcutPlan(target, desktop, startMenu);
+  if (plan.length === 0) return !desktop && !startMenu;
+  let ok = true;
+  for (const shortcut of plan) {
+    if (!writeShortcut(shortcut)) ok = false;
+  }
+  return ok;
 }
 
 /**
@@ -304,11 +302,7 @@ export async function installLocally(options: InstallOptions): Promise<InstallRe
     }
   }
 
-  const shortcuts = await writeShortcuts(
-    target,
-    options.desktopShortcut,
-    options.startMenuShortcut,
-  );
+  const shortcuts = writeShortcuts(target, options.desktopShortcut, options.startMenuShortcut);
 
   // Installed apps, so there is a supported way *out* of this. Written after the copy because it
   // names the copy, and not treated as fatal: an app that installed but is missing from that list
@@ -414,7 +408,14 @@ export async function uninstallLocally(
   };
 }
 
-/** Deletes the two shortcuts, wherever Windows says those folders actually are. */
+/**
+ * Deletes the shortcuts, wherever Windows says those folders actually are.
+ *
+ * Three of them, not two: the notifier writes a `Start Menu\Programs\vrc.zip\` folder of its own
+ * when there is no installed shortcut to hang an AppUserModelID off, and an uninstall that leaves
+ * behind a Start menu entry pointing at a deleted executable is exactly the untidiness the uninstall
+ * entry exists to avoid. Removing a folder we created whole is why it is a folder.
+ */
 async function removeShortcuts(): Promise<boolean> {
   const script = [
     "$ErrorActionPreference='SilentlyContinue'",
@@ -422,6 +423,8 @@ async function removeShortcuts(): Promise<boolean> {
     "  $path=Join-Path $folder 'vrc.zip.lnk'",
     "  if (Test-Path $path) { Remove-Item -Force $path }",
     "}",
+    "$own=Join-Path ([Environment]::GetFolderPath('Programs')) 'vrc.zip'",
+    "if (Test-Path $own) { Remove-Item -Recurse -Force $own }",
   ].join("; ");
   try {
     const child = Bun.spawn(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], {

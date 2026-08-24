@@ -6,8 +6,9 @@ import {
   installDirectory,
   installTarget,
   isInstalled,
-  shortcutScript,
+  shortcutPlan,
 } from "./install.ts";
+import { APP_USER_MODEL_ID, FOLDERID_Desktop, knownFolder } from "./shortcut.ts";
 import { startupCommand, startupEntryTarget, startupLocation, startupSupport } from "./startup.ts";
 import { shouldShowTray } from "./tray.ts";
 
@@ -173,39 +174,40 @@ describe("install paths", () => {
   });
 });
 
-describe("the shortcut script", () => {
-  test("does not hide the console it inherited", () => {
-    /*
-     * The bug this replaced: clicking Install made the daemon's console window vanish for good.
-     *
-     * A console process spawned from a console process inherits that console, and PowerShell
-     * implements `-WindowStyle Hidden` as `ShowWindow(GetConsoleWindow(), SW_HIDE)` — on the
-     * console it inherited, which is ours. Measured rather than reasoned: with the flag,
-     * `IsWindowVisible` on our own console goes true to false across the spawn, and without it
-     * stays true.
-     *
-     * The replacement is `windowsHide` at the spawn, which is `CREATE_NO_WINDOW` and can only
-     * affect a window the child would have created for itself.
-     */
-    expect(shortcutScript()).not.toContain("-WindowStyle");
-    expect(shortcutScript()).not.toContain("Hidden");
+describe("the shortcut plan", () => {
+  /*
+   * This used to assert on a PowerShell script, because that is what wrote the shortcuts. It writes
+   * them over COM now, for one reason: a toast is attributed to an AppUserModelID, an unpackaged app
+   * can only own one by putting it on a Start menu shortcut, and `WScript.Shell` cannot write that
+   * property. So what is worth asserting moved with it — not the text of a script, but that every
+   * shortcut carries the id and that neither folder is composed by hand.
+   *
+   * Nothing here writes a `.lnk`. `shortcutPlan` is the decision and `writeShortcut` is the effect,
+   * which is exactly why they are two functions.
+   */
+  test.if(process.platform === "win32")("stamps the AppUserModelID on both shortcuts", () => {
+    const plan = shortcutPlan("C:\\app\\vrc.zip.exe", true, true);
+    // A machine that cannot resolve either folder plans nothing, and has nothing to say here.
+    if (plan.length === 0) return;
+    for (const shortcut of plan) {
+      expect(shortcut.appUserModelId).toBe(APP_USER_MODEL_ID);
+      expect(shortcut.target).toBe("C:\\app\\vrc.zip.exe");
+      expect(shortcut.path.endsWith("vrc.zip.lnk")).toBe(true);
+    }
   });
 
-  test("carries no path in its text", () => {
-    // The rule `desktop-notification.ts` set: PowerShell has its own quoting on top of the argv
-    // boundary, so a folder with a quote in it would break the script or extend it. Paths go
-    // through the environment instead, and this asserts that nobody later inlined one.
-    const script = shortcutScript().join(" ");
-    expect(script).toContain("$env:VRCZ_LNK_TARGET");
-    expect(script).not.toContain("C:\\");
+  test("plans nothing when neither shortcut was asked for", () => {
+    expect(shortcutPlan("C:\\app\\vrc.zip.exe", false, false)).toEqual([]);
   });
 
-  test("asks Windows where the folders are", () => {
+  test.if(process.platform === "win32")("asks Windows where the folders are", () => {
     // A desktop redirected into OneDrive is the common case now, and `%USERPROFILE%\Desktop` is
-    // simply the wrong folder there.
-    const script = shortcutScript().join(" ");
-    expect(script).toContain("GetFolderPath('Desktop')");
-    expect(script).toContain("GetFolderPath('Programs')");
+    // simply the wrong folder there. `SHGetKnownFolderPath` is what the PowerShell version's
+    // `[Environment]::GetFolderPath` was calling underneath.
+    const desktop = knownFolder(FOLDERID_Desktop);
+    if (desktop === null) return;
+    expect(desktop.length).toBeGreaterThan(0);
+    expect(desktop).not.toBe(process.env.USERPROFILE);
   });
 });
 

@@ -6,7 +6,7 @@ export const APP_NAME = "vrc.zip";
  * package; it is duplicated rather than imported so that nothing at runtime has to read a
  * `package.json` off disk (the shipped bundle has no reliable path to one).
  */
-export const APP_VERSION = "0.1.5";
+export const APP_VERSION = "0.1.6";
 
 /**
  * Where the project lives.

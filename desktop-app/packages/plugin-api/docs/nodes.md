@@ -151,12 +151,13 @@ Reusing `UINode` here would mean reading values back out of a rendering, which i
 a form that means something different after a redesign. The host draws config fields with the same
 components the [UI vocabulary](./ui.md) uses, so they look identical to a user regardless.
 
-Nine kinds:
+Eleven kinds:
 
 | `kind` | Extra props | Notes |
 | --- | --- | --- |
 | `text` | `placeholder?`, `default?: string`, `required?` | |
 | `number` | `min?`, `max?`, `default?: number`, `required?` | |
+| `slider` | `min`, `max` **both required**, `step?`, `default?: number` | A number whose bounds are the interesting part. Use `number` when the value has a unit and no natural ceiling. |
 | `boolean` | `default?: boolean` | No `required` — a boolean is always set. |
 | `select` | `options` **required** `{ value, label }[]`, `default?: string`, `required?` | |
 | `secret` | `placeholder?`, `required?` | Stored outside the graph. See below. |
@@ -164,8 +165,24 @@ Nine kinds:
 | `user` | `required?` | Host renders its own user picker. |
 | `world` | `required?` | Host renders its own world picker. |
 | `account` | `required?` | Which of the user's accounts the node acts as. Host renders a picker over the signed-in accounts. |
+| `buttons` | `max?`, `actions?: { value, label, argumentLabel?, placeholder? }[]`, `default?: string` | A list of buttons, a row at a time. The value is JSON in a string. See below. |
 
 Every kind also carries `id`, `label` (both required) and `description?`.
+
+**`buttons` is the only repeatable field, and its value is a JSON array in a string.** The host draws
+a row per button — a label, a select over the `actions` you declared, and an argument box that
+appears only for an action whose entry names one — and stores the whole list as one string. That is
+deliberate rather than a shortcut: a config value is `string | number | boolean` in four places at
+once (the wire type, the definition hash, the secret substitution, the validator), and widening it
+for one field would touch all four. The same trade `duration` makes by storing milliseconds in a
+`number`.
+
+Read it with `parseButtonRows(config.buttons)`, which answers `ButtonRow[]` and returns an empty list
+for anything malformed. Never assume the string is well-formed: it is round-tripped through export,
+hand-editing and import like every other config value.
+
+What the actions *mean* is yours. The host renders the labels and stores the choice; your handler
+decides what each one does.
 
 **`account` stores an account id, and blank means "the graph's account".** That is the convention
 every built-in follows and the reason the field is never `required`: a graph already has an account,

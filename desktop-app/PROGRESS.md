@@ -14,6 +14,8 @@ config-field kind, and a `vrchat://` opener that attaches to a running client in
 second one. Decision 241 adds twenty-eight **named triggers** over the pipeline and the game log, so
 a graph starts on "my status changed" or "a portal appeared" with typed ports, rather than on a
 pattern with a `json` blob.
+**Decision 285 is the one to read first if a launch ever looks fine and does nothing:** Bun
+kills its subprocesses when the parent exits, so every handover goes through `os/detached.ts`.
 **vrc.zip updates itself as of 2026-08-24** (decisions 283 and 284): the update-on-run path
 closes the copy that is in the way, replaces the file and hands over to it, and a six-hourly
 check against GitHub's release list drives a console line, a bar across the top of the UI, and a
@@ -5425,6 +5427,44 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
        hour purely so a tab left open overnight notices. Dismissing is per-tab and not persisted - a
        stored dismissal is how an app ends up several versions behind in silence.
 
+285. **Bun kills its subprocesses when the parent exits, so every handover in this app went through
+     `CreateProcessW` instead.** Decision 283's last step - start the updated copy, then stop being
+     the old one - did not work. Nothing about it was wrong on paper: the file was replaced, the
+     spawn returned a pid, the process exited. The successor was simply dead a moment later.
+
+     Measured rather than reasoned about, because the guesses were all wrong. A parent that spawns
+     `cmd /c timeout 6 & echo ok > file`, calls `unref()` and exits leaves no file behind; the same
+     child started through `CreateProcessW` writes it. `unref()` only stops a child holding the event
+     loop open - it says nothing about what happens at exit, and on Bun 1.4.0 / Windows 11 what
+     happens at exit is that the child goes too.
+
+     `os/detached.ts` is the fix: `CreateProcessW` over `bun:ffi` with `DETACHED_PROCESS` and
+     `CREATE_NEW_PROCESS_GROUP`, returning a pid or null, failing the way `plugins/job-object.ts`
+     fails - quietly, with the caller deciding what a failed launch means.
+
+     - **Three callers, and all three were broken the same way.** The update handover was the one
+       somebody noticed. `--uninstall` writes a script whose entire plan is to *wait for this process
+       to exit* and then delete the folder it ran from, so it was killed by the very event it was
+       waiting for and the folder was never removed - silently, since the uninstall had already
+       reported success. `runProgram` promises to launch "something the user will then use for an
+       hour", which was true only for as long as the daemon happened to stay up: quitting vrc.zip
+       took VRChat with it.
+     - **`lpApplicationName` is NULL, with the executable as argv[0].** The PATH search only happens
+       when it is NULL, and both `cmd.exe` and whatever a graph's Run a program node names are that
+       kind of name.
+     - **The argv is joined with `CommandLineToArgvW`'s rules**, which is the inverse of how the
+       child un-parses it. That keeps `run-program.ts`'s one rule intact: joining is not a shell, so
+       a `&&` is still four characters and a `%VAR%` is still eight. The rules are not the obvious
+       ones - a backslash is literal except immediately before a quote, where the whole run doubles -
+       so they have their own tests.
+     - **`cmd.exe` was the case worth checking**, since it does not use `CommandLineToArgvW` at all
+       and re-reads the raw line by rules of its own. Checked with the script in a folder whose name
+       has spaces: the ordinary quoted form runs it correctly, so the `cmd /s /c` idiom is not needed
+       and there is one quoting rule for every caller rather than two.
+     - **`CREATE_BREAKAWAY_FROM_JOB` is not set.** It fails outright in a job that does not permit
+       breakaway, and vrc.zip is not in a job on the path that matters. It was tried first, from
+       inside a shell that *had* jobbed the test process, which is how an afternoon goes.
+
 ---
 
 ## Gotchas
@@ -5432,6 +5472,14 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **`Bun.spawn(...).unref()` does not outlive its parent on Windows, and nothing says so.** The
+  child is started, the pid is real, and it is gone the instant the parent exits. Three separate
+  features in this repo were built on the assumption that it survives - the update handover,
+  `--uninstall`'s deferred folder removal, and launching VRChat from a graph - and all three failed
+  silently, because "spawn returned a pid" is the last observation any of them made. `os/detached.ts`
+  is the fix. Decision 285; the experiment is in that module's header.
+
 
 - **Bun's `typeof fetch` is not a function type an arrow can satisfy.** It carries `preconnect`, so
   every injected `fetch` stub in `updates/` failed to typecheck against it while behaving perfectly

@@ -42,6 +42,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { APP_NAME, APP_VERSION, REPOSITORY_URL } from "@vrcz/shared";
 import { stateDir } from "../paths.ts";
+import { startDetached } from "./detached.ts";
 import { deleteKey, readString, writeDword, writeString } from "./registry.ts";
 import {
   APP_USER_MODEL_ID,
@@ -475,13 +476,16 @@ async function scheduleDirectoryRemoval(directory: string, execPath: string): Pr
 
   try {
     await Bun.write(script, body);
-    Bun.spawn(["cmd", "/c", script], {
-      stdout: "ignore",
-      stderr: "ignore",
-      stdin: "ignore",
-      // Detached: this has to outlive us, since what it is waiting for is us exiting.
-    }).unref();
-    return true;
+    /*
+     * Detached, and it has to be `startDetached` rather than `Bun.spawn`.
+     *
+     * What this script waits for is *us exiting* — and a Bun subprocess is killed when its parent
+     * exits, so the version of this that used `Bun.spawn().unref()` was a script that got as far as
+     * its first `timeout` and was then taken down by the very event it was waiting for. The folder
+     * was never removed and nothing said so, because the uninstall had already reported success and
+     * the process that would have noticed was gone.
+     */
+    return startDetached({ path: "cmd.exe", args: ["/c", script] }) !== null;
   } catch {
     return false;
   }
@@ -778,23 +782,15 @@ export function startInstalledCopy(
 /**
  * Starts a vrc.zip and lets go of it. The successor half of every handover in this app.
  *
- * `unref`, and every caller exits immediately afterwards. The child is a GUI-subsystem executable
- * that claims a console of its own, so it does not need the one this process is holding — which is
- * just as well, since that window is about to close along with us.
+ * **Not `Bun.spawn`, and that is the whole point of `os/detached.ts`.** Bun kills its subprocesses
+ * when the parent exits, `unref()` and all, so the obvious version of this function spawned a
+ * successor that was dead before it finished starting — every caller here exits immediately
+ * afterwards, which is precisely the case that does not survive. Measured, not inferred; the note
+ * on `startDetached` has the experiment.
  */
 export function startExecutable(path: string, args: readonly string[], directory: string): boolean {
   if (!IS_WINDOWS) return false;
-  try {
-    Bun.spawn([path, ...args], {
-      cwd: directory,
-      stdout: "ignore",
-      stderr: "ignore",
-      stdin: "ignore",
-    }).unref();
-    return true;
-  } catch {
-    return false;
-  }
+  return startDetached({ path, args, directory }) !== null;
 }
 
 /**

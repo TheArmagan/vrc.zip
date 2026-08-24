@@ -3,11 +3,16 @@
  *
  * ## The one rule
  *
- * **An argv array, never a command line.** `Bun.spawn` takes a list and does no shell
- * interpretation, so a path with a space in it, an argument with a quote in it, and an argument
- * somebody typed a `&&` into are all just characters. The moment this reached a shell — `cmd /c`,
- * `sh -c`, a joined string — every argument would become executable text, and the arguments here are
- * typed into a graph that gets exported, shared and imported again.
+ * **An argv array, and never a shell.** A path with a space in it, an argument with a quote in it,
+ * and an argument somebody typed a `&&` into are all just characters. The moment this reached a
+ * shell — `cmd /c`, `sh -c` — every argument would become executable text, and the arguments here
+ * are typed into a graph that gets exported, shared and imported again.
+ *
+ * Off Windows that is `Bun.spawn`, which takes the list as a list. On Windows the launch goes
+ * through `os/detached.ts` so it can outlive the daemon, and `CreateProcessW` takes a command line
+ * rather than an argv — so the list is joined with `CommandLineToArgvW`'s quoting rules, which the
+ * child then un-joins into the same list. Still no shell anywhere: nothing expands `%VAR%`, nothing
+ * acts on `&&`, nothing globs.
  *
  * That is also why {@link splitArguments} exists rather than `value.split(" ")`. The author types one
  * line, and one line has to become a list the same way a shell would split it, quotes included,
@@ -26,6 +31,7 @@
  * result says whether the process started, never that it did anything useful.
  */
 
+import { startDetached } from "./detached.ts";
 import { openerArgv } from "./open-url.ts";
 
 /** VRChat on Steam. The one app id this file knows, because it is the one node that names it. */
@@ -50,14 +56,42 @@ export interface RunProgramResult {
 /**
  * Starts a program and lets go of it.
  *
- * `unref` rather than an await, for the reason `openUrl` has: the point of this is to launch
- * something the user will then use for an hour, and awaiting the exit would hold a graph run open
- * for exactly that long. The pid is the only handle a caller gets, which is honest — this is a
- * launcher, not a job runner.
+ * Never awaited, for the reason `openUrl` has: the point of this is to launch something the user
+ * will then use for an hour, and awaiting the exit would hold a graph run open for exactly that
+ * long. The pid is the only handle a caller gets, which is honest — this is a launcher, not a job
+ * runner.
+ *
+ * **On Windows it goes through `os/detached.ts`, not `Bun.spawn`**, and that is a bug fix rather
+ * than a preference: Bun kills its subprocesses when the parent exits, `unref()` included, so a
+ * VRChat launched from a graph died the moment somebody quit vrc.zip. "For an hour" is the whole
+ * contract of this function, and it was true only for as long as the daemon happened to run.
+ *
+ * The one rule at the top of this file survives the change. `CreateProcessW` takes a command line
+ * rather than an argv, so the list is joined — but joined with `CommandLineToArgvW`'s own quoting
+ * rules, which is the inverse of how the child will parse it, and not a shell. Nothing expands a
+ * `%VAR%`, nothing acts on an `&&`, nothing globs a `*`. That is the same property `Bun.spawn` has,
+ * arrived at by a different route, and `os/detached.ts` owns the quoting so there is one copy of it.
  */
 export async function runProgram(request: RunProgramRequest): Promise<RunProgramResult> {
   const path = request.path.trim();
   if (path === "") return { started: false, pid: null, reason: "no program was named" };
+  const directory =
+    request.directory === undefined || request.directory.trim() === ""
+      ? undefined
+      : request.directory;
+
+  if (process.platform === "win32") {
+    const pid = startDetached({
+      path,
+      args: request.args,
+      ...(directory === undefined ? {} : { directory }),
+    });
+    return await Promise.resolve(
+      pid === null
+        ? { started: false, pid: null, reason: `${path} could not be started` }
+        : { started: true, pid },
+    );
+  }
 
   try {
     const child = Bun.spawn([path, ...request.args], {
@@ -66,9 +100,7 @@ export async function runProgram(request: RunProgramRequest): Promise<RunProgram
       stdin: "ignore",
       // `CREATE_NO_WINDOW`: a daemon that may have no console of its own has none to lend a child.
       windowsHide: true,
-      ...(request.directory === undefined || request.directory.trim() === ""
-        ? {}
-        : { cwd: request.directory }),
+      ...(directory === undefined ? {} : { cwd: directory }),
     });
     child.unref();
     return await Promise.resolve({ started: true, pid: child.pid });
@@ -121,8 +153,8 @@ export function steamRunUrl(appId: string, args: readonly string[]): string {
  *
  * Quotes group, both kinds, and a quote can be escaped with a backslash. Whitespace outside quotes
  * separates. Nothing else happens: no globbing, no `$HOME`, no `%APPDATA%`, no operators — this
- * turns text into a list and the list goes straight to `Bun.spawn`, so anything that looks like
- * shell syntax stays a literal character in an argument.
+ * turns text into a list, and the list is launched as a list, so anything that looks like shell
+ * syntax stays a literal character in an argument.
  *
  * An unclosed quote keeps what it has rather than throwing. Somebody is typing, and half a quoted
  * path is an ordinary intermediate state rather than a fault.

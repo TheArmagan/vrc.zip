@@ -299,7 +299,7 @@ const TEMPLATE: NodeDefinition = {
       label: "Text",
       placeholder: "{a} joined {b}",
       description:
-        "Write {a}, {b} and so on where the wired values should go. A number can be formatted: {a:2f} for two decimals, {a:,} to group thousands, {a:%} for a percentage, {a:+} to always show the sign.",
+        "Write {a}, {b} and so on where the wired values should go. A number can be formatted: {a:2f} for two decimals, {a:,} to group thousands, {a:%} for a percentage, {a:+} to always show the sign. {a:str} quotes and escapes the value as JSON, for building a body by hand.",
       required: true,
     },
     {
@@ -325,6 +325,21 @@ const TEMPLATE: NodeDefinition = {
  * `{a:}` means nothing and is therefore a typo rather than a request.
  */
 const FORMAT_SPEC = /^(\+?)(,?)(?:(\d*)([f%]))?$/;
+
+/**
+ * `{a:str}` — the value as a JSON literal, quotes and escaping included.
+ *
+ * The reason it exists is building JSON by hand, which is what `Compose text` gets used for the
+ * moment somebody needs a request body this palette has no node for. `{"name": "{a}"}` looks right
+ * and breaks the first time a display name contains a quote, a backslash or a newline — and it
+ * breaks at the far end, in whatever service rejected the payload, which is the worst place to
+ * find out. `{"name": {a:str}}` cannot: the quoting is the formatter's job.
+ *
+ * It is also the one spec that is useful on something that is not a string. An object arrives as its
+ * JSON, a number as digits with no quotes, `null` as `null` — each of which is what a JSON document
+ * wanted in that position anyway.
+ */
+const JSON_SPEC = "str";
 
 /**
  * The locale is fixed, and that is a decision rather than an oversight.
@@ -383,6 +398,9 @@ export function fillTemplate(template: string, inputs: PortValues): string {
       if (match === "}}") return "}";
       if (slot === undefined || !(slot in inputs)) return match;
       if (spec === undefined) return asText(inputs[slot]);
+      // `undefined` has no JSON form, and a wired port carrying nothing is a real state. `null` is
+      // the JSON word for it and is what the surrounding document can actually parse.
+      if (spec === JSON_SPEC) return JSON.stringify(inputs[slot] ?? null) ?? "null";
       return formatNumber(inputs[slot], spec) ?? match;
     },
   );

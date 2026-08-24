@@ -1073,6 +1073,7 @@ async function saveSecret(fieldId: string): Promise<void> {
           placeholder="Search nodes"
           aria-label="Search nodes"
           onkeydown={onPaletteKey}
+          onblur={() => preview.hide()}
         />
       </div>
       <!--
@@ -1160,10 +1161,14 @@ async function saveSecret(fieldId: string): Promise<void> {
       A focusable `separator` is the window-splitter pattern from ARIA itself: the role becomes
       interactive precisely when it is given a tabindex and a value, which is what it has here.
       Svelte's rule reads the role in isolation and cannot see that.
+
+      Four pixels wide and sixteen pixels to grab: the `::after` overhangs both sides and is
+      hit-tested as part of this element, so the line stays a line while the target is a target.
+      A four-pixel grab zone is one every user misses at least once.
     -->
     <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
     <div
-      class="w-1 shrink-0 cursor-col-resize bg-border transition-colors hover:bg-primary focus-visible:bg-primary focus-visible:outline-none"
+      class="relative w-1 shrink-0 cursor-col-resize bg-border transition-colors after:absolute after:inset-y-0 after:-left-1.5 after:-right-1.5 after:content-[''] hover:bg-primary focus-visible:bg-primary focus-visible:outline-none"
       class:bg-primary={resizing}
       role="separator"
       aria-orientation="vertical"

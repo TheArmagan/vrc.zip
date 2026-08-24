@@ -281,6 +281,7 @@ const choices = $derived.by(() => {
       placeholder={from === null ? "Add a node" : "What goes here?"}
       aria-label="Find a node"
       onkeydown={onSearchKey}
+      onblur={() => preview.hide()}
     />
     {#if from !== null}
       <!-- The dot is the same one on the handle the wire came from, so the two read as one thing. -->

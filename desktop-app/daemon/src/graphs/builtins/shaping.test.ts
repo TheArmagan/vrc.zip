@@ -184,6 +184,28 @@ describe("compose text: formatting a number", () => {
     expect(fillTemplate("{a:,2f}", { a: 1234.5 })).toBe("1,234.50");
   });
 
+  test("str quotes and escapes, which is the point of it", () => {
+    // `{"name": "{a}"}` looks right and breaks on the first display name with a quote in it, at the
+    // far end, in whatever service rejected the body.
+    expect(fillTemplate('{"name": {a:str}}', { a: 'Ada "The Great" Lovelace' })).toBe(
+      '{"name": "Ada \\"The Great\\" Lovelace"}',
+    );
+    expect(fillTemplate("{a:str}", { a: "line\nbreak" })).toBe('"line\\nbreak"');
+  });
+
+  test("str is the one spec that is useful on something that is not a string", () => {
+    expect(fillTemplate("{a:str}", { a: { x: 1 } })).toBe('{"x":1}');
+    expect(fillTemplate("{a:str}", { a: [1, "two"] })).toBe('[1,"two"]');
+    // No quotes on a number: a JSON document wanted digits in that position.
+    expect(fillTemplate("{a:str}", { a: 5 })).toBe("5");
+    expect(fillTemplate("{a:str}", { a: true })).toBe("true");
+  });
+
+  test("a wired port carrying nothing is null, which the surrounding document can parse", () => {
+    expect(fillTemplate("{a:str}", { a: null })).toBe("null");
+    expect(fillTemplate("{a:str}", { a: undefined })).toBe("null");
+  });
+
   test("an unwired slot with a spec is still left as typed", () => {
     expect(fillTemplate("{a:2f} and {b:2f}", { a: 1 })).toBe("1.00 and {b:2f}");
   });

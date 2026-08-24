@@ -44,6 +44,8 @@ interface Harness {
   readonly sent: { user: string; kind: string }[];
   /** Every desktop notification the run raised. Never a real toast — see the seam. */
   readonly toasts: GraphNotification[];
+  /** Every link the run opened. Never a real browser — see the seam. */
+  readonly opened: string[];
   readonly bus: EventBus;
   run(
     type: string,
@@ -64,6 +66,7 @@ function harness(options: { canNotify?: boolean } = {}): Harness {
   const events: BusEvent[] = [];
   const sent: { user: string; kind: string }[] = [];
   const toasts: GraphNotification[] = [];
+  const opened: string[] = [];
   let instances = 0;
   bus.subscribe((event) => {
     events.push(event);
@@ -98,6 +101,13 @@ function harness(options: { canNotify?: boolean } = {}): Harness {
      * (That path suppresses itself under NODE_ENV=test for exactly this reason — this seam means the
      * node's own test does not have to rely on it.)
      */
+    // The real opener refuses anything that is not public https, which is the guard this stands in
+    // for: a graph must not be able to hand the OS protocol handler a `file://` URL.
+    openLink: async (url) => {
+      const ok = url.startsWith("https://");
+      if (ok) opened.push(url);
+      return await Promise.resolve(ok);
+    },
     ...(options.canNotify === false
       ? {}
       : {
@@ -120,6 +130,7 @@ function harness(options: { canNotify?: boolean } = {}): Harness {
     events,
     sent,
     toasts,
+    opened,
     bus,
     arm: async (type, config, fire) => {
       instances += 1;
@@ -344,6 +355,43 @@ describe("the desktop notification", () => {
     expect(h.toasts[0]?.buttons?.[0]?.label).toBe("Accept");
   });
 
+  test("a button keeps the name it was given, which is what a press reports", async () => {
+    // The whole point of an editable id: a graph filters on "accept", not on "b1".
+    const h = harness();
+    await h.run(
+      "desktop-notification",
+      { text: "Ada wants in" },
+      {
+        buttons: JSON.stringify([
+          { id: "accept", label: "Accept", action: "signal" },
+          { id: "later", label: "Later", action: "snooze", argument: "10" },
+        ]),
+      },
+    );
+    expect(h.toasts[0]?.buttons?.map((button) => button.id)).toEqual(["accept", "later"]);
+  });
+
+  test("two buttons with one name keep the first", async () => {
+    // Two buttons answering to the same name is a press the graph cannot attribute. Dropped here
+    // rather than in the parser, because the editor has to be able to hold a half-typed name.
+    const h = harness();
+    await h.run(
+      "desktop-notification",
+      { text: "hi" },
+      {
+        buttons: JSON.stringify([
+          { id: "yes", label: "Accept" },
+          { id: "yes", label: "Also accept" },
+          { id: "no", label: "Decline" },
+        ]),
+      },
+    );
+    expect(h.toasts[0]?.buttons).toEqual([
+      { id: "yes", label: "Accept", action: "signal" },
+      { id: "no", label: "Decline", action: "signal" },
+    ]);
+  });
+
   test("nonsense in the buttons field is no buttons, not a failed run", async () => {
     // The value is round-tripped through export, hand-editing and import like any other config.
     const h = harness();
@@ -472,6 +520,73 @@ describe("the notification press trigger", () => {
     h.bus.emit(press({ tag: "friend-online", button: "yes" }));
     expect(fired).toEqual([]);
     await disarm();
+  });
+});
+
+describe("naming a notification", () => {
+  test("a configured name is used instead of a fresh one", async () => {
+    const h = harness();
+    const result = await h.run("desktop-notification", { text: "hi" }, { id: "ada-invite" });
+    expect(h.toasts[0]?.id).toBe("ada-invite");
+    // The seam answers with its own id; what matters here is that the caller's name went out.
+    expect(result.id).toBe("toast-1");
+  });
+
+  test("a wired name beats the configured one, and blank is no name at all", async () => {
+    const h = harness();
+    await h.run("desktop-notification", { text: "hi", id: "tonight" }, { id: "ada-invite" });
+    expect(h.toasts[0]?.id).toBe("tonight");
+    await h.run("desktop-notification", { text: "hi" }, {});
+    // Absent rather than empty: the notifier mints one, and an empty string would be a name.
+    expect(h.toasts[1]?.id).toBeUndefined();
+  });
+
+  test("the trigger can wait for one notification rather than a kind of them", async () => {
+    const h = harness();
+    const mine: PortValues[] = [];
+    const disarm = await h.arm("on-notification-press", { notification: "ada-invite" }, (values) =>
+      mine.push(values),
+    );
+    const press = (notificationId: string) => ({
+      kind: DESKTOP_ACTIVATION_KIND,
+      accountId: null,
+      ts: T0,
+      subjectId: "",
+      payload: { notificationId, tag: "invites", button: "yes" },
+    });
+    h.bus.emit(press("ada-invite"));
+    h.bus.emit(press("someone-else"));
+    expect(mine).toHaveLength(1);
+    expect(mine[0]?.notification).toBe("ada-invite");
+    await disarm();
+  });
+});
+
+describe("opening a link", () => {
+  test("opens it and says so", async () => {
+    const h = harness();
+    expect(await h.run("open-link", { url: "https://vrchat.com/home" })).toEqual({ opened: true });
+    expect(h.opened).toEqual(["https://vrchat.com/home"]);
+  });
+
+  test("anything that is not a public https link comes back false", async () => {
+    // The opener refuses rather than the node checking: a graph must not be able to point the
+    // operating system's protocol handler at a `file://` URL or at something on loopback that
+    // trusts its callers. False rather than a thrown run, because a URL down a wire is data.
+    const h = harness();
+    expect(await h.run("open-link", { url: "file:///C:/Windows/System32" })).toEqual({
+      opened: false,
+    });
+    expect(h.opened).toEqual([]);
+  });
+
+  test("a rehearsal opens nothing and writes a note", async () => {
+    const h = harness();
+    expect(await h.run("open-link", { url: "https://vrchat.com" }, {}, { dryRun: true })).toEqual({
+      opened: false,
+    });
+    expect(h.opened).toEqual([]);
+    expect(notes(h.events)).toEqual(["open https://vrchat.com"]);
   });
 });
 

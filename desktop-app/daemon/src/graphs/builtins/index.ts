@@ -20,6 +20,7 @@ import {
   actionNodes,
   type GraphFetch,
   type GraphNotify,
+  type GraphOpenLink,
   type GraphSocialActions,
 } from "./actions.ts";
 import { apiNodes, type GraphApiCall } from "./api.ts";
@@ -35,7 +36,12 @@ import { type TriggerContext, triggerNodes } from "./triggers.ts";
 import { type BuiltinArmRequest, type BuiltinNode, builtinId } from "./types.ts";
 import { valueNodes } from "./values.ts";
 
-export type { GraphInviteTarget, GraphNotify, GraphSocialActions } from "./actions.ts";
+export type {
+  GraphInviteTarget,
+  GraphNotify,
+  GraphOpenLink,
+  GraphSocialActions,
+} from "./actions.ts";
 export type { GraphApiCall, GraphApiRequest, GraphApiResponse } from "./api.ts";
 export type { GraphDataStore } from "./data-store.ts";
 export type {
@@ -135,6 +141,13 @@ export interface BuiltinNodeDeps {
    */
   readonly notify?: GraphNotify | undefined;
   /**
+   * Opens a link in the browser, for the link node and for a notification button that carries one.
+   *
+   * Absent for the same reason and with the same result as `notify`: the node stays in the palette
+   * and says the build cannot open links, rather than leaving a hole in a saved graph.
+   */
+  readonly openLink?: GraphOpenLink | undefined;
+  /**
    * VRChat reads and the game log, for the resolver nodes.
    *
    * Absent leaves them in the palette and failing with a sentence. That is better than hiding them:
@@ -218,6 +231,7 @@ export function createBuiltinNodes(deps: BuiltinNodeDeps = {}): BuiltinNodes {
           ...(deps.social === undefined ? {} : { social: deps.social }),
           ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
           ...(deps.notify === undefined ? {} : { notify: deps.notify }),
+          ...(deps.openLink === undefined ? {} : { openLink: deps.openLink }),
         });
   const clockFn = deps.now ?? Date.now;
   /*

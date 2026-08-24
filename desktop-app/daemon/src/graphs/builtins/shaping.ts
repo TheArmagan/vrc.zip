@@ -12,6 +12,7 @@
  * why `gate` needs no cooperation from the walk.
  */
 
+import { randomUUID } from "node:crypto";
 import type { NodeConfigValues, NodeDefinition, PortValues } from "@vrcz/plugin-api/nodes";
 import type { BuiltinNode } from "./types.ts";
 
@@ -213,6 +214,41 @@ const GATE: NodeDefinition = {
     { kind: "literal", text: "only if " },
     { kind: "port", port: "value" },
   ],
+};
+
+/**
+ * A fresh identifier, because several nodes now take a name and nobody wants to invent one.
+ *
+ * The notification node can be told what to call a notification so a press trigger can wait for
+ * exactly that one; a shared store row wants a key; a signal wants something to correlate on. All
+ * three are the same wish — "a string nothing else will collide with" — and typing one by hand is
+ * how two runs of the same graph end up answering to the same name.
+ *
+ * `randomUUID` rather than a counter or a timestamp, and that matters here: two runs of one graph
+ * can overlap, and a counter that reset when the daemon restarted would hand out a name that is
+ * already on screen.
+ *
+ * Deliberately **not** stable across a run. Every execution of this node produces a new value; a
+ * chain that needs the same one twice reads the same output port twice, which is what a wire is.
+ */
+const UUID: NodeDefinition = {
+  id: "uuid",
+  kind: "action",
+  title: "Create a name",
+  description: "Makes a fresh identifier nothing else will be using.",
+  category: "Data",
+  inputs: [],
+  outputs: [{ id: "value", label: "Name", type: "string" }],
+  config: [
+    {
+      kind: "text",
+      id: "prefix",
+      label: "Starting with",
+      placeholder: "invite-",
+      description: "Put in front of it, so a name says what it is for when you read it back.",
+    },
+  ],
+  body: [{ kind: "literal", text: "a name" }],
 };
 
 /* -------------------------------------------------------------------------------------------- */
@@ -506,6 +542,12 @@ export function shapingNodes(): BuiltinNode[] {
       // Nothing, not `false`: an unproduced port is what stops the run, and returning `{out: false}`
       // would send a literal `false` down the graph instead.
       execute: (inputs) => (inputs.value === true ? { out: inputs.payload ?? true } : {}),
+    },
+    {
+      definition: UUID,
+      execute: (_inputs, config) => ({
+        value: `${typeof config.prefix === "string" ? config.prefix.trim() : ""}${randomUUID()}`,
+      }),
     },
     {
       definition: FIELD,

@@ -254,3 +254,21 @@ describe("the built-in set", () => {
     await expect(run("wait", {})).rejects.toThrow("the engine should have run it itself");
   });
 });
+
+describe("create a name", () => {
+  test("a fresh one every time", async () => {
+    // The property the node exists for. A counter or a timestamp would hand out a name that is
+    // already on screen after a restart, or when two runs of one graph overlap.
+    const first = (await run("uuid", {})).value;
+    const second = (await run("uuid", {})).value;
+    expect(typeof first).toBe("string");
+    expect(first).not.toBe(second);
+    expect(String(first)).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  test("a prefix goes in front, trimmed", async () => {
+    const value = String((await run("uuid", {}, { prefix: "  invite-  " })).value);
+    expect(value.startsWith("invite-")).toBe(true);
+    expect(value).toHaveLength("invite-".length + 36);
+  });
+});

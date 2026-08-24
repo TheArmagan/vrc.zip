@@ -4709,6 +4709,32 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      - An expiry of zero is left off rather than sent, because zero means "leave it in the Action
        Center" and sending it would remove the notification the instant it was raised.
 
+252. **Names, everywhere a graph has to point at something it made.** Asked for after 251 landed,
+     and it is the same request three times: a press is only useful if you can tell *what* was
+     pressed.
+     - **A notification can be told what it is called**, by config or by a wire, and the press
+       trigger can wait for exactly that one. A tag names a kind — replace the last friend-online
+       toast, hear every friend-online press — and an id names the instance. Raising one under a
+       name that is already on screen lets go of the old one first: two live toasts answering to one
+       name is a press that cannot be attributed, which is the only thing an id is for.
+     - **A button can be told what it is called too.** `b1` and `b2` are what the editor starts a
+       row with, and wiring a condition against a number nobody chose is not an automation anybody
+       wants to read. The box is offered only for an action that actually reports a press, which
+       excludes `dismiss`: Windows closes its own toast and never wakes the daemon, so there is
+       nothing to be filtering on.
+     - **Two rules moved out of `parseButtonRows` for the same reason the blank-label one did.**
+       Duplicate ids are kept by the parser and dropped by the handler, because the id is a text box
+       now and retyping one goes through a state where it matches its neighbour. The editor's
+       `{#each}` had to stop keying on the id as well — a duplicate key is a hard runtime error in
+       Svelte 5 — and says out loud that only the first of two same-named buttons will fire.
+     - **`Open a link`**, which the button action made conspicuous by its absence: a graph could
+       open a URL as a side effect of somebody pressing something and had no way to just open one.
+       It goes through `openExternalUrl`, the opener that refuses anything not public https — the
+       other one carries a session token in the URL it is handed — so a graph cannot point the
+       operating system's protocol handler at a `file://` URL or at something on loopback.
+     - **`Create a name`**, a `randomUUID` with an optional prefix. Several nodes take a name now
+       and typing one by hand is how two runs of a graph end up sharing one.
+
 ---
 
 ## Gotchas

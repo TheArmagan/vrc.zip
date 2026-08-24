@@ -339,6 +339,15 @@ export type NodeConfigField =
         /** Blank hides the argument box for that action, which is right for "just tell the graph". */
         readonly argumentLabel?: string;
         readonly placeholder?: string;
+        /**
+         * Whether a press on a button with this action is reported back to the graph.
+         *
+         * Defaults to true. False for an action the host handles entirely on its own — a Dismiss
+         * button that the platform closes without waking this process — and the editor uses it to
+         * decide whether the row's *name* is worth asking for: a press that never arrives is a press
+         * nothing can be filtering on.
+         */
+        readonly reportsPress?: boolean;
       }[];
       readonly default?: string;
     };
@@ -364,6 +373,12 @@ export interface ButtonRow {
  * (or the moment somebody cleared the box to retype it) would be unusable. The rule belongs where
  * the button is *drawn*, not where the value is read.
  *
+ * **Duplicate ids are kept too**, and for the same reason. Two rows answering to one name is a graph
+ * that cannot tell which button was pressed, so the handler drops the later one — but the editor
+ * hands somebody a text box to type a name into, and a row that disappeared halfway through
+ * retyping it (because it briefly matched its neighbour) would be unusable. Reading a value and
+ * drawing a button are different jobs with different rules.
+ *
  * A row with no id gets its index, so a list authored before ids existed still routes.
  */
 export function parseButtonRows(value: unknown): ButtonRow[] {
@@ -377,20 +392,12 @@ export function parseButtonRows(value: unknown): ButtonRow[] {
   if (!Array.isArray(parsed)) return [];
 
   const rows: ButtonRow[] = [];
-  const seen = new Set<string>();
   parsed.forEach((entry, index) => {
     if (typeof entry !== "object" || entry === null) return;
     const row = entry as Record<string, unknown>;
-    const label = typeof row.label === "string" ? row.label : "";
-    const wanted =
-      typeof row.id === "string" && row.id.trim() !== "" ? row.id.trim() : `b${String(index)}`;
-    // Two rows reporting the same id would make a graph unable to tell which was pressed, which is
-    // a bug that only shows up as "the wrong branch ran".
-    if (seen.has(wanted)) return;
-    seen.add(wanted);
     rows.push({
-      id: wanted,
-      label,
+      id: typeof row.id === "string" && row.id.trim() !== "" ? row.id.trim() : `b${String(index)}`,
+      label: typeof row.label === "string" ? row.label : "",
       action: typeof row.action === "string" && row.action !== "" ? row.action : "signal",
       argument: typeof row.argument === "string" ? row.argument : "",
     });

@@ -63,6 +63,18 @@ export interface NotificationButton {
 export type NotificationScenario = "default" | "reminder" | "alarm" | "incomingCall";
 
 export interface DesktopNotification {
+  /**
+   * A name for *this one*, chosen by the caller.
+   *
+   * The difference from {@link DesktopNotification.tag} is the difference between a kind and an
+   * instance: a tag says "this is the friend-online notification" and replaces the last one like it,
+   * an id says "this is the one about Ada, tonight". A trigger can filter on either.
+   *
+   * Left off, a fresh one is minted per notification. Reusing an id lets go of whatever was on
+   * screen under it first — two live toasts answering to one name is a press that cannot be
+   * attributed, which is the one thing an id is for.
+   */
+  readonly id?: string;
   readonly title: string;
   readonly body: string;
   /** No sound. The toast still appears. */
@@ -377,7 +389,10 @@ export class DesktopNotifier {
     }
 
     const image = await this.#resolveImage(notification.image);
-    const id = randomUUID();
+    const id =
+      notification.id === undefined || notification.id === "" ? randomUUID() : notification.id;
+    // A reused id replaces rather than doubles. See the note on `DesktopNotification.id`.
+    this.#live.get(id)?.toast?.close();
     const now = this.#options.now?.() ?? Date.now();
 
     const live = showToast(

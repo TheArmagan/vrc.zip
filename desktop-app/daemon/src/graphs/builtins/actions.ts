@@ -69,6 +69,17 @@ export interface GraphSocialActions {
 export type GraphFetch = (url: string, init: RequestInit) => Promise<Response>;
 
 /**
+ * Opening a link in the user's browser, as the graph runtime needs it.
+ *
+ * Structurally satisfied by `os/open-url.ts`'s `openExternalUrl`, which is the **external** opener
+ * and not the one the tray uses for the app itself. That distinction is a safety property rather
+ * than a tidiness one: the other opener carries a session token in the URL it is handed, so it
+ * refuses anything off loopback — and this one refuses anything that is not public https, which is
+ * exactly the guard a URL arriving down a wire needs.
+ */
+export type GraphOpenLink = (url: string) => Promise<boolean>;
+
+/**
  * What a button on a notification does, beyond telling the graph it was pressed.
  *
  * A mirror of `ButtonAction` in `os/desktop-notification.ts`, declared here for the same reason
@@ -79,6 +90,7 @@ export type GraphFetch = (url: string, init: RequestInit) => Promise<Response>;
 export type GraphButtonAction = "signal" | "url" | "screen" | "dismiss" | "snooze";
 
 export interface GraphNotification {
+  id?: string;
   title: string;
   body: string;
   silent?: boolean;
@@ -122,6 +134,8 @@ export interface ActionDeps {
   readonly fetch?: GraphFetch;
   /** Injected so a test does not put a real toast on the developer's desktop. */
   readonly notify?: GraphNotify | undefined;
+  /** Injected so a test does not open a browser. */
+  readonly openLink?: GraphOpenLink | undefined;
   readonly now?: () => number;
 }
 
@@ -401,12 +415,18 @@ const DESKTOP: NodeDefinition = {
       type: "string",
       description: "A file on this computer, or a VRChat image URL. Windows only.",
     },
+    {
+      id: "id",
+      label: "Called",
+      type: "string",
+      description: "Names this one notification, so a press trigger can wait for exactly it.",
+    },
     ...DESKTOP_LABEL_PORTS,
   ],
   // The count comes from the buttons themselves rather than a second number to keep in step with
-  // them; the three fixed ports above are never hidden. See `visibleInputCount`.
+  // them; the four fixed ports above are never hidden. See `visibleInputCount`.
   variadicInputs: "buttons",
-  variadicInputsBase: 3,
+  variadicInputsBase: 4,
   outputs: [
     {
       id: "shown",
@@ -429,6 +449,14 @@ const DESKTOP: NodeDefinition = {
   ],
   config: [
     { kind: "text", id: "title", label: "Title", default: "vrc.zip" },
+    {
+      kind: "text",
+      id: "id",
+      label: "Called",
+      placeholder: "a new one each time",
+      description:
+        "Names this one notification. The press trigger can wait for exactly this one, and raising it again replaces what was on screen under the same name. A tag names the kind; this names the instance.",
+    },
     {
       kind: "text",
       id: "tag",
@@ -471,7 +499,9 @@ const DESKTOP: NodeDefinition = {
           argumentLabel: "Minutes",
           placeholder: "10",
         },
-        { value: "dismiss", label: "Just close it" },
+        // The one action that never reaches this process: Windows closes its own toast, so there is
+        // no press to report and therefore no name worth asking for.
+        { value: "dismiss", label: "Just close it", reportsPress: false },
       ],
     },
     {
@@ -567,6 +597,14 @@ const DESKTOP_PRESSED: NodeDefinition = {
     },
     {
       kind: "text",
+      id: "notification",
+      label: "Called",
+      placeholder: "any",
+      description:
+        "Only the notification with this name, which is what the notify node was told to call it. Narrower than a tag: this is one notification rather than a kind of them.",
+    },
+    {
+      kind: "text",
       id: "button",
       label: "Button",
       placeholder: "any",
@@ -577,6 +615,40 @@ const DESKTOP_PRESSED: NodeDefinition = {
   body: [
     { kind: "literal", text: "pressed " },
     { kind: "config", field: "button", fallback: "anything" },
+  ],
+};
+
+/**
+ * Opening a link, which is a node because a notification button already was one.
+ *
+ * The button action came first and made the gap obvious: a graph could open a URL as a *side effect
+ * of somebody pressing something*, and had no way to just open one. Now both spellings exist and
+ * they share an opener.
+ *
+ * `Opened` is a real answer for the same reason `Shown` is. The opener refuses anything that is not
+ * public https — a graph must not be able to hand the operating system's protocol handler a `file://`
+ * URL, or reach a loopback address that trusts its callers — and a headless box has no browser to
+ * open anything with. Both come back as false rather than as a thrown run.
+ */
+const OPEN_LINK: NodeDefinition = {
+  id: "open-link",
+  kind: "action",
+  title: "Open a link",
+  description: "Opens a link in the browser on this computer.",
+  category: "Send",
+  inputs: [{ id: "url", label: "Link", type: "string", required: true }],
+  outputs: [
+    {
+      id: "opened",
+      label: "Opened",
+      type: "boolean",
+      description:
+        "False for anything that is not a public https link, and on a machine with no browser.",
+    },
+  ],
+  body: [
+    { kind: "literal", text: "open " },
+    { kind: "port", port: "url" },
   ],
 };
 
@@ -721,10 +793,14 @@ function requireAccount(context: ExecuteContext, doing: string): string {
  * The wired label wins when there is one, and an empty wire is not one — a `Compose text` that
  * produced nothing must not blank a button the author wrote a label for.
  *
- * A row that ends up with no text at all is dropped here, which is the one place that rule can live:
- * the editor has to be able to hold a half-typed row, and `parseButtonRows` has to be able to read
- * one back, so "a button with no text is a button nobody can press" is enforced where the button is
- * actually drawn.
+ * Two rules are enforced here rather than in the parser, and both for the same reason: the editor
+ * has to be able to hold a half-typed row and `parseButtonRows` has to be able to read one back, so
+ * anything about what makes a *usable button* belongs where the button is actually drawn.
+ *
+ *  - A row with no text is dropped. A button with no label is one nobody can press.
+ *  - A row whose name is already taken is dropped, keeping the first. Two buttons answering to one
+ *    name is a press the graph cannot attribute — and it shows up as "the wrong branch ran", not as
+ *    an error.
  */
 function desktopButtons(
   config: NodeConfigValues,
@@ -741,7 +817,10 @@ function desktopButtons(
         ...(row.argument === "" ? {} : { argument: row.argument }),
       };
     })
-    .filter((button) => button.label !== "");
+    .filter((button, index, all) => {
+      if (button.label === "") return false;
+      return all.findIndex((other) => other.id === button.id) === index;
+    });
 }
 
 const BUTTON_ACTIONS: readonly GraphButtonAction[] = [
@@ -903,11 +982,13 @@ export function actionNodes(deps: ActionDeps): BuiltinNode[] {
           throw new Error("This daemon cannot raise desktop notifications.");
         }
 
+        const named = text(inputs.id) || configText(config, "id");
         const tag = configText(config, "tag");
         const image = text(inputs.image) || configText(config, "image");
         const scenario = configText(config, "scenario");
         const expires = configNumber(config, "expires", 0);
         const result = await deps.notify({
+          ...(named === "" ? {} : { id: named }),
           title,
           body: message,
           ...(config.silent === true ? { silent: true } : {}),
@@ -932,12 +1013,16 @@ export function actionNodes(deps: ActionDeps): BuiltinNode[] {
       arm: (request) => {
         const wantedTag = configText(request.config, "tag");
         const wantedButton = configText(request.config, "button");
+        const wantedNotification = configText(request.config, "notification");
 
         const subscription = deps.bus.subscribe(
           (event) => {
             const press = pressOf(event);
             if (press === null) return;
             if (wantedTag !== "" && press.tag !== wantedTag) return;
+            // Narrower than the tag, and checked the same way: this is one notification rather than
+            // a kind of them, which only means anything because the notify node can name one.
+            if (wantedNotification !== "" && press.notificationId !== wantedNotification) return;
             // A blank button hears everything, the body click included. A named one hears only
             // itself — which is what makes "when Accept is pressed" one node rather than two.
             if (wantedButton !== "" && press.button !== wantedButton) return;
@@ -955,6 +1040,20 @@ export function actionNodes(deps: ActionDeps): BuiltinNode[] {
         return () => {
           subscription.unsubscribe();
         };
+      },
+    },
+    {
+      definition: OPEN_LINK,
+      execute: async (inputs, _config, context) => {
+        const url = text(inputs.url).trim();
+        if (context.dryRun) {
+          rehearse(deps, context, `open ${url.slice(0, 200)}`);
+          return { opened: false };
+        }
+        if (deps.openLink === undefined) {
+          throw new Error("This daemon cannot open links.");
+        }
+        return { opened: await deps.openLink(url) };
       },
     },
     {

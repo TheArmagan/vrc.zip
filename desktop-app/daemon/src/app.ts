@@ -494,6 +494,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     // and obey the same suppression switch. It never rejects and reports whether anything actually
     // appeared, which is what the node hands back on its `Shown` port.
     notify: async (notification) => await notifier.notify(notification),
+    // The *external* opener, which is the one that refuses anything that is not public https. The
+    // other one carries a session token in the URL it is handed, and a graph must not be able to
+    // point it anywhere.
+    openLink: async (url) => await openExternalUrl(url),
     // The cooldown and counter nodes. Four SQL statements behind a two-method seam, so the graph
     // runtime never learns that SQLite is under there.
     state: {

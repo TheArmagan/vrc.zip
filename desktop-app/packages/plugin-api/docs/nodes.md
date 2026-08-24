@@ -165,7 +165,7 @@ Eleven kinds:
 | `user` | `required?` | Host renders its own user picker. |
 | `world` | `required?` | Host renders its own world picker. |
 | `account` | `required?` | Which of the user's accounts the node acts as. Host renders a picker over the signed-in accounts. |
-| `buttons` | `max?`, `actions?: { value, label, argumentLabel?, placeholder? }[]`, `default?: string` | A list of buttons, a row at a time. The value is JSON in a string. See below. |
+| `buttons` | `max?`, `actions?: { value, label, argumentLabel?, placeholder?, reportsPress? }[]`, `default?: string` | A list of buttons, a row at a time. The value is JSON in a string. See below. |
 
 Every kind also carries `id`, `label` (both required) and `description?`.
 
@@ -180,6 +180,14 @@ for one field would touch all four. The same trade `duration` makes by storing m
 Read it with `parseButtonRows(config.buttons)`, which answers `ButtonRow[]` and returns an empty list
 for anything malformed. Never assume the string is well-formed: it is round-tripped through export,
 hand-editing and import like every other config value.
+
+**It keeps rows a running notification would not.** A row with a blank label, and a second row with
+an id that is already taken, both come back from the parser — the host draws a text box for each of
+those, and a row that vanished mid-keystroke would be unusable. Enforce what makes a *usable* button
+in your handler: drop the unlabelled ones, and keep the first of any two sharing an id. A row's `id`
+is what a press reports back, so it is the field a graph filters on; `reportsPress: false` on an
+action tells the host not to ask for one, which is right for an action the platform handles without
+waking you.
 
 What the actions *mean* is yours. The host renders the labels and stores the choice; your handler
 decides what each one does.

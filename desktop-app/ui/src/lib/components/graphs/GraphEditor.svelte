@@ -1459,8 +1459,14 @@ async function saveSecret(fieldId: string): Promise<void> {
               {@const max = field.max ?? 5}
               {@const actions = field.actions ?? [{ value: "signal", label: "Tell the graph" }]}
               <div class="flex flex-col gap-2">
-                {#each rows as row, index (row.id)}
+                <!--
+                  Keyed by index, not by id. The id is a text box now, so two rows can hold the same
+                  one for as long as it takes to finish typing — and a duplicate key in an `{#each}`
+                  is a hard runtime error in Svelte 5 rather than a warning.
+                -->
+                {#each rows as row, index (index)}
                   {@const chosen = actions.find((option) => option.value === row.action)}
+                  {@const duplicate = rows.some((other, i) => i !== index && other.id === row.id)}
                   <div class="rounded border border-border p-2">
                     <div class="flex items-center gap-1">
                       <Input
@@ -1494,6 +1500,34 @@ async function saveSecret(fieldId: string): Promise<void> {
                         <option value={option.value}>{option.label}</option>
                       {/each}
                     </select>
+                    <!--
+                      The name a press reports back, and the reason the row has three boxes rather
+                      than two. A graph that wants to know *which* button was pressed reads this, so
+                      leaving it as `b1` and `b2` would mean wiring a condition against a number
+                      nobody chose. It is asked for only where a press actually arrives — a Dismiss
+                      button is closed by Windows and never reaches the daemon.
+                    -->
+                    {#if chosen?.reportsPress !== false}
+                      <Input
+                        class="mt-1 h-7 text-sm"
+                        placeholder="Called (accept, later, …)"
+                        value={row.id}
+                        oninput={(event: Event) =>
+                          updateButtonRow(field.id, index, {
+                            id: (event.currentTarget as HTMLInputElement).value,
+                          })}
+                      />
+                      {#if duplicate}
+                        <!--
+                          A warning rather than a refusal: the box has to be typeable through a
+                          state where two rows briefly match. The daemon keeps the first and drops
+                          the rest, which is what this says out loud.
+                        -->
+                        <span class="text-xs text-destructive">
+                          Another button is called this. Only the first one will fire.
+                        </span>
+                      {/if}
+                    {/if}
                     <!--
                       The argument box appears only for an action that takes one. An always-present
                       box beside "Tell the graph" would be asking a question with no answer.

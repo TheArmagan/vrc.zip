@@ -5233,6 +5233,21 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
        decides nothing and the invite fires for any world; and the `Only if` gate reads the invite's
        own `Sent`, which is true by the time it is asked.
 
+279. **"In your world" reads the live session, not the REST row.** The Friends screen built its set
+     of your own instances from `GameSession.currentLocation`, which is refetched on a 250ms
+     debounce after a session frame lands. The socket already carries the same fact sooner: a
+     `gamelog.location_join` or a `session.update` updates `liveSessions` on arrival. For the width
+     of that refetch the section was pinned to the instance you had just left, which is the one
+     moment its answer is visibly wrong.
+     - **`liveSessions.locationFor(session)` is the precedence, in one place.** The socket wins when
+       it has observed a location; the REST row answers when it has not, because an entry can be
+       created by a frame that says nothing about location (a VR-mode line) and treating that as
+       "nowhere" would blank a location REST already knew. An ended client is nowhere either way -
+       its last observed location is where it *was*.
+     - It stays reactive through a `$derived` for the usual two reasons together: `#bySessionId` is
+       a `SvelteMap` so the lookup tracks structural change, and each entry is `$state` so reading
+       `entry.location` tracks the mutation.
+
 ---
 
 ## Gotchas

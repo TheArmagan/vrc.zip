@@ -202,6 +202,25 @@ export class LiveSessionsState {
     return this.#bySessionId.get(session.id) ?? null;
   }
 
+  /**
+   * The freshest instance one of your clients is standing in.
+   *
+   * `GameSession.currentLocation` and the socket's view are the same fact from two sources, and
+   * they only ever disagree for the moment between them: `gamelog.location_join` lands here
+   * immediately, while `/api/sessions` is refetched on a debounce afterwards. So the socket wins
+   * when it has seen a location, and REST answers when it has not — an entry can be created by a
+   * frame that carries no location at all (a VR-mode line, say), and treating that as "nowhere"
+   * would blank a location the REST row already knew.
+   *
+   * An ended client is nowhere regardless: its last observed location is where it *was*.
+   */
+  locationFor(session: GameSession): string | null {
+    const observed = this.#correlate(session);
+    if (observed === null) return session.currentLocation;
+    if (observed.ended) return null;
+    return observed.location ?? session.currentLocation;
+  }
+
   merge(sessions: readonly GameSession[]): MergedSession[] {
     return sessions.map((session) => {
       const observed = this.#correlate(session);

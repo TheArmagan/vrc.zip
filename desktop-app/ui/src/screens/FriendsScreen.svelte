@@ -40,6 +40,7 @@ import { Skeleton } from "$lib/components/ui/skeleton/index.js";
 import * as Tabs from "$lib/components/ui/tabs/index.js";
 import { parseLocation, statusLabel } from "$lib/format.ts";
 import { app } from "$lib/state/app.svelte.ts";
+import { liveSessions } from "$lib/state/live-sessions.svelte.ts";
 
 let friends = $state<Friend[]>([]);
 let loading = $state(true);
@@ -105,11 +106,17 @@ const RANK: Readonly<Record<string, number>> = {
  * From the game log, not from VRChat: `sessions.current_location` is written by the log watcher as
  * the client writes `Joining wrld_…`, which is the only source that knows what *this machine* is
  * doing. Several clients can be up at once, so it is a set rather than a location.
+ *
+ * Read through `liveSessions` rather than off the REST row, because the two disagree for as long as
+ * the refetch takes: a `gamelog.location_join` frame updates the live view on arrival, and
+ * `/api/sessions` is re-read on a debounce behind it. Taking the REST value alone left this section
+ * pointing at the instance you had just left for that window, which is precisely when it is wrong
+ * in the most visible way.
  */
 const myLocations = $derived(
   new Set(
     app.sessions
-      .map((session) => session.currentLocation)
+      .map((session) => liveSessions.locationFor(session))
       .filter((location): location is string => location !== null && location !== ""),
   ),
 );

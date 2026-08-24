@@ -4831,6 +4831,23 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      card with three hidden underneath. A dropped wire and a double-click still say where themselves;
      this is only the answer for the gestures that have no position to offer.
 
+256. **`status` follows VRChat's online verdict now, everywhere presence is written.** A friend's
+     `status` is the word they *picked*, and VRChat keeps sending it after they log out, so
+     `state: "offline", status: "join me"` is an ordinary answer about somebody who left hours ago.
+     `PresenceService` knew that for `isOnline` and nowhere else, and `isOnline` never crosses the
+     wire — `FriendPresence` carries `status` alone, so that word *is* online-ness to every reader.
+     One `statusFor` helper now reconciles the two at all three write sites (the poll, a profile
+     read, a pipeline frame), and offline always wins: it is not a status a person chose.
+     - **Online-ness comes only from frames that assert it.** `friend.online`, `friend.active` and
+       `friend.location` say somebody is there; `friend.offline` says they are not; everything else
+       keeps what is known, or reads the frame's own `state`. `friend.updated` was the trap — VRChat
+       sends one whenever a profile field moves, for logged-out people too.
+     - **Only `friend.added` may insert a row.** Presence *is* the friends list, the rule `observe`
+       already followed. The bus path did not, so a `user-update` frame — which is about the
+       signed-in account itself — put the user into their own friends list.
+     - A known-offline reading now drops `location` and `worldId` rather than carrying the last
+       place forward, which is what left an offline friend with a joinable instance under them.
+
 257. **`graphs.last_run_at`, because the Graphs list said "never run" about everything.** Migration
      015, and the Gotcha of the same name. The list read a grouped `MAX(started_at)` over
      `graph_runs`, which is pruned the moment a run settles — so the only runs it could see were the
@@ -4850,6 +4867,18 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **Expanding an offline friend turned them online, and they stayed that way.** Reported from the
+  Friends screen: open the expander on a row in the Offline group and it flips to Active. The
+  expander is what authorises `GET /users/{id}`, whose freshest-reading-wins result feeds
+  `presence.observe` — and that body says `state: "offline"` next to `status: "active"`, because
+  `status` is the last word the person chose and VRChat never clears it. `observe` believed `state`
+  for `isOnline` and copied `status` through untouched, which would have been harmless if `isOnline`
+  were on the wire. It is not: `/api/friends` sends `status` and nothing else, so the UI's only
+  reading of online-ness is the one field VRChat lies in. **A derived flag that never leaves the
+  process is not a fix for the field that does.** There was even a test pinning the wrong half of
+  it (`expect(updated?.status).toBe("active")` with `isOnline` false) — a test can encode a bug as
+  faithfully as a comment. Decision 256.
 
 - **`validateNodeDefinition` has been rejecting `slider` and `buttons` from plugins the whole time.**
   Found while adding `fields` and `paths` to `CONFIG_KINDS`: the list had nine entries and the type

@@ -56,6 +56,52 @@ function nonEmpty(value: string | null | undefined): string | null {
 }
 
 /**
+ * The status to record, given VRChat's own verdict on whether the person is there.
+ *
+ * `status` is the status the *user picked* and VRChat keeps sending it while they are logged out:
+ * `GET /users/{id}` answers `state: "offline", status: "join me"` for somebody who left hours ago.
+ * `isOnline` is the only field that carries the fact, so the word has to follow it — otherwise an
+ * offline row flipped to "Join me" the moment its expander asked for the profile, and stayed there
+ * until the next friends poll, which is the whole of this bug.
+ *
+ * Offline wins over anything VRChat says here, because offline is not a status a person chose.
+ * Going the other way — online again — the chosen word is the answer, and `active` stands in when
+ * the only thing we hold is the `offline` that just stopped being true.
+ */
+function statusFor(isOnline: boolean, chosen: string | null, fallback: string): string {
+  if (!isOnline) return "offline";
+  if (chosen !== null && chosen !== "offline") return chosen;
+  return fallback === "offline" ? "active" : fallback;
+}
+
+/**
+ * What a frame or a body says about online-ness, or null when it does not say.
+ *
+ * `state` is VRChat's own verdict and is believed outright. A location is weaker evidence and only
+ * consulted when there is no verdict at all: `offline` is a location VRChat really sends, and
+ * anything else is a place, which nobody is standing in while logged out.
+ */
+/**
+ * The bus kinds that assert somebody is online by their existence.
+ *
+ * `friend.online` and `friend.active` say so outright; `friend.location` is VRChat announcing that
+ * a friend just moved between instances, which nobody does while logged out. `friend.added` is
+ * deliberately absent — a friendship starting says nothing about whether either person is in the
+ * game — and so is `friend.updated`, for the reason spelled out where these are read.
+ */
+const ONLINE_KINDS: ReadonlySet<string> = new Set([
+  "friend.online",
+  "friend.active",
+  "friend.location",
+]);
+
+function onlineFromFields(state: string | null, location: string | null): boolean | null {
+  if (state !== null) return state !== "offline";
+  if (location !== null) return location !== "offline";
+  return null;
+}
+
+/**
  * Friend presence: who is online, where, and on what.
  *
  * Presence is **in-memory, not a table**. It is a projection of live state that is wrong the moment
@@ -259,10 +305,14 @@ export class PresenceService {
     const next: FriendPresenceRecord = {
       ...existing,
       displayName: nonEmpty(user.displayName) ?? existing.displayName,
-      status: nonEmpty(user.status) ?? existing.status,
+      // Never `user.status` on its own — see `statusFor`. The friends list has no `isOnline` of its
+      // own to fall back on, so this word *is* online-ness everywhere it is read.
+      status: statusFor(isOnline, nonEmpty(user.status), existing.status),
       statusDescription: nonEmpty(user.statusDescription) ?? existing.statusDescription,
-      location: nonEmpty(user.location) ?? existing.location,
-      worldId: nonEmpty(user.worldId) ?? existing.worldId,
+      // Nobody offline is anywhere, so a known-offline reading drops the place rather than carrying
+      // the last one forward. Keeping it left an offline friend with a joinable instance under them.
+      location: isOnline ? (nonEmpty(user.location) ?? existing.location) : nonEmpty(user.location),
+      worldId: isOnline ? (nonEmpty(user.worldId) ?? existing.worldId) : null,
       platform: nonEmpty(user.platform) ?? nonEmpty(user.last_platform) ?? existing.platform,
       trustLevel: user.tags === undefined ? existing.trustLevel : trustLevelOf(user.tags),
       isOnline,
@@ -333,10 +383,12 @@ export class PresenceService {
     return {
       id: friend.id,
       displayName: friend.displayName,
-      // `nonEmpty`, not `??`: VRChat sends `""` for a field it has nothing for, so `??` lets the
-      // empty string through as if it were an answer. `""` is not a status any vocabulary maps, so
-      // the UI drew a grey dot and the word "Unknown" for a friend who was plainly online.
-      status: nonEmpty(friend.status) ?? (isOnline ? "active" : "offline"),
+      // Which page this came from is the fact; `friend.status` is only what the person picked, and
+      // VRChat serves the picked word on the offline page too. `nonEmpty`, not `??`, for the same
+      // reason everywhere else: VRChat sends `""` for a field it has nothing for, and `""` is not a
+      // status any vocabulary maps, so the UI drew a grey dot and "Unknown" for a friend who was
+      // plainly online.
+      status: statusFor(isOnline, nonEmpty(friend.status), isOnline ? "active" : "offline"),
       statusDescription: nonEmpty(friend.statusDescription),
       location: friend.location ?? null,
       // `friend.location` is literally "private" when hidden; there is no world id to recover.
@@ -388,7 +440,14 @@ export class PresenceService {
     }
 
     const payload = event.payload as
-      | { userId?: string; userid?: string; user?: Partial<LimitedUserFriend>; location?: string }
+      | {
+          userId?: string;
+          userid?: string;
+          // `state` is not on `LimitedUserFriend` — the friends list has no such field — but the
+          // user object inside a pipeline frame carries it, and it is the only trustworthy one.
+          user?: Partial<LimitedUserFriend> & { state?: string };
+          location?: string;
+        }
       | undefined;
     if (!payload) return;
 
@@ -407,17 +466,39 @@ export class PresenceService {
       return;
     }
 
-    const isOnline = kind !== "friend.offline";
     const user = payload.user;
+    const frameLocation = nonEmpty(payload.location) ?? nonEmpty(user?.location);
+
+    /*
+     * Only some frames are a statement about whether somebody is *there*.
+     *
+     * `friend-update` is the trap this used to fall into. VRChat sends one whenever a profile field
+     * moves — a bio, an avatar, a status message — and it sends them for people who logged out
+     * yesterday. Reading "not the offline frame" as evidence of being online therefore pinned
+     * offline friends to a fake Active that nothing corrected until the next poll.
+     *
+     * So an unasserting frame keeps what is already known, unless its own `state` says otherwise.
+     */
+    let isOnline: boolean;
+    if (kind === "friend.offline") isOnline = false;
+    else if (ONLINE_KINDS.has(kind)) isOnline = true;
+    else {
+      isOnline =
+        onlineFromFields(nonEmpty(user?.state), frameLocation) ?? existing?.isOnline ?? false;
+    }
+
+    // Presence *is* the friends list, so only a friendship starting may add a row to it. Every
+    // other frame updates a row or does nothing: `user-update` is about the signed-in account
+    // itself, and inserting on it put the user into their own friends list.
+    if (existing === undefined && kind !== "friend.added") return;
 
     map.set(userId, {
       id: userId,
       displayName: user?.displayName ?? existing?.displayName ?? userId,
-      status: nonEmpty(user?.status) ?? (isOnline ? (existing?.status ?? "active") : "offline"),
+      status: statusFor(isOnline, nonEmpty(user?.status), existing?.status ?? "active"),
       statusDescription: nonEmpty(user?.statusDescription) ?? existing?.statusDescription ?? null,
-      location:
-        payload.location ?? user?.location ?? (isOnline ? (existing?.location ?? null) : null),
-      worldId: existing?.worldId ?? null,
+      location: isOnline ? (frameLocation ?? existing?.location ?? null) : frameLocation,
+      worldId: isOnline ? (existing?.worldId ?? null) : null,
       platform: user?.platform ?? existing?.platform ?? null,
       trustLevel: user?.tags ? trustLevelOf(user.tags) : (existing?.trustLevel ?? "visitor"),
       isOnline,

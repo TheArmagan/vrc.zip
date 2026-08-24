@@ -377,11 +377,71 @@ describe("PresenceService", () => {
 
     // VRChat keeps `status` at the user's *chosen* value while they are offline, so reading
     // online-ness off it would leave this friend online forever.
-    presence.observe("usr_alice", { id: "usr_on_0", status: "active", state: "offline" });
+    presence.observe("usr_alice", {
+      id: "usr_on_0",
+      status: "active",
+      state: "offline",
+      location: "wrld_stale:42",
+    });
 
     const updated = presence.list("usr_alice")[0];
     expect(updated?.isOnline).toBe(false);
-    expect(updated?.status).toBe("active");
+    // And the word follows the verdict. `status` is the only online-ness the friends list carries
+    // over the wire, so leaving the chosen word on an offline row is the same bug wearing a hat:
+    // expanding an offline friend flipped them to Active until the next poll.
+    expect(updated?.status).toBe("offline");
+    expect(updated?.worldId).toBeNull();
+    presence.stop();
+  });
+
+  test("a profile read of somebody online keeps the status they chose", async () => {
+    const presence = await setup(friends(1, true, "on"));
+    presence.start();
+    await presence.refresh("usr_alice");
+
+    presence.observe("usr_alice", { id: "usr_on_0", status: "join me", state: "online" });
+
+    expect(presence.list("usr_alice")[0]?.status).toBe("join me");
+    presence.stop();
+  });
+
+  test("an update frame is not evidence that somebody is online", async () => {
+    const presence = await setup(friends(1, false, "off"));
+    presence.start();
+    await presence.refresh("usr_alice");
+    expect(presence.list("usr_alice")[0]?.isOnline).toBe(false);
+
+    // VRChat sends `friend-update` whenever a profile field moves, including for somebody who
+    // logged out yesterday. Treating "not the offline frame" as proof of presence pinned offline
+    // friends to a fake Active that nothing corrected until the next poll.
+    bus.emit({
+      kind: "friend.updated",
+      accountId: "usr_alice",
+      ts: Date.now(),
+      payload: { userId: "usr_off_0", user: { id: "usr_off_0", status: "join me" } },
+    });
+
+    const row = presence.list("usr_alice")[0];
+    expect(row?.isOnline).toBe(false);
+    expect(row?.status).toBe("offline");
+    presence.stop();
+  });
+
+  test("a frame about a non-friend never adds a row", async () => {
+    const presence = await setup(friends(1, true, "on"));
+    presence.start();
+    await presence.refresh("usr_alice");
+
+    // `user-update` is about the signed-in account itself, and this used to insert the user into
+    // their own friends list.
+    bus.emit({
+      kind: "user.updated",
+      accountId: "usr_alice",
+      ts: Date.now(),
+      payload: { user: { id: "usr_alice", status: "active" } },
+    });
+
+    expect(presence.list("usr_alice").map((r) => r.id)).toEqual(["usr_on_0"]);
     presence.stop();
   });
 

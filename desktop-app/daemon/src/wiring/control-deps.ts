@@ -1027,8 +1027,6 @@ function checkGraphEdges(document: GraphDocument, host: PluginHost | undefined):
 
 /** What a summary needs beyond the row, and cannot work out from it alone. */
 interface SummaryExtras {
-  /** When this graph last started a run. */
-  readonly lastRunAt?: number | null;
   /** Answers whether a node type is a trigger. Absent in a test with no engine wired. */
   readonly definitionOf?: ((type: string) => { kind: string } | null) | undefined;
 }
@@ -1036,11 +1034,10 @@ interface SummaryExtras {
 /**
  * A graph as the list sees it.
  *
- * `lastRunAt` is passed in rather than looked up here, because the list wants every graph's answer
- * and one grouped scan beats one query per row. A caller returning a *single* graph — after an
- * enable, an arm, a save — passes nothing and gets `null`, which the client corrects on its next
- * list. Deliberate: those routes exist to flip a switch, and making each of them pay for a run
- * lookup so a relative timestamp stays live for one render is the wrong trade.
+ * `lastRunAt` comes off the row. It used to be passed in from a grouped scan of `graph_runs`, which
+ * could not answer: that table holds only runs in flight, so every graph read as never having run.
+ * See migration 015 — the moment a run starts is stamped on the graph, because the run row itself is
+ * deleted as soon as it settles.
  */
 function graphSummary(row: GraphRow, extras: SummaryExtras = {}): GraphSummary {
   const document = parseGraphDocument(row.definition);
@@ -1055,7 +1052,7 @@ function graphSummary(row: GraphRow, extras: SummaryExtras = {}): GraphSummary {
         : document.nodes
             .filter((node) => isTrigger(node.type)?.kind === "trigger")
             .map((node) => node.type),
-    lastRunAt: extras.lastRunAt ?? null,
+    lastRunAt: row.last_run_at,
     id: row.id,
     name: row.name,
     description: row.description,
@@ -1290,8 +1287,8 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
    * Bound once here and handed to every summary, not just the list's. It costs nothing — the
    * document is already parsed — and leaving it off the single-graph routes meant a rename came back
    * with an empty `triggerTypes` and the card visibly lost the line saying what the graph watches
-   * for, until the next full list. `lastRunAt` is the one that stays list-only, because that one is
-   * a query.
+   * for, until the next full list. `lastRunAt` used to be the one exception, because it was a query;
+   * it is a column on the row now, so every summary carries it.
    */
   const definitionOf = options.graphs?.definitionOf.bind(options.graphs);
   let settings = options.settings;
@@ -2842,14 +2839,8 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
     },
 
     async listGraphs(): Promise<GraphSummary[]> {
-      // One scan for every graph's last run, rather than a lookup per row. See `graphSummary`.
-      const lastRuns = store.lastGraphRunTimes();
       return await Promise.resolve(
-        store
-          .listGraphs()
-          .map((row) =>
-            graphSummary(row, { lastRunAt: lastRuns.get(row.id) ?? null, definitionOf }),
-          ),
+        store.listGraphs().map((row) => graphSummary(row, { definitionOf })),
       );
     },
 

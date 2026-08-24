@@ -369,11 +369,17 @@ export type GraphRow = {
   account_id: string | null;
   definition: string;
   disabled_reason: string | null;
+  /**
+   * When this graph last started a run, or null for one that never has.
+   *
+   * Here rather than derived from `graph_runs`, which holds only runs in flight — see migration 015.
+   */
+  last_run_at: number | null;
   created_at: number;
   updated_at: number;
 };
 
-export type NewGraph = Omit<GraphRow, "disabled_reason">;
+export type NewGraph = Omit<GraphRow, "disabled_reason" | "last_run_at">;
 
 /**
  * One run that has not finished — running, waiting on a `wait` node, or queued behind another.

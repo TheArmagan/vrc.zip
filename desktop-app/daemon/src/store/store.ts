@@ -1046,6 +1046,14 @@ export class Store {
     this.stmts.setGraphArmed.run(armed ? 1 : 0, updatedAt, id);
   }
 
+  /**
+   * Records a run, and stamps its graph with when it started.
+   *
+   * The stamp is here rather than at the engine's call site on purpose: `graph_runs` is deleted the
+   * moment a run settles, so this insert is the only moment the fact "this graph ran" exists at all.
+   * A caller that had to remember to record it separately is a caller that eventually forgets, and
+   * the symptom is the list quietly saying "never run" again.
+   */
   insertGraphRun(run: NewGraphRun): void {
     this.stmts.insertGraphRun.run(
       run.id,
@@ -1057,6 +1065,7 @@ export class Store {
       run.started_at,
       run.updated_at,
     );
+    this.stmts.stampGraphRun.run(run.started_at, run.graph_id);
   }
 
   getGraphRun(id: string): GraphRunRow | null {
@@ -1069,11 +1078,6 @@ export class Store {
 
   listGraphRunsByStatus(status: string, limit = 200): GraphRunRow[] {
     return this.stmts.listGraphRunsByStatus.all(status, limit);
-  }
-
-  /** When each graph last started a run, keyed by graph id. Absent means it never has. */
-  lastGraphRunTimes(): Map<string, number> {
-    return new Map(this.stmts.lastGraphRunTimes.all().map((row) => [row.graph_id, row.at]));
   }
 
   /** Queued, running and waiting all count. See the note on `SQL.countLiveGraphRuns`. */
@@ -1490,7 +1494,7 @@ function prepareAll(db: Database) {
     getGraphRun: q<GraphRunRow, [string]>(SQL.getGraphRun),
     listGraphRuns: q<GraphRunRow, [string, number]>(SQL.listGraphRuns),
     listGraphRunsByStatus: q<GraphRunRow, [string, number]>(SQL.listGraphRunsByStatus),
-    lastGraphRunTimes: q<{ graph_id: string; at: number }, []>(SQL.lastGraphRunTimes),
+    stampGraphRun: q<void, [number, string]>(SQL.stampGraphRun),
     countLiveGraphRuns: q<{ n: number }, [string]>(SQL.countLiveGraphRuns),
     countGraphRunsByStatus: q<{ n: number }, [string, string]>(SQL.countGraphRunsByStatus),
     nextQueuedGraphRun: q<GraphRunRow, [string]>(SQL.nextQueuedGraphRun),

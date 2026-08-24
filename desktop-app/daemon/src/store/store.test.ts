@@ -802,8 +802,8 @@ describe("graph runs", () => {
     store.close();
   });
 
-  test("the last run of every graph comes back in one scan, and never-run graphs are absent", () => {
-    // What the Graphs list draws as "ran 2m ago". Absent rather than zero, because a graph that has
+  test("starting a run stamps its graph, and a graph that never ran stays null", () => {
+    // What the Graphs list draws as "ran 2m ago". Null rather than zero, because a graph that has
     // never run and one that ran at the epoch are different sentences.
     const store = seed();
     addGraph(store, "g1");
@@ -813,10 +813,34 @@ describe("graph runs", () => {
     addRun(store, "r2", "g1", { started_at: T0 + 5000 });
     addRun(store, "r3", "g2", { started_at: T0 + 100 });
 
-    const times = store.lastGraphRunTimes();
-    expect(times.get("g1")).toBe(T0 + 5000);
-    expect(times.get("g2")).toBe(T0 + 100);
-    expect(times.has("g3")).toBe(false);
+    expect(store.getGraph("g1")?.last_run_at).toBe(T0 + 5000);
+    expect(store.getGraph("g2")?.last_run_at).toBe(T0 + 100);
+    expect(store.getGraph("g3")?.last_run_at).toBeNull();
+    store.close();
+  });
+
+  test("the stamp survives the run row it came from, which is the whole point", () => {
+    // `graph_runs` is pruned the moment a run settles, so a scan of it can only ever see runs in
+    // flight. That is what made the list say "never run" about a graph that had just run.
+    const store = seed();
+    addGraph(store, "g1");
+    addRun(store, "r1", "g1", { started_at: T0 });
+    store.deleteGraphRun("r1");
+
+    expect(store.listGraphRuns("g1")).toHaveLength(0);
+    expect(store.getGraph("g1")?.last_run_at).toBe(T0);
+    store.close();
+  });
+
+  test("a run that started earlier does not move the stamp backwards", () => {
+    // A queued run starts after the one it was queued behind, and the engine may stamp in either
+    // order. The column is the most recent start, not the last write.
+    const store = seed();
+    addGraph(store, "g1");
+    addRun(store, "r1", "g1", { started_at: T0 + 5000 });
+    addRun(store, "r2", "g1", { started_at: T0 });
+
+    expect(store.getGraph("g1")?.last_run_at).toBe(T0 + 5000);
     store.close();
   });
 

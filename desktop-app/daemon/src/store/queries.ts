@@ -633,14 +633,18 @@ export const SQL = {
   listGraphRunsByStatus: `
     SELECT * FROM graph_runs WHERE status = ? ORDER BY started_at LIMIT ?`,
   /*
-   * When each graph last started a run, for the list on the Graphs screen.
+   * Stamps a graph with the moment a run of it started, for the list on the Graphs screen.
    *
-   * Every graph in one statement rather than one query per row: the list is drawn on every visit and
-   * the retention sweep keeps `graph_runs` small, so the grouped scan is cheaper than N round trips
-   * through the statement cache. A graph that has never run is simply absent from the result.
+   * `MAX` rather than a plain assignment, because a queued run starts later than the one it is
+   * queued behind and the engine may stamp them in either order; the column is "the most recent
+   * start", not "the last one written".
+   *
+   * This used to be a grouped `MAX(started_at)` over `graph_runs` and could not work: that table is
+   * pruned the moment a run finishes, so the scan only ever saw runs still in flight and the list
+   * said "never run" about a graph that had just run. See migration 015.
    */
-  lastGraphRunTimes: `
-    SELECT graph_id, MAX(started_at) AS at FROM graph_runs GROUP BY graph_id`,
+  stampGraphRun: `
+    UPDATE graphs SET last_run_at = MAX(COALESCE(last_run_at, 0), ?) WHERE id = ?`,
   /*
    * The concurrency check, and a `waiting` run counts. A run parked on a `wait` has not finished —
    * treating it as a free slot is how a graph that waits five minutes ends up with fifty live runs

@@ -4831,6 +4831,18 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      card with three hidden underneath. A dropped wire and a double-click still say where themselves;
      this is only the answer for the gestures that have no position to offer.
 
+257. **`graphs.last_run_at`, because the Graphs list said "never run" about everything.** Migration
+     015, and the Gotcha of the same name. The list read a grouped `MAX(started_at)` over
+     `graph_runs`, which is pruned the moment a run settles — so the only runs it could see were the
+     ones still in flight, and there are none of those when somebody opens the screen. A column on
+     `graphs` instead, stamped inside `Store.insertGraphRun` rather than at the engine's call site,
+     since that insert is the only moment the fact exists and a caller who has to remember is a caller
+     who forgets. `MAX(COALESCE(last_run_at, 0), ?)` rather than an assignment: a queued run starts
+     after the one it waited behind and the two may be stamped in either order. Nullable, because a
+     graph that never ran and one that ran at the epoch are different sentences. `lastRunAt` stops
+     being list-only as a side effect — it is on the row now, so an enable, an arm or a save answers
+     with it too.
+
 ---
 
 ## Gotchas
@@ -5719,6 +5731,16 @@ Carried in from research, not yet verified against running code:
   a flattened payload it had invented. Found while building the friend twin of the same family;
   `subjectRecord()` reads the nested object and falls back to the flat one, and both families use it.
   **Where a test writes its own payload, check the shape against the bridge that produces it.**
+
+- **The Graphs list said "never run" about every graph, including one that had just run.** `lastRunAt`
+  came from `SELECT graph_id, MAX(started_at) FROM graph_runs GROUP BY graph_id`, and `graph_runs` is
+  live state: the engine deletes a run's row the instant it settles. So the scan could only see runs
+  still in flight, which at the moment somebody opens the screen is none of them. Both halves were
+  individually tested and correct — the store test seeded three live runs and got the right answer,
+  and nothing joined the query to the deletion twelve hundred lines away. **When a table is documented
+  as pruned, an aggregate over it answers a question about the present, not about history.** The fix
+  is a `last_run_at` column stamped inside `insertGraphRun` (migration 015), so the fact outlives the
+  row it came from and no call site has to remember to record it.
 
 ---
 

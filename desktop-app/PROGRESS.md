@@ -4602,6 +4602,22 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
        `Open` does not fit one line at this card width, and the row wrapping put the primary action
        on a line of its own.
 
+248. **The hidden window and the message loop moved out of the tray, into `os/message-pump.ts`.**
+     The first step of the notification work, and a prerequisite rather than tidying: a WinRT toast
+     with buttons delivers its `Activated` callback as a COM call into a single-threaded apartment,
+     and an STA delivers calls by *sending window messages* — so the notifier needs a pumped thread,
+     and the tray already had the only one. Two pumps in one process is not two independent things:
+     `PeekMessageW(NULL, …)` reads the *thread's* queue, so each loop would steal messages meant for
+     the other. The module is refcounted and module-level, which is the one place in the daemon that
+     holds process state instead of being handed it by `app.ts`, because the thing it holds *is*
+     process state — one window, one thread, one queue. The window procedure is now generic: a
+     `Map` from a message id that will be *sent* to the id it should be re-posted under, which is
+     exactly what the tray was doing by hand for `WM_TRAY` and `TaskbarCreated`. Subscribers get
+     `onMessage` for posted ids and `onTick` for the health check the tray runs on the loop's
+     interval. The window class name is unchanged (`vrczip-tray-<pid>`) so the cross-process probe
+     in `tray.test.ts` still finds it, and that test is still the one thing that proves a *sent*
+     message reaches us at all.
+
 ---
 
 ## Gotchas

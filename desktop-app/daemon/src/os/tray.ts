@@ -4,49 +4,28 @@
  * ## Why this is FFI rather than a helper process
  *
  * The obvious way to put an icon in the tray from a runtime with no window toolkit is to spawn
- * PowerShell and let `System.Windows.Forms.NotifyIcon` do it, which is exactly what
- * `desktop-notification.ts` does for toasts. It is the wrong trade here, and for one measurable
- * reason: a toast is a PowerShell process that lives for a second, and a tray icon is one that lives
- * for the whole session. A PowerShell host is 40 to 60MB resident. This app's stated idle footprint
- * is 50 to 80MB, so a helper process would roughly double it to draw a 16px square.
+ * PowerShell and let `System.Windows.Forms.NotifyIcon` do it. It is the wrong trade, and for one
+ * measurable reason: a PowerShell host is 40 to 60MB resident, and a tray icon is a process that
+ * lives for the whole session rather than for a second. This app's stated idle footprint is 50 to
+ * 80MB, so a helper process would roughly double it to draw a 16px square.
  *
  * So it is `Shell_NotifyIconW` over `bun:ffi`, on the same pattern `console.ts` already uses for
  * kernel32. The cost is about two hundred lines of struct packing; the benefit is that the icon is
  * free.
  *
- * ## The message loop, and why there *is* a callback
+ * ## The window and the loop are not ours
  *
- * A tray icon needs a window to receive its click notifications, and a window needs a message loop.
- * The first version of this file tried to avoid handing Windows a pointer into JavaScript at all: it
- * registered **`DefWindowProcW` itself** as the class procedure and let the pump read messages with
- * `PeekMessageW` and inspect them before dispatching. That draws a perfect icon and receives
- * absolutely nothing.
- *
- * The reason is the distinction between a *posted* and a *sent* message. `PeekMessageW` returns
- * posted messages, which sit in the thread queue; a sent message is not queued at all, and the
- * retrieval call delivers it by invoking the target window's procedure directly before it goes
- * looking for anything queued. The shell's tray callbacks are sent, and so is the `WM_CONTEXTMENU`
- * that version 4 uses for a right-click. So every click went straight into `DefWindowProcW` and was
- * discarded, while `PostMessageW`-ing `WM_TRAY` at our own window by hand worked perfectly, which is
- * what made the failure so hard to read. Electron does not do it this way either: `NotifyIconHost`
- * registers a real `WndProcStatic` and handles the callback inside it.
- *
- * So there is a `JSCallback` now, and the original worry about it is answered by keeping it
- * trivial rather than by not having one. The procedure never opens a menu, never touches the daemon
- * and cannot throw: it turns a notification into a `PostMessageW` at our own window and returns.
- * Everything with any weight to it — building the menu, the modal `TrackPopupMenu`, opening a URL,
- * shutting down — happens later, on our own stack, out of the pump. Windows only ever calls back
- * into JavaScript from inside our own `PeekMessageW` on our own thread, which is the one case where
- * a callback is not a cross-thread hazard.
- *
- * The pump runs on an `unref`ed interval, so it never keeps the process alive on its own — the
- * servers do that — and a daemon shutting down does not wait for a tick.
+ * They were, once. A tray icon needs a window to receive its click notifications and a loop to
+ * deliver them, and both used to live in this file — until the notifier needed the same thread's
+ * queue for a WinRT toast's activation handler, and two pumps in one process turned out to mean two
+ * `PeekMessageW(NULL, …)` calls stealing each other's messages. Both are now in
+ * `os/message-pump.ts`, which is also where the long explanation of *why* a window procedure exists
+ * at all ended up. This file subscribes.
  *
  * ## Explorer restarts
  *
  * When explorer crashes and comes back it broadcasts `TaskbarCreated`, and every icon that was in
- * the notification area is gone until its owner adds it again. That broadcast only reaches
- * top-level windows, which is why the window is `WS_POPUP` rather than a message-only child.
+ * the notification area is gone until its owner adds it again.
  *
  * ## Hide is only offered when the console is ours
  *
@@ -56,9 +35,19 @@
  * window we would be hiding.
  */
 
-import { dlopen, FFIType, JSCallback, ptr, suffix } from "bun:ffi";
+import { dlopen, FFIType, suffix } from "bun:ffi";
+import {
+  acquireMessagePump,
+  type MessagePump,
+  setPointer,
+  wide,
+  writeFixedWide,
+} from "./message-pump.ts";
 
 const IS_WINDOWS = process.platform === "win32";
+
+/** Re-exported because the struct-size test derives all three together. */
+export { MSG_BYTES, WNDCLASSEXW_BYTES } from "./message-pump.ts";
 
 /* -------------------------------------------------------------------------------------------- */
 /* Win32 constants                                                                                */
@@ -84,8 +73,8 @@ const WM_TRAY = 0x8000 + 1;
  * What the window procedure posts at us once it has been *sent* a `WM_TRAY`.
  *
  * The whole point of the second id: the procedure runs inside Windows' own call, so it does the one
- * cheap thing it can safely do there and lets the pump pick the work up on our stack. See the note
- * at the top of this file.
+ * cheap thing it can safely do there and lets the pump pick the work up on our stack. See
+ * `os/message-pump.ts`.
  */
 const WM_TRAY_QUEUED = 0x8000 + 2;
 /** Posted the same way when `TaskbarCreated` arrives, to re-add an icon explorer forgot. */
@@ -98,12 +87,7 @@ const NIN_KEYSELECT = 0x0401;
 const WM_RBUTTONUP = 0x0205;
 const WM_CONTEXTMENU = 0x007b;
 const WM_NULL = 0x0000;
-const WM_QUIT = 0x0012;
 
-/** A top-level window, which is what a `TaskbarCreated` broadcast will actually reach. */
-const WS_POPUP = 0x80000000;
-
-const PM_REMOVE = 0x0001;
 const SW_HIDE = 0;
 const SW_SHOW = 5;
 
@@ -113,9 +97,6 @@ const LR_DEFAULTCOLOR = 0x0000;
 const FIRST_ICON_RESOURCE = 1;
 /** `IDI_APPLICATION`, for a run from source where the binary has no icon of its own. */
 const IDI_APPLICATION = 32512;
-
-/** `MSGFLT_ALLOW`, for `ChangeWindowMessageFilterEx`. */
-const MSGFLT_ALLOW = 1;
 
 const MF_STRING = 0x0000;
 const MF_SEPARATOR = 0x0800;
@@ -138,10 +119,6 @@ const ID_STARTUP = 5;
 /* Structs                                                                                        */
 /* -------------------------------------------------------------------------------------------- */
 
-/** `sizeof(MSG)` on x64: hwnd, message, wParam, lParam, time, POINT, and the tail padding. */
-export const MSG_BYTES = 48;
-/** `sizeof(WNDCLASSEXW)` on x64. */
-export const WNDCLASSEXW_BYTES = 80;
 /**
  * `sizeof(NOTIFYICONDATAW)` on x64, for the current (Vista and later) version of the struct.
  *
@@ -169,74 +146,12 @@ const NID = {
   dwInfoFlags: 948,
 } as const;
 
-/** UTF-16LE, NUL-terminated. Every `…W` entry point wants this. */
-function wide(value: string): Uint8Array {
-  const buffer = new Uint8Array((value.length + 1) * 2);
-  const view = new DataView(buffer.buffer);
-  for (let index = 0; index < value.length; index += 1) {
-    view.setUint16(index * 2, value.charCodeAt(index), true);
-  }
-  return buffer;
-}
-
-/**
- * Writes a NUL-terminated UTF-16 string into a fixed-width field, truncating rather than overrunning.
- *
- * `szTip` is 128 `WCHAR`s. A longer tip is a caller's mistake and not worth failing over, but
- * writing past the field would corrupt the struct that follows it.
- */
-function writeFixedWide(view: DataView, offset: number, value: string, chars: number): void {
-  const limit = Math.min(value.length, chars - 1);
-  for (let index = 0; index < limit; index += 1) {
-    view.setUint16(offset + index * 2, value.charCodeAt(index), true);
-  }
-  view.setUint16(offset + limit * 2, 0, true);
-}
-
-function setPointer(view: DataView, offset: number, value: number | bigint | null): void {
-  view.setBigUint64(offset, BigInt(value ?? 0), true);
-}
-
 /* -------------------------------------------------------------------------------------------- */
 /* The libraries                                                                                  */
 /* -------------------------------------------------------------------------------------------- */
 
 interface TrayLibs {
   readonly user32: {
-    RegisterClassExW: (klass: Uint8Array) => number;
-    UnregisterClassW: (name: Uint8Array, instance: number | null) => number;
-    CreateWindowExW: (
-      exStyle: number,
-      klass: Uint8Array,
-      name: Uint8Array,
-      style: number,
-      x: number,
-      y: number,
-      width: number,
-      height: number,
-      parent: number | null,
-      menu: number | null,
-      instance: number | null,
-      param: number | null,
-    ) => number | null;
-    DestroyWindow: (hwnd: number) => number;
-    /** Called by our own window procedure for everything that is not ours. */
-    DefWindowProcW: (
-      hwnd: number,
-      message: number,
-      wParam: number | bigint,
-      lParam: number | bigint,
-    ) => bigint;
-    RegisterWindowMessageW: (name: Uint8Array) => number;
-    PeekMessageW: (
-      msg: Uint8Array,
-      hwnd: number | null,
-      min: number,
-      max: number,
-      remove: number,
-    ) => number;
-    TranslateMessage: (msg: Uint8Array) => number;
-    DispatchMessageW: (msg: Uint8Array) => number | null;
     CreatePopupMenu: () => number | null;
     AppendMenuW: (menu: number, flags: number, id: number, text: Uint8Array | null) => number;
     DestroyMenu: (menu: number) => number;
@@ -251,18 +166,6 @@ interface TrayLibs {
     ) => number;
     GetCursorPos: (point: Uint8Array) => number;
     SetForegroundWindow: (hwnd: number) => number;
-    ChangeWindowMessageFilterEx: (
-      hwnd: number,
-      message: number,
-      action: number,
-      change: Uint8Array | null,
-    ) => number;
-    PostMessageW: (
-      hwnd: number,
-      message: number,
-      wParam: number | bigint,
-      lParam: number | bigint,
-    ) => number;
     ShowWindow: (hwnd: number, command: number) => number;
     IsWindowVisible: (hwnd: number) => number;
     LoadImageW: (
@@ -302,37 +205,6 @@ function load(): TrayLibs | null {
   if (!IS_WINDOWS) return null;
   try {
     const user32 = dlopen(`user32.${suffix}`, {
-      RegisterClassExW: { args: [FFIType.ptr], returns: FFIType.u16 },
-      UnregisterClassW: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
-      CreateWindowExW: {
-        args: [
-          FFIType.u32,
-          FFIType.ptr,
-          FFIType.ptr,
-          FFIType.u32,
-          FFIType.i32,
-          FFIType.i32,
-          FFIType.i32,
-          FFIType.i32,
-          FFIType.ptr,
-          FFIType.ptr,
-          FFIType.ptr,
-          FFIType.ptr,
-        ],
-        returns: FFIType.ptr,
-      },
-      DestroyWindow: { args: [FFIType.ptr], returns: FFIType.i32 },
-      DefWindowProcW: {
-        args: [FFIType.ptr, FFIType.u32, FFIType.u64, FFIType.i64],
-        returns: FFIType.i64,
-      },
-      RegisterWindowMessageW: { args: [FFIType.ptr], returns: FFIType.u32 },
-      PeekMessageW: {
-        args: [FFIType.ptr, FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.u32],
-        returns: FFIType.i32,
-      },
-      TranslateMessage: { args: [FFIType.ptr], returns: FFIType.i32 },
-      DispatchMessageW: { args: [FFIType.ptr], returns: FFIType.ptr },
       CreatePopupMenu: { args: [], returns: FFIType.ptr },
       AppendMenuW: {
         args: [FFIType.ptr, FFIType.u32, FFIType.u64, FFIType.ptr],
@@ -353,14 +225,6 @@ function load(): TrayLibs | null {
       },
       GetCursorPos: { args: [FFIType.ptr], returns: FFIType.i32 },
       SetForegroundWindow: { args: [FFIType.ptr], returns: FFIType.i32 },
-      ChangeWindowMessageFilterEx: {
-        args: [FFIType.ptr, FFIType.u32, FFIType.u32, FFIType.ptr],
-        returns: FFIType.i32,
-      },
-      PostMessageW: {
-        args: [FFIType.ptr, FFIType.u32, FFIType.u64, FFIType.i64],
-        returns: FFIType.i32,
-      },
       ShowWindow: { args: [FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
       IsWindowVisible: { args: [FFIType.ptr], returns: FFIType.i32 },
       LoadImageW: {
@@ -447,7 +311,7 @@ export interface TrayOptions {
 }
 
 export interface Tray {
-  /** Removes the icon and stops the pump. Safe to call twice. */
+  /** Removes the icon and gives up the pump. Safe to call twice. */
   stop(): void;
 }
 
@@ -479,90 +343,30 @@ export function shouldShowTray(
 export function startTray(options: TrayOptions): Tray | null {
   const lib = load();
   if (lib === null) return null;
+  const pump = acquireMessagePump();
+  if (pump === null) return null;
 
+  const started = attach(lib, pump, options);
+  if (started === null) {
+    pump.release();
+    return null;
+  }
+  return started;
+}
+
+function attach(lib: TrayLibs, pump: MessagePump, options: TrayOptions): Tray | null {
   const { user32, shell32, kernel32 } = lib;
   const instance = kernel32.GetModuleHandleW(null);
+  const hwnd = pump.hwnd;
 
   /** Explorer's "I just restarted, add your icon again" broadcast. Zero if it cannot be registered. */
-  const taskbarCreated = user32.RegisterWindowMessageW(wide("TaskbarCreated"));
+  const taskbarCreated = pump.registerWindowMessage("TaskbarCreated");
 
-  /*
-   * The window procedure.
-   *
-   * Deliberately the smallest thing that can work, for the reasons in the note at the top: it is
-   * called by Windows, from inside our own `PeekMessageW`, and anything it throws is thrown across a
-   * foreign stack frame. So it recognises two messages, turns each into a post at our own window,
-   * and hands everything else — including the `WM_NCCREATE`/`WM_CREATE` pair that arrives while
-   * `CreateWindowExW` is still running — to `DefWindowProcW`. The `try` is belt and braces; there is
-   * nothing in here that can reasonably fail.
-   */
-  const procedure = new JSCallback(
-    (hwnd: number, message: number, wParam: bigint, lParam: bigint): bigint => {
-      try {
-        if (message === WM_TRAY) {
-          user32.PostMessageW(hwnd, WM_TRAY_QUEUED, wParam, lParam);
-          return 0n;
-        }
-        if (taskbarCreated !== 0 && message === taskbarCreated) {
-          user32.PostMessageW(hwnd, WM_TRAY_RESTORE, 0, 0);
-          return 0n;
-        }
-        return user32.DefWindowProcW(hwnd, message, wParam, lParam);
-      } catch {
-        return 0n;
-      }
-    },
-    {
-      args: [FFIType.ptr, FFIType.u32, FFIType.u64, FFIType.i64],
-      returns: FFIType.i64,
-    },
-  );
-
-  const className = wide(`vrczip-tray-${String(process.pid)}`);
-  const klass = new Uint8Array(WNDCLASSEXW_BYTES);
-  const klassView = new DataView(klass.buffer);
-  klassView.setUint32(0, WNDCLASSEXW_BYTES, true);
-  setPointer(klassView, 8, procedure.ptr);
-  setPointer(klassView, 24, instance);
-  setPointer(klassView, 64, ptr(className));
-  if (user32.RegisterClassExW(klass) === 0) {
-    procedure.close();
-    return null;
-  }
-
-  const hwnd = user32.CreateWindowExW(
-    0,
-    className,
-    wide("vrc.zip"),
-    WS_POPUP,
-    0,
-    0,
-    0,
-    0,
-    null,
-    null,
-    instance,
-    null,
-  );
-  if (hwnd === null || hwnd === 0) {
-    user32.UnregisterClassW(className, instance);
-    procedure.close();
-    return null;
-  }
-
-  /*
-   * Let the shell's click notifications through to us.
-   *
-   * UIPI blocks a posted message from a lower-integrity process to a higher-integrity one, and it
-   * blocks it *silently*: run the daemon from an elevated terminal and explorer (medium integrity)
-   * can still add our icon, draw it, and show its tooltip, while every click it posts back is
-   * dropped before it reaches our queue. The icon looks perfect and the menu simply never opens,
-   * with nothing logged anywhere. This is the documented fix, and it is a no-op when we are not
-   * elevated, so it is unconditional rather than guarded on a privilege check.
-   */
-  user32.ChangeWindowMessageFilterEx(hwnd, WM_TRAY, MSGFLT_ALLOW, null);
+  pump.forwardSent(WM_TRAY, WM_TRAY_QUEUED);
+  pump.allowMessage(WM_TRAY);
   if (taskbarCreated !== 0) {
-    user32.ChangeWindowMessageFilterEx(hwnd, taskbarCreated, MSGFLT_ALLOW, null);
+    pump.forwardSent(taskbarCreated, WM_TRAY_RESTORE);
+    pump.allowMessage(taskbarCreated);
   }
 
   const icon = loadIcon(lib, instance);
@@ -591,12 +395,7 @@ export function startTray(options: TrayOptions): Tray | null {
     return true;
   };
 
-  if (!install()) {
-    user32.DestroyWindow(hwnd);
-    user32.UnregisterClassW(className, instance);
-    procedure.close();
-    return null;
-  }
+  if (!install()) return null;
 
   /*
    * A word on what `NIM_SETVERSION` in there is for.
@@ -609,8 +408,6 @@ export function startTray(options: TrayOptions): Tray | null {
    * broken in exactly the way this file already looked broken once.
    */
 
-  const message = new Uint8Array(MSG_BYTES);
-  const messageView = new DataView(message.buffer);
   const point = new Uint8Array(8);
   let stopped = false;
 
@@ -622,9 +419,9 @@ export function startTray(options: TrayOptions): Tray | null {
   /**
    * Says something in a balloon from our own icon.
    *
-   * A balloon rather than `notifyDesktop`, which would be the other option: this is a reply to a
-   * click the user just made on this icon, so it belongs on this icon rather than arriving as a
-   * separate toast from a PowerShell process a second later.
+   * A balloon rather than the notifier, which would be the other option: this is a reply to a click
+   * the user just made on this icon, so it belongs on this icon rather than arriving as a separate
+   * toast a second later.
    *
    * `uFlags` is put back afterwards, and that is not tidiness. `NIF_INFO` is sticky — it lives in
    * the same struct the tooltip and the icon are edited through, so leaving it set turns the next
@@ -702,7 +499,7 @@ export function startTray(options: TrayOptions): Tray | null {
         hwnd,
         null,
       );
-      user32.PostMessageW(hwnd, WM_NULL, 0, 0);
+      pump.post(WM_NULL);
 
       switch (chosen) {
         case ID_OPEN:
@@ -743,13 +540,35 @@ export function startTray(options: TrayOptions): Tray | null {
     }
   };
 
-  /**
-   * One pass of the message queue.
-   *
-   * Bounded rather than drained: `TrackPopupMenu` is modal and blocks this thread until the menu
-   * closes, so an unbounded loop over a queue that keeps filling would be a way to stall the whole
-   * daemon. Sixty-four messages is far more than a tray icon ever produces in a tick.
-   */
+  const onNotification = (_wParam: bigint, lParam: bigint): void => {
+    if (stopped) return;
+    /*
+     * The notification rides in the low half of lParam under version 4, and *is* lParam under the
+     * old contract. Same bits either way — but which spellings to *accept* is not a matter of taste,
+     * and accepting both is a bug: a version 4 icon delivers the raw mouse message as well as the
+     * `NIN_*` notification for the same click, so a pump that answers to both opened the launch URL
+     * twice per click. Whichever contract `NIM_SETVERSION` actually left us on is the only one we
+     * listen to.
+     */
+    const which = Number(lParam & 0xffffn);
+    const menu = version4 ? which === WM_CONTEXTMENU : which === WM_RBUTTONUP;
+    const select = version4
+      ? which === NIN_SELECT || which === NIN_KEYSELECT
+      : which === WM_LBUTTONUP || which === WM_LBUTTONDBLCLK;
+    if (menu) showMenu();
+    else if (select) options.open(options.launchUrl);
+  };
+
+  const subscriptions = [
+    pump.onMessage(WM_TRAY_QUEUED, onNotification),
+    // `WM_TRAY` too, so a message posted straight at the window still works: the probe harness does
+    // that, and so does anything that reaches us before `NIM_SETVERSION` lands.
+    pump.onMessage(WM_TRAY, onNotification),
+    pump.onMessage(WM_TRAY_RESTORE, () => {
+      if (!stopped) install();
+    }),
+  ];
+
   /*
    * How many pump ticks between "is the icon still there?" checks. 120ms x 40 is roughly five
    * seconds, which is soon enough that nobody sits looking at an empty notification area and rare
@@ -759,7 +578,7 @@ export function startTray(options: TrayOptions): Tray | null {
   let ticks = 0;
 
   /**
-   * Puts the icon back if it has gone, and answers whether it had to.
+   * Puts the icon back if it has gone.
    *
    * `NIM_MODIFY` is the cheap existence check the shell already offers: it fails when there is no
    * icon with our id, which is exactly the question. `TaskbarCreated` handles the case we get told
@@ -769,83 +588,28 @@ export function startTray(options: TrayOptions): Tray | null {
    * other part of this process was busy. A tray icon is the only way back to a daemon whose console
    * is hidden, so "it is usually there" is not a good enough guarantee for it.
    */
-  const healIcon = (): boolean => {
-    if (shell32.Shell_NotifyIconW(NIM_MODIFY, data) !== 0) return false;
-    install();
-    return true;
-  };
-
-  const pump = (): void => {
-    if (stopped) return;
-
-    ticks += 1;
-    if (ticks >= HEALTH_TICKS) {
+  subscriptions.push(
+    pump.onTick(() => {
+      if (stopped) return;
+      ticks += 1;
+      if (ticks < HEALTH_TICKS) return;
       ticks = 0;
-      healIcon();
-    }
-
-    for (let index = 0; index < 64; index += 1) {
-      /*
-       * This call is doing two jobs, and the second one is invisible.
-       *
-       * It returns the next posted message, which is what the loop below reads. It also delivers
-       * every message that was *sent* to one of this thread's windows by calling the procedure —
-       * which is where the shell's clicks actually arrive, and where they turn into the
-       * `WM_TRAY_QUEUED` this loop then picks up on a later pass.
-       */
-      if (user32.PeekMessageW(message, null, 0, 0, PM_REMOVE) === 0) return;
-      const id = messageView.getUint32(8, true);
-      if (id === WM_QUIT) return;
-      if (id === WM_TRAY_RESTORE) {
-        install();
-        continue;
-      }
-      // `WM_TRAY` too, so a message posted straight at the window still works: the probe harness
-      // does that, and so does anything that reaches us before `NIM_SETVERSION` lands.
-      if (id === WM_TRAY_QUEUED || id === WM_TRAY) {
-        /*
-         * The notification rides in the low half of lParam under version 4, and *is* lParam under
-         * the old contract. Same bits either way — but which spellings to *accept* is not a matter
-         * of taste, and accepting both is a bug: a version 4 icon delivers the raw mouse message
-         * as well as the `NIN_*` notification for the same click, so a pump that answers to both
-         * opened the launch URL twice per click. Whichever contract `NIM_SETVERSION` actually left
-         * us on is the only one we listen to.
-         */
-        const which = Number(messageView.getBigInt64(24, true) & 0xffffn);
-        const menu = version4 ? which === WM_CONTEXTMENU : which === WM_RBUTTONUP;
-        const select = version4
-          ? which === NIN_SELECT || which === NIN_KEYSELECT
-          : which === WM_LBUTTONUP || which === WM_LBUTTONDBLCLK;
-        if (menu) showMenu();
-        else if (select) options.open(options.launchUrl);
-        continue;
-      }
-      user32.TranslateMessage(message);
-      user32.DispatchMessageW(message);
-    }
-  };
-
-  // 120ms: below the threshold where a right-click feels laggy, and 8 wake-ups a second of a
-  // function that usually returns on its first `PeekMessageW`.
-  const timer = setInterval(pump, 120);
-  timer.unref?.();
+      if (shell32.Shell_NotifyIconW(NIM_MODIFY, data) === 0) install();
+    }),
+  );
 
   return {
     stop(): void {
       if (stopped) return;
       stopped = true;
-      clearInterval(timer);
+      for (const unsubscribe of subscriptions) unsubscribe();
       try {
         shell32.Shell_NotifyIconW(NIM_DELETE, data);
-        // Order matters: the window has to be gone before the procedure it points at is, or a
-        // message arriving in between would call into freed memory.
-        user32.DestroyWindow(hwnd);
-        user32.UnregisterClassW(className, instance);
-        procedure.close();
       } catch {
         // Shutting down. An icon left behind is Windows' problem to clean up, not a reason to fail
         // the exit path.
       }
+      pump.release();
     },
   };
 }

@@ -11,8 +11,9 @@
  */
 
 import type { NodeDefinition, PortDefinition } from "@vrcz/plugin-api/nodes";
-import { AFTER_PORT, ERROR_PORT, visibleInputs } from "@vrcz/plugin-api/nodes";
+import { AFTER_PORT, ERROR_PORT, visibleInputs, visibleOutputs } from "@vrcz/plugin-api/nodes";
 import { FOREACH_AFTER_PORTS } from "@vrcz/shared";
+import { defaultConfig } from "./config.ts";
 import { FOREACH_TYPE } from "./loops.ts";
 
 /* -------------------------------------------------------------------------------------------- */
@@ -163,13 +164,19 @@ function rowOf(port: PortDefinition): PortRow {
  */
 export function detailPorts(qualifiedId: string, definition: NodeDefinition): PortRows {
   const executable = definition.kind !== "trigger";
+  /*
+   * The node as it will arrive on the canvas, which means its declared defaults rather than an empty
+   * config: for a variadic node that is its default number of slots and not all of them, and for an
+   * extractor it is the one row it starts with. An empty config used to be passed here, and it drew
+   * every extractor as a card with no outputs at all — a preview of the one thing the node is for.
+   */
+  const config = defaultConfig(definition);
+  const outputs = visibleOutputs(definition, config);
   const after =
     qualifiedId === FOREACH_TYPE
-      ? definition.outputs.filter((port) => FOREACH_AFTER_PORTS.includes(port.id))
+      ? outputs.filter((port) => FOREACH_AFTER_PORTS.includes(port.id))
       : [];
-  // The empty config is the point: nothing has been created yet, so this is the node as it will
-  // arrive on the canvas — which for a variadic node is its default number of slots, not all of them.
-  const shown = executable ? visibleInputs(definition, {}) : [];
+  const shown = executable ? visibleInputs(definition, config) : [];
 
   return {
     moreInputs: executable ? definition.inputs.length - shown.length : 0,
@@ -188,7 +195,7 @@ export function detailPorts(qualifiedId: string, definition: NodeDefinition): Po
       ...shown.map(rowOf),
     ],
     outputs: [
-      ...definition.outputs.filter((port) => !after.includes(port)).map(rowOf),
+      ...outputs.filter((port) => !after.includes(port)).map(rowOf),
       ...after.map((port) => ({ ...rowOf(port), role: "sequence" as const })),
       ...(executable
         ? [

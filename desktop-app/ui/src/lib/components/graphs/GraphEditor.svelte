@@ -32,7 +32,10 @@ import {
   isPortType,
   type NodeDefinition,
   parseButtonRows,
+  parseSlotRows,
   type PortType,
+  type SlotRow,
+  slotRowLabel,
   visibleInputCount,
 } from "@vrcz/plugin-api/nodes";
 import type { GraphDocument, GraphEdge as WireEdge, GraphNode as WireNode } from "@vrcz/shared";
@@ -62,11 +65,12 @@ import RelativeTime from "$lib/components/RelativeTime.svelte";
 import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
 import { Input } from "$lib/components/ui/input/index.js";
+import { defaultConfig } from "$lib/graphs/config.ts";
 import { clampSidebarWidth, SIDEBAR_DEFAULT_WIDTH } from "$lib/graphs/details.ts";
 import { iconFor } from "$lib/graphs/icons.ts";
 import { loopProblems } from "$lib/graphs/loops.ts";
 import { NodePreview } from "$lib/graphs/node-preview.svelte.ts";
-import { familyColor, familyOf, portColor } from "$lib/graphs/visuals.ts";
+import { familyColor, familyOf, isListPort, portColor } from "$lib/graphs/visuals.ts";
 import { hrefFor } from "$lib/router.ts";
 import { app } from "$lib/state/app.svelte.ts";
 import { graphRun } from "$lib/state/graph-run.svelte.ts";
@@ -86,6 +90,13 @@ let dirty = $state(false);
 let selectedId = $state<string | null>(null);
 /** Which node's secret field is being typed into, and what. Never read back from the daemon. */
 let secretDraft = $state<Record<string, string>>({});
+/**
+ * What is typed in an extractor's field filter.
+ *
+ * One box for the whole inspector rather than one per row: it narrows a catalogue, and somebody
+ * adding four fields off the same object is filtering for the same word each time.
+ */
+let fieldQuery = $state("");
 /** What is typed in the palette's search box. */
 let paletteQuery = $state("");
 /** Which palette row the arrows are on, counted across every open group. */
@@ -208,6 +219,7 @@ $effect(() => {
   void graphs.nodeTypes.size;
   applyProblems();
   applyVariadicFloors();
+  applyWiredOutputs();
   applyEdgeStyles();
 });
 
@@ -246,6 +258,39 @@ function applyVariadicFloors(): void {
     if (data.config[field] === count) return node;
     changed = true;
     return { ...node, data: { ...node.data, config: { ...data.config, [field]: count } } };
+  });
+  if (changed) nodes = next;
+}
+
+/**
+ * Tells each extractor card which of its output slots already has an edge.
+ *
+ * The card cannot work this out for itself — it is handed one node, and this is a fact about the
+ * graph — so it arrives in `node.data` the same way `problem` does. It is a **floor**: `visibleOutputs`
+ * draws a wired slot whatever the config rows say, so deleting the row that produced a value leaves
+ * the port and its wire on screen to be dealt with, rather than hiding an edge that is still there.
+ *
+ * Only nodes that actually have slots are touched. Writing the key onto all of them would rebuild
+ * every node's data object on every edge change for no gain.
+ */
+function applyWiredOutputs(): void {
+  let changed = false;
+  const next = nodes.map((node) => {
+    const data = node.data as { qualifiedId: string; wiredOutputs?: readonly string[] };
+    const definition = graphs.definition(data.qualifiedId);
+    if (definition === null || definition.kind === "trigger") return node;
+    if (definition.variadicOutputs === undefined) return node;
+    const wired = [
+      ...new Set(
+        edges
+          .filter((edge) => edge.source === node.id && edge.sourceHandle != null)
+          .map((edge) => edge.sourceHandle as string),
+      ),
+    ].sort();
+    const current = data.wiredOutputs ?? [];
+    if (current.length === wired.length && current.every((id, i) => id === wired[i])) return node;
+    changed = true;
+    return { ...node, data: { ...node.data, wiredOutputs: wired } };
   });
   if (changed) nodes = next;
 }
@@ -833,16 +878,6 @@ function addNode(
   return id;
 }
 
-function defaultConfig(definition: NodeDefinition): Record<string, string | number | boolean> {
-  const config: Record<string, string | number | boolean> = {};
-  for (const field of definition.config ?? []) {
-    // A secret has no default and never carries one: its value lives in the credential store.
-    if (field.kind === "secret") continue;
-    if ("default" in field && field.default !== undefined) config[field.id] = field.default;
-  }
-  return config;
-}
-
 function removeNode(id: string): void {
   nodes = nodes.filter((node) => node.id !== id);
   edges = edges.filter((edge) => edge.source !== id && edge.target !== id);
@@ -987,6 +1022,118 @@ function removeButtonRow(fieldId: string, index: number): void {
     fieldId,
     buttonRowsOf(fieldId).filter((_, i) => i !== index),
   );
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* The extractor rows: a `fields` or `paths` field                                                */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * The rows of a `fields` or `paths` field, read back out of the stored string each time.
+ *
+ * Same rule as the button rows: the config is the truth, and a draft copy beside it would be a
+ * second thing to keep in step with node switching, undo and a graph reloaded from disk.
+ */
+function slotRowsOf(fieldId: string): SlotRow[] {
+  if (selected === null) return [];
+  return parseSlotRows((selected.data as { config: Record<string, unknown> }).config[fieldId]);
+}
+
+function setSlotRows(fieldId: string, rows: readonly SlotRow[]): void {
+  setConfig(fieldId, JSON.stringify(rows));
+}
+
+/**
+ * The slots of one bank that no row has claimed, in the order the node declares them.
+ *
+ * Two banks, split by whether the port carries a list, because that is the one thing a slot's type
+ * fixes and a field's shape decides. `skip` is the row being edited, so a row changing bank does not
+ * count itself as the occupant of the slot it is leaving.
+ */
+function freeSlots(definition: NodeDefinition, list: boolean, rows: readonly SlotRow[]): string[] {
+  if (definition.kind === "trigger") return [];
+  const base = definition.variadicOutputsBase ?? 0;
+  const taken = new Set(rows.map((row) => row.slot));
+  return definition.outputs
+    .slice(base)
+    .filter((port) => isListPort(port.type) === list && !taken.has(port.id))
+    .map((port) => port.id);
+}
+
+/**
+ * Adds a row on the lowest free slot of the bank it needs, or does nothing when that bank is full.
+ *
+ * The lowest free one rather than the next by count: a row deleted from the middle frees its slot,
+ * and handing that slot to the next row added is what keeps a node's ports from creeping down the
+ * card as it is edited.
+ */
+function addSlotRow(fieldId: string, list: boolean): void {
+  if (selectedDefinition === null) return;
+  const rows = slotRowsOf(fieldId);
+  const slot = freeSlots(selectedDefinition, list, rows)[0];
+  if (slot === undefined) return;
+  setSlotRows(fieldId, [...rows, { slot, path: "", label: "", list }]);
+}
+
+function updateSlotRow(fieldId: string, index: number, patch: Partial<SlotRow>): void {
+  setSlotRows(
+    fieldId,
+    slotRowsOf(fieldId).map((row, i) => (i === index ? { ...row, ...patch } : row)),
+  );
+}
+
+function removeSlotRow(fieldId: string, index: number): void {
+  setSlotRows(
+    fieldId,
+    slotRowsOf(fieldId).filter((_, i) => i !== index),
+  );
+}
+
+/**
+ * Moves a row to the other bank, because what it holds changed.
+ *
+ * Picking a field that holds several of something, or ticking "several" by hand, changes which kind
+ * of port the row needs — and a port has one type, so it has to be a different slot. **The row keeps
+ * its old slot when the target bank is full**, which leaves the value on a `json` port rather than
+ * refusing the edit: the runtime reads the slot's declared type, so what arrives is still correct,
+ * and a `For each` downstream can take it through an `As list`.
+ */
+function reslotRow(fieldId: string, index: number, list: boolean): Partial<SlotRow> {
+  if (selectedDefinition === null) return { list };
+  const rows = slotRowsOf(fieldId);
+  const row = rows[index];
+  if (row === undefined) return { list };
+  if (isListSlot(row.slot) === list) return { list };
+  const slot = freeSlots(
+    selectedDefinition,
+    list,
+    rows.filter((_, i) => i !== index),
+  )[0];
+  return slot === undefined ? { list } : { list, slot };
+}
+
+/** Whether a slot id belongs to the list bank, decided by the port rather than by the id's shape. */
+function isListSlot(slot: string): boolean {
+  const port = selectedDefinition?.outputs.find((entry) => entry.id === slot);
+  return port !== undefined && isListPort(port.type);
+}
+
+/** Picking a field: it sets the path, names the port, and moves bank if the field holds a list. */
+function pickField(
+  fieldId: string,
+  index: number,
+  path: string,
+  options: readonly { readonly value: string; readonly label: string; readonly list?: boolean }[],
+): void {
+  const option = options.find((entry) => entry.value === path);
+  const list = option?.list === true;
+  updateSlotRow(fieldId, index, {
+    ...reslotRow(fieldId, index, list),
+    path,
+    // The catalogue's own name goes in as the label, which is what makes the override an override:
+    // the port reads correctly straight away and the box is there for the times it does not.
+    label: option?.label ?? path,
+  });
 }
 
 function toDocument(): GraphDocument {
@@ -1552,6 +1699,172 @@ async function saveSecret(fieldId: string): Promise<void> {
                 {:else}
                   <span class="text-xs text-muted-foreground">
                     {max} is as many as Windows will show.
+                  </span>
+                {/if}
+              </div>
+            {:else if field.kind === "fields" || field.kind === "paths"}
+              <!--
+                One row per output port. This is the only field that decides what a node *gives*,
+                which is why the row carries its slot: deleting the first of six rows must not
+                re-point the five wires below it at a different value.
+
+                The two kinds differ only in how the path is entered — a picker over the catalogue
+                the node declared, or a box to type one into. Everything else is shared: a name for
+                the port, a "several" flag deciding which bank of slots the row lands on, and the
+                remove button.
+              -->
+              {@const rows = slotRowsOf(field.id)}
+              {@const options = field.kind === "fields" ? field.options : []}
+              {@const roomForValue = freeSlots(selectedDefinition, false, rows).length}
+              {@const roomForList = freeSlots(selectedDefinition, true, rows).length}
+              <div class="flex flex-col gap-2">
+                {#if field.kind === "fields" && options.length > 8}
+                  <!--
+                    Above the rows, because it changes what every picker below it offers. A user has
+                    forty-four fields and a plain dropdown of forty-four is a scroll nobody reads.
+                  -->
+                  <Input
+                    class="h-7 text-sm"
+                    placeholder="Filter the {options.length} fields"
+                    value={fieldQuery}
+                    oninput={(event: Event) =>
+                      (fieldQuery = (event.currentTarget as HTMLInputElement).value)}
+                  />
+                {/if}
+                <!--
+                  Keyed by index. A slot is unique across rows, but only once a row *has* one, and a
+                  duplicate key in an `{#each}` is a hard runtime error in Svelte 5 rather than a
+                  warning.
+                -->
+                {#each rows as row, index (index)}
+                  {@const port = selectedDefinition.outputs.find((entry) => entry.id === row.slot)}
+                  <div class="rounded border border-border p-2">
+                    <div class="flex items-center gap-1">
+                      {#if field.kind === "fields"}
+                        <!--
+                          A search box in front of a select, because the catalogue is forty-four
+                          fields for a user and a plain dropdown of forty-four is a scroll nobody
+                          reads. Typing narrows it; the select is still the thing that picks.
+                        -->
+                        <select
+                          class="h-7 min-w-0 flex-1 rounded border border-input bg-background px-1 text-sm"
+                          value={row.path}
+                          onchange={(event: Event) =>
+                            pickField(
+                              field.id,
+                              index,
+                              (event.currentTarget as HTMLSelectElement).value,
+                              options,
+                            )}
+                        >
+                          <option value="">Pick a field</option>
+                          {#each options.filter((option) => fieldQuery === "" || option.value.toLowerCase().includes(fieldQuery.toLowerCase())) as option (option.value)}
+                            <option value={option.value}>
+                              {option.label}{option.list === true ? " (several)" : ""}
+                            </option>
+                          {/each}
+                          {#if row.path !== "" && !options.some((option) => option.value === row.path)}
+                            <!-- A path from an older spec, or a hand-edited document. Kept
+                                 selectable rather than silently reset to blank. -->
+                            <option value={row.path}>{row.path} (not in this version)</option>
+                          {/if}
+                        </select>
+                      {:else}
+                        <Input
+                          class="h-7 text-sm"
+                          placeholder={field.placeholder ?? "user.displayName"}
+                          value={row.path}
+                          oninput={(event: Event) =>
+                            updateSlotRow(field.id, index, {
+                              path: (event.currentTarget as HTMLInputElement).value,
+                            })}
+                        />
+                      {/if}
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        class="size-7 shrink-0"
+                        title="Remove this value"
+                        onclick={() => removeSlotRow(field.id, index)}
+                      >
+                        <TrashIcon class="size-4" />
+                      </Button>
+                    </div>
+                    <!--
+                      The port's name. Blank means derive it, which is the normal case — the picker
+                      writes the field's own name in, and clearing the box falls back to the last
+                      segment of the path. The placeholder shows whichever it currently is, so the
+                      box always says what the port on the card is called.
+                    -->
+                    <Input
+                      class="mt-1 h-7 text-sm"
+                      placeholder={slotRowLabel(row)}
+                      value={row.label}
+                      oninput={(event: Event) =>
+                        updateSlotRow(field.id, index, {
+                          label: (event.currentTarget as HTMLInputElement).value,
+                        })}
+                    />
+                    <div class="mt-1 flex items-center justify-between gap-2">
+                      {#if field.kind === "paths"}
+                        <!--
+                          Nothing knows whether a hand-typed path lands on a list, so the author
+                          says. Ticked, the row moves to a `list<json>` port, which is the one a
+                          For each will take.
+                        -->
+                        <label class="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                          <input
+                            type="checkbox"
+                            checked={row.list}
+                            onchange={(event: Event) =>
+                              updateSlotRow(
+                                field.id,
+                                index,
+                                reslotRow(
+                                  field.id,
+                                  index,
+                                  (event.currentTarget as HTMLInputElement).checked,
+                                ),
+                              )}
+                          />
+                          several
+                        </label>
+                      {:else}
+                        <span></span>
+                      {/if}
+                      <!--
+                        Which port this row is. Worth showing: an exported document names it, and it
+                        is how somebody reads a wire in a diff back to a row in this list.
+                      -->
+                      <span class="font-mono text-[10px] text-muted-foreground">
+                        {row.slot}{port === undefined ? " (no such port)" : `: ${port.type}`}
+                      </span>
+                    </div>
+                  </div>
+                {/each}
+                <div class="flex gap-2">
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={roomForValue === 0}
+                    onclick={() => addSlotRow(field.id, false)}
+                  >
+                    Add a value
+                  </Button>
+                  {#if field.kind === "paths"}
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={roomForList === 0}
+                      onclick={() => addSlotRow(field.id, true)}
+                    >
+                      Add a list
+                    </Button>
+                  {/if}
+                </div>
+                {#if roomForValue === 0 && roomForList === 0}
+                  <span class="text-xs text-muted-foreground">
+                    Every port on this node is in use. Wire a second one from the same value.
                   </span>
                 {/if}
               </div>

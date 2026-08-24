@@ -350,6 +350,57 @@ export type NodeConfigField =
         readonly reportsPress?: boolean;
       }[];
       readonly default?: string;
+    }
+  | {
+      /**
+       * A list of fields to pull out of a value, chosen from a set the node declares.
+       *
+       * The repeatable field behind the `Extract … values` nodes. Each row names a path into the
+       * incoming value and **claims one output slot**, which is what makes a node's outputs
+       * something the author decides without the definition's ports depending on an instance's
+       * config — see {@link visibleOutputs} for the mechanism and why it has to work that way.
+       *
+       * `options` is the catalogue the row's picker offers, declared by whoever registered the node.
+       * The host's own extractors fill it from the pinned OpenAPI spec; a plugin fills it from
+       * whatever schema it knows. It is not hashed (a definition is pinned by its config field
+       * *kinds*), so a catalogue that grows with a spec bump does not mark a saved graph stale.
+       *
+       * The stored value is a JSON array in a string, for the same four reasons `buttons` is —
+       * read it with {@link parseSlotRows}, which answers an empty list for anything malformed.
+       */
+      readonly kind: "fields";
+      readonly id: string;
+      readonly label: string;
+      readonly description?: string;
+      /** What a row may choose. `list: true` marks a field that holds several of something. */
+      readonly options: readonly {
+        readonly value: string;
+        readonly label: string;
+        readonly list?: boolean;
+      }[];
+      /** How many rows the editor will let somebody add. Defaults to the slots the node declares. */
+      readonly max?: number;
+      readonly default?: string;
+    }
+  | {
+      /**
+       * The same repeatable row as `fields`, with the path typed by hand rather than picked.
+       *
+       * For a value nothing has a schema for: a webhook's reply, a plugin's payload, an event body.
+       * The difference from `fields` is only the control, and it is a separate kind rather than a
+       * flag because the schema is what says which one appears — a discriminator the editor has to
+       * read out of a sibling property is a discriminator that gets read wrong.
+       *
+       * Since nothing knows whether a hand-typed path lands on an array, the row carries `list`
+       * itself and the editor draws it as a checkbox. Same stored shape, same {@link parseSlotRows}.
+       */
+      readonly kind: "paths";
+      readonly id: string;
+      readonly label: string;
+      readonly description?: string;
+      readonly placeholder?: string;
+      readonly max?: number;
+      readonly default?: string;
     };
 
 /** One row of a `buttons` field. `id` is what an activation reports, so it is not the label. */
@@ -403,6 +454,78 @@ export function parseButtonRows(value: unknown): ButtonRow[] {
     });
   });
   return rows;
+}
+
+/**
+ * One row of a `fields` or `paths` field: a path out of a value, and the output slot it claims.
+ *
+ * **The row stores its slot, and that is the whole design.** A saved edge points at a port id, so
+ * handing slots out by row position would mean that deleting the first row silently re-points every
+ * wire below it at a different value — a graph that does something else after an edit nobody thought
+ * was an edit. With the slot in the row, adding takes the lowest free one, deleting frees one, and
+ * reordering is a rename of nothing.
+ *
+ * `label` blank means "derive it", which is the normal case: the picker writes the catalogue's
+ * friendly name in when a field is chosen, and clearing the box falls back to the path's last
+ * segment. `list` says the value is several of something and therefore belongs on a list slot.
+ */
+export interface SlotRow {
+  /** The output port id this row produces on: `o1`, `l2`. Blank for a row mid-edit. */
+  readonly slot: string;
+  readonly path: string;
+  readonly label: string;
+  readonly list: boolean;
+}
+
+/**
+ * Reads a `fields` or `paths` value.
+ *
+ * Total, exactly like {@link parseButtonRows}: the value arrives from a document that was exported,
+ * hand-edited and imported again, so "somebody wrote something else in it" is an ordinary input
+ * rather than an exception. A row with a slot no port answers to is kept here and dropped where the
+ * ports are worked out — reading a value and drawing a port are different jobs with different rules.
+ */
+export function parseSlotRows(value: unknown): SlotRow[] {
+  if (typeof value !== "string" || value.trim() === "") return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+
+  const rows: SlotRow[] = [];
+  for (const entry of parsed) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const row = entry as Record<string, unknown>;
+    rows.push({
+      slot: typeof row.slot === "string" ? row.slot.trim() : "",
+      path: typeof row.path === "string" ? row.path : "",
+      label: typeof row.label === "string" ? row.label : "",
+      list: row.list === true,
+    });
+  }
+  return rows;
+}
+
+/**
+ * What a row's port is called: the author's override, the path's last segment, or the slot id.
+ *
+ * The last segment rather than the whole path, because `friends[0].displayName` on a port label in a
+ * 224-pixel card is a truncation with the useful half cut off. Somebody who needs the whole path can
+ * type a name into the row, which is what the override is for.
+ */
+export function slotRowLabel(row: SlotRow): string {
+  const chosen = row.label.trim();
+  if (chosen !== "") return chosen;
+  const segments = row.path
+    .trim()
+    .replace(/^\$\.?/, "")
+    .replaceAll(/\[["']?(.*?)["']?\]/g, ".$1")
+    .split(".")
+    .filter((segment) => segment !== "");
+  return segments[segments.length - 1] ?? row.slot;
 }
 
 /** A configured instance's values, keyed by field id. Integer unix-ms for `duration` fields. */
@@ -540,6 +663,30 @@ export interface ExecutableNodeDefinition extends NodeDefinitionBase {
    * value that is about something else entirely.
    */
   readonly variadicInputsBase?: number;
+  /**
+   * The id of a `fields` or `paths` config field whose rows say which outputs are *in use*.
+   *
+   * The output half of {@link variadicInputs}, and it exists for the same reason: a node's ports are
+   * its identity — hashed, referenced by a saved edge, checked on every wire — so they cannot depend
+   * on an instance's config. All the slots are declared, always; this changes only which ones the
+   * editor draws, and what they are called.
+   *
+   * The one structural difference is that a row **claims a named slot** rather than the count
+   * running from the first port. An extractor's rows are added and removed in the middle, and a
+   * positional rule would re-point live wires every time one was deleted. See {@link SlotRow}.
+   *
+   * Declaring the slots in banks by type is what lets a node answer with a list: ten `json` slots and
+   * five `list<json>` slots means a field holding several of something arrives on a port a `For each`
+   * will accept, rather than as JSON somebody has to convert by hand.
+   */
+  readonly variadicOutputs?: string;
+  /**
+   * How many of the declared outputs come *before* the slots and are therefore always drawn.
+   *
+   * Defaults to zero. Set it on a node whose slots follow a fixed output or two, so a config field
+   * about something else cannot hide them.
+   */
+  readonly variadicOutputsBase?: number;
 }
 
 /**
@@ -608,6 +755,51 @@ export function visibleInputs(
 ): readonly PortDefinition[] {
   if (definition.kind === "trigger") return [];
   return definition.inputs.slice(0, visibleInputCount(definition, config, wired));
+}
+
+/**
+ * The outputs one instance of a node draws, which is not always every output the type declares.
+ *
+ * For a node with no {@link variadicOutputs} this is simply its outputs, which is every node that
+ * existed before extractors did. For one that has them: the fixed ports, then one port per config
+ * row that claims a slot, wearing the row's label.
+ *
+ * `wired` is the ids of slots that already have an edge, and it is a floor in the same sense the
+ * input count's is: **a port with a wire in it is never hidden**, whatever the config says. A row
+ * deleted by mistake, a hand-edited document, an import from a build that declared more slots — each
+ * would otherwise leave an edge feeding a port that is not on the card, which is a graph doing
+ * something with no way to see that it is.
+ *
+ * A row naming a slot the definition does not have is skipped, and so is a second row claiming a
+ * slot already taken. Both are shapes a round-tripped document can hold, and neither can be drawn.
+ */
+export function visibleOutputs(
+  definition: NodeDefinition,
+  config: NodeConfigValues,
+  wired: readonly string[] = [],
+): readonly PortDefinition[] {
+  if (definition.kind === "trigger") return definition.outputs;
+  const field = definition.variadicOutputs;
+  if (field === undefined) return definition.outputs;
+
+  const base = definition.variadicOutputsBase ?? 0;
+  const slots = new Map(definition.outputs.slice(base).map((port) => [port.id, port]));
+  const shown: PortDefinition[] = [...definition.outputs.slice(0, base)];
+  const claimed = new Set<string>();
+
+  for (const row of parseSlotRows(config[field])) {
+    const port = slots.get(row.slot);
+    if (port === undefined || claimed.has(row.slot)) continue;
+    claimed.add(row.slot);
+    shown.push({ ...port, label: slotRowLabel(row) });
+  }
+  for (const id of wired) {
+    const port = slots.get(id);
+    if (port === undefined || claimed.has(id)) continue;
+    claimed.add(id);
+    shown.push(port);
+  }
+  return shown;
 }
 
 export type NodeDefinition = TriggerNodeDefinition | ExecutableNodeDefinition;
@@ -730,9 +922,18 @@ export type NodeValidation =
   | { readonly ok: true; readonly definition: NodeDefinition }
   | { readonly ok: false; readonly issues: readonly NodeIssue[] };
 
+/**
+ * Every field kind a definition may declare.
+ *
+ * **`slider` and `buttons` were missing from this list until `fields` and `paths` were added**, which
+ * meant a plugin declaring either was rejected while the host's own nodes used both freely — the
+ * built-ins never pass through here, so nothing caught it. Neither kind was ever documented as
+ * host-only, so the list was the bug rather than the rule. See PROGRESS.md Gotchas.
+ */
 const CONFIG_KINDS = [
   "text",
   "number",
+  "slider",
   "boolean",
   "select",
   "secret",
@@ -740,6 +941,9 @@ const CONFIG_KINDS = [
   "user",
   "world",
   "account",
+  "buttons",
+  "fields",
+  "paths",
 ] as const;
 
 /** `publisher.name`-ish: an identifier a graph can store and a person can read in an error. */
@@ -883,6 +1087,11 @@ export function validateNodeDefinition(value: unknown): NodeValidation {
         checkString(issues, `${at}.label`, field.label, { required: true });
         if (field.kind === "select" && !Array.isArray(field.options)) {
           issues.push({ path: `${at}.options`, message: "a select needs options" });
+        }
+        // A `fields` row is a picker over a catalogue the node declares. With no catalogue there is
+        // nothing to pick, and the row would be a `paths` field wearing the wrong control.
+        if (field.kind === "fields" && !Array.isArray(field.options)) {
+          issues.push({ path: `${at}.options`, message: "a fields picker needs options" });
         }
       });
     }

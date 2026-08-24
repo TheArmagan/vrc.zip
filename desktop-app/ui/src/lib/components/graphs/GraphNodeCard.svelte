@@ -30,7 +30,13 @@
 <script lang="ts">
 import CircleAlertIcon from "@lucide/svelte/icons/circle-alert";
 import { Handle, type NodeProps, Position } from "@xyflow/svelte";
-import { AFTER_PORT, ERROR_PORT, evaluateNodeBody, visibleInputs } from "@vrcz/plugin-api/nodes";
+import {
+  AFTER_PORT,
+  ERROR_PORT,
+  evaluateNodeBody,
+  visibleInputs,
+  visibleOutputs,
+} from "@vrcz/plugin-api/nodes";
 import { FOREACH_AFTER_PORTS } from "@vrcz/shared";
 import { iconFor } from "$lib/graphs/icons.ts";
 import { familyColor, familyOf, isListPort, portColor } from "$lib/graphs/visuals.ts";
@@ -55,6 +61,16 @@ interface GraphNodeData {
   readonly stale: boolean;
   /** Set when this node breaks a loop rule, in the words the daemon would use. */
   readonly problem?: string | undefined;
+  /**
+   * The output ports that already have an edge, for a node whose outputs are chosen in the
+   * inspector.
+   *
+   * The editor knows the edges and the card does not, so it is handed over the same way `problem` is.
+   * It is a floor rather than a list: a slot with a wire in it is drawn whatever the config says,
+   * because an edge feeding a port that is not on the card is a graph doing something with no way to
+   * see that it is.
+   */
+  readonly wiredOutputs?: readonly string[] | undefined;
   [key: string]: unknown;
 }
 
@@ -75,7 +91,18 @@ const Icon = $derived(iconFor(definition?.category, owner));
  * The editor keeps the count above whatever is wired, so this can never hide a port with an edge.
  */
 const inputs = $derived(definition === null ? [] : visibleInputs(definition, node.config));
-const outputs = $derived(definition?.outputs ?? []);
+/**
+ * The outputs this instance draws, which for an extractor is one per configured row.
+ *
+ * Same mechanism as the inputs and the same floor: `visibleOutputs` never hides a slot the editor
+ * says is wired. A node with no `variadicOutputs` gets its declared outputs back unchanged, which is
+ * every node that existed before the extractors did.
+ */
+const outputs = $derived(
+  definition === null
+    ? []
+    : visibleOutputs(definition, node.config, node.wiredOutputs ?? []),
+);
 const body = $derived(
   definition?.body === undefined ? "" : evaluateNodeBody(definition.body, node.config, outputs),
 );

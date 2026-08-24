@@ -145,3 +145,47 @@ describe("what the card lists", () => {
     ]);
   });
 });
+
+describe("an extractor's preview", () => {
+  /** Two slots and a default row, which is the shape every `Extract … values` node has. */
+  const extractor: NodeDefinition = {
+    kind: "action",
+    id: "extract-user",
+    title: "Extract user values",
+    inputs: [{ id: "value", label: "From", type: "json", required: true }],
+    outputs: [
+      { id: "o1", label: "Value 1", type: "json" },
+      { id: "o2", label: "Value 2", type: "json" },
+      { id: "l1", label: "List 1", type: "list<json>" },
+    ],
+    variadicOutputs: "fields",
+    config: [
+      {
+        kind: "fields",
+        id: "fields",
+        label: "Values",
+        options: [{ value: "displayName", label: "displayName" }],
+        default: JSON.stringify([{ slot: "o1", path: "displayName", label: "Name", list: false }]),
+      },
+    ],
+  };
+
+  test("the card shows the row the node arrives with, not every slot", () => {
+    /*
+     * The config used to be `{}` here, which drew every extractor as a card with no outputs at all
+     * -- a preview of the one thing those nodes are for. The defaults are what the node will
+     * actually have the moment it lands on the canvas.
+     */
+    const ports = detailPorts("vrcz/extract-user", extractor);
+    expect(ports.outputs.map((port) => port.label)).toEqual(["Name", "on error"]);
+    expect(ports.outputs[0]?.type).toBe("json");
+  });
+
+  test("the unclaimed slots are not counted as more inputs", () => {
+    // `moreInputs` is about the input slider. An extractor's spare outputs are a different fact and
+    // the card does not claim otherwise.
+    const ports = detailPorts("vrcz/extract-user", extractor);
+    expect(ports.moreInputs).toBe(0);
+    expect(ports.inputs.map((port) => port.label)).toEqual(["run after", "From"]);
+  });
+});

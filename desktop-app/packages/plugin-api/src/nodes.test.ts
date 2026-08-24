@@ -11,8 +11,12 @@ import {
   nodeDefinitionHash,
   PORT_TYPES,
   type PortType,
+  parseSlotRows,
+  slotRowLabel,
+  validateNodeDefinition,
   visibleInputCount,
   visibleInputs,
+  visibleOutputs,
 } from "./nodes.ts";
 
 describe("assignable", () => {
@@ -312,5 +316,175 @@ describe("variadic inputs", () => {
     // whatever the slider says -- and the hash does not depend on an instance's config.
     expect(visibleInputs(compose, { slots: 2 }).map((port) => port.id)).toEqual(["a", "b"]);
     expect(compose.kind === "action" && compose.inputs).toHaveLength(4);
+  });
+});
+
+describe("slot rows", () => {
+  test("a well-formed value round-trips, defaults filled in", () => {
+    const rows = parseSlotRows(
+      JSON.stringify([
+        { slot: "o1", path: "displayName", label: "Name", list: false },
+        { slot: "l1", path: "tags", list: true },
+      ]),
+    );
+    expect(rows).toEqual([
+      { slot: "o1", path: "displayName", label: "Name", list: false },
+      { slot: "l1", path: "tags", label: "", list: true },
+    ]);
+  });
+
+  test("anything malformed is an empty list rather than a throw", () => {
+    // Every one of these is a shape a document that was exported, hand-edited and imported can hold.
+    for (const value of [undefined, null, 3, "", "   ", "not json", "{}", '"a string"', "[1,2]"]) {
+      expect(parseSlotRows(value)).toEqual([]);
+    }
+  });
+
+  test("a row missing its slot is kept, because the editor writes one mid-edit", () => {
+    const rows = parseSlotRows('[{"path":"a"}]');
+    expect(rows).toEqual([{ slot: "", path: "a", label: "", list: false }]);
+  });
+
+  test("a label is the override, then the path's last segment, then the slot", () => {
+    expect(slotRowLabel({ slot: "o1", path: "user.displayName", label: "Who", list: false })).toBe(
+      "Who",
+    );
+    expect(slotRowLabel({ slot: "o1", path: "user.displayName", label: "  ", list: false })).toBe(
+      "displayName",
+    );
+    // Brackets and a leading `$` normalise the same way `readPath` walks them.
+    expect(slotRowLabel({ slot: "o1", path: "$.friends[0].id", label: "", list: false })).toBe(
+      "id",
+    );
+    expect(slotRowLabel({ slot: "o3", path: "", label: "", list: false })).toBe("o3");
+  });
+});
+
+describe("variadic outputs", () => {
+  const extractor: NodeDefinition = {
+    kind: "action",
+    id: "extract",
+    title: "Extract",
+    inputs: [{ id: "value", label: "From", type: "json" }],
+    outputs: [
+      { id: "o1", label: "Value 1", type: "json" },
+      { id: "o2", label: "Value 2", type: "json" },
+      { id: "l1", label: "List 1", type: "list<json>" },
+    ],
+    variadicOutputs: "fields",
+    config: [{ kind: "paths", id: "fields", label: "Values" }],
+  };
+
+  const rows = (...list: { slot: string; path: string; label?: string }[]): string =>
+    JSON.stringify(list);
+
+  test("a row claims its slot and names the port", () => {
+    const shown = visibleOutputs(extractor, {
+      fields: rows({ slot: "l1", path: "tags", label: "Tags" }, { slot: "o2", path: "status" }),
+    });
+    expect(shown.map((port) => [port.id, port.label, port.type])).toEqual([
+      ["l1", "Tags", "list<json>"],
+      ["o2", "status", "json"],
+    ]);
+  });
+
+  test("no rows means no slots drawn, and no config means the same", () => {
+    expect(visibleOutputs(extractor, {})).toEqual([]);
+    expect(visibleOutputs(extractor, { fields: "[]" })).toEqual([]);
+  });
+
+  test("a slot the definition does not have is skipped", () => {
+    // The shape an import from a build with more slots produces.
+    expect(visibleOutputs(extractor, { fields: rows({ slot: "o9", path: "a" }) })).toEqual([]);
+  });
+
+  test("a second row claiming a taken slot is skipped, so a port is never drawn twice", () => {
+    const shown = visibleOutputs(extractor, {
+      fields: rows({ slot: "o1", path: "a" }, { slot: "o1", path: "b" }),
+    });
+    expect(shown.map((port) => port.id)).toEqual(["o1"]);
+  });
+
+  test("a wired slot is drawn whatever the rows say", () => {
+    // The floor. An edge feeding a port that is not on the card is a graph doing something with no
+    // way to see that it is.
+    const shown = visibleOutputs(extractor, { fields: "[]" }, ["o2"]);
+    expect(shown.map((port) => [port.id, port.label])).toEqual([["o2", "Value 2"]]);
+  });
+
+  test("a wired slot a row already claimed is not drawn twice", () => {
+    const shown = visibleOutputs(extractor, { fields: rows({ slot: "o1", path: "a" }) }, ["o1"]);
+    expect(shown.map((port) => port.id)).toEqual(["o1"]);
+  });
+
+  test("fixed outputs before the slots are always drawn", () => {
+    const withFixed: NodeDefinition = { ...extractor, variadicOutputsBase: 1 } as NodeDefinition;
+    // `o1` is now a fixed port rather than a slot, so a row cannot claim it and it never disappears.
+    const shown = visibleOutputs(withFixed, { fields: rows({ slot: "o1", path: "a" }) });
+    expect(shown.map((port) => port.id)).toEqual(["o1"]);
+  });
+
+  test("a node with no variadic outputs gets its declared outputs back unchanged", () => {
+    // Declared without the field rather than with it set to `undefined`: `exactOptionalPropertyTypes`
+    // draws that distinction, and "absent" is the state every node before the extractors was in.
+    const plain: NodeDefinition = {
+      kind: "action",
+      id: "plain",
+      title: "Plain",
+      inputs: [],
+      outputs: extractor.outputs,
+    };
+    expect(visibleOutputs(plain, {})).toEqual(plain.outputs);
+    const trigger: NodeDefinition = {
+      kind: "trigger",
+      id: "t",
+      title: "t",
+      outputs: [{ id: "a", label: "A", type: "json" }],
+    };
+    expect(visibleOutputs(trigger, {})).toEqual(trigger.outputs);
+  });
+
+  test("the declared ports do not move, which is what keeps a saved edge valid", () => {
+    // The hash covers all three whatever an instance's rows say -- same argument as the inputs.
+    const before = canonicalNodeDefinition(extractor);
+    expect(before).toContain("out:l1:list<json>:0,out:o1:json:0,out:o2:json:0");
+  });
+});
+
+describe("config field kinds", () => {
+  const withField = (field: unknown): unknown => ({
+    id: "n",
+    kind: "action",
+    title: "N",
+    inputs: [],
+    outputs: [],
+    config: [field],
+  });
+
+  test("every kind the host's own nodes use is accepted from a plugin too", () => {
+    /*
+     * `slider` and `buttons` were missing from the accepted list until the extractors were added,
+     * so a plugin declaring either was rejected while the built-ins used both freely. The built-ins
+     * never pass through this validator, which is why nothing caught it.
+     */
+    for (const field of [
+      { kind: "slider", id: "n", label: "N", min: 1, max: 4 },
+      { kind: "buttons", id: "b", label: "B" },
+      { kind: "fields", id: "f", label: "F", options: [{ value: "a", label: "A" }] },
+      { kind: "paths", id: "p", label: "P" },
+    ]) {
+      const result = validateNodeDefinition(withField(field));
+      expect(result.ok).toBe(true);
+    }
+  });
+
+  test("a fields picker with no catalogue is refused", () => {
+    // With no options there is nothing to pick, and the row would be a `paths` field wearing the
+    // wrong control.
+    const result = validateNodeDefinition(withField({ kind: "fields", id: "f", label: "F" }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues.some((issue) => issue.path === "config[0].options")).toBe(true);
+    }
   });
 });

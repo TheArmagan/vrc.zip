@@ -21,6 +21,9 @@ category. A fourth template ships the loop's shape so it can be read rather than
 **Decision 244 mirrors the triggers.** The eight "When my …" profile nodes now have eight "When
 someone …" twins over `friend.updated.*`, plus four more for moving, waking up, and a friendship
 starting or ending. Generated from the same table, so the two families cannot drift.
+**Decision 253 gives a node ports the author chooses.** Six `Extract … values` nodes pull a list of
+fields out of one object, one output port per field, over a `variadicOutputs` mechanism and two new
+repeatable config kinds. The field catalogues are generated from the pinned spec by `bun run codegen`.
 **Current phase:** Phase 4 is **complete** — 4.1 through 4.6, built on 2026-08-23 from the spec the
 planning pass of the same day produced (decision 206). Graphs are stored, run, edited on a canvas,
 armed behind a hold, and shared as files. What remains in the plan is Phase 5, packaging and polish,
@@ -604,6 +607,13 @@ get an **error output port**; and the port lattice grows **`list<T>`**.
       portals, destinations, joins, screenshots and client lifecycle from the log. Three existing
       triggers gained filters, and `wiring/trigger-context.ts` is the new seam behind them.
       **Built** (decision 241). `PLAN.md` §Phase 4 carries the spec.
+- [x] **4.9 The extractors** — not in the original plan either, and the same shape of gap as 4.7:
+      `Read field` could reach any value in a payload and only one per card, so reading six fields
+      off one user meant six cards holding six hand-typed paths. Six `Extract … values` nodes with a
+      list of paths and one output port per path, over a `variadicOutputs` mechanism in
+      `@vrcz/plugin-api` and two new repeatable config kinds (`fields`, `paths`). The typed ones'
+      catalogues are generated from the pinned spec into `packages/api/src/generated/fields.ts`.
+      **Built** (decision 253). Verified by clicking, per the bar below.
 
 **Phase 4 is complete.** 4.1 through 4.6 are built, and everything below the checklist that once
 said "Phase 4's" now has a caller. What is *not* here, stated rather than implied: no undo/redo on
@@ -4735,6 +4745,56 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      - **`Create a name`**, a `randomUUID` with an optional prefix. Several nodes take a name now
        and typing one by hand is how two runs of a graph end up sharing one.
 
+253. **Six `Extract … values` nodes, and the output half of the variadic mechanism.** `Read field`
+     answers one path per node, which is the right node for one value and the wrong one for six: a
+     graph wanting a name, a status, a trust rank and a list of tags off the same user ended up with
+     four cards wired to the same port, each holding a hand-typed path. These are that shape said
+     once — a list of paths, and one output port per path. `Extract raw values` takes typed paths;
+     `Extract user / world / group / avatar / instance values` offer a picker.
+     - **`variadicOutputs`, and it had to claim named slots rather than count from the first.** A
+       node's ports are its identity — hashed, referenced by every saved edge, checked on every wire
+       — so the answer is the one `Compose text` already gave: declare every port, always, and let
+       the config decide which are drawn. The inputs' rule counts from the first port, which works
+       because a slider only ever grows or shrinks a run. Extractor rows are added and *removed in
+       the middle*, and a positional rule would silently re-point every wire below a deleted row at
+       a different value. So a row stores its slot, adding takes the lowest free one, and reordering
+       renames nothing. `visibleOutputs` keeps the same floor `visibleInputs` has: a slot with an
+       edge in it is drawn whatever the rows say.
+     - **Two banks of slots, ten `json` and five `list<json>`**, because a port has one type and a
+       field holds one thing or several. That is what makes `tags` arrive on a port a `For each`
+       will accept rather than as JSON somebody converts by hand. Fifteen of the sixteen ports
+       `MAX_NODE_PORTS` allows, and the last one is left deliberately: adding a slot later would
+       restamp every saved extractor's `defHash` and mark those graphs stale.
+     - **Two new config kinds, `fields` and `paths`**, and they are separate kinds rather than one
+       with a flag because the schema is what says which control appears. `fields` renders a picker
+       over `options` the node declares; `paths` renders a text box and a "several" checkbox, since
+       nothing knows whether a hand-typed path lands on an array. Both store a JSON array in a
+       string, for the four reasons `buttons` does, and `parseSlotRows` reads them the same total
+       way. Options are not hashed, so a spec bump that adds a field does not mark a graph stale.
+     - **The catalogue is generated, not written.** `bun run codegen` emits
+       `packages/api/src/generated/fields.ts` from the pinned spec: 184 fields across five models,
+       top-level properties only, and the only type information in a row is whether it holds several
+       of something. It deliberately does *not* claim `location` is an `instance` or `id` a `user` —
+       that would be a guess from a name, and a wrong guess is an edge the editor accepts and the
+       run breaks on. `CurrentUser` is excluded: eighty-two properties including `authToken`, and
+       the Me nodes already answer what is worth asking about yourself.
+     - **The input is an object already in hand, not an id.** `Look up a user` costs the request and
+       exists; these read its `Everything` port. An extractor that fetched would be a second way to
+       spend the rate budget with no way to see it on the card.
+     - **A path that finds nothing produces nothing, per port.** `Read field`'s rule applied one
+       slot at a time: the missing field's own edges are dead and its branch skips while every other
+       slot flows. `null` on the port would have a graph carry on and address a message to nobody;
+       gating the whole node would let one absent `statusDescription` stop a run that wanted a name.
+       A list slot whose value is not an array is the same answer — the author said this field holds
+       several of something, and handing a `For each` one object because VRChat answered with one
+       would be the node deciding it knew better.
+     - The handler keys on the **slot's declared type**, never the row's `list` flag. The slot is
+       what an edge is wired to and what the type check ran against, and a round-tripped document
+       can disagree with itself.
+     - `defaultConfig` moved out of `GraphEditor` into `lib/graphs/config.ts`, because the palette's
+       detail card needed the same answer: built from an empty config, it drew every extractor as a
+       card with no outputs at all — a preview of the one thing those nodes are for.
+
 ---
 
 ## Gotchas
@@ -4742,6 +4802,15 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **`validateNodeDefinition` has been rejecting `slider` and `buttons` from plugins the whole time.**
+  Found while adding `fields` and `paths` to `CONFIG_KINDS`: the list had nine entries and the type
+  union had eleven. Neither missing kind was ever documented as host-only, and the host's own nodes
+  use both freely — the built-ins are registered directly and never pass through the validator, so
+  nothing caught it. The list was the bug rather than the rule, and it is now the full thirteen. The
+  general shape of this is worth remembering: **a validator listing what a hand-written union already
+  says is a second source of truth, and the copy nobody exercises is the one that drifts.** Only the
+  built-ins exercise these kinds today, which is exactly why it went unnoticed.
 
 - **A newly added button row vanished the moment it appeared.** `parseButtonRows` dropped rows with
   a blank label, on the reasoning that a button with no text is a button nobody can press — which is

@@ -151,7 +151,7 @@ Reusing `UINode` here would mean reading values back out of a rendering, which i
 a form that means something different after a redesign. The host draws config fields with the same
 components the [UI vocabulary](./ui.md) uses, so they look identical to a user regardless.
 
-Eleven kinds:
+Thirteen kinds:
 
 | `kind` | Extra props | Notes |
 | --- | --- | --- |
@@ -166,16 +166,19 @@ Eleven kinds:
 | `world` | `required?` | Host renders its own world picker. |
 | `account` | `required?` | Which of the user's accounts the node acts as. Host renders a picker over the signed-in accounts. |
 | `buttons` | `max?`, `actions?: { value, label, argumentLabel?, placeholder?, reportsPress? }[]`, `default?: string` | A list of buttons, a row at a time. The value is JSON in a string. See below. |
+| `fields` | `options` **required** `{ value, label, list? }[]`, `max?`, `default?: string` | A list of fields to pull out of a value, picked from a catalogue you declare. Each row claims an output slot. See below. |
+| `paths` | `placeholder?`, `max?`, `default?: string` | The same rows with the path typed by hand, for a value nothing has a schema for. |
 
 Every kind also carries `id`, `label` (both required) and `description?`.
 
-**`buttons` is the only repeatable field, and its value is a JSON array in a string.** The host draws
-a row per button — a label, a select over the `actions` you declared, and an argument box that
-appears only for an action whose entry names one — and stores the whole list as one string. That is
-deliberate rather than a shortcut: a config value is `string | number | boolean` in four places at
-once (the wire type, the definition hash, the secret substitution, the validator), and widening it
-for one field would touch all four. The same trade `duration` makes by storing milliseconds in a
-`number`.
+**Three kinds are repeatable — `buttons`, `fields`, `paths` — and all three store a JSON array in a
+string.** That is deliberate rather than a shortcut: a config value is `string | number | boolean` in
+four places at once (the wire type, the definition hash, the secret substitution, the validator), and
+widening it for one field would touch all four. The same trade `duration` makes by storing
+milliseconds in a `number`.
+
+For `buttons`, the host draws a row per button — a label, a select over the `actions` you declared,
+and an argument box that appears only for an action whose entry names one.
 
 Read it with `parseButtonRows(config.buttons)`, which answers `ButtonRow[]` and returns an empty list
 for anything malformed. Never assume the string is well-formed: it is round-tripped through export,
@@ -191,6 +194,33 @@ waking you.
 
 What the actions *mean* is yours. The host renders the labels and stores the choice; your handler
 decides what each one does.
+
+**`fields` and `paths` are the rows that decide what a node gives.** Each one names a path into an
+incoming value and claims one output slot, which is the mechanism described under
+[ports the author chooses](#ports-the-author-chooses). Read them with `parseSlotRows(config.fields)`:
+
+```ts
+interface SlotRow {
+  readonly slot: string;   // the output port this row produces on
+  readonly path: string;
+  readonly label: string;  // blank means derive it
+  readonly list: boolean;
+}
+```
+
+The difference between the two kinds is only the control the host draws. `fields` renders a picker
+over the `options` you declared, so it is the kind for a value with a schema behind it — a `list: true`
+option tells the host the field holds several of something and the row belongs on a list slot.
+`paths` renders a text box and a "several" checkbox, for a value nothing has a schema for.
+
+`options` is **not hashed** (a definition is pinned by its config field *kinds*), so a catalogue that
+grows does not mark every saved graph stale. `slotRowLabel(row)` gives a port's name: the author's
+override, then the path's last segment, then the slot id.
+
+In your handler, key the outputs by `row.slot` and read the **slot's declared type**, not the row's
+`list` flag — the slot is what an edge is wired to and what the type check ran against, and a
+round-tripped document can disagree with itself. A path that finds nothing should produce nothing on
+that one port: the edges out of it are then dead and its branch skips, while every other slot flows.
 
 **`account` stores an account id, and blank means "the graph's account".** That is the convention
 every built-in follows and the reason the field is never `required`: a graph already has an account,
@@ -333,6 +363,10 @@ difference from a trigger.
 interface ExecutableNodeDefinition extends NodeDefinitionBase {
   readonly kind: "action" | "condition";
   readonly inputs: readonly PortDefinition[];
+  readonly variadicInputs?: string;       // a config field saying how many inputs are in use
+  readonly variadicInputsBase?: number;   // how many come before the variadic run
+  readonly variadicOutputs?: string;      // a `fields` or `paths` field whose rows claim outputs
+  readonly variadicOutputsBase?: number;
 }
 
 interface ExecutableRegistration {
@@ -345,6 +379,53 @@ interface ExecutableRegistration {
 anything.
 
 `isTriggerDefinition(def)` narrows a `NodeDefinition` for consumers that switch on the kind.
+
+### Ports the author chooses
+
+**Every port a node will ever have is declared, always.** A node's ports are its identity: they are
+hashed into `nodeDefinitionHash`, a saved edge references one by id, and the host checks every wire
+against them. So a definition whose ports depend on an instance's config is a definition that is not
+one thing, and there is no API for producing one. What the four `variadic*` fields change is only
+**which of the declared ports the editor draws**, and what they are called.
+
+`variadicInputs` names a numeric (or `buttons`) config field saying how many inputs are in use,
+counting from the first; `variadicInputsBase` is how many fixed inputs come before that run. This is
+what lets a "compose text" node declare twenty-six slots and show three. `visibleInputCount(def,
+config, wired)` and `visibleInputs(def, config, wired)` give the answer — and `wired` is a floor, so
+**a port with an edge in it is never hidden**.
+
+`variadicOutputs` names a `fields` or `paths` config field whose rows each **claim one output slot**
+by id:
+
+```ts
+const EXTRACT: ExecutableNodeDefinition = {
+  kind: "action",
+  id: "extract",
+  title: "Extract values",
+  inputs: [{ id: "value", label: "From", type: "json", required: true }],
+  // Two banks. A port has one type; a field holds one thing or several.
+  outputs: [
+    { id: "o1", label: "Value 1", type: "json" },
+    { id: "o2", label: "Value 2", type: "json" },
+    { id: "l1", label: "List 1", type: "list<json>" },
+  ],
+  variadicOutputs: "fields",
+  config: [{ kind: "paths", id: "fields", label: "Values" }],
+};
+
+visibleOutputs(EXTRACT, { fields: '[{"slot":"l1","path":"tags","label":"Tags"}]' });
+// -> [{ id: "l1", label: "Tags", type: "list<json>" }]
+```
+
+Claiming a **named** slot rather than counting from the first is the one place the output mechanism
+differs from the input one, and it is not a style choice. Rows are added and removed in the middle of
+the list; with a positional rule, deleting the first of six rows would silently re-point the five
+wires below it at a different value — a graph that does something else after an edit nobody thought
+was an edit.
+
+Declare the slots in banks by type. Ten `json` and five `list<json>` is what the host's own
+extractors use, and the list bank is what makes a field holding several of something arrive on a port
+a `For each` will accept.
 
 ### A worked pair
 

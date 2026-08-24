@@ -3,6 +3,7 @@ import { API_OPERATIONS } from "@vrcz/api/operations";
 import { validateNodeDefinition } from "@vrcz/plugin-api/nodes";
 import { EventBus } from "../../bus/event-bus.ts";
 import {
+  buildBody,
   buildPath,
   buildQuery,
   definitionFor,
@@ -97,6 +98,47 @@ describe("the generated shape", () => {
     expect(inputs.map((port) => [port.id, port.type])).toEqual([["userId", "user"]]);
   });
 
+  test("a path parameter is also a box, and neither half is marked required", () => {
+    // Required moved from the port to the run: `pathIsComplete` accepts a value from either half,
+    // and a port marked required beside a box that satisfies it would be a lie on the canvas.
+    if (getUser === undefined) return;
+    const definition = definitionFor(getUser);
+    const inputs = "inputs" in definition ? definition.inputs : [];
+    expect(inputs[0]?.required).toBeUndefined();
+    const field = (definition.config ?? []).find((entry) => entry.id === "userId");
+    expect(field?.kind).toBe("text");
+  });
+
+  test("every operation can be filled in without wiring anything", () => {
+    // The property the whole change is for, asserted across all 286 rather than on one endpoint:
+    // every path parameter and every body has somewhere to type a value.
+    const problems: string[] = [];
+    for (const operation of API_OPERATIONS) {
+      const definition = definitionFor(operation);
+      const ids = new Set((definition.config ?? []).map((field) => field.id));
+      for (const param of operation.params) {
+        if (param.in === "path" && !ids.has(param.name)) {
+          problems.push(`${operation.operationId}: no box for ${param.name}`);
+        }
+      }
+      if (operation.hasBody && !ids.has("body")) {
+        problems.push(`${operation.operationId}: no box for the body`);
+      }
+    }
+    expect(problems).toEqual([]);
+  });
+
+  test("no node has two config fields writing to the same key", () => {
+    // Path, body and query all land in one config object now, so a name shared across two of them
+    // would be two boxes fighting over one value. None collide today; a spec bump is the risk.
+    const problems: string[] = [];
+    for (const operation of API_OPERATIONS) {
+      const ids = (definitionFor(operation).config ?? []).map((field) => field.id);
+      if (new Set(ids).size !== ids.length) problems.push(operation.operationId);
+    }
+    expect(problems).toEqual([]);
+  });
+
   test("titles are humanised and suffixed", () => {
     expect(titleFor("getUser")).toBe("Get user");
     expect(titleFor("acceptFriendRequest")).toBe("Accept friend request");
@@ -133,16 +175,43 @@ describe("building a request", () => {
 
   test("path parameters are substituted and encoded", () => {
     if (getUser === undefined) return;
-    expect(buildPath(getUser, { userId: "usr_a b" })).toBe("/users/usr_a%20b");
+    expect(buildPath(getUser, { userId: "usr_a b" }, {})).toBe("/users/usr_a%20b");
+  });
+
+  test("the wire wins over the box, and a blank wire is not a wire", () => {
+    // The same rule the id literals follow: a `Read field` that found nothing must not blank a
+    // value the author typed in and can see on the canvas.
+    if (getUser === undefined) return;
+    expect(buildPath(getUser, { userId: "usr_wired" }, { userId: "usr_typed" })).toBe(
+      "/users/usr_wired",
+    );
+    expect(buildPath(getUser, {}, { userId: "usr_typed" })).toBe("/users/usr_typed");
+    expect(buildPath(getUser, { userId: "  " }, { userId: "usr_typed" })).toBe("/users/usr_typed");
   });
 
   test("an unfilled path parameter is caught before the call", () => {
     // `/users//friendStatus` would either 404 or, worse, reach a different endpoint than the one
     // the author drew on the canvas.
     if (getUser === undefined) return;
-    expect(pathIsComplete(getUser, { userId: "usr_a" })).toBe(true);
-    expect(pathIsComplete(getUser, {})).toBe(false);
-    expect(pathIsComplete(getUser, { userId: "" })).toBe(false);
+    expect(pathIsComplete(getUser, { userId: "usr_a" }, {})).toBe(true);
+    // Either half satisfies it, which is the whole point of the box existing.
+    expect(pathIsComplete(getUser, {}, { userId: "usr_a" })).toBe(true);
+    expect(pathIsComplete(getUser, {}, {})).toBe(false);
+    expect(pathIsComplete(getUser, { userId: "" }, {})).toBe(false);
+  });
+
+  test("a body comes off the port, then out of the box, and bad JSON is a sentence", () => {
+    const withBody = API_OPERATIONS.find((operation) => operation.operationId === "addFavorite");
+    expect(withBody).toBeDefined();
+    if (withBody === undefined) return;
+    expect(buildBody(withBody, { body: { a: 1 } }, { body: '{"b":2}' })).toEqual({ a: 1 });
+    expect(buildBody(withBody, {}, { body: '{"b":2}' })).toEqual({ b: 2 });
+    expect(buildBody(withBody, {}, {})).toBeUndefined();
+    // Thrown rather than gated, unlike `JSON value`: the body is the thing this node exists to
+    // send, so calling VRChat without it would be a worse answer than a sentence on the error port.
+    expect(() => buildBody(withBody, {}, { body: "{ oops" })).toThrow(/not valid JSON/);
+    // An operation with no body ignores both halves rather than inventing one.
+    if (getUser !== undefined) expect(buildBody(getUser, { body: { a: 1 } }, {})).toBeUndefined();
   });
 
   test("a blank config field is absent from the query rather than empty", () => {
@@ -182,6 +251,18 @@ describe("executing", () => {
     const wrote = await h.nodes.execute("vrcz/api-unfriend", { userId: "usr_a" }, {}, context);
     expect(wrote).toEqual({ status: 0 });
     expect(h.calls).toHaveLength(1);
+  });
+
+  test("a path typed into the box calls VRChat with nothing wired at all", async () => {
+    const h = harness();
+    const result = await h.nodes.execute(
+      "vrcz/api-get-user",
+      {},
+      { userId: "usr_typed" },
+      { graphId: "g1", runId: "r1", nodeId: "n1", dryRun: false, accountId: "usr_me" },
+    );
+    expect(result).toEqual({ result: { ok: true }, status: 200 });
+    expect(h.calls[0]?.request.path).toBe("/users/usr_typed");
   });
 
   test("a missing path parameter produces nothing rather than calling a wrong URL", async () => {

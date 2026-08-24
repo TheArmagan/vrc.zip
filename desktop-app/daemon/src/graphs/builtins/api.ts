@@ -16,11 +16,15 @@
  *
  * ## The shape of a generated node
  *
- * - **Path parameters are inputs.** They are ids, and an id comes from a trigger or a value node.
+ * - **Path parameters are inputs *and* boxes.** They are ids, so they come from a trigger or a value
+ *   node — but a graph that always calls the same endpoint about the same world should not have to
+ *   place a second node to say so. Each path parameter gets a port and a config field, the port
+ *   wins when it is wired, and neither is marked required because either one will do.
  * - **Query parameters are config.** They are the knobs somebody types once: a page size, a sort
  *   order, a search term. A spec `enum` becomes a picker.
- * - **A request body is one `json` input**, because generating a port per field of every request
- *   schema would produce nodes nobody can read, and `JSON value` already exists for building one.
+ * - **A request body is one `json` input, plus a box to type one into.** Generating a port per field
+ *   of every request schema would produce nodes nobody can read. The port takes an object a graph
+ *   built; the box takes JSON typed in, which is what a fixed body actually is.
  * - **The output is `result` plus `status`.** `Read field` is how a graph reaches into the result,
  *   which is exactly what that node is for.
  *
@@ -134,6 +138,37 @@ export function portTypeFor(param: ApiOperationParam): PortType {
   }
 }
 
+/**
+ * The placeholder for a path parameter's box, which is the only hint about what belongs in it.
+ *
+ * VRChat's own descriptions say "Must be a valid user ID" without saying what one looks like, and
+ * the prefix is the half somebody typing into an empty box actually needs.
+ */
+function placeholderFor(type: PortType): string {
+  switch (type) {
+    case "user":
+      return "usr_…";
+    case "world":
+      return "wrld_…";
+    case "avatar":
+      return "avtr_…";
+    case "group":
+      return "grp_…";
+    case "instance":
+      return "wrld_…:12345~region(eu)";
+    default:
+      return "";
+  }
+}
+
+/**
+ * Path parameters and the body, as ports.
+ *
+ * **Nothing here is `required`**, and that is not laxness: each one has a config field beside it
+ * now, so "this port has no edge" stopped meaning "this node cannot run". What must still be true is
+ * that the value arrives *somehow*, and `pathIsComplete` is where that is checked — at run time,
+ * against both halves, with a gate rather than a call to a URL with a hole in it.
+ */
 function inputsFor(operation: ApiOperation): PortDefinition[] {
   const inputs: PortDefinition[] = operation.params
     .filter((param) => param.in === "path")
@@ -141,8 +176,10 @@ function inputsFor(operation: ApiOperation): PortDefinition[] {
       id: param.name,
       label: titleFor(param.name),
       type: portTypeFor(param),
-      required: true,
-      ...(param.description === "" ? {} : { description: param.description }),
+      description:
+        param.description === ""
+          ? "Or type one into the box below."
+          : `${param.description} Or type one into the box below.`,
     }));
 
   if (operation.hasBody) {
@@ -150,14 +187,55 @@ function inputsFor(operation: ApiOperation): PortDefinition[] {
       id: "body",
       label: "Body",
       type: "json",
-      description: "The request body, as VRChat's API documents it.",
+      description: "The request body, as VRChat's API documents it. Wins over the box below.",
     });
   }
   return inputs.slice(0, MAX_NODE_PORTS);
 }
 
+/**
+ * The boxes: one per path parameter, one for the body, then the query knobs.
+ *
+ * Path first because it is the field a node is unusable without, and the tail is what gets cut if a
+ * future spec ever pushes an operation past `MAX_NODE_CONFIG_FIELDS`. Ids are deduped for the same
+ * reason: today no operation has a path and a query parameter sharing a name, and a spec bump that
+ * introduced one must not silently produce two fields writing to the same key.
+ */
 function configFor(operation: ApiOperation): NodeConfigField[] {
   const fields: NodeConfigField[] = [];
+  const taken = new Set<string>();
+  const add = (field: NodeConfigField): void => {
+    if (taken.has(field.id)) return;
+    taken.add(field.id);
+    fields.push(field);
+  };
+
+  for (const param of operation.params) {
+    if (param.in !== "path") continue;
+    const label = titleFor(param.name);
+    const common = { id: param.name, label, description: "Used when the port is not wired." };
+    if (param.type === "number") {
+      add({ kind: "number", ...common });
+      continue;
+    }
+    if (param.type === "boolean") {
+      add({ kind: "boolean", ...common, default: false });
+      continue;
+    }
+    const placeholder = placeholderFor(portTypeFor(param));
+    add({ kind: "text", ...common, ...(placeholder === "" ? {} : { placeholder }) });
+  }
+
+  if (operation.hasBody) {
+    add({
+      kind: "text",
+      id: "body",
+      label: "Body",
+      description: "JSON, as VRChat's API documents it. Used when the Body port is not wired.",
+      placeholder: '{ "userId": "usr_…" }',
+    });
+  }
+
   for (const param of operation.params) {
     if (param.in !== "query") continue;
     const label = titleFor(param.name);
@@ -165,7 +243,7 @@ function configFor(operation: ApiOperation): NodeConfigField[] {
     const common = { id: param.name, label, ...(description === "" ? {} : { description }) };
 
     if (param.enumValues.length > 0) {
-      fields.push({
+      add({
         kind: "select",
         ...common,
         options: param.enumValues.map((value) => ({ value, label: value })),
@@ -174,7 +252,7 @@ function configFor(operation: ApiOperation): NodeConfigField[] {
       continue;
     }
     if (param.type === "number") {
-      fields.push({
+      add({
         kind: "number",
         ...common,
         ...(typeof param.defaultValue === "number" ? { default: param.defaultValue } : {}),
@@ -182,14 +260,14 @@ function configFor(operation: ApiOperation): NodeConfigField[] {
       continue;
     }
     if (param.type === "boolean") {
-      fields.push({
+      add({
         kind: "boolean",
         ...common,
         ...(typeof param.defaultValue === "boolean" ? { default: param.defaultValue } : {}),
       });
       continue;
     }
-    fields.push({
+    add({
       kind: "text",
       ...common,
       ...(typeof param.defaultValue === "string" ? { default: param.defaultValue } : {}),
@@ -218,13 +296,53 @@ export function definitionFor(operation: ApiOperation): NodeDefinition {
   };
 }
 
-/** Substitutes `{userId}` from the wired inputs, encoding each one. */
-export function buildPath(operation: ApiOperation, inputs: PortValues): string {
-  return operation.pathTemplate.replaceAll(/\{(\w+)\}/g, (_match, name: string) => {
-    const value = inputs[name];
-    const text = typeof value === "string" ? value : value === undefined ? "" : String(value);
-    return encodeURIComponent(text);
-  });
+/**
+ * One path parameter's value: the wire first, then the box.
+ *
+ * A blank wire is not a wire — the same rule the id literals follow, and for the same reason. A
+ * `Read field` that found nothing must not blank a value the author typed in and can see.
+ */
+export function pathValue(name: string, inputs: PortValues, config: NodeConfigValues): string {
+  const wired = inputs[name];
+  const fromWire = wired === undefined || wired === null ? "" : String(wired).trim();
+  if (fromWire !== "") return fromWire;
+  const typed = config[name];
+  return typed === undefined || typed === null ? "" : String(typed).trim();
+}
+
+/** Substitutes `{userId}` from the wired inputs or the typed-in boxes, encoding each one. */
+export function buildPath(
+  operation: ApiOperation,
+  inputs: PortValues,
+  config: NodeConfigValues,
+): string {
+  return operation.pathTemplate.replaceAll(/\{(\w+)\}/g, (_match, name: string) =>
+    encodeURIComponent(pathValue(name, inputs, config)),
+  );
+}
+
+/**
+ * The request body: the wired port first, then the JSON typed into the box.
+ *
+ * Text that will not parse **throws**, unlike `JSON value`, which produces nothing. The difference
+ * is who is being told: a `JSON value` node feeding nothing gates its consumer and shows up as a
+ * skipped node, while a request body is the thing this node exists to send, and "vrc.zip called
+ * VRChat with no body" is a worse answer than a sentence on the error port.
+ */
+export function buildBody(
+  operation: ApiOperation,
+  inputs: PortValues,
+  config: NodeConfigValues,
+): unknown {
+  if (!operation.hasBody) return undefined;
+  if (inputs.body !== undefined) return inputs.body;
+  const typed = typeof config.body === "string" ? config.body.trim() : "";
+  if (typed === "") return undefined;
+  try {
+    return JSON.parse(typed);
+  } catch {
+    throw new Error("The body typed into this node is not valid JSON.");
+  }
 }
 
 /** Query parameters the author actually set. A blank field is *absent*, not an empty value. */
@@ -242,14 +360,22 @@ export function buildQuery(
   return query;
 }
 
-/** True when every `{placeholder}` in the path got a value. An empty one would call the wrong URL. */
-export function pathIsComplete(operation: ApiOperation, inputs: PortValues): boolean {
+/**
+ * True when every `{placeholder}` in the path got a value, from either half. An empty one would
+ * call the wrong URL.
+ *
+ * This is where "required" actually lives now that the ports are not marked so — the check moved
+ * from the port definition to the run, because a value typed into a box satisfies it just as well
+ * as an edge does.
+ */
+export function pathIsComplete(
+  operation: ApiOperation,
+  inputs: PortValues,
+  config: NodeConfigValues,
+): boolean {
   return operation.params
     .filter((param) => param.in === "path")
-    .every((param) => {
-      const value = inputs[param.name];
-      return value !== undefined && value !== null && String(value) !== "";
-    });
+    .every((param) => pathValue(param.name, inputs, config) !== "");
 }
 
 function requireAccount(context: ExecuteContext, operation: ApiOperation): string {
@@ -272,7 +398,7 @@ export function apiNodes(call: GraphApiCall | undefined): BuiltinNode[] {
       if (call === undefined) throw new Error("This daemon cannot call VRChat.");
       const account = requireAccount(context, operation);
 
-      if (!pathIsComplete(operation, inputs)) {
+      if (!pathIsComplete(operation, inputs, config)) {
         // Nothing, which stops the run. Calling `/users//friendStatus` would either 404 or, worse,
         // hit a different endpoint than the author drew.
         return {};
@@ -280,9 +406,9 @@ export function apiNodes(call: GraphApiCall | undefined): BuiltinNode[] {
 
       const request: GraphApiRequest = {
         method: operation.method,
-        path: buildPath(operation, inputs),
+        path: buildPath(operation, inputs, config),
         query: buildQuery(operation, config),
-        body: inputs.body,
+        body: buildBody(operation, inputs, config),
       };
 
       /*

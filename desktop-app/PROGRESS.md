@@ -4998,6 +4998,26 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
        is refused on the acting account's **role in the group** far more often than on the
        recipient. So the helper took an optional `forbidden` override and this is its one caller.
 
+265. **Every generated API node can be filled in without wiring anything.** Path parameters were
+     ports and nothing else, so calling `Get user (API)` about one fixed person meant placing a
+     second node to hold the id. Each path parameter now has a **port and a box**, and the request
+     body has a JSON box beside its port. The port wins when it is wired, and a blank wire is not a
+     wire — the same precedence the id literals use (decision 262).
+     - **`required` moved off the ports and into the run.** A port marked required beside a box that
+       satisfies it is a lie on the canvas, so `pathIsComplete` is the check now and it accepts a
+       value from either half. It already gated rather than calling a URL with a hole in it, which
+       is why nothing else had to move.
+     - **A body typed in that will not parse throws**, where `JSON value` produces nothing. The
+       difference is what the silence would mean: a `JSON value` gating shows up as a skipped node,
+       while a request body is the thing the node exists to send, so "vrc.zip called VRChat without
+       it" is a worse answer than a sentence on the error port.
+     - **Config order is path, body, then query**, and ids are deduped as they are added. No
+       operation in the pinned spec has a path and a query parameter sharing a name or a parameter
+       called `body` — checked, and asserted across all 286 — but a spec bump is exactly the kind of
+       thing that would introduce one, and two boxes writing to one key is a bug nobody would see.
+     - Restamps all 286 `nodeDefinitionHash`es, so saved graphs using an API node are flagged as
+       changed. Same trade as decision 262 and accepted for the same reason.
+
 ---
 
 ## Gotchas

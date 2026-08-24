@@ -25,7 +25,8 @@ starting or ending. Generated from the same table, so the two families cannot dr
 fields out of one object, one output port per field, over a `variadicOutputs` mechanism and two new
 repeatable config kinds. The field catalogues are generated from the pinned spec by `bun run codegen`.
 **Decision 254 finishes the desktop notification.** Every part of a button is wireable, not just its
-text, and a notification can carry arbitrary JSON that comes back with the press.
+text, and a notification can carry arbitrary JSON that comes back with the press. Decision 255 makes
+the palette drop a new node where the canvas is, not where the graph's origin is.
 **Current phase:** Phase 4 is **complete** — 4.1 through 4.6, built on 2026-08-23 from the spec the
 planning pass of the same day produced (decision 206). Graphs are stored, run, edited on a canvas,
 armed behind a hold, and shared as files. What remains in the plan is Phase 5, packaging and polish,
@@ -4820,6 +4821,16 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
        cycle, a function or a `BigInt` on that port would otherwise land on the EventBus and in the
        feed's SQLite row minutes later, from an event, with no run left to attribute the throw to.
        Dropped instead: the notification still appears, carrying nothing.
+
+255. **The palette places a node where you are looking.** A node added from the palette (or with
+     Enter from its search box) went to a fixed spot near the graph's origin, which is nowhere at all
+     once somebody has panned away: adding a node and seeing nothing appear, with the node sitting
+     several screens to the left. It now lands in the middle of the visible viewport, converted from
+     the canvas box and the bound `viewport` the same way the double-click handler does it, and steps
+     diagonally past anything already sitting there so a run of adds is four cards rather than one
+     card with three hidden underneath. A dropped wire and a double-click still say where themselves;
+     this is only the answer for the gestures that have no position to offer.
+
 ---
 
 ## Gotchas

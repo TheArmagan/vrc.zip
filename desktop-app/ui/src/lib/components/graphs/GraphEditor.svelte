@@ -855,6 +855,48 @@ function pick(choice: PickerChoice): void {
   );
 }
 
+/**
+ * Roughly what a card takes up, used only to place one.
+ *
+ * A guess rather than a measurement, because the node does not exist yet: Svelte Flow reports
+ * `measured` after the card has rendered, and by then it has already been put somewhere. Being a
+ * little out only shifts a new card by a few pixels, which is invisible next to landing off screen.
+ */
+const CARD = { width: 230, height: 120 };
+
+/**
+ * Where a node goes when the gesture that made it did not say.
+ *
+ * The palette and its Enter key have no position to offer, and the old answer was a fixed spot near
+ * the graph's origin — which is *nowhere* the moment somebody has panned away from it. Adding a node
+ * and seeing nothing appear is the bug: the node was there, several screens to the left.
+ *
+ * So the middle of whatever is on screen, in flow coordinates, and then stepped diagonally past
+ * anything already sitting there. The step is what keeps a run of adds readable; without it four
+ * nodes from the palette are one node with three hidden underneath it.
+ */
+function freeSpot(): { x: number; y: number } {
+  const box = canvas?.getBoundingClientRect();
+  const center =
+    box === undefined
+      ? { x: 120, y: 80 }
+      : {
+          x: (box.width / 2 - viewport.x) / viewport.zoom - CARD.width / 2,
+          y: (box.height / 2 - viewport.y) / viewport.zoom - CARD.height / 2,
+        };
+  const step = 32;
+  // Bounded: a canvas crowded enough to exhaust this wants the last offset, not a hang.
+  for (let taken = 0; taken < 40; taken += 1) {
+    const spot = { x: center.x + taken * step, y: center.y + taken * step };
+    const occupied = nodes.some(
+      (node) =>
+        Math.abs(node.position.x - spot.x) < step && Math.abs(node.position.y - spot.y) < step,
+    );
+    if (!occupied) return spot;
+  }
+  return center;
+}
+
 function addNode(
   qualifiedId: string,
   definition: NodeDefinition,
@@ -867,9 +909,7 @@ function addNode(
     {
       id,
       type: "vrcz",
-      // Dropped in the middle-ish rather than at the origin, and offset per node so a second add
-      // does not land exactly on the first.
-      position: at ?? { x: 120 + nodes.length * 60, y: 80 + nodes.length * 90 },
+      position: at ?? freeSpot(),
       data: { qualifiedId, config: defaultConfig(definition), stale: false },
     },
   ];

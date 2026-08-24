@@ -218,6 +218,13 @@ function payloadOf(event: BusEvent): Record<string, unknown> {
  * never opens the picker sees no change. The `only` field narrows further and wins over nothing —
  * both apply, so "a friend, and specifically this one" is expressible.
  */
+const ONLY_PERSON_FIELD: NodeConfigField = {
+  kind: "user",
+  id: "only",
+  label: "Only this person",
+  description: "Optional, and narrows the choice above further.",
+};
+
 const WHO_FIELDS: readonly NodeConfigField[] = [
   {
     kind: "select",
@@ -230,12 +237,7 @@ const WHO_FIELDS: readonly NodeConfigField[] = [
     ],
     default: "anyone",
   },
-  {
-    kind: "user",
-    id: "only",
-    label: "Only this person",
-    description: "Optional, and narrows the choice above further.",
-  },
+  ONLY_PERSON_FIELD,
 ];
 
 /**
@@ -443,6 +445,8 @@ function presets(deps: TriggerDeps): readonly Preset[] {
     },
 
     ...profilePresets(deps),
+    ...otherProfilePresets(deps),
+    ...otherPresets(deps),
     ...selfPresets(),
     ...gameLogPresets(),
   ];
@@ -453,7 +457,13 @@ function presets(deps: TriggerDeps): readonly Preset[] {
 /* -------------------------------------------------------------------------------------------- */
 
 /**
- * The eight aspects of your own profile, as eight triggers.
+ * The eight aspects of a profile, as sixteen triggers: eight about you, eight about everybody else.
+ *
+ * One table with two sets of names rather than two tables, because the aspect, the payload field and
+ * the port type are the same question asked about a different subject. VRChat refines the two update
+ * frames identically (`user-update` into `user.updated.status`, `friend-update` into
+ * `friend.updated.status`, same differ, same `changes` list), so a second table would be the first
+ * one copied with a chance of drifting from it.
  *
  * ## Why eight nodes and not one with a picker
  *
@@ -478,11 +488,18 @@ function presets(deps: TriggerDeps): readonly Preset[] {
  * avatar id and the avatar node can offer an `avatar` port that flows into `Look up an avatar`.
  * Where the field genuinely is a string, the port is a string, which is honest rather than clever.
  */
-interface ProfileAspect {
-  readonly aspect: string;
+interface AspectNames {
   readonly id: string;
   readonly title: string;
   readonly description: string;
+}
+
+interface ProfileAspect {
+  readonly aspect: string;
+  /** The node about your own account, over `user.updated.*`. */
+  readonly mine: AspectNames;
+  /** The same aspect on somebody else, over `friend.updated.*`. */
+  readonly theirs: AspectNames;
   /** The port carrying the new value, and the payload field it reads. */
   readonly port: {
     readonly id: string;
@@ -495,69 +512,143 @@ interface ProfileAspect {
 const PROFILE_ASPECTS: readonly ProfileAspect[] = [
   {
     aspect: "status",
-    id: "on-my-status-change",
-    title: "When my status changes",
-    description: "The dot: join me, online, ask me, do not disturb, invisible.",
+    mine: {
+      id: "on-my-status-change",
+      title: "When my status changes",
+      description: "The dot: join me, online, ask me, do not disturb, invisible.",
+    },
+    theirs: {
+      id: "on-someone-status-change",
+      title: "When someone changes their status",
+      description: "Their dot moved: join me, online, ask me, do not disturb, invisible.",
+    },
     port: { id: "status", label: "Status", type: "string" },
     field: "status",
   },
   {
     aspect: "status_message",
-    id: "on-my-status-message-change",
-    title: "When my status message changes",
-    description: "The free-text line under your status.",
+    mine: {
+      id: "on-my-status-message-change",
+      title: "When my status message changes",
+      description: "The free-text line under your status.",
+    },
+    theirs: {
+      id: "on-someone-status-message-change",
+      title: "When someone changes their status message",
+      description: "The free-text line under their status.",
+    },
     port: { id: "message", label: "Message", type: "string" },
     field: "statusDescription",
   },
   {
     aspect: "avatar",
-    id: "on-my-avatar-change",
-    title: "When my avatar changes",
-    description: "Fires whenever you put on a different avatar, however you switched.",
+    mine: {
+      id: "on-my-avatar-change",
+      title: "When my avatar changes",
+      description: "Fires whenever you put on a different avatar, however you switched.",
+    },
+    theirs: {
+      id: "on-someone-avatar-change",
+      title: "When someone changes their avatar",
+      description: "Fires whenever they put on a different avatar, wherever they are.",
+    },
     port: { id: "avatar", label: "Avatar", type: "avatar" },
     field: "currentAvatar",
   },
   {
     aspect: "icon",
-    id: "on-my-icon-change",
-    title: "When my profile picture changes",
-    description: "The picture shown for you, which VRC+ lets you set apart from the avatar.",
+    mine: {
+      id: "on-my-icon-change",
+      title: "When my profile picture changes",
+      description: "The picture shown for you, which VRC+ lets you set apart from the avatar.",
+    },
+    theirs: {
+      id: "on-someone-icon-change",
+      title: "When someone changes their profile picture",
+      description: "The picture shown for them, which VRC+ lets them set apart from the avatar.",
+    },
     port: { id: "icon", label: "Picture", type: "string" },
     field: "userIcon",
   },
   {
     aspect: "bio",
-    id: "on-my-bio-change",
-    title: "When my bio changes",
-    description: "The text on your profile.",
+    mine: {
+      id: "on-my-bio-change",
+      title: "When my bio changes",
+      description: "The text on your profile.",
+    },
+    theirs: {
+      id: "on-someone-bio-change",
+      title: "When someone changes their bio",
+      description: "The text on their profile.",
+    },
     port: { id: "bio", label: "Bio", type: "string" },
     field: "bio",
   },
   {
     aspect: "name",
-    id: "on-my-name-change",
-    title: "When my display name changes",
-    description: "Rare, and worth knowing about when it is not you who did it.",
+    mine: {
+      id: "on-my-name-change",
+      title: "When my display name changes",
+      description: "Rare, and worth knowing about when it is not you who did it.",
+    },
+    theirs: {
+      id: "on-someone-name-change",
+      title: "When someone changes their display name",
+      description: "Rare, and the one change that makes a person hard to recognise.",
+    },
     port: { id: "name", label: "Name", type: "string" },
     field: "displayName",
   },
   {
     aspect: "trust",
-    id: "on-my-trust-change",
-    title: "When my trust rank changes",
-    description: "Visitor, new, user, known, trusted.",
+    mine: {
+      id: "on-my-trust-change",
+      title: "When my trust rank changes",
+      description: "Visitor, new, user, known, trusted.",
+    },
+    theirs: {
+      id: "on-someone-trust-change",
+      title: "When someone changes trust rank",
+      description: "Visitor, new, user, known, trusted. Goes down as well as up.",
+    },
     port: { id: "trust", label: "Trust", type: "string" },
     field: "",
   },
   {
     aspect: "platform",
-    id: "on-my-platform-change",
-    title: "When my platform changes",
-    description: "Which device VRChat last saw you on.",
+    mine: {
+      id: "on-my-platform-change",
+      title: "When my platform changes",
+      description: "Which device VRChat last saw you on.",
+    },
+    theirs: {
+      id: "on-someone-platform-change",
+      title: "When someone changes platform",
+      description: "Which device VRChat last saw them on. PC, Quest, or the phone app.",
+    },
     port: { id: "platform", label: "Platform", type: "string" },
     field: "last_platform",
   },
 ];
+
+/**
+ * The user object an update frame is about.
+ *
+ * A pipeline update frame is `{ userId, user: { … } }`: the profile fields live one level down, and
+ * the bridge adds `changes` beside them rather than flattening. Reading the payload directly found
+ * nothing, so every value port fell back to the rendered `to` string — and for an avatar that is the
+ * thumbnail URL the differ compares on, not an `avtr_` id. A port typed `avatar` was carrying
+ * something no avatar node could look up.
+ *
+ * Falls back to the flat payload so a frame that genuinely has no nested user still reads.
+ */
+function subjectRecord(payload: Record<string, unknown>): Record<string, unknown> {
+  const user = payload.user;
+  return typeof user === "object" && user !== null && !Array.isArray(user)
+    ? (user as Record<string, unknown>)
+    : payload;
+}
 
 /** The `changes` list a refined update event carries, as aspect names. */
 function changedAspects(payload: Record<string, unknown>): string[] {
@@ -593,9 +684,9 @@ function changeFor(
 
 function profilePresets(deps: TriggerDeps): Preset[] {
   return PROFILE_ASPECTS.map((entry) => ({
-    id: entry.id,
-    title: entry.title,
-    description: entry.description,
+    id: entry.mine.id,
+    title: entry.mine.title,
+    description: entry.mine.description,
     kinds: [`user.updated.${entry.aspect}`, "user.updated"],
     outputs: [
       { id: entry.port.id, label: entry.port.label, type: entry.port.type },
@@ -623,7 +714,7 @@ function profilePresets(deps: TriggerDeps): Preset[] {
         return null;
       }
       const change = changeFor(payload, entry.aspect);
-      const value = entry.field === "" ? null : text(payload[entry.field]);
+      const value = entry.field === "" ? null : text(subjectRecord(payload)[entry.field]);
       const where = deps.context?.location(event.accountId) ?? "";
       return {
         // The typed port carries the payload's own field where there is one. Trust has none — it is
@@ -641,6 +732,243 @@ function profilePresets(deps: TriggerDeps): Preset[] {
       };
     },
   }));
+}
+
+/* -------------------------------------------------------------------------------------------- */
+/* Someone else: what VRChat says about the people you know                                       */
+/* -------------------------------------------------------------------------------------------- */
+
+/**
+ * The subject of a `friend.*` frame, as an id and a display name.
+ *
+ * Four spellings for one id, and all four are load-bearing. `subjectId` is what the bridge already
+ * resolved and is right almost always; `userid` with a lowercase i is a real upstream typo on
+ * `friend-active` frames; and the nested `user.id` is the one left when a frame carries the object
+ * without repeating the id beside it.
+ */
+function friendOf(event: BusEvent): { readonly id: string; readonly name: string } | null {
+  const payload = payloadOf(event);
+  const user = subjectRecord(payload);
+  const id = text(event.subjectId) ?? text(payload.userId) ?? text(payload.userid) ?? text(user.id);
+  return id === null ? null : { id, name: text(user.displayName) ?? "" };
+}
+
+/**
+ * The eight profile aspects again, this time about somebody who is not you.
+ *
+ * ## Why the subject port is `friend` and not `user`
+ *
+ * VRChat pushes `friend-update` frames **only for people you are friends with**. It is not a general
+ * "somebody's profile moved" feed and there is no way to make it one, so the subject really is a
+ * friend and the narrower type is the honest one — it flows into every `user` port anyway
+ * (`friend <: user`), and refuses the nodes that need a relationship to exist.
+ *
+ * The nodes are called "when someone" rather than "when a friend" because that is the phrase people
+ * search the palette for. The reach is stated in each description instead, which is the place a
+ * limit belongs when the title would get clumsy carrying it.
+ *
+ * ## The who-filter is here, and it is nearly a no-op
+ *
+ * `Only this person` is the half that earns its place: it turns "tell me when this one person
+ * changes their avatar" into a trigger rather than a trigger plus a comparison. The
+ * Anyone/Friends/Strangers picker rides along because these nodes share {@link WHO_FIELDS} with the
+ * player triggers, and on this family *strangers selects nothing* — every subject here is already a
+ * friend. That is a filter doing exactly what it says, over a set that happens to be empty.
+ */
+function otherProfilePresets(deps: TriggerDeps): Preset[] {
+  return PROFILE_ASPECTS.map((entry) => ({
+    id: entry.theirs.id,
+    title: entry.theirs.title,
+    description: entry.theirs.description,
+    kinds: [`friend.updated.${entry.aspect}`, "friend.updated"],
+    outputs: [
+      { id: "friend", label: "Who", type: "friend" as const },
+      // The display-name node's value port *is* the name, so the two would collide. One port, and
+      // it carries the new name — which is what both of them meant.
+      ...(entry.port.id === "name" ? [] : [{ id: "name", label: "Name", type: "string" as const }]),
+      { id: entry.port.id, label: entry.port.label, type: entry.port.type },
+      {
+        id: "from",
+        label: "Was",
+        type: "string" as const,
+        description: "Empty when vrc.zip had no previous value, which is not the same as blank.",
+      },
+      { id: "to", label: "Now", type: "string" as const },
+      { id: "at", label: "At", type: "number" as const },
+      { id: "event", label: "Event", type: "json" as const },
+    ],
+    config: WHO_FIELDS,
+    // A friends list of three hundred people produces a lot of these on a busy evening, and the
+    // same ceiling the pipeline and game-log triggers carry is the right one here.
+    maxFiresPerMinute: 120,
+    map: (event: BusEvent, config: NodeConfigValues): PortValues | null => {
+      const payload = payloadOf(event);
+      // Same double subscription as the self family: the generic kind reaches here too, and fires
+      // only when this node's own aspect is one of the several things that moved.
+      if (event.kind === "friend.updated" && !changedAspects(payload).includes(entry.aspect)) {
+        return null;
+      }
+      const friend = friendOf(event);
+      if (friend === null) return null;
+      if (!passesWho(deps, config, event.accountId, friend.id)) return null;
+
+      const change = changeFor(payload, entry.aspect);
+      const value = entry.field === "" ? null : text(subjectRecord(payload)[entry.field]);
+      return {
+        friend: friend.id,
+        name: friend.name,
+        ...(value === null
+          ? change.to === null
+            ? {}
+            : { [entry.port.id]: change.to }
+          : { [entry.port.id]: value }),
+        from: change.from ?? "",
+        to: change.to ?? value ?? "",
+        at: event.ts,
+        event: event.payload ?? null,
+      };
+    },
+  }));
+}
+
+/**
+ * The other things that happen to other people: moving, being added, being dropped, waking up.
+ *
+ * `When a friend comes online` and `When a friend goes offline` already existed and stay as they
+ * are. These are the rest of the `friend.*` vocabulary, which until now could only be reached
+ * through `When VRChat pushes an event` and a `Read field` per port.
+ */
+function otherPresets(deps: TriggerDeps): Preset[] {
+  return [
+    {
+      id: "on-someone-goes-somewhere",
+      title: "When someone goes somewhere",
+      description: "A friend arrived in an instance. The busiest thing VRChat says about anybody.",
+      kinds: ["friend.location"],
+      outputs: [
+        { id: "friend", label: "Who", type: "friend" },
+        { id: "name", label: "Name", type: "string" },
+        { id: "location", label: "Instance", type: "instance" },
+        { id: "world", label: "World", type: "world" },
+        {
+          id: "travellingTo",
+          label: "Travelling to",
+          type: "instance",
+          description: "Set while they are still in transit, and unset once they arrive.",
+        },
+        { id: "at", label: "At", type: "number" },
+        { id: "event", label: "Event", type: "json" },
+      ],
+      config: WHO_FIELDS,
+      // Lower than the profile family on purpose: this is the single noisiest frame VRChat pushes,
+      // and one graph armed on it across a large friends list is a run every few seconds.
+      maxFiresPerMinute: 60,
+      map: (event, config): PortValues | null => {
+        const friend = friendOf(event);
+        if (friend === null) return null;
+        if (!passesWho(deps, config, event.accountId, friend.id)) return null;
+
+        const payload = payloadOf(event);
+        const location = text(event.location) ?? locationOfPayload(payload);
+        // `offline` arrives down this frame as well and is not a place. `private` and `traveling`
+        // are: a graph that wants to know somebody went somewhere it cannot see is a real graph.
+        if (location === null || location === "offline") return null;
+        const world = text(payload.worldId) ?? worldOf(location);
+        const travelling = text(payload.travelingToLocation);
+        return {
+          friend: friend.id,
+          name: friend.name,
+          location,
+          ...(world === null ? {} : { world }),
+          ...(travelling === null ? {} : { travellingTo: travelling }),
+          at: event.ts,
+          event: event.payload ?? null,
+        };
+      },
+    },
+    {
+      id: "on-someone-becomes-active",
+      title: "When someone becomes active",
+      description:
+        "A friend signed in on the website or the phone app. Not the same as being in the game.",
+      kinds: ["friend.active"],
+      outputs: [
+        { id: "friend", label: "Who", type: "friend" },
+        { id: "name", label: "Name", type: "string" },
+        { id: "platform", label: "Platform", type: "string" },
+        { id: "at", label: "At", type: "number" },
+        { id: "event", label: "Event", type: "json" },
+      ],
+      config: WHO_FIELDS,
+      map: (event, config): PortValues | null => {
+        const friend = friendOf(event);
+        if (friend === null) return null;
+        if (!passesWho(deps, config, event.accountId, friend.id)) return null;
+        const payload = payloadOf(event);
+        const platform = text(payload.platform) ?? text(subjectRecord(payload).last_platform);
+        return {
+          friend: friend.id,
+          name: friend.name,
+          ...(platform === null ? {} : { platform }),
+          at: event.ts,
+          event: event.payload ?? null,
+        };
+      },
+    },
+    {
+      id: "on-someone-becomes-a-friend",
+      title: "When someone becomes a friend",
+      description: "A friend request was accepted, whichever of you sent it.",
+      kinds: ["friend.added"],
+      outputs: [
+        { id: "friend", label: "Who", type: "friend" },
+        { id: "name", label: "Name", type: "string" },
+        { id: "at", label: "At", type: "number" },
+        { id: "event", label: "Event", type: "json" },
+      ],
+      config: WHO_FIELDS,
+      map: (event, config): PortValues | null => {
+        const friend = friendOf(event);
+        if (friend === null) return null;
+        if (!passesWho(deps, config, event.accountId, friend.id)) return null;
+        return {
+          friend: friend.id,
+          name: friend.name,
+          at: event.ts,
+          event: event.payload ?? null,
+        };
+      },
+    },
+    {
+      id: "on-someone-stops-being-a-friend",
+      title: "When someone stops being a friend",
+      description: "They removed you, or you removed them. VRChat does not say which.",
+      kinds: ["friend.removed"],
+      outputs: [
+        // `user`, not `friend`: by the time this fires the relationship is the thing that ended,
+        // and handing the id to a node that requires friendship would be a request that fails.
+        { id: "user", label: "Who", type: "user" },
+        { id: "name", label: "Name", type: "string" },
+        { id: "at", label: "At", type: "number" },
+        { id: "event", label: "Event", type: "json" },
+      ],
+      // The user picker only. The Friends/Strangers half would race the removal — the presence map
+      // this filter reads is being updated by the same event — so it would drop fires at random.
+      config: [ONLY_PERSON_FIELD],
+      map: (event, config): PortValues | null => {
+        const friend = friendOf(event);
+        if (friend === null) return null;
+        const only = typeof config.only === "string" ? config.only.trim() : "";
+        if (only !== "" && friend.id !== only) return null;
+        return {
+          user: friend.id,
+          name: friend.name,
+          at: event.ts,
+          event: event.payload ?? null,
+        };
+      },
+    },
+  ];
 }
 
 /**

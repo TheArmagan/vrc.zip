@@ -18,6 +18,9 @@ pattern with a `json` blob.
 intrinsics, a `results` port, a pace between items, the body drawn as a tinted region on the canvas,
 a live position readout while a run is in flight, and every node card redesigned around its palette
 category. A fourth template ships the loop's shape so it can be read rather than guessed.
+**Decision 244 mirrors the triggers.** The eight "When my …" profile nodes now have eight "When
+someone …" twins over `friend.updated.*`, plus four more for moving, waking up, and a friendship
+starting or ending. Generated from the same table, so the two families cannot drift.
 **Current phase:** Phase 4 is **complete** — 4.1 through 4.6, built on 2026-08-23 from the spec the
 planning pass of the same day produced (decision 206). Graphs are stored, run, edited on a canvas,
 armed behind a hold, and shared as files. What remains in the plan is Phase 5, packaging and polish,
@@ -4469,6 +4472,38 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      template could not express a sequencing edge at all — which is what a source node like
      `Friends` needs to be reachable from its trigger.
 
+244. **The "When my …" family has a twin about everybody else.** Decision 241 gave the eight profile
+     aspects typed triggers over `user.updated.*`. VRChat refines `friend-update` frames through the
+     *same* differ into the *same* eight `friend.updated.*` kinds, and nothing offered a way in:
+     reacting to a friend changing their avatar meant `When VRChat pushes an event` and a `Read
+     field` per port. So there are now sixteen, generated from one table.
+     - **One table with two sets of names, not two tables.** `PROFILE_ASPECTS` grew `mine` and
+       `theirs` beside the aspect it already carried, because the payload field, the port type and
+       the refinement rule are the same question asked about a different subject. A second table
+       would have been the first one copied with a licence to drift.
+     - **"When someone", not "when a friend", and the limit lives in the description.** VRChat only
+       pushes these frames for people you are friends with and there is no way to make it do
+       otherwise. The title is what somebody types into the palette, so it says *someone*; each
+       description says who it can actually reach. The subject port is typed `friend` rather than
+       `user`, which is the honest type and widens into every `user` port anyway.
+     - **The who-filter rides along, and half of it is a no-op here.** `Only this person` is what
+       earns it: "tell me when *this* person changes their avatar" becomes a trigger rather than a
+       trigger plus a comparison. The Anyone/Friends/Strangers picker is shared with the player
+       triggers and on this family *strangers selects nothing*, since every subject is already a
+       friend. Kept and documented rather than special-cased, on the grounds that a filter doing
+       exactly what it says over an empty set is explicable and a missing control is not.
+     - **`When someone stops being a friend` is the exception, deliberately.** Its subject port is
+       `user`, because by the time it fires the relationship is the thing that ended and a `friend`
+       id would flow into nodes that need one and fail at 3 AM. It gets the person picker but *not*
+       the Friends/Strangers half, which would race the presence map this very event is updating and
+       drop fires at random.
+     - **Four more beyond the eight**, all previously unreachable except through the generic node:
+       `When someone goes somewhere` (`friend.location`, the noisiest frame VRChat pushes, so 60
+       fires a minute rather than the family's 120), `When someone becomes active` (signed in on the
+       web or the phone, which is not being in the game), and the two halves of a friendship
+       starting and ending. `When a friend comes online` and `… goes offline` already existed and
+       are unchanged.
+
 ---
 
 ## Gotchas
@@ -5306,6 +5341,16 @@ Carried in from research, not yet verified against running code:
   rendering" were a cached `dist` served by the daemon on `:7773`; the DOM was reporting the
   *previous* build's class list. `location.reload(true)` after every `bun run build`, and check a
   class name you just changed before believing what you are looking at.
+
+- **A pipeline update frame is `{ userId, user: { … } }`, and the profile triggers were reading the
+  wrong level.** `wiring/pipeline-bridge.ts` adds `changes` *beside* the nested user object rather
+  than flattening it, so `payload.currentAvatar` was always `undefined` and every typed value port
+  quietly fell back to the rendered `to` string from the change record. For an avatar that string is
+  the thumbnail URL the differ compares on — so `When my avatar changes` was handing a `.png` out of
+  a port typed `avatar`, which no avatar node can look up. Nothing caught it because the test emitted
+  a flattened payload it had invented. Found while building the friend twin of the same family;
+  `subjectRecord()` reads the nested object and falls back to the flat one, and both families use it.
+  **Where a test writes its own payload, check the shape against the bridge that produces it.**
 
 ---
 

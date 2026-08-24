@@ -1025,8 +1025,37 @@ function checkGraphEdges(document: GraphDocument, host: PluginHost | undefined):
   }
 }
 
-function graphSummary(row: GraphRow): GraphSummary {
+/** What a summary needs beyond the row, and cannot work out from it alone. */
+interface SummaryExtras {
+  /** When this graph last started a run. */
+  readonly lastRunAt?: number | null;
+  /** Answers whether a node type is a trigger. Absent in a test with no engine wired. */
+  readonly definitionOf?: ((type: string) => { kind: string } | null) | undefined;
+}
+
+/**
+ * A graph as the list sees it.
+ *
+ * `lastRunAt` is passed in rather than looked up here, because the list wants every graph's answer
+ * and one grouped scan beats one query per row. A caller returning a *single* graph — after an
+ * enable, an arm, a save — passes nothing and gets `null`, which the client corrects on its next
+ * list. Deliberate: those routes exist to flip a switch, and making each of them pay for a run
+ * lookup so a relative timestamp stays live for one render is the wrong trade.
+ */
+function graphSummary(row: GraphRow, extras: SummaryExtras = {}): GraphSummary {
+  const document = parseGraphDocument(row.definition);
+  const isTrigger = extras.definitionOf;
   return {
+    // Empty rather than guessed when there is no resolver: a list that says a graph watches nothing
+    // is visibly incomplete, and one that guesses from the type id would be confidently wrong about
+    // every node a plugin contributed.
+    triggerTypes:
+      isTrigger === undefined
+        ? []
+        : document.nodes
+            .filter((node) => isTrigger(node.type)?.kind === "trigger")
+            .map((node) => node.type),
+    lastRunAt: extras.lastRunAt ?? null,
     id: row.id,
     name: row.name,
     description: row.description,
@@ -1037,14 +1066,22 @@ function graphSummary(row: GraphRow): GraphSummary {
     concurrency: isGraphConcurrency(row.concurrency) ? row.concurrency : "parallel",
     accountId: row.account_id,
     disabledReason: row.disabled_reason,
-    nodeCount: parseGraphDocument(row.definition).nodes.length,
+    nodeCount: document.nodes.length,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
 
-function toGraph(row: GraphRow, staleNodes: readonly string[] = []): Graph {
-  return { ...graphSummary(row), definition: parseGraphDocument(row.definition), staleNodes };
+function toGraph(
+  row: GraphRow,
+  staleNodes: readonly string[] = [],
+  extras: SummaryExtras = {},
+): Graph {
+  return {
+    ...graphSummary(row, extras),
+    definition: parseGraphDocument(row.definition),
+    staleNodes,
+  };
 }
 
 /**
@@ -1247,6 +1284,16 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
    */
   const streamListeners = new Set<(event: StreamEvent) => void>();
   const { accounts, store, bus, limiter, secrets, presence, connectPipeline } = options;
+  /**
+   * Resolves a node type, so a graph summary can say which of its nodes are triggers.
+   *
+   * Bound once here and handed to every summary, not just the list's. It costs nothing — the
+   * document is already parsed — and leaving it off the single-graph routes meant a rename came back
+   * with an empty `triggerTypes` and the card visibly lost the line saying what the graph watches
+   * for, until the next full list. `lastRunAt` is the one that stays list-only, because that one is
+   * a query.
+   */
+  const definitionOf = options.graphs?.definitionOf.bind(options.graphs);
   let settings = options.settings;
   // Absent means unsupported, which is what every non-Windows run and every test gets. Nothing in
   // this file may reach the registry directly; see `StartupControl`.
@@ -2795,12 +2842,22 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
     },
 
     async listGraphs(): Promise<GraphSummary[]> {
-      return await Promise.resolve(store.listGraphs().map(graphSummary));
+      // One scan for every graph's last run, rather than a lookup per row. See `graphSummary`.
+      const lastRuns = store.lastGraphRunTimes();
+      return await Promise.resolve(
+        store
+          .listGraphs()
+          .map((row) =>
+            graphSummary(row, { lastRunAt: lastRuns.get(row.id) ?? null, definitionOf }),
+          ),
+      );
     },
 
     async getGraph(graphId): Promise<Graph> {
       const row = requireGraph(store, graphId);
-      return toGraph(row, await staleNodes(parseGraphDocument(row.definition), options.plugins));
+      return toGraph(row, await staleNodes(parseGraphDocument(row.definition), options.plugins), {
+        definitionOf,
+      });
     },
 
     async createGraph(input): Promise<Graph> {
@@ -2822,7 +2879,7 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       // Nothing to arm — a new graph is off — but going through the same path keeps "the engine
       // matches the table" a property of one method rather than of four call sites remembering.
       await options.graphs?.reload(id);
-      return toGraph(requireGraph(store, id));
+      return toGraph(requireGraph(store, id), [], { definitionOf });
     },
 
     async updateGraph(graphId, input): Promise<Graph> {
@@ -2850,6 +2907,7 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       return toGraph(
         saved,
         await staleNodes(parseGraphDocument(saved.definition), options.plugins),
+        { definitionOf },
       );
     },
 
@@ -2908,7 +2966,7 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
 
       const row = requireGraph(store, id);
       return {
-        graph: toGraph(row, await staleNodes(parsed.definition, options.plugins)),
+        graph: toGraph(row, await staleNodes(parsed.definition, options.plugins), { definitionOf }),
         missing,
         changed,
       };
@@ -2943,13 +3001,13 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       // in, and leaving it behind would have the UI reporting a ceiling that has been dealt with.
       store.setGraphEnabled(graphId, enabled);
       await options.graphs?.reload(graphId);
-      return graphSummary(requireGraph(store, graphId));
+      return graphSummary(requireGraph(store, graphId), { definitionOf });
     },
 
     async setGraphArmed(graphId, armed): Promise<GraphSummary> {
       requireGraph(store, graphId);
       store.setGraphArmed(graphId, armed);
-      return graphSummary(requireGraph(store, graphId));
+      return graphSummary(requireGraph(store, graphId), { definitionOf });
     },
 
     async listGraphRuns(graphId): Promise<GraphRunSummary[]> {

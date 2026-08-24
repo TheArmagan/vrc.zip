@@ -4558,12 +4558,49 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
        template that silently drops what it did not understand is one nobody can debug. A value that
        is *not a number* is different and falls through as its plain text: the spec was right, the
        world handed over a string, and printing the string beats printing `NaN`.
+     - **`{a:str}` is the value as a JSON literal**, quoting and escaping included, and it is there
+       for the thing `Compose text` actually gets used for once somebody needs a request body this
+       palette has no node for. `{"name": "{a}"}` looks right and breaks on the first display name
+       containing a quote, a backslash or a newline — and it breaks at the far end, in whatever
+       service rejected the payload. It is also the one spec that is useful on a non-string: an
+       object arrives as its JSON, a number as bare digits, a port carrying nothing as `null`, each
+       of which is what the surrounding document wanted in that position.
      - **The locale is pinned to `en-US`.** A graph is a document, and the line it composes goes to
        a webhook or a notification. It must not read differently because the daemon happens to be
        running on a machine set to German — somebody who wants a decimal comma can type one, but
        nobody should be opted into a machine setting they did not know was in play.
      - Growing the input list moves `Compose text`'s definition hash, so a saved graph using one
        shows the "node changed" badge until it is re-saved. Same cost as decision 240, same call.
+
+247. **The Graphs list says what state each graph is in, and lets you rename one where you are
+     standing.** The card was a bordered box with two switches: **off and armed looked identical at
+     a glance**, and one of them sends real invites. `Rehearsing` was a badge for one of the four
+     states and the other three were "read the toggles and work it out".
+     - **A coloured rail and a dot, one colour per state**, at the left edge where the eye starts.
+       `graphState` is the single place those four answers live, and `disabledReason` beats
+       everything: a graph the daemon switched off is not *off*, it is **stopped**, the difference is
+       whether somebody chose it, and the daemon's own reason is now on the card rather than behind
+       a hover. That reason being invisible is how a graph stayed dead for a week.
+     - **The card says what the graph watches for.** `GraphSummary` gained `triggerTypes`, which is
+       free — the daemon already parses the document to count nodes — and the client resolves the
+       titles from the catalogue it already holds. Type ids rather than resolved titles on the wire:
+       a title belongs to whoever registered the node, and sending it would freeze it at read time.
+     - **And when it last ran.** `lastRunAt`, from one grouped `MAX(started_at)` scan rather than a
+       query per row. Only the *list* pays for it; the single-graph routes return null and the client
+       corrects itself on the next list, because those routes exist to flip a switch. `triggerTypes`
+       is on every route by contrast — leaving it off the single-graph ones meant a rename came back
+       and the card visibly lost the line saying what the graph was for.
+     - **Rename is inline, not a dialog.** Naming a graph is something you do *because* of the other
+       graphs — this one is the invite watcher, that one is the roundup — and a modal covers exactly
+       the list you are naming it against. It sends name and description only: handing `update` a
+       definition it did not ask for is how a rename from a list overwrites a canvas open in another
+       tab.
+     - **`Open` is a button and never fades.** The secondary actions (rename, run, export, delete)
+       fade in on hover, on focus, and are always visible below `md` — hover alone would put Delete
+       and Export out of reach of a keyboard and of a narrow window, which is a real loss dressed up
+       as restraint. They are icons rather than labels because four labelled buttons plus a hold plus
+       `Open` does not fit one line at this card width, and the row wrapping put the primary action
+       on a line of its own.
 
 ---
 

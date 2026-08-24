@@ -181,6 +181,17 @@ export class GraphEngine {
     await this.#arm(graph);
   }
 
+  /**
+   * One node type's definition, intrinsics included.
+   *
+   * Public because the control API has to answer the same question the engine answers internally —
+   * "is this node a trigger?" — and the two must not disagree. Asking the provider directly would
+   * miss the intrinsics, which is how a `For each` ends up classified as an unknown type.
+   */
+  definitionOf(type: string): NodeDefinition | null {
+    return this.#definition(type);
+  }
+
   /** Resumes every parked run whose time has come, and applies the missed policy to the rest. */
   async resumeDue(): Promise<void> {
     const now = this.#now();

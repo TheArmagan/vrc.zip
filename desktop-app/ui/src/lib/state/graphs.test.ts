@@ -23,6 +23,8 @@ function summary(id: string, name: string): GraphSummary {
     accountId: null,
     disabledReason: null,
     nodeCount: 0,
+    triggerTypes: [],
+    lastRunAt: null,
     createdAt: 0,
     updatedAt: 0,
   };

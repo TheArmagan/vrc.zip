@@ -126,6 +126,17 @@ export interface GraphSummary {
   /** Why the daemon switched this graph off, when it was the daemon that did it. */
   readonly disabledReason: string | null;
   readonly nodeCount: number;
+  /**
+   * The type ids of this graph's triggers, in document order.
+   *
+   * Free here — the daemon already parses the document to count the nodes — and it is what lets the
+   * list say *what a graph watches for* rather than only how big it is. Type ids rather than titles,
+   * because a title belongs to whoever registered the node and the client has that catalogue
+   * already; sending a resolved title would freeze it at the moment the row was read.
+   */
+  readonly triggerTypes: readonly string[];
+  /** When a run of this graph last started, or null if one never has. */
+  readonly lastRunAt: number | null;
   readonly createdAt: number;
   readonly updatedAt: number;
 }

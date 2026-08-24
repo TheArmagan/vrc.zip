@@ -1071,6 +1071,11 @@ export class Store {
     return this.stmts.listGraphRunsByStatus.all(status, limit);
   }
 
+  /** When each graph last started a run, keyed by graph id. Absent means it never has. */
+  lastGraphRunTimes(): Map<string, number> {
+    return new Map(this.stmts.lastGraphRunTimes.all().map((row) => [row.graph_id, row.at]));
+  }
+
   /** Queued, running and waiting all count. See the note on `SQL.countLiveGraphRuns`. */
   countLiveGraphRuns(graphId: string): number {
     return this.stmts.countLiveGraphRuns.get(graphId)?.n ?? 0;
@@ -1485,6 +1490,7 @@ function prepareAll(db: Database) {
     getGraphRun: q<GraphRunRow, [string]>(SQL.getGraphRun),
     listGraphRuns: q<GraphRunRow, [string, number]>(SQL.listGraphRuns),
     listGraphRunsByStatus: q<GraphRunRow, [string, number]>(SQL.listGraphRunsByStatus),
+    lastGraphRunTimes: q<{ graph_id: string; at: number }, []>(SQL.lastGraphRunTimes),
     countLiveGraphRuns: q<{ n: number }, [string]>(SQL.countLiveGraphRuns),
     countGraphRunsByStatus: q<{ n: number }, [string, string]>(SQL.countGraphRunsByStatus),
     nextQueuedGraphRun: q<GraphRunRow, [string]>(SQL.nextQueuedGraphRun),

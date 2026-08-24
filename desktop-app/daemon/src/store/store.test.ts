@@ -802,6 +802,24 @@ describe("graph runs", () => {
     store.close();
   });
 
+  test("the last run of every graph comes back in one scan, and never-run graphs are absent", () => {
+    // What the Graphs list draws as "ran 2m ago". Absent rather than zero, because a graph that has
+    // never run and one that ran at the epoch are different sentences.
+    const store = seed();
+    addGraph(store, "g1");
+    addGraph(store, "g2");
+    addGraph(store, "g3");
+    addRun(store, "r1", "g1", { started_at: T0 });
+    addRun(store, "r2", "g1", { started_at: T0 + 5000 });
+    addRun(store, "r3", "g2", { started_at: T0 + 100 });
+
+    const times = store.lastGraphRunTimes();
+    expect(times.get("g1")).toBe(T0 + 5000);
+    expect(times.get("g2")).toBe(T0 + 100);
+    expect(times.has("g3")).toBe(false);
+    store.close();
+  });
+
   test("a run ends by being deleted, and deleting the graph takes its runs with it", () => {
     const store = seed();
     addGraph(store);

@@ -633,6 +633,15 @@ export const SQL = {
   listGraphRunsByStatus: `
     SELECT * FROM graph_runs WHERE status = ? ORDER BY started_at LIMIT ?`,
   /*
+   * When each graph last started a run, for the list on the Graphs screen.
+   *
+   * Every graph in one statement rather than one query per row: the list is drawn on every visit and
+   * the retention sweep keeps `graph_runs` small, so the grouped scan is cheaper than N round trips
+   * through the statement cache. A graph that has never run is simply absent from the result.
+   */
+  lastGraphRunTimes: `
+    SELECT graph_id, MAX(started_at) AS at FROM graph_runs GROUP BY graph_id`,
+  /*
    * The concurrency check, and a `waiting` run counts. A run parked on a `wait` has not finished —
    * treating it as a free slot is how a graph that waits five minutes ends up with fifty live runs
    * of itself, which is precisely the shape the ceilings exist to prevent.

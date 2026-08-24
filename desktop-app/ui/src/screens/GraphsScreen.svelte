@@ -12,10 +12,12 @@
 -->
 <script lang="ts">
 import DownloadIcon from "@lucide/svelte/icons/download";
+import PencilIcon from "@lucide/svelte/icons/pencil";
 import PlayIcon from "@lucide/svelte/icons/play";
 import PlusIcon from "@lucide/svelte/icons/plus";
 import UploadIcon from "@lucide/svelte/icons/upload";
 import WorkflowIcon from "@lucide/svelte/icons/workflow";
+import ZapIcon from "@lucide/svelte/icons/zap";
 import { api, describeError, type GraphSummary, type GraphTemplate } from "$lib/api.ts";
 import EmptyState from "$lib/components/EmptyState.svelte";
 import ErrorNote from "$lib/components/ErrorNote.svelte";
@@ -24,11 +26,12 @@ import HoldToConfirm from "$lib/components/HoldToConfirm.svelte";
 import RelativeTime from "$lib/components/RelativeTime.svelte";
 import SectionHeader from "$lib/components/SectionHeader.svelte";
 import StoresPanel from "$lib/components/graphs/StoresPanel.svelte";
-import { Badge } from "$lib/components/ui/badge/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
 import { Input } from "$lib/components/ui/input/index.js";
 import { Skeleton } from "$lib/components/ui/skeleton/index.js";
 import { Switch } from "$lib/components/ui/switch/index.js";
+import { Textarea } from "$lib/components/ui/textarea/index.js";
+import { graphState, watchesFor } from "$lib/graphs/graph-state.ts";
 import { hrefFor } from "$lib/router.ts";
 import { graphs } from "$lib/state/graphs.svelte.ts";
 
@@ -45,6 +48,14 @@ let fromTemplate = $state("");
 /** What an import could not find on this machine. Kept until the user starts something else. */
 let importNote = $state<string | null>(null);
 let fileInput = $state<HTMLInputElement | null>(null);
+/**
+ * The graph being renamed, and the draft of its two editable fields.
+ *
+ * Inline on the card rather than in a dialog: naming a graph is something you do *because* of the
+ * other graphs — "this one is the invite watcher, that one is the roundup" — and a modal covers
+ * exactly the list you are naming it against.
+ */
+let editing = $state<{ id: string; name: string; description: string } | null>(null);
 
 $effect(() => {
   if (!graphs.loaded) void graphs.load();
@@ -150,6 +161,32 @@ async function importGraph(file: File): Promise<void> {
       result.missing.length === 0
         ? `Imported "${result.graph.name}". It is off until you switch it on.`
         : `Imported "${result.graph.name}", but this machine has no ${result.missing.join(", ")}. Those nodes will not run.`;
+  } catch (cause) {
+    actionError = describeError(cause);
+  } finally {
+    busy = null;
+  }
+}
+
+/**
+ * Saves a renamed graph.
+ *
+ * Name and description only. `update` takes the definition too, and deliberately is not handed one
+ * here: sending the fields you did not touch is how a rename from a list overwrites a canvas
+ * somebody has open in another tab.
+ */
+async function saveDetails(): Promise<void> {
+  const draft = editing;
+  if (draft === null) return;
+  const name = draft.name.trim();
+  if (name === "") return;
+  busy = draft.id;
+  actionError = null;
+  try {
+    graphs.replace(
+      await api.graphs.update(draft.id, { name, description: draft.description.trim() }),
+    );
+    editing = null;
   } catch (cause) {
     actionError = describeError(cause);
   } finally {
@@ -281,29 +318,118 @@ async function runNow(graph: GraphSummary): Promise<void> {
         />
       {:else}
         {#each graphs.graphs as graph (graph.id)}
-          <div class="flex flex-col gap-3 rounded-lg border border-border p-4">
-            <div class="flex flex-wrap items-center gap-2">
-              <a class="font-medium hover:underline" href={hrefFor("graphs", graph.id)}>
-                {graph.name}
-              </a>
-              <Badge variant="secondary">{graph.nodeCount} nodes</Badge>
-              {#if graph.enabled && !graph.armed}
-                <!-- The state a new graph starts in, and the one worth naming on the card. -->
-                <Badge variant="outline">Rehearsing</Badge>
-              {/if}
-              {#if graph.disabledReason !== null}
-                <Badge variant="destructive">{graph.disabledReason}</Badge>
-              {/if}
-              <span class="ml-auto text-xs text-muted-foreground">
-                edited <RelativeTime ts={graph.updatedAt} />
-              </span>
-            </div>
+          {@const state = graphState(graph)}
+          {@const watches = watchesFor(
+            graph.triggerTypes,
+            (type) => graphs.definition(type)?.title ?? null,
+          )}
+          <!--
+            The rail and the dot carry the state, in one colour, at the left edge where the eye
+            starts. Off and armed used to look identical at a glance and one of them sends real
+            invites; a badge for one of the four states was not enough to tell them apart.
+          -->
+          <article
+            class="group relative overflow-hidden rounded-lg border border-border transition-shadow hover:shadow-md"
+          >
+            <span
+              class="absolute inset-y-0 left-0 w-1"
+              style="background: {state.color}"
+              aria-hidden="true"
+            ></span>
+            <div class="flex flex-col gap-3 p-4 pl-5">
+              {#if editing?.id === graph.id}
+                <!--
+                  The fields take the place of the title and the description rather than appearing
+                  under them, so the card does not jump and you are editing the thing you are
+                  looking at. Enter saves, Escape abandons.
+                -->
+                <div class="flex flex-col gap-2">
+                  <Input
+                    bind:value={editing.name}
+                    aria-label="Name"
+                    placeholder="Tell me when Ada comes online"
+                    onkeydown={(event: KeyboardEvent) => {
+                      if (event.key === "Enter") void saveDetails();
+                      if (event.key === "Escape") editing = null;
+                    }}
+                  />
+                  <Textarea
+                    bind:value={editing.description}
+                    aria-label="Description"
+                    rows={2}
+                    placeholder="What this graph is for. Optional."
+                    onkeydown={(event: KeyboardEvent) => {
+                      if (event.key === "Escape") editing = null;
+                    }}
+                  />
+                  <div class="flex gap-2">
+                    <Button
+                      size="sm"
+                      disabled={editing.name.trim() === "" || busy === graph.id}
+                      onclick={() => void saveDetails()}
+                    >
+                      Save
+                    </Button>
+                    <Button size="sm" variant="ghost" onclick={() => (editing = null)}>
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
+              {:else}
+                <div class="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                  <span
+                    class="size-2 shrink-0 self-center rounded-full"
+                    style="background: {state.color}"
+                    aria-hidden="true"
+                  ></span>
+                  <a class="font-medium hover:underline" href={hrefFor("graphs", graph.id)}>
+                    {graph.name}
+                  </a>
+                  <span class="ml-auto text-xs text-muted-foreground">
+                    edited <RelativeTime ts={graph.updatedAt} />
+                  </span>
+                </div>
 
-            {#if graph.description !== ""}
-              <p class="text-sm text-muted-foreground">{graph.description}</p>
-            {/if}
+                <!-- One meta line instead of a row of badges. `.` separators rather than bullets,
+                     which is the house rule about typing what a keyboard types. -->
+                <div class="-mt-1 flex flex-wrap items-center gap-x-1.5 text-xs">
+                  <span class="font-medium" style="color: {state.color}">{state.label}</span>
+                  <span class="text-muted-foreground">.</span>
+                  <span class="text-muted-foreground">
+                    {graph.nodeCount}
+                    {graph.nodeCount === 1 ? "node" : "nodes"}
+                  </span>
+                  <span class="text-muted-foreground">.</span>
+                  <span class="text-muted-foreground">
+                    {#if graph.lastRunAt === null}
+                      never run
+                    {:else}
+                      ran <RelativeTime ts={graph.lastRunAt} />
+                    {/if}
+                  </span>
+                </div>
 
-            <div class="flex flex-wrap items-center gap-4">
+                {#if state.detail !== ""}
+                  <p class="text-xs" style="color: {state.color}">{state.detail}</p>
+                {/if}
+
+                {#if watches.length > 0}
+                  <!-- What the graph is *for*, which the node count never said. -->
+                  <p
+                    class="flex items-start gap-1.5 text-sm text-muted-foreground"
+                    title="This graph's triggers"
+                  >
+                    <ZapIcon class="mt-0.5 size-3.5 shrink-0" />
+                    <span>{watches.join(", ")}</span>
+                  </p>
+                {/if}
+
+                {#if graph.description !== ""}
+                  <p class="text-sm text-muted-foreground">{graph.description}</p>
+                {/if}
+              {/if}
+
+            <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
               <label class="flex items-center gap-2 text-sm">
                 <Switch
                   checked={graph.enabled}
@@ -336,24 +462,57 @@ async function runNow(graph: GraphSummary): Promise<void> {
                 />
               {/if}
 
-              <div class="ml-auto flex gap-2">
+              <!--
+                The secondary actions fade in on hover, and on focus, and always below `md`.
+
+                Hover alone would put Delete and Export out of reach of a keyboard and of a narrow
+                window, which is a real loss dressed up as restraint. What the fade buys is a resting
+                card that is a name and a state rather than six buttons — and `Open` never fades,
+                because it is the one thing you came to the list to do.
+              -->
+              <div class="ml-auto flex items-center gap-1">
+              <div
+                class="flex items-center gap-1 transition-opacity md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100"
+              >
+                <!--
+                  Icons rather than words, and the label lives in `aria-label` and the tooltip.
+                  Three labelled ghost buttons plus a hold plus Open does not fit one line at this
+                  card width, and the row wrapping put the primary action on a line of its own.
+                -->
                 <Button
                   variant="ghost"
-                  size="sm"
+                  size="icon"
+                  aria-label="Rename"
+                  title="Rename"
+                  disabled={busy === graph.id}
+                  onclick={() =>
+                    (editing = {
+                      id: graph.id,
+                      name: graph.name,
+                      description: graph.description,
+                    })}
+                >
+                  <PencilIcon class="size-4" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label="Run now"
+                  title="Run now"
                   disabled={busy === graph.id}
                   onclick={() => void runNow(graph)}
                 >
                   <PlayIcon class="size-4" />
-                  Run now
                 </Button>
                 <Button
                   variant="ghost"
-                  size="sm"
+                  size="icon"
+                  aria-label="Export"
+                  title="Export"
                   disabled={busy === graph.id}
                   onclick={() => void exportGraph(graph)}
                 >
                   <DownloadIcon class="size-4" />
-                  Export
                 </Button>
                 <!--
                   Held, not clicked. A graph is a document with no version history and no undo, and
@@ -369,8 +528,13 @@ async function runNow(graph: GraphSummary): Promise<void> {
                   onconfirm={() => void remove(graph)}
                 />
               </div>
+              <!-- Outside the fading group on purpose: opacity applies to a whole subtree, and
+                   Open is the one thing you came to the list to do. -->
+              <Button size="sm" href={hrefFor("graphs", graph.id)}>Open</Button>
+              </div>
             </div>
-          </div>
+            </div>
+          </article>
         {/each}
       {/if}
 

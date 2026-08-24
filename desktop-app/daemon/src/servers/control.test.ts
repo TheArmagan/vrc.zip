@@ -595,6 +595,8 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
   const GRAPH: Graph = {
     id: "graph-1",
     name: "Greet arrivals",
+    triggerTypes: [],
+    lastRunAt: null,
     description: "",
     enabled: false,
     armed: false,

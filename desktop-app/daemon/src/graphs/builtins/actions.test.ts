@@ -343,6 +343,74 @@ describe("the desktop notification", () => {
     ]);
   });
 
+  test("a notification carries whatever it was handed", async () => {
+    // The point of the port: a press arriving minutes later has the invite it was about, rather
+    // than a name the graph has to go and look up again.
+    const h = harness();
+    await h.run("desktop-notification", {
+      text: "Ada wants in",
+      data: { user: "usr_ada", invite: "not_1", tags: ["friend"] },
+    });
+    expect(h.toasts[0]?.data).toEqual({ user: "usr_ada", invite: "not_1", tags: ["friend"] });
+  });
+
+  test("a value JSON cannot hold is dropped rather than carried", async () => {
+    // It would reach SQLite through the press event, minutes later, with no run left to blame.
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    const h = harness();
+    await h.run("desktop-notification", { text: "hi", data: cyclic });
+    expect(h.toasts[0]?.data).toBeUndefined();
+    expect(h.toasts[0]?.body).toBe("hi");
+  });
+
+  test("a wired argument overrides the link, the screen and the snooze", async () => {
+    // The half of a button that is almost never a constant: the link goes to the person the event
+    // was about, the screen to the instance somebody just joined.
+    const h = harness();
+    await h.run(
+      "desktop-notification",
+      {
+        text: "Ada wants in",
+        button1arg: "https://vrchat.com/home/user/usr_ada",
+        button2arg: "/instance/wrld_1:42",
+        button3arg: "30",
+      },
+      {
+        buttons: JSON.stringify([
+          { id: "site", label: "Profile", action: "url", argument: "https://vrchat.com" },
+          { id: "join", label: "Where", action: "screen", argument: "/friends" },
+          { id: "later", label: "Later", action: "snooze", argument: "10" },
+        ]),
+      },
+    );
+    expect(h.toasts[0]?.buttons).toEqual([
+      {
+        id: "site",
+        label: "Profile",
+        action: "url",
+        argument: "https://vrchat.com/home/user/usr_ada",
+      },
+      { id: "join", label: "Where", action: "screen", argument: "/instance/wrld_1:42" },
+      { id: "later", label: "Later", action: "snooze", argument: "30" },
+    ]);
+  });
+
+  test("an empty wired argument leaves the authored one alone", async () => {
+    // Same rule the label follows: a graph that had nothing to give did not mean "clear it".
+    const h = harness();
+    await h.run(
+      "desktop-notification",
+      { text: "hi", button1arg: "  " },
+      {
+        buttons: JSON.stringify([
+          { id: "site", label: "Profile", action: "url", argument: "https://vrchat.com" },
+        ]),
+      },
+    );
+    expect(h.toasts[0]?.buttons?.[0]?.argument).toBe("https://vrchat.com");
+  });
+
   test("an empty wired label leaves the authored one alone", async () => {
     // A `Compose text` that produced nothing must not blank a button: a button with no text is a
     // button nobody can press.
@@ -470,9 +538,26 @@ describe("the notification press trigger", () => {
         tag: "friend-online",
         notification: "toast-1",
         argument: "",
+        data: null,
         at: T0,
       },
     ]);
+    await disarm();
+  });
+
+  test("what the notification carried comes back with the press", async () => {
+    const h = harness();
+    const fired: PortValues[] = [];
+    const disarm = await h.arm("on-notification-press", {}, (values) => fired.push(values));
+    h.bus.emit(
+      press({
+        notificationId: "toast-1",
+        tag: "friend-online",
+        button: "yes",
+        data: { user: "usr_ada", invite: "not_1" },
+      }),
+    );
+    expect(fired[0]?.data).toEqual({ user: "usr_ada", invite: "not_1" });
     await disarm();
   });
 

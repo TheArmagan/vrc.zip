@@ -24,6 +24,8 @@ starting or ending. Generated from the same table, so the two families cannot dr
 **Decision 253 gives a node ports the author chooses.** Six `Extract … values` nodes pull a list of
 fields out of one object, one output port per field, over a `variadicOutputs` mechanism and two new
 repeatable config kinds. The field catalogues are generated from the pinned spec by `bun run codegen`.
+**Decision 254 finishes the desktop notification.** Every part of a button is wireable, not just its
+text, and a notification can carry arbitrary JSON that comes back with the press.
 **Current phase:** Phase 4 is **complete** — 4.1 through 4.6, built on 2026-08-23 from the spec the
 planning pass of the same day produced (decision 206). Graphs are stored, run, edited on a canvas,
 armed behind a hold, and shared as files. What remains in the plan is Phase 5, packaging and polish,
@@ -4795,6 +4797,29 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
        detail card needed the same answer: built from an empty config, it drew every extractor as a
        card with no outputs at all — a preview of the one thing those nodes are for.
 
+254. **A notification's every moving part is wireable now, and it carries a payload.** Decision 251
+     made a button's *label* wireable and stopped there, which turned out to be the half that matters
+     least: the label is usually a constant, and the argument almost never is.
+     - **An argument port per button**, so the link a button opens goes to the person the event was
+       about and the screen it opens is the instance somebody just joined. Typed into the config, an
+       argument is one notification's worth of button sent every time. Same fallback rule the label
+       has — a blank wired value leaves the authored one alone, because a `Compose text` that produced
+       nothing did not mean "clear it".
+     - **`variadicInputsStride`**, because a `buttons` field counts buttons and a button is now worth
+       two ports. Without it the node drew the first three ports of five pairs. The ports are declared
+       interleaved (`button1`, `button1arg`, `button2`, …) since the run is positional, and the wired
+       floor rounds up to a whole pair — a wire into one argument must not leave the next button's
+       label showing on its own.
+     - **A `Carries` port, and a `Carried` one on the press trigger.** Arbitrary JSON, held beside the
+       toast in this process and copied onto the activation. Deliberately *not* part of
+       `activationArgument`: that string round-trips through Windows and back and is two encoded
+       fields for exactly that reason. This is the answer to a press arriving minutes later with no
+       idea what it was about — the toast said "Ada wants in", the press says "yes", and the invite
+       lives here in between.
+     - The value is **round-tripped through JSON at the node** before it reaches the notifier. A
+       cycle, a function or a `BigInt` on that port would otherwise land on the EventBus and in the
+       feed's SQLite row minutes later, from an event, with no run left to attribute the throw to.
+       Dropped instead: the notification still appears, carrying nothing.
 ---
 
 ## Gotchas

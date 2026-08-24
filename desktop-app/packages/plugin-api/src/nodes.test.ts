@@ -317,6 +317,47 @@ describe("variadic inputs", () => {
     expect(visibleInputs(compose, { slots: 2 }).map((port) => port.id)).toEqual(["a", "b"]);
     expect(compose.kind === "action" && compose.inputs).toHaveLength(4);
   });
+
+  describe("a stride, for a unit worth more than one port", () => {
+    // The desktop notification node's shape: two fixed ports, then a label and an argument per
+    // button, so a `buttons` field holding two rows draws six.
+    const notify: NodeDefinition = {
+      kind: "action",
+      id: "notify",
+      title: "Notify",
+      variadicInputs: "buttons",
+      variadicInputsBase: 2,
+      variadicInputsStride: 2,
+      inputs: [
+        { id: "text", label: "Message", type: "string" },
+        { id: "title", label: "Title", type: "string" },
+        { id: "button1", label: "Button 1 says", type: "string" },
+        { id: "button1arg", label: "Button 1 uses", type: "string" },
+        { id: "button2", label: "Button 2 says", type: "string" },
+        { id: "button2arg", label: "Button 2 uses", type: "string" },
+      ],
+      outputs: [],
+      config: [{ kind: "buttons", id: "buttons", label: "Buttons", max: 2 }],
+    };
+
+    test("each row claims a pair", () => {
+      expect(visibleInputCount(notify, { buttons: "[]" })).toBe(2);
+      expect(visibleInputCount(notify, { buttons: '[{"id":"a"}]' })).toBe(4);
+      expect(visibleInputCount(notify, { buttons: '[{"id":"a"},{"id":"b"}]' })).toBe(6);
+    });
+
+    test("the fixed ports survive a field that says nothing", () => {
+      expect(visibleInputCount(notify, {})).toBe(2);
+      expect(visibleInputCount(notify, { buttons: "not json" })).toBe(2);
+    });
+
+    test("the wired floor rounds up to a whole pair", () => {
+      // A wire into the first button's argument must not leave the second button's label showing
+      // on its own, which would read as a half-drawn button.
+      expect(visibleInputCount(notify, { buttons: "[]" }, 4)).toBe(4);
+      expect(visibleInputCount(notify, { buttons: "[]" }, 5)).toBe(6);
+    });
+  });
 });
 
 describe("slot rows", () => {

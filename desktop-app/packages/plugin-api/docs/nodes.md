@@ -365,6 +365,7 @@ interface ExecutableNodeDefinition extends NodeDefinitionBase {
   readonly inputs: readonly PortDefinition[];
   readonly variadicInputs?: string;       // a config field saying how many inputs are in use
   readonly variadicInputsBase?: number;   // how many come before the variadic run
+  readonly variadicInputsStride?: number; // how many ports one unit of the field claims
   readonly variadicOutputs?: string;      // a `fields` or `paths` field whose rows claim outputs
   readonly variadicOutputsBase?: number;
 }
@@ -385,7 +386,7 @@ anything.
 **Every port a node will ever have is declared, always.** A node's ports are its identity: they are
 hashed into `nodeDefinitionHash`, a saved edge references one by id, and the host checks every wire
 against them. So a definition whose ports depend on an instance's config is a definition that is not
-one thing, and there is no API for producing one. What the four `variadic*` fields change is only
+one thing, and there is no API for producing one. What the `variadic*` fields change is only
 **which of the declared ports the editor draws**, and what they are called.
 
 `variadicInputs` names a numeric (or `buttons`) config field saying how many inputs are in use,
@@ -393,6 +394,11 @@ counting from the first; `variadicInputsBase` is how many fixed inputs come befo
 what lets a "compose text" node declare twenty-six slots and show three. `visibleInputCount(def,
 config, wired)` and `visibleInputs(def, config, wired)` give the answer — and `wired` is a floor, so
 **a port with an edge in it is never hidden**.
+
+`variadicInputsStride` is how many declared ports one unit of that field claims, and it defaults to
+one. A `buttons` field counts buttons rather than ports, and the desktop notification node gives each
+of its buttons two: a label and an argument. Declare them interleaved (`button1`, `button1arg`,
+`button2`, …), because the run is positional.
 
 `variadicOutputs` names a `fields` or `paths` config field whose rows each **claim one output slot**
 by id:

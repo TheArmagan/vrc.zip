@@ -106,6 +106,8 @@ export interface GraphNotification {
   duration?: "short" | "long";
   expiresInMs?: number;
   click?: { action: GraphButtonAction; argument?: string };
+  /** Held beside the toast and handed back on a press. Never shown, never sent to the platform. */
+  data?: unknown;
 }
 
 /**
@@ -378,22 +380,37 @@ const XSOVERLAY: NodeDefinition = {
 const DESKTOP_BUTTONS = 5;
 
 /**
- * The label ports, one per possible button.
+ * Two ports per possible button: what it says, and what it does it with.
  *
- * All five are declared and only as many as there are buttons are drawn — the same trick
+ * All ten are declared and only as many as there are buttons are drawn — the same trick
  * `Compose text` uses for its twenty-six slots, and for the same reason: a node's ports are part of
- * its identity, so they cannot depend on an instance's config. See `variadicInputs`.
+ * its identity, so they cannot depend on an instance's config. See `variadicInputs`, and
+ * `variadicInputsStride` for why they are declared as pairs rather than as two runs.
  *
- * They exist because a button's text is the half of it that is about *this* notification. "Accept"
- * is a label; "Accept from Kirac" is an answer to something, and a graph that knows who is asking
- * should be able to say so.
+ * They exist because both halves of a button are about *this* notification rather than about the
+ * graph. "Accept" is a label; "Accept from Kirac" is an answer to something. And the argument is the
+ * half that is almost never a constant: the link a button opens is a link to the person the event
+ * was about, the screen it opens is the instance somebody just joined, and typing either into the
+ * config means one notification's worth of button, sent every time.
  */
-const DESKTOP_LABEL_PORTS = Array.from({ length: DESKTOP_BUTTONS }, (_, index) => ({
-  id: `button${String(index + 1)}`,
-  label: `Button ${String(index + 1)} says`,
-  type: "string" as const,
-  description: "Overrides that button's text for this notification.",
-}));
+const DESKTOP_BUTTON_PORTS = Array.from({ length: DESKTOP_BUTTONS }, (_, index) => {
+  const n = String(index + 1);
+  return [
+    {
+      id: `button${n}`,
+      label: `Button ${n} says`,
+      type: "string" as const,
+      description: "Overrides that button's text for this notification.",
+    },
+    {
+      id: `button${n}arg`,
+      label: `Button ${n} uses`,
+      type: "string" as const,
+      description:
+        "Overrides what that button acts on: the link it opens, the vrc.zip screen it opens, or the minutes it waits before showing this again.",
+    },
+  ];
+}).flat();
 
 const DESKTOP: NodeDefinition = {
   id: "desktop-notification",
@@ -421,12 +438,21 @@ const DESKTOP: NodeDefinition = {
       type: "string",
       description: "Names this one notification, so a press trigger can wait for exactly it.",
     },
-    ...DESKTOP_LABEL_PORTS,
+    {
+      id: "data",
+      label: "Carries",
+      type: "json",
+      description:
+        "Anything at all, handed back to the press trigger untouched. Not shown to anybody: this is how a press minutes later knows what it was about.",
+    },
+    ...DESKTOP_BUTTON_PORTS,
   ],
   // The count comes from the buttons themselves rather than a second number to keep in step with
-  // them; the four fixed ports above are never hidden. See `visibleInputCount`.
+  // them; the five fixed ports above are never hidden. Each button is worth two ports, which is what
+  // the stride says. See `visibleInputCount`.
   variadicInputs: "buttons",
-  variadicInputsBase: 4,
+  variadicInputsBase: 5,
+  variadicInputsStride: 2,
   outputs: [
     {
       id: "shown",
@@ -585,6 +611,13 @@ const DESKTOP_PRESSED: NodeDefinition = {
       description: "The value the notify node handed back when it raised this one.",
     },
     { id: "argument", label: "With", type: "string" },
+    {
+      id: "data",
+      label: "Carried",
+      type: "json",
+      description:
+        "Whatever the notify node was given to carry. Empty for a press on a notification that carried nothing.",
+    },
     { id: "at", label: "At", type: "number" },
   ],
   config: [
@@ -809,12 +842,17 @@ function desktopButtons(
   return parseButtonRows(config.buttons)
     .slice(0, DESKTOP_BUTTONS)
     .map((row, index) => {
-      const wired = text(inputs[`button${String(index + 1)}`]).trim();
+      const n = String(index + 1);
+      const wiredLabel = text(inputs[`button${n}`]).trim();
+      // Not trimmed away to nothing: a wired argument that arrives blank is a graph that had no
+      // value to give, and the configured one is what the author meant to fall back to.
+      const wiredArgument = text(inputs[`button${n}arg`]).trim();
+      const argument = wiredArgument === "" ? row.argument : wiredArgument;
       return {
         id: row.id,
-        label: wired === "" ? row.label.trim() : wired,
+        label: wiredLabel === "" ? row.label.trim() : wiredLabel,
         ...(isButtonAction(row.action) ? { action: row.action } : {}),
-        ...(row.argument === "" ? {} : { argument: row.argument }),
+        ...(argument === "" ? {} : { argument }),
       };
     })
     .filter((button, index, all) => {
@@ -842,6 +880,25 @@ function isScenario(value: string): value is (typeof SCENARIOS)[number] {
   return (SCENARIOS as readonly string[]).includes(value);
 }
 
+/**
+ * A value the toast can hold onto and the bus can carry, or `undefined` for one it cannot.
+ *
+ * The round trip is the check. Whatever a `json` port hands over goes on the EventBus when the press
+ * arrives, and from there into the feed's SQLite row — so a cycle, a function or a `BigInt` reaching
+ * the notifier is a write that throws minutes later, from an event, with no run left to attribute it
+ * to. Dropped here instead: the notification still appears, and it carries nothing rather than
+ * carrying a landmine.
+ */
+function portableJson(value: unknown): unknown {
+  if (value === undefined) return undefined;
+  try {
+    const encoded = JSON.stringify(value);
+    return encoded === undefined ? undefined : (JSON.parse(encoded) as unknown);
+  } catch {
+    return undefined;
+  }
+}
+
 /** What a press event carries. Read defensively: it crosses the bus like anything else. */
 function pressOf(event: BusEvent): {
   notificationId: string;
@@ -849,6 +906,7 @@ function pressOf(event: BusEvent): {
   button: string;
   label: string;
   argument: string;
+  data: unknown;
 } | null {
   const payload = event.payload;
   if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return null;
@@ -863,6 +921,9 @@ function pressOf(event: BusEvent): {
     button: string(record.button),
     label: string(record.label),
     argument: string(record.argument),
+    // Whatever the notify node attached, in whatever shape it was. Null rather than undefined so a
+    // press that carried nothing reads as an empty port instead of an absent one.
+    data: record.data ?? null,
   };
 }
 
@@ -987,6 +1048,7 @@ export function actionNodes(deps: ActionDeps): BuiltinNode[] {
         const image = text(inputs.image) || configText(config, "image");
         const scenario = configText(config, "scenario");
         const expires = configNumber(config, "expires", 0);
+        const carried = portableJson(inputs.data);
         const result = await deps.notify({
           ...(named === "" ? {} : { id: named }),
           title,
@@ -1000,6 +1062,7 @@ export function actionNodes(deps: ActionDeps): BuiltinNode[] {
           // Zero is "leave it there", which is the absence of an expiry rather than an expiry of
           // none — sending it would remove the notification the instant it was raised.
           ...(expires > 0 ? { expiresInMs: expires } : {}),
+          ...(carried === undefined ? {} : { data: carried }),
         });
         return {
           shown: result.shown,
@@ -1032,6 +1095,7 @@ export function actionNodes(deps: ActionDeps): BuiltinNode[] {
               tag: press.tag,
               notification: press.notificationId,
               argument: press.argument,
+              data: press.data,
               at: event.ts,
             });
           },

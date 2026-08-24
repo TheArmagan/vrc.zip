@@ -664,6 +664,19 @@ export interface ExecutableNodeDefinition extends NodeDefinitionBase {
    */
   readonly variadicInputsBase?: number;
   /**
+   * How many declared inputs one unit of {@link variadicInputs} claims. Defaults to one.
+   *
+   * A `buttons` field counts buttons, not ports, and a button is allowed to own more than one port:
+   * the desktop notification node gives each of its five buttons a label port *and* an argument port,
+   * so three buttons draw six. Without this the count and the field would be measuring different
+   * things, and the node would show the first three ports of five pairs.
+   *
+   * The ports must be declared **interleaved** — one button's ports together, then the next
+   * button's — because the run is positional. A node that declared all five labels and then all five
+   * arguments could not draw the third button's argument without drawing the fourth button's label.
+   */
+  readonly variadicInputsStride?: number;
+  /**
    * The id of a `fields` or `paths` config field whose rows say which outputs are *in use*.
    *
    * The output half of {@link variadicInputs}, and it exists for the same reason: a node's ports are
@@ -725,8 +738,16 @@ export function visibleInputCount(
    * node with no buttons — and, worse, hide the two fixed ports underneath it.
    */
   const fallback = base > 0 ? base : defaultCountOf(definition, field);
-  const chosen = Number.isNaN(asked) ? fallback : base + asked;
-  return Math.min(definition.inputs.length, Math.max(1, wired, chosen));
+  // A unit of the field can be worth more than one port. See `variadicInputsStride`.
+  const stride = Math.max(1, Math.floor(definition.variadicInputsStride ?? 1));
+  const chosen = Number.isNaN(asked) ? fallback : base + asked * stride;
+  /*
+   * The floor rounds up to a whole unit. A wire into one button's argument would otherwise leave the
+   * next button's label showing on its own, which reads as a half-drawn button rather than as the
+   * one wired port it actually is.
+   */
+  const floor = wired > base ? base + Math.ceil((wired - base) / stride) * stride : wired;
+  return Math.min(definition.inputs.length, Math.max(1, floor, chosen));
 }
 
 /**

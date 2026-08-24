@@ -96,6 +96,18 @@ export interface DesktopNotification {
   readonly expiresInMs?: number;
   /** What clicking the body itself means. Defaults to a plain signal. */
   readonly click?: { readonly action: ButtonAction; readonly argument?: string };
+  /**
+   * Anything the caller wants handed back when this one is pressed.
+   *
+   * Never shown, never sent to the platform, and deliberately not part of
+   * {@link activationArgument}: it is held here, in this process, beside the toast it belongs to, and
+   * copied onto the activation. That is what lets it be arbitrary JSON rather than something short
+   * enough to survive an `arguments` string that Windows round-trips through the shell.
+   *
+   * It is the answer to a press arriving minutes later with no idea what it was about. The toast said
+   * "Ada wants in"; the press says "yes" — and this is where the whole invite lives in between.
+   */
+  readonly data?: unknown;
 }
 
 export interface NotifyResult {
@@ -121,6 +133,8 @@ export interface NotificationActivation {
   readonly label: string | null;
   readonly action: ButtonAction;
   readonly argument: string;
+  /** Whatever {@link DesktopNotification.data} was set to. Absent when it was set to nothing. */
+  readonly data?: unknown;
   readonly at: number;
 }
 
@@ -501,6 +515,9 @@ export class DesktopNotifier {
       label: button?.label ?? null,
       action,
       argument,
+      // Straight off the record this process kept. Absent rather than null when there was none, so
+      // "carried nothing" and "carried a null" stay different answers.
+      ...(record.notification.data === undefined ? {} : { data: record.notification.data }),
       at: this.#options.now?.() ?? Date.now(),
     };
     for (const listener of [...this.#listeners]) {

@@ -44,6 +44,10 @@ export function attachNotificationActivations(options: NotificationActivationOpt
         label: activation.label,
         action: activation.action,
         argument: activation.argument,
+        // Whatever the caller attached to the toast, handed back untouched. Omitted rather than
+        // nulled when there was none: a payload key that is always there says every press carries
+        // something, and most of them carry nothing.
+        ...(activation.data === undefined ? {} : { data: activation.data }),
       },
     });
   });

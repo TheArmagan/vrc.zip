@@ -305,7 +305,7 @@ const ME: NodeDefinition = {
   category: ME_CATEGORY,
   inputs: [],
   outputs: [
-    { id: "user", label: "My user", type: "user" },
+    { id: "user", label: "My user id", type: "user" },
     { id: "name", label: "Name", type: "string" },
     { id: "status", label: "Status", type: "string" },
     { id: "statusMessage", label: "Status message", type: "string" },
@@ -367,7 +367,7 @@ const MY_SESSIONS: NodeDefinition = {
     { id: "account", label: "Account", type: "string" },
     { id: "name", label: "Signed in as", type: "string" },
     { id: "instance", label: "Where it is", type: "instance" },
-    { id: "world", label: "World", type: "world" },
+    { id: "world", label: "World id", type: "world" },
     { id: "mode", label: "Mode", type: "string", description: "vr or desktop." },
     { id: "headset", label: "Headset", type: "string" },
     { id: "oscPort", label: "OSC port", type: "number" },
@@ -495,7 +495,7 @@ const MY_WORLD: NodeDefinition = {
   description: "The world this account is standing in, as an id. Costs no request.",
   category: ME_CATEGORY,
   inputs: [],
-  outputs: [{ id: "world", label: "World", type: "world" }],
+  outputs: [{ id: "world", label: "World id", type: "world" }],
   config: [ACT_AS],
   body: [{ kind: "literal", text: "my current world" }],
 };
@@ -507,7 +507,7 @@ const MY_INSTANCE: NodeDefinition = {
   description: "The instance this account is in, as VRChat writes it. Costs no request.",
   category: ME_CATEGORY,
   inputs: [],
-  outputs: [{ id: "instance", label: "Instance", type: "instance" }],
+  outputs: [{ id: "instance", label: "Instance id", type: "instance" }],
   config: [ACT_AS],
   body: [{ kind: "literal", text: "my current instance" }],
 };
@@ -519,7 +519,7 @@ const MY_AVATAR: NodeDefinition = {
   description: "The avatar this account is wearing, as an id. Costs no request.",
   category: ME_CATEGORY,
   inputs: [],
-  outputs: [{ id: "avatar", label: "Avatar", type: "avatar" }],
+  outputs: [{ id: "avatar", label: "Avatar id", type: "avatar" }],
   config: [ACT_AS],
   body: [{ kind: "literal", text: "my current avatar" }],
 };
@@ -531,7 +531,7 @@ const MY_HOME_WORLD: NodeDefinition = {
   description: "The world this account spawns into, as an id. Costs no request.",
   category: ME_CATEGORY,
   inputs: [],
-  outputs: [{ id: "world", label: "World", type: "world" }],
+  outputs: [{ id: "world", label: "World id", type: "world" }],
   config: [ACT_AS],
   body: [{ kind: "literal", text: "my home world" }],
 };
@@ -544,7 +544,7 @@ const MY_GROUP: NodeDefinition = {
   category: ME_CATEGORY,
   inputs: [],
   outputs: [
-    { id: "group", label: "Group", type: "group" },
+    { id: "group", label: "Group id", type: "group" },
     { id: "name", label: "Name", type: "string" },
   ],
   config: [ACT_AS],
@@ -915,7 +915,7 @@ const JOIN_GROUP: NodeDefinition = {
   title: "Join a group",
   description: "Joins a group, or asks to. Many groups need approval, so read the state back.",
   category: ME_CATEGORY,
-  inputs: [{ id: "group", label: "Group", type: "group", required: true }],
+  inputs: [{ id: "group", label: "Group id", type: "group", required: true }],
   outputs: [
     {
       id: "state",
@@ -938,7 +938,7 @@ const LEAVE_GROUP: NodeDefinition = {
   title: "Leave a group",
   description: "Leaves a group, or cancels a pending request to join one.",
   category: ME_CATEGORY,
-  inputs: [{ id: "group", label: "Group", type: "group", required: true }],
+  inputs: [{ id: "group", label: "Group id", type: "group", required: true }],
   outputs: [{ id: "done", label: "Done", type: "boolean" }],
   config: [ACT_AS],
   body: [
@@ -953,7 +953,7 @@ const REPRESENT_GROUP: NodeDefinition = {
   title: "Represent a group",
   description: "Sets which group badge shows on your profile, or clears it.",
   category: ME_CATEGORY,
-  inputs: [{ id: "group", label: "Group", type: "group", required: true }],
+  inputs: [{ id: "group", label: "Group id", type: "group", required: true }],
   outputs: [{ id: "done", label: "Done", type: "boolean" }],
   config: [
     ACT_AS,
@@ -978,7 +978,7 @@ const POST_TO_GROUP: NodeDefinition = {
   description: "Writes a group post. Needs a role in that group that may do it.",
   category: ME_CATEGORY,
   inputs: [
-    { id: "group", label: "Group", type: "group", required: true },
+    { id: "group", label: "Group id", type: "group", required: true },
     { id: "text", label: "Text", type: "string", required: true },
   ],
   outputs: [{ id: "post", label: "Post", type: "json" }],
@@ -1029,7 +1029,7 @@ const INVITE_MYSELF: NodeDefinition = {
   title: "Invite myself",
   description: "Puts an invite in your own notifications, so a running client can travel there.",
   category: ME_CATEGORY,
-  inputs: [{ id: "instance", label: "Instance", type: "instance", required: true }],
+  inputs: [{ id: "instance", label: "Instance id", type: "instance", required: true }],
   outputs: [{ id: "sent", label: "Sent", type: "boolean" }],
   config: [ACT_AS],
   body: [
@@ -1044,7 +1044,7 @@ const SHOW_IN_VRCHAT: NodeDefinition = {
   title: "Show an instance in VRChat",
   description: "Opens the instance page in the VRChat client on this machine, so you can join it.",
   category: ME_CATEGORY,
-  inputs: [{ id: "instance", label: "Instance", type: "instance", required: true }],
+  inputs: [{ id: "instance", label: "Instance id", type: "instance", required: true }],
   outputs: [
     {
       id: "opened",

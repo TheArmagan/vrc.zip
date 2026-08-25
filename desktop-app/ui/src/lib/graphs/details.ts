@@ -10,8 +10,15 @@
  * measure; this decides.
  */
 
-import type { NodeDefinition, PortDefinition } from "@vrcz/plugin-api/nodes";
-import { AFTER_PORT, ERROR_PORT, visibleInputs, visibleOutputs } from "@vrcz/plugin-api/nodes";
+import {
+  AFTER_PORT,
+  ERROR_PORT,
+  type NodeDefinition,
+  type PortDefinition,
+  portTypeLabel,
+  visibleInputs,
+  visibleOutputs,
+} from "@vrcz/plugin-api/nodes";
 import { FOREACH_AFTER_PORTS } from "@vrcz/shared";
 import { defaultConfig } from "./config.ts";
 import { FOREACH_TYPE } from "./loops.ts";
@@ -120,7 +127,16 @@ export function placeDetails(anchor: Box, card: Size, viewport: Size): DetailPla
 export interface PortRow {
   readonly id: string;
   readonly label: string;
+  /** The wire type, which is what the dot is coloured from. `""` for a sequencing port. */
   readonly type: string;
+  /**
+   * The same type as a person reads it: `user id`, not `user`.
+   *
+   * Carried beside the wire type rather than replacing it, because the two are read by different
+   * things — the dot colour keys on the wire name, and only the badge is for a human. Empty for a
+   * sequencing port, which has no type to name.
+   */
+  readonly typeLabel: string;
   readonly description?: string | undefined;
   /** Inputs only. An unwired required input fails the check at save time, which is worth saying. */
   readonly required?: boolean | undefined;
@@ -145,6 +161,7 @@ function rowOf(port: PortDefinition): PortRow {
     id: port.id,
     label: port.label,
     type: port.type,
+    typeLabel: portTypeLabel(port.type),
     description: port.description,
     required: port.required,
     role: "value",
@@ -187,6 +204,7 @@ export function detailPorts(qualifiedId: string, definition: NodeDefinition): Po
               id: AFTER_PORT,
               label: "run after",
               type: "",
+              typeLabel: "",
               description:
                 "An edge into it means: not until that one has run. Whatever it carries is ignored, except a plain no, which stops this node from running at all.",
               role: "sequence" as const,
@@ -204,6 +222,7 @@ export function detailPorts(qualifiedId: string, definition: NodeDefinition): Po
               id: ERROR_PORT,
               label: "on error",
               type: "string",
+              typeLabel: "string",
               description: "Produced only when this node throws. Unwired, a failure stops the run.",
               role: "error" as const,
             },

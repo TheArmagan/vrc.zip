@@ -288,7 +288,7 @@ function presets(deps: TriggerDeps): readonly Preset[] {
       description: "Fires when a friend's presence goes from offline to online.",
       kinds: ["friend.online"],
       outputs: [
-        { id: "friend", label: "Friend", type: "friend" },
+        { id: "friend", label: "Friend id", type: "friend" },
         { id: "at", label: "At", type: "number" },
         { id: "event", label: "Event", type: "json" },
       ],
@@ -303,7 +303,7 @@ function presets(deps: TriggerDeps): readonly Preset[] {
       description: "Fires when a friend's presence goes from online to offline.",
       kinds: ["friend.offline"],
       outputs: [
-        { id: "friend", label: "Friend", type: "friend" },
+        { id: "friend", label: "Friend id", type: "friend" },
         { id: "at", label: "At", type: "number" },
         { id: "event", label: "Event", type: "json" },
       ],
@@ -319,8 +319,8 @@ function presets(deps: TriggerDeps): readonly Preset[] {
       kinds: ["gamelog.player_join"],
       outputs: [
         { id: "name", label: "Name", type: "string" },
-        { id: "user", label: "User", type: "user" },
-        { id: "location", label: "Instance", type: "instance" },
+        { id: "user", label: "User id", type: "user" },
+        { id: "location", label: "Instance id", type: "instance" },
         {
           id: "isFriend",
           label: "Is a friend",
@@ -360,7 +360,7 @@ function presets(deps: TriggerDeps): readonly Preset[] {
       kinds: ["gamelog.player_leave"],
       outputs: [
         { id: "name", label: "Name", type: "string" },
-        { id: "user", label: "User", type: "user" },
+        { id: "user", label: "User id", type: "user" },
         { id: "isFriend", label: "Is a friend", type: "boolean" },
         { id: "at", label: "At", type: "number" },
       ],
@@ -451,8 +451,8 @@ function presets(deps: TriggerDeps): readonly Preset[] {
        */
       kinds: ["gamelog.location_join"],
       outputs: [
-        { id: "world", label: "World", type: "world" },
-        { id: "location", label: "Instance", type: "instance" },
+        { id: "world", label: "World id", type: "world" },
+        { id: "location", label: "Instance id", type: "instance" },
         { id: "at", label: "At", type: "number" },
       ],
       map: (event) => {
@@ -579,7 +579,7 @@ const PROFILE_ASPECTS: readonly ProfileAspect[] = [
       title: "When someone changes their avatar",
       description: "Fires whenever they put on a different avatar, wherever they are.",
     },
-    port: { id: "avatar", label: "Avatar", type: "avatar" },
+    port: { id: "avatar", label: "Avatar id", type: "avatar" },
     field: "currentAvatar",
   },
   {
@@ -901,8 +901,8 @@ function otherPresets(deps: TriggerDeps): Preset[] {
       outputs: [
         { id: "friend", label: "Who", type: "friend" },
         { id: "name", label: "Name", type: "string" },
-        { id: "location", label: "Instance", type: "instance" },
-        { id: "world", label: "World", type: "world" },
+        { id: "location", label: "Instance id", type: "instance" },
+        { id: "world", label: "World id", type: "world" },
         {
           id: "travellingTo",
           label: "Travelling to",
@@ -1042,8 +1042,8 @@ function selfPresets(): Preset[] {
       description: "Fires when you arrive in an instance.",
       kinds: ["gamelog.location_join", "user.location"],
       outputs: [
-        { id: "location", label: "Instance", type: "instance" },
-        { id: "world", label: "World", type: "world" },
+        { id: "location", label: "Instance id", type: "instance" },
+        { id: "world", label: "World id", type: "world" },
         { id: "source", label: "Source", type: "string", description: "log or vrchat." },
         { id: "at", label: "At", type: "number" },
         { id: "event", label: "Event", type: "json" },
@@ -1223,7 +1223,7 @@ function selfPresets(): Preset[] {
         "Fires when a group membership becomes yours, including one you were approved for.",
       kinds: ["group.joined"],
       outputs: [
-        { id: "group", label: "Group", type: "group" },
+        { id: "group", label: "Group id", type: "group" },
         { id: "at", label: "At", type: "number" },
         { id: "event", label: "Event", type: "json" },
       ],
@@ -1235,7 +1235,7 @@ function selfPresets(): Preset[] {
       description: "Fires when you leave a group, or are removed from one.",
       kinds: ["group.left"],
       outputs: [
-        { id: "group", label: "Group", type: "group" },
+        { id: "group", label: "Group id", type: "group" },
         { id: "at", label: "At", type: "number" },
         { id: "event", label: "Event", type: "json" },
       ],
@@ -1247,7 +1247,7 @@ function selfPresets(): Preset[] {
       description: "Something about your membership moved: visibility, notifications, a ban.",
       kinds: ["group.member_updated"],
       outputs: [
-        { id: "group", label: "Group", type: "group" },
+        { id: "group", label: "Group id", type: "group" },
         { id: "member", label: "Membership", type: "json" },
         { id: "at", label: "At", type: "number" },
       ],
@@ -1268,7 +1268,7 @@ function selfPresets(): Preset[] {
       description: "You were given a role in a group, or one was taken away.",
       kinds: ["group.role_updated"],
       outputs: [
-        { id: "group", label: "Group", type: "group" },
+        { id: "group", label: "Group id", type: "group" },
         { id: "role", label: "Role", type: "string" },
         { id: "roleId", label: "Role id", type: "string" },
         { id: "at", label: "At", type: "number" },
@@ -1298,7 +1298,7 @@ function selfPresets(): Preset[] {
       description: "You entered the queue for a full instance.",
       kinds: ["instance.queue_joined"],
       outputs: [
-        { id: "location", label: "Instance", type: "instance" },
+        { id: "location", label: "Instance id", type: "instance" },
         { id: "position", label: "Position", type: "number" },
         { id: "size", label: "Queue size", type: "number" },
         { id: "wait", label: "Estimated wait", type: "number", description: "Seconds." },
@@ -1325,7 +1325,7 @@ function selfPresets(): Preset[] {
       description: "You reached the front and can go in. The one you have seconds to act on.",
       kinds: ["instance.queue_ready"],
       outputs: [
-        { id: "location", label: "Instance", type: "instance" },
+        { id: "location", label: "Instance id", type: "instance" },
         { id: "expires", label: "Expires", type: "string" },
         { id: "at", label: "At", type: "number" },
         { id: "event", label: "Event", type: "json" },
@@ -1403,8 +1403,8 @@ function gameLogPresets(deps: TriggerDeps): Preset[] {
       description: "The client resolved a destination, just before travelling there.",
       kinds: ["gamelog.destination_set"],
       outputs: [
-        { id: "location", label: "Instance", type: "instance" },
-        { id: "world", label: "World", type: "world" },
+        { id: "location", label: "Instance id", type: "instance" },
+        { id: "world", label: "World id", type: "world" },
         { id: "at", label: "At", type: "number" },
       ],
       map: (event): PortValues | null => {
@@ -1642,7 +1642,7 @@ function gameLogPresets(deps: TriggerDeps): Preset[] {
       config: WHO_FIELDS,
       outputs: [
         { id: "name", label: "Name", type: "string" },
-        { id: "user", label: "User", type: "user" },
+        { id: "user", label: "User id", type: "user" },
         { id: "sticker", label: "Sticker", type: "string" },
         { id: "at", label: "At", type: "number" },
       ],
@@ -1667,7 +1667,7 @@ function gameLogPresets(deps: TriggerDeps): Preset[] {
       config: WHO_FIELDS,
       outputs: [
         { id: "name", label: "Name", type: "string" },
-        { id: "user", label: "User", type: "user" },
+        { id: "user", label: "User id", type: "user" },
         { id: "prop", label: "Prop", type: "string" },
         { id: "type", label: "Type", type: "string", description: "prop or item." },
         { id: "at", label: "At", type: "number" },
@@ -1785,7 +1785,7 @@ function gameLogPresets(deps: TriggerDeps): Preset[] {
       outputs: [
         { id: "type", label: "Type", type: "string" },
         { id: "from", label: "From", type: "string" },
-        { id: "user", label: "User", type: "user" },
+        { id: "user", label: "User id", type: "user" },
         { id: "message", label: "Message", type: "string" },
         { id: "at", label: "At", type: "number" },
       ],
@@ -1807,7 +1807,7 @@ function gameLogPresets(deps: TriggerDeps): Preset[] {
       description: "The log named the account a running client belongs to.",
       kinds: ["gamelog.authenticated"],
       outputs: [
-        { id: "user", label: "User", type: "user" },
+        { id: "user", label: "User id", type: "user" },
         { id: "name", label: "Name", type: "string" },
         { id: "at", label: "At", type: "number" },
       ],
@@ -1961,8 +1961,8 @@ const ON_GAMELOG: NodeDefinition = {
   outputs: [
     { id: "kind", label: "Kind", type: "string" },
     { id: "name", label: "Who", type: "string", description: "Empty for lines about nobody." },
-    { id: "user", label: "User", type: "user", description: "Only when the log named an id." },
-    { id: "location", label: "Instance", type: "instance" },
+    { id: "user", label: "User id", type: "user", description: "Only when the log named an id." },
+    { id: "location", label: "Instance id", type: "instance" },
     { id: "at", label: "At", type: "number" },
     { id: "event", label: "Everything", type: "json" },
   ],
@@ -2059,7 +2059,7 @@ const PIPELINE_OUTPUTS: NodeDefinition["outputs"] = [
   { id: "type", label: "Type", type: "string", description: "VRChat's name for the frame." },
   { id: "kind", label: "Kind", type: "string", description: "vrc.zip's name for it." },
   { id: "subject", label: "About", type: "string", description: "The user, world or group." },
-  { id: "user", label: "User", type: "user", description: "When the subject is a person." },
+  { id: "user", label: "User id", type: "user", description: "When the subject is a person." },
   { id: "at", label: "At", type: "number" },
   { id: "event", label: "Everything", type: "json" },
 ];

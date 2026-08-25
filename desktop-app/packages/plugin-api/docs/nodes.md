@@ -59,6 +59,12 @@ Each absence is a decision, not an oversight:
 
 `isPortType(value)` is the runtime guard; `listElement(type)` gives a list's element type or null.
 
+`portTypeLabel(type)` gives the name to **show a person**: `user` reads as `user id`, `list<user>`
+as `list of user ids`. Use it anywhere a type reaches a human, and never parse it back — the wire
+name is what `isPortType` takes, and only the display name is allowed to change. The editor shows it
+in a port's hover title and in the node details panel, because a port labelled `User` with a bare
+`user` badge beside it reads as a user *record*, and it has only ever been a `usr_…`.
+
 ## `category` groups your nodes in the palette
 
 The editor groups the palette by category, not by owner — vrc.zip ships hundreds of built-in nodes

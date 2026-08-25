@@ -34,6 +34,7 @@ import {
   AFTER_PORT,
   ERROR_PORT,
   evaluateNodeBody,
+  portTypeLabel,
   visibleInputs,
   visibleOutputs,
 } from "@vrcz/plugin-api/nodes";
@@ -78,6 +79,17 @@ interface GraphNodeData {
    * floor is a count the editor writes back into the config.
    */
   readonly wiredInputs?: readonly string[] | undefined;
+  /** The author marked this node to stop the run. Part of the document; see `GraphNode`. */
+  readonly breakpoint?: boolean | undefined;
+  /**
+   * What this node did in the run the editor is inspecting, or absent if that run never reached it.
+   *
+   * "Never reached" and "skipped" are deliberately different, and the difference is worth drawing:
+   * the run going elsewhere is normal, and a wire above you going dead usually is not.
+   */
+  readonly ran?: "ok" | "error" | "skipped" | undefined;
+  /** The failure, when `ran` is `error`. Shown on the card, because that is where it happened. */
+  readonly ranMessage?: string | undefined;
   [key: string]: unknown;
 }
 
@@ -168,6 +180,8 @@ $effect(() => {
 /** Where the loop this card draws is up to, or null when it is not running. */
 const position = $derived(graphRun.loops.get(id) ?? null);
 const active = $derived(graphRun.active.has(id));
+/** A run is stopped **on** this node right now, waiting for somebody to continue it. */
+const paused = $derived(graphRun.pausedNodes.has(id));
 
 const executable = $derived(definition !== null && definition.kind !== "trigger");
 
@@ -185,12 +199,34 @@ function dotStyle(portType: string): string {
   size on a node wrapper, so a card that only said `text-sm` inherited something much larger and
   every node overlapped its neighbour.
 -->
+<!--
+  The debugger's three marks on the card, and they are ranked in that order because they answer
+  progressively less urgent questions:
+
+  **Paused** — a run is stopped *here*, right now, waiting for you. The only one that is about the
+  present tense, so it wins the border outright.
+
+  **Failed** — this node threw in the run being inspected. A destructive ring, which is the same
+  language the loop-rule warning below already speaks.
+
+  **Skipped** — it never ran, because something upstream produced nothing for the port feeding it.
+  Faded rather than ringed: it is not an error, it is an absence, and an absence that shouted would
+  make every branch you did not take look broken.
+
+  A node the run never reached gets none of the three. "The run went elsewhere" and "the wire above
+  you went dead" are different sentences, and only the second one is usually a bug.
+-->
 <div
   class="w-56 rounded-md border bg-card text-xs text-card-foreground shadow-sm transition-shadow"
-  class:border-primary={selected}
-  class:shadow-md={selected || active}
-  class:border-border={!selected}
-  class:opacity-60={definition === null}
+  class:border-primary={selected && !paused}
+  class:shadow-md={selected || active || paused}
+  class:border-border={!selected && !paused && node.ran !== "error"}
+  class:opacity-60={definition === null || node.ran === "skipped"}
+  style={paused
+    ? "border-color: var(--warning); box-shadow: 0 0 0 2px color-mix(in srgb, var(--warning) 45%, transparent);"
+    : node.ran === "error"
+      ? "border-color: var(--destructive);"
+      : ""}
 >
   <!--
     The category strip. Three pixels, and it is the first thing you see at any zoom.
@@ -202,6 +238,21 @@ function dotStyle(portType: string): string {
   <div class="h-[3px] w-full rounded-t-[5px]" style="background: {familyColor(family)}"></div>
 
   <div class="flex items-start gap-2 border-b border-border px-3 py-2">
+    {#if node.breakpoint === true}
+      <!--
+        The debugger's dot, in the place a debugger has always put it: the left gutter, ahead of the
+        thing it stops. Filled while a run is actually sitting here, hollow the rest of the time —
+        the same "one of something / several of something" language the port dots use, which here
+        reads as "this is armed" against "this is happening".
+      -->
+      <span
+        class="mt-0.5 size-3 shrink-0 rounded-full"
+        style={paused
+          ? "background: var(--warning); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning) 30%, transparent);"
+          : "border: 2px solid var(--destructive); background: var(--card);"}
+        title={paused ? "A run is stopped here." : "Breakpoint: runs stop here in debug mode."}
+      ></span>
+    {/if}
     <Icon class="mt-px size-4 shrink-0" style="color: {familyColor(family)}" />
     <div class="min-w-0 flex-1">
       <div class="truncate font-medium">
@@ -269,7 +320,7 @@ function dotStyle(portType: string): string {
         </div>
       {/if}
       {#each inputs as port (port.id)}
-        <div class="relative flex items-center gap-1.5" title="{port.label}: {port.type}">
+        <div class="relative flex items-center gap-1.5" title="{port.label}: {portTypeLabel(port.type)}">
           <Handle
             type="target"
             position={Position.Left}
@@ -286,7 +337,7 @@ function dotStyle(portType: string): string {
 
     <div class="flex min-w-0 flex-col items-end gap-1.5">
       {#each mainPorts as port (port.id)}
-        <div class="relative flex items-center gap-1.5" title="{port.label}: {port.type}">
+        <div class="relative flex items-center gap-1.5" title="{port.label}: {portTypeLabel(port.type)}">
           <span class="truncate">{port.label}</span>
           <Handle
             type="source"
@@ -307,7 +358,7 @@ function dotStyle(portType: string): string {
     <div class="border-t border-dashed border-muted-foreground/40 px-3 py-2 text-[11px]">
       <div class="flex flex-col items-end gap-1.5">
         {#each afterPorts as port (port.id)}
-          <div class="relative flex items-center gap-1.5" title="{port.label}: {port.type}">
+          <div class="relative flex items-center gap-1.5" title="{port.label}: {portTypeLabel(port.type)}">
             <span class="truncate text-muted-foreground">{port.label}</span>
             <Handle
               type="source"

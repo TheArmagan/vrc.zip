@@ -269,6 +269,7 @@ export {
   parseButtonRows,
   parseOptionRows,
   parseSlotRows,
+  portTypeLabel,
   RESERVED_NODE_NAMESPACE,
   type SlotRow,
   slotRowLabel,

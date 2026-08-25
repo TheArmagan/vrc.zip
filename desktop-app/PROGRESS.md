@@ -5666,6 +5666,26 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
        seen; a node title is the thing being read. Even so, `Notify on this computer` and `Send an
        ntfy notification` still truncate - 271px and 290px of title against a budget that has 955px
        for five cards and their gaps.
+293. **A domain port now says `user id` where a person reads it, and stays typed `user` on the
+     wire.** The lattice was right the whole time — `nodes.ts` has said "`user` is a user id, not a
+     user object" since it was written, and `assignable` has let every domain type widen to `string`
+     for just as long. Every surface that *displayed* it implied otherwise: the node card showed a
+     port labelled `User` with a `user: user` hover title, and the details panel put a bare `user`
+     badge beside it. Somebody wires that into a node expecting a record and gets a bare `usr_…`.
+
+     **Retyping the ports to `string` would have been the destructive fix**, and it is the obvious
+     one. `string` is assignable to nothing that wants a `user` (that half of rule 4 is asserted in
+     `nodes.test.ts` and exists so "this port needs a person" can refuse a world id at edit time), so
+     every graph wiring a person from one node into another would have broken on load, and the
+     editor would have lost the picker it draws for a domain port. The bug was never the type.
+
+     So `portTypeLabel()` lives beside `BASE_PORT_TYPES` and is the one place a type is named for a
+     human. One map fixes all 67 builtin domain ports, all 286 generated API nodes and every plugin
+     node at once, which is the argument for it living in `plugin-api` rather than in the UI. On top
+     of that, the 45 builtin ports whose label was the bare domain noun (`User`, `Group`, `World`,
+     `Instance`, `Avatar`, `Friend`) now say `… id` on the card face, because the card shows only the
+     label and a hover title is not where an author reads a port's meaning. Phrase labels (`Who`,
+     `Goes to`, `Wearing`, `Home world`) keep their wording — the badge beside them now carries it.
 
 ---
 

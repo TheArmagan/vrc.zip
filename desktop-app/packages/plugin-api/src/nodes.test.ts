@@ -13,6 +13,7 @@ import {
   PORT_TYPES,
   type PortType,
   parseSlotRows,
+  portTypeLabel,
   slotRowLabel,
   validateNodeDefinition,
   visibleInputCount,
@@ -125,6 +126,39 @@ describe("isPortType", () => {
     expect(isPortType("Friend")).toBe(false);
     expect(isPortType("any")).toBe(false);
     expect(isPortType(undefined)).toBe(false);
+  });
+});
+
+describe("portTypeLabel", () => {
+  test("a domain type names the id it carries, not the domain object", () => {
+    // The whole point: an editor showing a bare `user` beside a port called `User` reads as a user
+    // record, and the value has only ever been a `usr_…`.
+    expect(portTypeLabel("user")).toBe("user id");
+    expect(portTypeLabel("world")).toBe("world id");
+    expect(portTypeLabel("instance")).toBe("instance id");
+    expect(portTypeLabel("group")).toBe("group id");
+    expect(portTypeLabel("avatar")).toBe("avatar id");
+    // A friend is a user who is known to be one. The id is not shaped differently.
+    expect(portTypeLabel("friend")).toBe("user id");
+  });
+
+  test("the plain scalars are named as they always were", () => {
+    expect(portTypeLabel("string")).toBe("string");
+    expect(portTypeLabel("number")).toBe("number");
+    expect(portTypeLabel("boolean")).toBe("boolean");
+    expect(portTypeLabel("json")).toBe("json");
+  });
+
+  test("a list names its element type, and json is not pluralised", () => {
+    expect(portTypeLabel("list<user>")).toBe("list of user ids");
+    expect(portTypeLabel("list<string>")).toBe("list of strings");
+    expect(portTypeLabel("list<json>")).toBe("list of json values");
+  });
+
+  test("every port type has a label, so none can fall through to its wire name", () => {
+    for (const type of PORT_TYPES) {
+      expect(portTypeLabel(type).length).toBeGreaterThan(0);
+    }
   });
 });
 

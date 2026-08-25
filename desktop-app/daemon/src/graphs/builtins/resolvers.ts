@@ -84,7 +84,7 @@ const GET_USER: NodeDefinition = {
     { id: "status", label: "Status", type: "string" },
     { id: "statusMessage", label: "Status message", type: "string" },
     { id: "trust", label: "Trust", type: "string" },
-    { id: "location", label: "Instance", type: "instance" },
+    { id: "location", label: "Instance id", type: "instance" },
     { id: "isFriend", label: "Is a friend", type: "boolean" },
     { id: "user", label: "Everything", type: "json" },
   ],
@@ -121,7 +121,7 @@ const GET_INSTANCE: NodeDefinition = {
   category: "VRChat",
   inputs: [...idInput("instance", "Instance", "instance")],
   outputs: [
-    { id: "world", label: "World", type: "world" },
+    { id: "world", label: "World id", type: "world" },
     { id: "type", label: "Access", type: "string" },
     { id: "region", label: "Region", type: "string" },
     { id: "users", label: "People here", type: "number" },

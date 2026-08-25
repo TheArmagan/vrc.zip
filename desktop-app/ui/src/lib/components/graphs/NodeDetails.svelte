@@ -131,9 +131,11 @@ $effect(() => {
               <div class="min-w-0 flex-1">
                 <div class="flex items-baseline gap-1.5 text-[11px]">
                   <span class:text-destructive={port.role === "error"}>{port.label}</span>
-                  {#if port.type !== ""}
+                  {#if port.typeLabel !== ""}
+                    <!-- The readable name, not the wire type: a `user` badge beside a port called
+                         `User` reads as a user object, and it has only ever been an id. -->
                     <span class="truncate font-mono text-[10px] text-muted-foreground"
-                      >{port.type}</span
+                      >{port.typeLabel}</span
                     >
                   {/if}
                   {#if port.required === true}

@@ -115,6 +115,53 @@ export const LIST_PORT_TYPES: readonly ListPortType[] = BASE_PORT_TYPES.map(
 /** Every port type, scalars first. Iterated by the docs generator and by the editor's palette. */
 export const PORT_TYPES: readonly PortType[] = [...BASE_PORT_TYPES, ...LIST_PORT_TYPES];
 
+/**
+ * What each scalar type is called where a person reads it.
+ *
+ * The domain types carry **ids**, and the type name alone does not say so. An editor showing a port
+ * labelled `User` with a `user` badge beside it reads as a user *object* — somebody wires it into a
+ * node expecting a record, gets a bare `usr_…` string, and the type system was right the whole
+ * time while every surface that displayed it implied otherwise.
+ *
+ * So the display name says `user id` and the type stays `user`. Renaming the type to `string`
+ * instead would be the destructive fix: `string` is assignable to nothing that wants a `user`, so
+ * every existing graph wiring a person out of one node and into another would break, and the editor
+ * would lose the picker it draws for a domain port. The lattice exists precisely so producers do
+ * not have to agree on a payload shape (see {@link BASE_PORT_TYPES}); the bug was never the type.
+ *
+ * `friend` says `user id` too, because that is what it is — the distinction it carries is that the
+ * person is known to be a friend, not that the id is shaped differently.
+ */
+const BASE_PORT_TYPE_LABELS: Readonly<Record<BasePortType, string>> = {
+  friend: "user id",
+  user: "user id",
+  world: "world id",
+  instance: "instance id",
+  group: "group id",
+  avatar: "avatar id",
+  string: "string",
+  number: "number",
+  boolean: "boolean",
+  json: "json",
+};
+
+/**
+ * The human-readable name of a port type, for any surface a person reads: an edge label, a hover
+ * title, the badge in a node's details, generated docs.
+ *
+ * Never parse this back into a type — {@link isPortType} takes the wire name. This is display only,
+ * and unlike the wire name it is allowed to change.
+ */
+export function portTypeLabel(type: PortType): string {
+  const element = listElement(type);
+  if (element !== null) {
+    // `json` is a mass noun and pluralises to nothing readable, so it is named rather than suffixed.
+    const name = BASE_PORT_TYPE_LABELS[element];
+    return element === "json" ? "list of json values" : `list of ${name}s`;
+  }
+  return BASE_PORT_TYPE_LABELS[type as BasePortType] ?? type;
+}
+
 /** The element type of a list port, or null for a scalar. */
 export function listElement(type: PortType): BasePortType | null {
   if (!type.startsWith("list<") || !type.endsWith(">")) return null;

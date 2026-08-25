@@ -759,7 +759,7 @@ const INVITE: NodeDefinition = {
   category: "VRChat",
   inputs: [
     { id: "user", label: "To", type: "user", required: true },
-    { id: "instance", label: "Instance", type: "instance", required: true },
+    { id: "instance", label: "Instance id", type: "instance", required: true },
   ],
   outputs: [{ id: "sent", label: "Sent", type: "boolean" }],
   config: [
@@ -797,7 +797,7 @@ const INVITE_TO_GROUP: NodeDefinition = {
   category: "VRChat",
   inputs: [
     { id: "user", label: "To", type: "user", required: true },
-    { id: "group", label: "Group", type: "group", required: true },
+    { id: "group", label: "Group id", type: "group", required: true },
   ],
   outputs: [{ id: "sent", label: "Sent", type: "boolean" }],
   config: [
@@ -855,7 +855,7 @@ const WEAR_AVATAR: NodeDefinition = {
   // in this file that does. It used to say so in its own description instead, which was the same
   // observation with nowhere to put it. See `me.ts`.
   category: ME_CATEGORY,
-  inputs: [{ id: "avatar", label: "Avatar", type: "avatar", required: true }],
+  inputs: [{ id: "avatar", label: "Avatar id", type: "avatar", required: true }],
   outputs: [{ id: "worn", label: "Worn", type: "boolean" }],
   config: [{ kind: "account", id: "accountId", label: "Act as" }],
   body: [

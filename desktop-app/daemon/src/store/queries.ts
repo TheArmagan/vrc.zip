@@ -59,6 +59,27 @@ export const SQL = {
     WHERE ended_at IS NULL`,
   updateSessionLocation: `
     UPDATE sessions SET current_location = ?, current_world_id = ? WHERE id = ?`,
+  /*
+   * `COALESCE(?, col)` for the same reason as `updateSessionIdentity`: the environment block can
+   * arrive partially (a resumed file that caught only its tail), and a later partial read must not
+   * blank keys an earlier one already established. The OSC port is written the same way, which is
+   * also what enforces "only the first port wins" at the storage layer — OSCQuery advertises on a
+   * random high port and, on some builds, first.
+   */
+  updateSessionEnvironment: `
+    UPDATE sessions SET
+      vrchat_build     = COALESCE(?, vrchat_build),
+      unity_version    = COALESCE(?, unity_version),
+      platform         = COALESCE(?, platform),
+      store            = COALESCE(?, store),
+      device_model     = COALESCE(?, device_model),
+      processor_type   = COALESCE(?, processor_type),
+      graphics_device  = COALESCE(?, graphics_device),
+      system_memory    = COALESCE(?, system_memory),
+      operating_system = COALESCE(?, operating_system),
+      xr_device        = COALESCE(?, xr_device),
+      osc_port         = COALESCE(osc_port, ?)
+    WHERE id = ?`,
   getSession: `SELECT * FROM sessions WHERE id = ?`,
   listOpenSessions: `SELECT * FROM sessions WHERE ended_at IS NULL ORDER BY started_at DESC`,
   listSessions: `SELECT * FROM sessions WHERE account_id = ? ORDER BY started_at DESC LIMIT ?`,

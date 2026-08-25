@@ -44,6 +44,7 @@ function refusingSelf(): GraphSelf {
     get: (_target, property) => {
       if (property === "gameState") return () => ({ running: false, platform: "", location: "" });
       if (property === "accounts") return () => [];
+      if (property === "sessions") return () => [];
       if (property === "me") return async () => await Promise.resolve({ status: "active" });
       return refuse;
     },
@@ -91,7 +92,14 @@ describe("the Me node set", () => {
       expect(result.ok, `${node.definition.id}: ${JSON.stringify(result)}`).toBe(true);
       // `My accounts` is the one node with no account picker, because it is a question *about* the
       // accounts rather than one asked as any of them.
-      if (node.definition.id !== "my-accounts" && node.definition.id !== "show-in-vrchat") {
+      // `My accounts` and `Running game clients` are both questions *about* the machine rather
+      // than ones asked as an account, and `Show in VRChat` opens a link rather than calling
+      // VRChat. None of the three has an account to act as.
+      if (
+        node.definition.id !== "my-accounts" &&
+        node.definition.id !== "my-sessions" &&
+        node.definition.id !== "show-in-vrchat"
+      ) {
         expect(node.definition.config?.some((field) => field.id === "accountId")).toBe(true);
       }
       expect(node.definition.category).toBe(ME_CATEGORY);
@@ -126,6 +134,7 @@ describe("dry run", () => {
     "me",
     "my-account",
     "my-accounts",
+    "my-sessions",
     "my-game",
     "my-notifications",
     "my-groups",

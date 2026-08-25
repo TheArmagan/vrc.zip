@@ -27,6 +27,7 @@ import BellIcon from "@lucide/svelte/icons/bell";
 import CameraIcon from "@lucide/svelte/icons/camera";
 import CircleDotIcon from "@lucide/svelte/icons/circle-dot";
 import CircleSlashIcon from "@lucide/svelte/icons/circle-slash";
+import CpuIcon from "@lucide/svelte/icons/cpu";
 import DoorOpenIcon from "@lucide/svelte/icons/door-open";
 import GlobeIcon from "@lucide/svelte/icons/globe";
 import HeadphonesIcon from "@lucide/svelte/icons/headphones";
@@ -37,10 +38,13 @@ import LogOutIcon from "@lucide/svelte/icons/log-out";
 import MonitorIcon from "@lucide/svelte/icons/monitor";
 import PackageIcon from "@lucide/svelte/icons/package";
 import PencilIcon from "@lucide/svelte/icons/pencil";
+import PlayIcon from "@lucide/svelte/icons/play";
 import PowerIcon from "@lucide/svelte/icons/power";
 import RadioIcon from "@lucide/svelte/icons/radio";
 import ShieldCheckIcon from "@lucide/svelte/icons/shield-check";
+import ShirtIcon from "@lucide/svelte/icons/shirt";
 import SparklesIcon from "@lucide/svelte/icons/sparkles";
+import StickerIcon from "@lucide/svelte/icons/sticker";
 import TriangleAlertIcon from "@lucide/svelte/icons/triangle-alert";
 import UserMinusIcon from "@lucide/svelte/icons/user-minus";
 import UserPlusIcon from "@lucide/svelte/icons/user-plus";
@@ -370,6 +374,118 @@ export function describeEvent(event: LiveEvent): EventDetails {
       };
     }
 
+    case "gamelog.instance_ready":
+      return {
+        ...BLANK,
+        icon: DoorOpenIcon,
+        tone: "place",
+        subject: null,
+        action: "Finished loading the instance",
+      };
+
+    case "gamelog.avatar_change": {
+      // The de-sanitized name first: it is the one a reader can search for, and the two differ only
+      // when VRChat substituted a lookalike character the keyboard cannot produce.
+      const name = str(payload, "displayNameClean") ?? str(payload, "displayName") ?? who;
+      return {
+        ...BLANK,
+        icon: ShirtIcon,
+        tone: "neutral",
+        subject: name,
+        action: "changed avatar",
+        facts: fact("Avatar", str(payload, "avatarName")),
+      };
+    }
+
+    case "gamelog.video_play":
+      return {
+        ...BLANK,
+        icon: PlayIcon,
+        tone: "capture",
+        subject: null,
+        action: "A video started",
+        // The URL, because VRChat never logs the title. Mono: it is read character by character.
+        facts: fact("URL", str(payload, "resolvedUrl") ?? str(payload, "url"), true),
+      };
+
+    case "gamelog.sticker_spawn": {
+      const name = str(payload, "displayNameClean") ?? str(payload, "displayName") ?? who;
+      return {
+        ...BLANK,
+        icon: StickerIcon,
+        tone: "social",
+        subject: name,
+        action: "dropped a sticker",
+      };
+    }
+
+    case "gamelog.prop_spawn": {
+      const name = str(payload, "displayNameClean") ?? str(payload, "displayName") ?? who;
+      return {
+        ...BLANK,
+        icon: PackageIcon,
+        tone: "social",
+        subject: name,
+        // "Prop" and "item" are one feature under two names, and the row says whichever the id did.
+        action: str(payload, "spawnKind") === "item" ? "spawned an item" : "spawned a prop",
+      };
+    }
+
+    case "gamelog.osc_ready": {
+      const port = payload?.port;
+      return {
+        ...BLANK,
+        icon: RadioIcon,
+        tone: "system",
+        subject: null,
+        action: "OSC came up",
+        facts: fact("Port", typeof port === "number" ? String(port) : null, true),
+      };
+    }
+
+    case "gamelog.environment": {
+      const info = asRecord(payload?.info ?? null);
+      return {
+        ...BLANK,
+        icon: CpuIcon,
+        tone: "system",
+        subject: null,
+        action: "Reported its hardware",
+        // Four of the ten keys, chosen as the ones that identify a machine at a glance. The rest is
+        // on the session row, which is where somebody goes when they want all of it.
+        facts: [
+          ...fact("Build", str(info, "VRChat Build")),
+          ...fact("Platform", str(info, "Platform")),
+          ...fact("Graphics", str(info, "Graphics Device Name")),
+          ...fact("Headset", str(info, "XR Device")),
+        ],
+      };
+    }
+
+    case "gamelog.notification": {
+      const from = str(payload, "fromDisplayNameClean") ?? str(payload, "fromDisplayName");
+      return {
+        ...BLANK,
+        icon: BellIcon,
+        tone: "social",
+        subject: from,
+        action: "sent a notification",
+        facts: [
+          ...fact("Type", str(payload, "notificationType")),
+          ...fact("Message", str(payload, "message")),
+        ],
+      };
+    }
+
+    case "gamelog.friend_updated":
+      return {
+        ...BLANK,
+        icon: UsersIcon,
+        tone: "social",
+        subject: who,
+        action: "was updated in the log",
+      };
+
     case "gamelog.destination_set":
       return {
         ...BLANK,
@@ -392,14 +508,18 @@ export function describeEvent(event: LiveEvent): EventDetails {
         location: nestedLocation(payload, "target"),
       };
 
-    case "gamelog.left_room":
+    case "gamelog.left_room": {
+      // A reason means the network dropped the client, which is a different row from walking out.
+      const reason = str(payload, "reason");
       return {
         ...BLANK,
         icon: LogOutIcon,
-        tone: "depart",
+        tone: reason === null ? "depart" : "alert",
         subject: null,
-        action: "Left the instance",
+        action: reason === null ? "Left the instance" : "Was disconnected",
+        facts: fact("Reason", reason),
       };
+    }
 
     case "gamelog.join_failed":
       return {

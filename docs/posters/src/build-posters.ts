@@ -2,16 +2,19 @@
  * Builds the three vrc.zip wall posters as 1024x1536 HTML pages.
  *
  * The graph is redrawn rather than screenshotted so wires and node titles survive being read from
- * across a room; the inset is a real capture of the same graph in the app, so the drawing is
- * checkable against the thing it draws.
+ * across a room.
  *
  * `bun run docs/posters/src/build-posters.ts` writes the HTML next to this file. Each page is
  * exactly 1024x1536 with no scroll, so a headless capture at that viewport is the PNG; the three
  * committed PNGs in the parent directory were made that way.
  *
  * The node titles, port names and config strings are the real ones from the built-in node registry
- * (`daemon/src/graphs/builtins`). If a node's ports change, the drawing goes stale silently, so the
- * inset screenshots are the check: they are captures of these same three graphs in the app.
+ * (`daemon/src/graphs/builtins`), and if a node's ports change the drawing goes stale silently.
+ * That used to be caught by an inset capture of the same graph in the app, printed beside the
+ * sublines; the inset is gone, because at the size these are actually seen - a quad in-world is
+ * about 512px tall - it was a grey smudge either way. Nothing checks the drawing now except
+ * opening the three graphs in the editor and comparing, so do that when a builtin's ports move.
+ * `shots/` is still where `icon.png` lives; the three `app-*.jpg` captures are unreferenced.
  */
 
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -29,15 +32,28 @@ mkdirSync(OUT, { recursive: true });
  * edge. So every margin-adjacent element is placed from this one number rather than from a literal,
  * and it is deliberately generous: 100px is about 10% of the width and 6.5% of the height.
  *
- * The graph band is the one thing allowed past it, and only on the right. Node cards are meant to
- * run off that edge; a clipped card reads as a canvas continuing, where a clipped letter just reads
- * as broken. The leftmost card is therefore placed so its title clears the safe area too.
+ * The graph band is the one thing allowed past it, and only on the right - the dotted canvas runs
+ * to the poster edge so it reads as continuing rather than stopping. The cards on it do not: a
+ * clipped card is fine as an idea but a clipped card *title* just reads as broken, and at 512px
+ * tall a truncated title is not recoverable by leaning in. So cards stay inside 1050, and the
+ * leftmost is placed so its title, not its border, lands on the safe area.
  */
 const M = 100;
 
 const BAND = { x: -40, y: 638, w: 1104, h: 392 };
-const ROW_H = 26;
-const PAD = 14;
+
+/*
+ * Node-card metrics.
+ *
+ * These are sized for the poster being *seen at 512px tall*, not for the 1024x1536 file - a quad
+ * in-world, or a preview thumbnail, is a third of the authored size, so everything below about
+ * 15px in here turns to mush before anyone gets close enough to read it. So the small type went up
+ * by roughly a fifth and the card metrics went with it. The cards did not get correspondingly
+ * wider, because the band has a fixed horizontal budget and five of them have to fit; a couple of
+ * titles now truncate where they used to fit, which is what the editor does anyway.
+ */
+const ROW_H = 31;
+const PAD = 16;
 
 type Row = {
   /** Left-hand port label, if this row has an input. */
@@ -65,9 +81,9 @@ type Node = {
   trigger?: boolean;
 };
 
-const headerH = (n: Node) => (n.sub ? 62 : 46);
-const nodeH = (n: Node) => headerH(n) + n.rows.length * ROW_H + 18;
-const rowY = (n: Node, i: number) => n.y + headerH(n) + 13 + i * ROW_H;
+const headerH = (n: Node) => (n.sub ? 75 : 55);
+const nodeH = (n: Node) => headerH(n) + n.rows.length * ROW_H + 20;
+const rowY = (n: Node, i: number) => n.y + headerH(n) + 15 + i * ROW_H;
 
 /* ---------- icons (Lucide) ---------- */
 
@@ -83,7 +99,7 @@ const ICONS = {
   smartphone: '<rect width="14" height="20" x="5" y="2" rx="2"/><path d="M12 18h.01"/>',
 } as const;
 
-const icon = (k: keyof typeof ICONS, size = 15, color = "currentColor") =>
+const icon = (k: keyof typeof ICONS, size = 18, color = "currentColor") =>
   `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[k]}</svg>`;
 
 /* ---------- rendering ---------- */
@@ -129,25 +145,18 @@ function renderWires(nodes: Node[], wires: Wire[]): string {
   return `<svg class="wires" width="${BAND.w}" height="${BAND.h}">${paths}</svg>`;
 }
 
-/**
- * A canvas zoom, per poster, exactly as the editor has one.
- *
- * Five cards do not fit across 1024px at the same type size four do, and the alternatives were both
- * worse: shrink the type on every poster to suit the busiest one, or let the last card run off the
- * right edge and cut its title mid-word. Zooming one canvas out keeps every title complete and every
- * card inside the safe area, and it is a thing the app itself does, so the drawing stays truthful.
- */
-const zoomOf = (p: Poster) => p.zoom ?? 1;
-
 /* ---------- the three posters ---------- */
 
+/*
+ * Cards are laid out left to right along the chain, and a card's `x` must clear the previous card's
+ * right edge - a wire that has to run backwards to reach the next input reads as a mistake. That,
+ * plus the band's fixed width, is the whole width budget: the leftmost card starts at 95 so its
+ * title lands on the 100px safe area, and the chain has to reach the right edge from there.
+ */
 type Poster = {
   slug: string;
-  /** Canvas zoom. Omitted means 1; see `zoomOf`. */
-  zoom?: number;
   eyebrow: string;
   lines: string[];
-  shot: string;
   nodes: Node[];
   wires: Wire[];
 };
@@ -161,16 +170,15 @@ const posters: Poster[] = [
       "Discord gets a line about it.",
       "Four nodes and a webhook URL.",
     ],
-    shot: "shots/app-discord.jpg",
     nodes: [
       {
         id: "n1",
         title: "When a friend comes online",
         icon: "zap",
         trigger: true,
-        x: 100,
+        x: 95,
         y: 15,
-        w: 255,
+        w: 304,
         rows: [{ r: "Friend", rOn: true }, { r: "At" }, { r: "Event" }],
       },
       {
@@ -178,9 +186,9 @@ const posters: Poster[] = [
         title: "Read field",
         sub: ".displayName",
         icon: "database",
-        x: 375,
+        x: 429,
         y: 205,
-        w: 175,
+        w: 182,
         rows: [
           { l: "run after", lHollow: true, r: "Value", rOn: true },
           { l: "From", lOn: true },
@@ -191,7 +199,7 @@ const posters: Poster[] = [
         title: "Compose text",
         sub: "{a} is online",
         icon: "type",
-        x: 570,
+        x: 641,
         y: 30,
         w: 175,
         rows: [
@@ -204,9 +212,9 @@ const posters: Poster[] = [
         title: "Post to Discord",
         sub: "Discord: text",
         icon: "send",
-        x: 765,
-        y: 220,
-        w: 175,
+        x: 846,
+        y: 215,
+        w: 202,
         rows: [
           { l: "run after", lHollow: true, r: "Status" },
           { l: "Message", lOn: true },
@@ -222,23 +230,21 @@ const posters: Poster[] = [
 
   {
     slug: "02-stranger",
-    zoom: 0.9,
     eyebrow: "NODE GRAPH AUTOMATION FOR VRCHAT",
     lines: [
       "Someone you have never met walks in.",
       "Your desktop says so.",
       "A friend joining stays quiet.",
     ],
-    shot: "shots/app-stranger.jpg",
     nodes: [
       {
         id: "n1",
         title: "When someone joins",
         icon: "zap",
         trigger: true,
-        x: 114,
-        y: 15,
-        w: 200,
+        x: 95,
+        y: 10,
+        w: 230,
         rows: [
           { r: "Name", rOn: true },
           { r: "User" },
@@ -251,9 +257,9 @@ const posters: Poster[] = [
         title: "Compare",
         sub: "left eq false",
         icon: "split",
-        x: 325,
-        y: 20,
-        w: 152,
+        x: 333,
+        y: 15,
+        w: 178,
         rows: [
           { l: "run after", lHollow: true, r: "Result", rOn: true },
           { l: "This", lOn: true },
@@ -265,9 +271,9 @@ const posters: Poster[] = [
         title: "Only if",
         sub: "only if value",
         icon: "split",
-        x: 488,
-        y: 240,
-        w: 145,
+        x: 519,
+        y: 200,
+        w: 161,
         rows: [
           { l: "run after", lHollow: true, r: "Then", rOn: true },
           { l: "If", lOn: true },
@@ -279,9 +285,9 @@ const posters: Poster[] = [
         title: "Compose text",
         sub: "{a} joined, not a friend",
         icon: "type",
-        x: 644,
-        y: 35,
-        w: 155,
+        x: 688,
+        y: 30,
+        w: 174,
         rows: [
           { l: "run after", lHollow: true, r: "Text", rOn: true },
           { l: "A", lOn: true },
@@ -292,9 +298,9 @@ const posters: Poster[] = [
         title: "Notify on this computer",
         sub: "notify: text",
         icon: "bell",
-        x: 810,
-        y: 270,
-        w: 235,
+        x: 870,
+        y: 225,
+        w: 180,
         rows: [
           { l: "run after", lHollow: true, r: "Shown" },
           { l: "Message", lOn: true },
@@ -312,23 +318,21 @@ const posters: Poster[] = [
 
   {
     slug: "03-phone",
-    zoom: 0.95,
     eyebrow: "NODE GRAPH AUTOMATION FOR VRCHAT",
     lines: [
       "A friend moves to another world.",
       "Your phone buzzes, world name in it.",
       "The game does not have to be open.",
     ],
-    shot: "shots/app-ntfy.jpg",
     nodes: [
       {
         id: "n1",
         title: "When someone goes somewhere",
         icon: "zap",
         trigger: true,
-        x: 105,
+        x: 95,
         y: 10,
-        w: 279,
+        w: 310,
         rows: [
           { r: "Who" },
           { r: "Name", rOn: true },
@@ -343,9 +347,9 @@ const posters: Poster[] = [
         title: "Read field",
         sub: ".name",
         icon: "database",
-        x: 398,
-        y: 250,
-        w: 155,
+        x: 424,
+        y: 225,
+        w: 172,
         rows: [
           { l: "run after", lHollow: true, r: "Value", rOn: true },
           { l: "From", lOn: true },
@@ -356,9 +360,9 @@ const posters: Poster[] = [
         title: "Compose text",
         sub: "{a} went to {b}",
         icon: "type",
-        x: 567,
-        y: 30,
-        w: 158,
+        x: 615,
+        y: 25,
+        w: 190,
         rows: [
           { l: "run after", lHollow: true, r: "Text", rOn: true },
           { l: "A", lOn: true },
@@ -370,9 +374,9 @@ const posters: Poster[] = [
         title: "Send an ntfy notification",
         sub: "ntfy vrczip-friends",
         icon: "smartphone",
-        x: 739,
-        y: 255,
-        w: 250,
+        x: 824,
+        y: 230,
+        w: 224,
         rows: [
           { l: "run after", lHollow: true, r: "Status" },
           { l: "Message", lOn: true },
@@ -423,20 +427,27 @@ function page(p: Poster): string {
   }
 
   /* --- top bar --- */
-  .top{position:absolute;left:${M}px;right:${M}px;top:${M}px;display:flex;align-items:center;gap:13px}
-  .top img{width:34px;height:34px;border-radius:8px;display:block}
-  .top .wm{font-size:22px;font-weight:600;letter-spacing:-.01em;color:var(--paper)}
-  .top .meta{margin-left:auto;font-size:13.5px;letter-spacing:.15em;color:var(--muted);text-transform:uppercase}
+  .top{position:absolute;left:${M}px;right:${M}px;top:${M}px;display:flex;align-items:center;gap:14px}
+  .top img{width:38px;height:38px;border-radius:9px;display:block}
+  .top .wm{font-size:26px;font-weight:600;letter-spacing:-.01em;color:var(--paper)}
+  .top .meta{margin-left:auto;font-size:18px;letter-spacing:.15em;color:var(--muted);text-transform:uppercase}
   .rule{position:absolute;left:${M}px;right:${M}px;height:1px;background:var(--line)}
 
   /* --- headline --- */
-  .eyebrow{position:absolute;left:${M}px;top:196px;font-size:14px;letter-spacing:.2em;color:var(--amber)}
+  .eyebrow{position:absolute;left:${M}px;top:194px;font-size:19px;letter-spacing:.2em;color:var(--amber)}
   .strip{position:absolute;left:${M}px;right:${M}px;top:232px;height:4px;background:var(--amber)}
   .outport{position:absolute;right:${M - 6}px;top:228px;width:12px;height:12px;border-radius:50%;background:var(--amber)}
   h1{position:absolute;left:${M - 6}px;top:242px;font-size:216px;line-height:.86;color:var(--amber)}
 
   /* --- subline --- */
-  .sub{position:absolute;left:${M}px;top:1064px;width:424px;font-size:18px;line-height:1.76;color:var(--paper)}
+  /*
+   * The sublines get the whole width between the band and the footer, and they get it because the
+   * app-capture inset used to sit beside them and no longer does. At 512px tall the inset was a
+   * grey smudge of a screenshot - it could only work at a size the poster does not have to give -
+   * so it went, and the three lines took the room. 32px is the largest that keeps the longest of
+   * them (36 monospace characters, 691px) on one line.
+   */
+  .sub{position:absolute;left:${M}px;top:1086px;width:${1024 - 2 * M}px;font-size:32px;line-height:1.65;color:var(--paper)}
   .sub b{display:block;font-weight:400}
   .sub b + b{color:#b9b3a8}
 
@@ -451,7 +462,6 @@ function page(p: Poster): string {
     content:"";position:absolute;inset:0;pointer-events:none;
     background:linear-gradient(90deg,var(--ink) 0,transparent 18px,transparent calc(100% - 18px),var(--ink) 100%);
   }
-  .canvas{position:absolute;left:0;top:0;width:100%;height:100%;transform-origin:0 0}
   .wires{position:absolute;left:0;top:0;overflow:visible}
   .wire{fill:none;stroke:var(--amber);stroke-width:2.4;opacity:.92}
   .wire.dim{stroke:var(--amber-deep);opacity:.5;stroke-dasharray:7 5}
@@ -459,7 +469,7 @@ function page(p: Poster): string {
   .node{position:absolute;background:var(--panel);border:1px solid rgba(236,231,221,.13);border-top:0}
   .nstrip{height:4px;background:rgba(242,194,78,.42)}
   .node.trig .nstrip{background:var(--amber)}
-  .head{display:flex;gap:9px;padding:11px ${PAD}px 0;color:#7f7a71;align-items:flex-start}
+  .head{display:flex;gap:11px;padding:14px ${PAD}px 0;color:#7f7a71;align-items:flex-start}
   .node.trig .head{color:var(--amber)}
   .head svg{flex:none;margin-top:1px}
   /*
@@ -468,24 +478,25 @@ function page(p: Poster): string {
    * means card widths can be chosen for the composition instead of by the longest title.
    */
   .ht{min-width:0;overflow:hidden}
-  .ht b{display:block;font-size:13px;font-weight:600;color:var(--paper);letter-spacing:-.01em;
+  .ht b{display:block;font-size:15.5px;font-weight:600;color:var(--paper);letter-spacing:-.01em;
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .ht em{display:block;font-style:normal;font-size:11.5px;color:var(--muted);margin-top:2px;
+  .ht em{display:block;font-style:normal;font-size:14px;color:var(--muted);margin-top:2px;
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .rows{margin-top:9px}
+  .rows{margin-top:12px}
   .row{display:flex;justify-content:space-between;align-items:center;height:${ROW_H}px;padding:0 ${PAD}px}
-  .p{display:flex;align-items:center;gap:6px;font-size:12px;color:#a8a29a;white-space:nowrap}
+  /*
+   * Port labels stop a size short of the titles. Five cards have to fit across the band and the
+   * row is the widest thing in most of them, so every point here costs width somewhere else - and
+   * a port name is texture at the size the poster is actually seen, where the title is the thing
+   * being read. The titles got the width instead.
+   */
+  .p{display:flex;align-items:center;gap:7px;font-size:13.5px;color:#a8a29a;white-space:nowrap}
   .p.right{justify-content:flex-end}
-  .dot{width:7px;height:7px;border-radius:50%;background:#5d5952;flex:none}
-  .dot.on{background:var(--amber);box-shadow:0 0 0 3px rgba(242,194,78,.16)}
-  .dot.hollow{background:transparent;border:1.5px solid #4c4842}
-  .p .dot{margin-left:-${PAD + 3}px}
-  .p.right .dot{margin-left:0;margin-right:-${PAD + 3}px}
-
-  /* --- inset --- */
-  .cap{position:absolute;right:${M}px;top:1036px;font-size:13px;letter-spacing:.12em;color:var(--muted);text-transform:uppercase}
-  .shot{position:absolute;right:${M}px;top:1064px;width:372px;height:176px;border:1px solid var(--line);overflow:hidden;background:#000}
-  .shot img{width:100%;height:100%;object-fit:cover;display:block}
+  .dot{width:9px;height:9px;border-radius:50%;background:#5d5952;flex:none}
+  .dot.on{background:var(--amber);box-shadow:0 0 0 4px rgba(242,194,78,.16)}
+  .dot.hollow{background:transparent;border:2px solid #4c4842}
+  .p .dot{margin-left:-${PAD + 4}px}
+  .p.right .dot{margin-left:0;margin-right:-${PAD + 4}px}
 
   /* --- the wire that runs from the headline down to the wordmark --- */
   .spine{position:absolute;left:0;top:0;width:1024px;height:1536px;pointer-events:none}
@@ -493,10 +504,10 @@ function page(p: Poster): string {
   .spine circle{fill:var(--amber)}
 
   /* --- footer --- */
-  .foot{position:absolute;left:${M}px;right:${M}px;top:1322px;display:flex;align-items:flex-end}
+  .foot{position:absolute;left:${M}px;right:${M}px;top:1314px;display:flex;align-items:flex-end}
   .foot .url{font-size:84px;line-height:.9;color:var(--amber)}
-  .foot .claims{margin-top:14px;font-size:16px;letter-spacing:.1em;color:var(--paper)}
-  .foot .plat{margin-left:auto;text-align:right;font-size:13.5px;letter-spacing:.15em;color:var(--muted);text-transform:uppercase;line-height:1.85}
+  .foot .claims{margin-top:14px;font-size:22px;letter-spacing:.1em;color:var(--paper)}
+  .foot .plat{margin-left:auto;text-align:right;font-size:18px;letter-spacing:.15em;color:var(--muted);text-transform:uppercase;line-height:1.8}
 </style></head>
 <body><div class="poster">
 
@@ -518,9 +529,6 @@ function page(p: Poster): string {
   </div>
 
   <div class="sub">${p.lines.map((l) => `<b>${l}</b>`).join("")}</div>
-
-  <div class="cap">the same graph, in the app</div>
-  <div class="shot"><img src="${p.shot}" alt=""></div>
 
   <svg class="spine" viewBox="0 0 1024 1536">
     <path d="M${1024 - M} 234 C ${1024 - M + 30} 234, ${1024 - M + 34} 252, ${1024 - M + 34} 282 L ${1024 - M + 34} ${BAND.y - 8}"/>

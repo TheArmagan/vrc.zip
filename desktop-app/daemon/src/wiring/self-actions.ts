@@ -64,6 +64,28 @@ export interface SelfGameState {
 }
 
 /**
+ * One live game client. Structurally the `GraphSessionInfo` the Me nodes declare; see the note
+ * above {@link SelfGameState} for why the two files each state their own shape.
+ *
+ * Sessions, not accounts (PLAN.md §1.7): several clients run at once, and `accountId` is null for
+ * one signed into an account vrc.zip does not manage rather than absent from the list.
+ */
+export interface SelfSessionInfo {
+  readonly id: number;
+  readonly accountId: string | null;
+  readonly displayName: string | null;
+  readonly startedAt: number;
+  readonly vrMode: string | null;
+  readonly location: string | null;
+  readonly worldId: string | null;
+  readonly build: string | null;
+  readonly platform: string | null;
+  readonly graphicsDevice: string | null;
+  readonly xrDevice: string | null;
+  readonly oscPort: number | null;
+}
+
+/**
  * What the graph runtime needs in order to act as the user on the user's own account.
  *
  * Declared as an interface here and satisfied structurally by {@link createSelfActions}, the same
@@ -77,6 +99,8 @@ export interface SelfActions {
   accounts(): SelfAccountSummary[];
   /** Is a game client running for this account right now, and on which platform. */
   gameState(accountId: string | null): SelfGameState;
+  /** Every game client running right now, newest first. No request. */
+  sessions(): SelfSessionInfo[];
 
   /** `PUT /users/{id}` with only the fields the caller actually set. */
   updateProfile(accountId: string, patch: Record<string, JsonValue>): Promise<void>;
@@ -301,6 +325,26 @@ export function createSelfActions(deps: SelfActionDeps): SelfActions {
         platform: session.vr_mode ?? "",
         location: session.current_location ?? "",
       };
+    },
+
+    sessions(): SelfSessionInfo[] {
+      // `listOpenSessions` is already newest-first, and open is the whole definition of running: a
+      // session's row is closed by the quit marker or by the staleness reaper, so anything still
+      // open is a client this machine believes is up.
+      return deps.store.listOpenSessions().map((row) => ({
+        id: row.id,
+        accountId: row.account_id,
+        displayName: row.display_name,
+        startedAt: row.started_at,
+        vrMode: row.vr_mode,
+        location: row.current_location,
+        worldId: row.current_world_id,
+        build: row.vrchat_build,
+        platform: row.platform,
+        graphicsDevice: row.graphics_device,
+        xrDevice: row.xr_device,
+        oscPort: row.osc_port,
+      }));
     },
 
     async updateProfile(accountId, patch): Promise<void> {

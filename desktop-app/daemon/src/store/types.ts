@@ -28,9 +28,34 @@ export type SessionRow = {
   vr_mode: string | null;
   current_location: string | null;
   current_world_id: string | null;
+} & SessionEnvironment;
+
+/**
+ * What the `[UserInfoLogger] Environment Info` block reported, plus the OSC port.
+ *
+ * Split out as its own type because it is written by a different path from the rest of the row:
+ * every other column is known when the session is inserted, these arrive a fraction of a second
+ * later on a multi-line block the parser has to stitch together. Null throughout means the block
+ * was never seen, which is normal for a session resumed from the middle of an old file.
+ */
+export type SessionEnvironment = {
+  vrchat_build: string | null;
+  unity_version: string | null;
+  platform: string | null;
+  store: string | null;
+  device_model: string | null;
+  processor_type: string | null;
+  graphics_device: string | null;
+  system_memory: string | null;
+  operating_system: string | null;
+  xr_device: string | null;
+  osc_port: number | null;
 };
 
-export type NewSession = Omit<SessionRow, "id" | "ended_at" | "exit_kind">;
+export type NewSession = Omit<
+  SessionRow,
+  "id" | "ended_at" | "exit_kind" | keyof SessionEnvironment
+>;
 
 export type EventRow = {
   id: number;

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { parseLine } from "./parser.ts";
+import { LogScanner, parseLine } from "./parser.ts";
 import type { ExitKind, LogSink, SessionEvent, SessionPatch, SessionSnapshot } from "./sessions.ts";
 import { SessionTracker } from "./sessions.ts";
 
@@ -188,4 +188,62 @@ test("sessionStart fires once, before any event", () => {
     displayName: "Kira Test",
     accountId: "acct_1",
   });
+});
+
+/* -------------------------------------------------------------------------------------------- */
+/* Environment, OSC and device de-duplication                                                     */
+/* -------------------------------------------------------------------------------------------- */
+
+test("the environment block lands on the session, merged rather than replaced", () => {
+  const { sink } = recorder();
+  const tracker = makeTracker(sink);
+  feed(tracker, [AUTH]);
+
+  const scanner = new LogScanner();
+  const lines = [
+    "2024.03.09 14:22:08 Log        -  [UserInfoLogger] Environment Info",
+    "VRChat Build: Build 1500",
+    "XR Device: Index",
+    "2024.03.09 14:22:09 Log        -  [UserInfoLogger] Environment Info",
+    "Unity Version: 2022.3.22f1",
+    "2024.03.09 14:22:10 Log        -  [Behaviour] OnLeftRoom",
+  ];
+  for (const line of lines) for (const event of scanner.push(line)) tracker.ingest(event);
+
+  // A second, partial block must not blank what the first one established.
+  expect(tracker.snapshot().environment).toEqual({
+    "VRChat Build": "Build 1500",
+    "XR Device": "Index",
+    "Unity Version": "2022.3.22f1",
+  });
+});
+
+test("only the first OSC port is kept", () => {
+  const { sink, log } = recorder();
+  const tracker = makeTracker(sink);
+  feed(tracker, [
+    AUTH,
+    "2024.03.09 14:22:08 Log        -  Advertising Service VRChat-Client of type OSC on 9000",
+    // OSCQuery lands on a random high port. Taking the newest value recorded that one instead.
+    "2024.03.09 14:22:09 Log        -  OSC::Bound receiver to 127.0.0.1:54123",
+  ]);
+
+  expect(tracker.snapshot().oscPort).toBe(9000);
+  expect(log.updates.filter((entry) => entry.patch.oscPort !== undefined)).toHaveLength(1);
+});
+
+test("a re-logged device is dropped; a real change is not", () => {
+  const { sink, log } = recorder();
+  const tracker = makeTracker(sink);
+  feed(tracker, [
+    AUTH,
+    "2024.03.09 14:22:08 Log        -  [Behaviour] Microphone device changing to Yeti",
+    "2024.03.09 14:22:09 Log        -  [Behaviour] Microphone device changing to Yeti",
+    "2024.03.09 14:22:10 Log        -  [Behaviour] Microphone device changing to Index HMD",
+    // A different kind with the same name is still its own change.
+    "2024.03.09 14:22:11 Log        -  [Behaviour] Audio device changing to Index HMD",
+  ]);
+
+  const devices = log.events.filter((event) => event.kind === "device-change");
+  expect(devices).toHaveLength(3);
 });

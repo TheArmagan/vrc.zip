@@ -85,11 +85,39 @@ export interface GraphGameState {
   readonly location: string;
 }
 
+/**
+ * One running VRChat client, as a graph sees it.
+ *
+ * A *session*, not an account, and the distinction is the whole reason this exists beside
+ * {@link GraphGameState}. Several clients can run at once on different accounts (PLAN.md §1.7),
+ * `gameState` collapses that to a single yes/no about one account, and a graph that wants to know
+ * "how many clients are up, and is one of them on the alt" cannot get there from a boolean.
+ *
+ * `accountId` is null for a client signed into an account vrc.zip does not manage. That is a normal
+ * state and the session is still listed — hiding it would misreport the number of clients running.
+ */
+export interface GraphSessionInfo {
+  readonly id: number;
+  readonly accountId: string | null;
+  readonly displayName: string | null;
+  readonly startedAt: number;
+  readonly vrMode: string | null;
+  readonly location: string | null;
+  readonly worldId: string | null;
+  readonly build: string | null;
+  readonly platform: string | null;
+  readonly graphicsDevice: string | null;
+  readonly xrDevice: string | null;
+  readonly oscPort: number | null;
+}
+
 /** What the Me nodes need. Satisfied by `wiring/self-actions.ts`; see the note on the types above. */
 export interface GraphSelf {
   me(accountId: string, refresh?: boolean): Promise<Record<string, unknown>>;
   accounts(): GraphAccountSummary[];
   gameState(accountId: string | null): GraphGameState;
+  /** Every game client running right now, newest first. No request; reads the session rows. */
+  sessions(): GraphSessionInfo[];
 
   updateProfile(accountId: string, patch: Record<string, unknown>): Promise<void>;
 
@@ -308,6 +336,58 @@ const ME: NodeDefinition = {
     },
   ],
   body: [{ kind: "literal", text: "me" }],
+};
+
+/**
+ * Every running game client, not just this account's.
+ *
+ * `Me` already answers "is the game up" for one account, and that answer is a boolean. This one is
+ * for the questions a boolean cannot reach: how many clients are running, which accounts they are
+ * on, what hardware each is using, and which port to send OSC to. Multi-account is the default
+ * posture here, so "one client" is a case rather than the shape.
+ *
+ * Costs no request. Session rows are written by the log watcher and read straight back.
+ */
+const MY_SESSIONS: NodeDefinition = {
+  id: "my-sessions",
+  kind: "action",
+  title: "Running game clients",
+  description: "Every VRChat client open on this computer, with its instance and hardware.",
+  category: ME_CATEGORY,
+  inputs: [],
+  outputs: [
+    { id: "count", label: "How many", type: "number" },
+    { id: "running", label: "Any running", type: "boolean" },
+    {
+      id: "session",
+      label: "Session",
+      type: "number",
+      description: "The chosen client's session id.",
+    },
+    { id: "account", label: "Account", type: "string" },
+    { id: "name", label: "Signed in as", type: "string" },
+    { id: "instance", label: "Where it is", type: "instance" },
+    { id: "world", label: "World", type: "world" },
+    { id: "mode", label: "Mode", type: "string", description: "vr or desktop." },
+    { id: "headset", label: "Headset", type: "string" },
+    { id: "oscPort", label: "OSC port", type: "number" },
+    { id: "startedAt", label: "Started", type: "number" },
+    { id: "sessions", label: "All of them", type: "json" },
+  ],
+  config: [
+    {
+      kind: "select",
+      id: "pick",
+      label: "Report on",
+      description: "Which client fills the single-value ports. `All of them` always has every one.",
+      options: [
+        { value: "mine", label: "This graph's account, else the newest" },
+        { value: "newest", label: "The newest client" },
+      ],
+      default: "mine",
+    },
+  ],
+  body: [{ kind: "literal", text: "running game clients" }],
 };
 
 const MY_ACCOUNT: NodeDefinition = {
@@ -1030,6 +1110,44 @@ export function meNodes(deps: MeDeps): BuiltinNode[] {
   }
 
   const nodes: BuiltinNode[] = [
+    {
+      definition: MY_SESSIONS,
+      /*
+       * The one Me node with no acting account, deliberately.
+       *
+       * `actingAccount` throws when a graph has none, and the honest answer to "what clients are
+       * running" does not need one — a client signed into an unmanaged account is still a running
+       * client. It reads rows and makes no request, so it is also safe on a hot trigger.
+       */
+      execute: async (_inputs, config, context): Promise<PortValues> => {
+        const sessions = self().sessions();
+        const mine =
+          config.pick === "newest" || context.accountId === null
+            ? undefined
+            : sessions.find((row) => row.accountId === context.accountId);
+        const chosen = mine ?? sessions[0];
+        if (chosen === undefined) {
+          // No client is running. Every single-value port stays unset rather than reporting a
+          // session zero at nowhere, so the branch downstream of them simply does not run.
+          return { count: 0, running: false, sessions: [] };
+        }
+        const world = chosen.worldId ?? worldOfLocation(chosen.location ?? "");
+        return {
+          count: sessions.length,
+          running: true,
+          session: chosen.id,
+          ...(chosen.accountId === null ? {} : { account: chosen.accountId }),
+          ...(text(chosen.displayName) === "" ? {} : { name: chosen.displayName }),
+          ...(text(chosen.location) === "" ? {} : { instance: chosen.location }),
+          ...(world === "" ? {} : { world }),
+          ...(text(chosen.vrMode) === "" ? {} : { mode: chosen.vrMode }),
+          ...(text(chosen.xrDevice) === "" ? {} : { headset: chosen.xrDevice }),
+          ...(chosen.oscPort === null ? {} : { oscPort: chosen.oscPort }),
+          startedAt: chosen.startedAt,
+          sessions: sessions as unknown as PortValues[keyof PortValues],
+        };
+      },
+    },
     {
       definition: ME,
       execute: async (_inputs, config, context): Promise<PortValues> => {

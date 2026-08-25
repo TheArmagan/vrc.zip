@@ -35,6 +35,13 @@ export interface SessionSnapshot {
   vrMode: VrMode | null;
   currentLocation: string | null;
   currentWorldId: string | null;
+  /**
+   * What the `[UserInfoLogger] Environment Info` block said: build, Unity version, GPU, XR device
+   * and the rest. Empty until the block lands, which is within the first second of a session.
+   */
+  environment: Readonly<Record<string, string>>;
+  /** The client's OSC receive port. `null` until it advertises one, and forever if OSC is off. */
+  oscPort: number | null;
 }
 
 /** Fields that can change over a live session's lifetime. Only the changed keys are present. */
@@ -45,6 +52,8 @@ export interface SessionPatch {
   vrMode?: VrMode | null;
   currentLocation?: string | null;
   currentWorldId?: string | null;
+  environment?: Readonly<Record<string, string>>;
+  oscPort?: number | null;
 }
 
 /**
@@ -113,6 +122,8 @@ export class SessionTracker {
 
   private readonly state: SessionSnapshot;
   private buffered: KnownEvent[] = [];
+  /** Last device seen per kind, so a re-log of the same one is dropped rather than emitted. */
+  private readonly lastDevice = new Map<string, string>();
   private authenticated = false;
   private started = false;
   private ended = false;
@@ -138,6 +149,8 @@ export class SessionTracker {
       vrMode: null,
       currentLocation: null,
       currentWorldId: null,
+      environment: {},
+      oscPort: null,
     };
   }
 
@@ -176,6 +189,14 @@ export class SessionTracker {
       this.applyAuthentication(event.displayName, event.userId);
       this.emit(event);
       return;
+    }
+
+    // VRChat re-logs the current microphone on every device refresh, several times a minute on
+    // some setups. Only a *change* is an event; the repeats are the client talking to itself.
+    if (event.kind === "device-change") {
+      const previous = this.lastDevice.get(event.deviceKind);
+      if (previous === event.device) return;
+      this.lastDevice.set(event.deviceKind, event.device);
     }
 
     this.applySideEffects(event);
@@ -236,6 +257,22 @@ export class SessionTracker {
         this.state.currentLocation = null;
         this.state.currentWorldId = null;
         this.sink.sessionUpdate(this.id, { currentLocation: null, currentWorldId: null });
+        return;
+      }
+      case "environment": {
+        // Merged rather than replaced. VRChat writes the block once, but a resumed file can see a
+        // partial one, and losing a key already known to a longer-running read would be a
+        // regression rather than an update.
+        this.state.environment = { ...this.state.environment, ...event.info };
+        this.sink.sessionUpdate(this.id, { environment: this.state.environment });
+        return;
+      }
+      case "osc-ready": {
+        // Only the first port is kept. The OSCQuery service is advertised on a random high port
+        // and, on some builds, first — so a later line overwriting this one records the wrong port.
+        if (this.state.oscPort !== null) return;
+        this.state.oscPort = event.port;
+        this.sink.sessionUpdate(this.id, { oscPort: event.port });
         return;
       }
       default:

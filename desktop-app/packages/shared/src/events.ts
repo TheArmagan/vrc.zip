@@ -172,6 +172,8 @@ export type GamelogEventKind =
   | "gamelog.player_leave"
   | "gamelog.world_enter"
   | "gamelog.location_join"
+  /** `Finished entering world.` — the instance is loaded, which `location_join` does not mean. */
+  | "gamelog.instance_ready"
   | "gamelog.portal_spawn"
   | "gamelog.destination_set"
   | "gamelog.left_room"
@@ -180,7 +182,32 @@ export type GamelogEventKind =
   | "gamelog.app_quit"
   | "gamelog.vr_mode"
   /** The `User Authenticated:` line — what attributes a log file to an account. */
-  | "gamelog.authenticated";
+  | "gamelog.authenticated"
+  /** Someone in the room swapped avatars, from `Switching …` / `Loading avatar for …`. */
+  | "gamelog.avatar_change"
+  /** A video player resolved a URL. The client logs URLs only, never titles. */
+  | "gamelog.video_play"
+  /** A string, image or asset bundle fetch. High volume — bus-only, never written to the feed. */
+  | "gamelog.download"
+  | "gamelog.sticker_spawn"
+  /** `[VRCProps] Prop` and `[VRCItems] Item` are one feature under two spellings. */
+  | "gamelog.prop_spawn"
+  /** Microphone or output device swapped mid-session. Bus-only. */
+  | "gamelog.device_change"
+  /** The client's OSC receive port, once per session. */
+  | "gamelog.osc_ready"
+  /** The `[UserInfoLogger] Environment Info` block: build, GPU, XR device, and the rest. */
+  | "gamelog.environment"
+  /** A VRChat API call the *game client* failed. Bus-only; unrelated to the daemon's own calls. */
+  | "gamelog.api_failure"
+  /**
+   * A `Received Notification:` line. Deliberately never merged with `notification.*`, which is the
+   * pipeline's own delivery of the same fact with more detail — this one exists for the case where
+   * no account is signed into vrc.zip at all.
+   */
+  | "gamelog.notification"
+  /** A `FriendUpdated:` line. Same separation as above. */
+  | "gamelog.friend_updated";
 
 /** A running game client's lifecycle. Sessions are not accounts — see PLAN.md §1.7. */
 export type SessionEventKind = "session.start" | "session.update" | "session.end";
@@ -362,6 +389,7 @@ export const BUS_EVENT_KINDS = [
   "gamelog.player_leave",
   "gamelog.world_enter",
   "gamelog.location_join",
+  "gamelog.instance_ready",
   "gamelog.portal_spawn",
   "gamelog.destination_set",
   "gamelog.left_room",
@@ -370,6 +398,17 @@ export const BUS_EVENT_KINDS = [
   "gamelog.app_quit",
   "gamelog.vr_mode",
   "gamelog.authenticated",
+  "gamelog.avatar_change",
+  "gamelog.video_play",
+  "gamelog.download",
+  "gamelog.sticker_spawn",
+  "gamelog.prop_spawn",
+  "gamelog.device_change",
+  "gamelog.osc_ready",
+  "gamelog.environment",
+  "gamelog.api_failure",
+  "gamelog.notification",
+  "gamelog.friend_updated",
   "session.start",
   "session.update",
   "session.end",

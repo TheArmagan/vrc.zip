@@ -475,7 +475,7 @@ function presets(deps: TriggerDeps): readonly Preset[] {
     ...otherProfilePresets(deps),
     ...otherPresets(deps),
     ...selfPresets(),
-    ...gameLogPresets(),
+    ...gameLogPresets(deps),
   ];
 }
 
@@ -1361,7 +1361,7 @@ function selfPresets(): Preset[] {
  * the branch that needed it — so a graph wired through "a portal appeared" still runs on a line
  * that never said where the portal went.
  */
-function gameLogPresets(): Preset[] {
+function gameLogPresets(deps: TriggerDeps): Preset[] {
   return [
     {
       id: "on-portal-spawn",
@@ -1420,10 +1420,29 @@ function gameLogPresets(): Preset[] {
     {
       id: "on-left-room",
       title: "When I leave an instance",
-      description: "Your client left the room it was in.",
+      description: "Your client left the room it was in, on purpose or because it was dropped.",
       kinds: ["gamelog.left_room"],
-      outputs: [{ id: "at", label: "At", type: "number" }],
-      map: (event): PortValues => ({ at: event.ts }),
+      outputs: [
+        {
+          id: "reason",
+          label: "Reason",
+          type: "string",
+          description: "Only when the network dropped you. Unset on a leave you chose.",
+        },
+        {
+          id: "dropped",
+          label: "Was dropped",
+          type: "boolean",
+          description: "True when VRChat gave a disconnect reason rather than you walking out.",
+        },
+        { id: "at", label: "At", type: "number" },
+      ],
+      map: (event): PortValues => {
+        const reason = text(payloadOf(event).reason);
+        // An unset port rather than an empty string, so a graph wired to `reason` runs only on a
+        // disconnect and a graph wired to `at` runs on every departure.
+        return { ...(reason === null ? {} : { reason }), dropped: reason !== null, at: event.ts };
+      },
     },
     {
       id: "on-join-failed",
@@ -1504,6 +1523,282 @@ function gameLogPresets(): Preset[] {
       map: (event): PortValues | null => {
         const mode = text(payloadOf(event).vrMode);
         return mode === null ? null : { mode, inVr: mode === "vr", at: event.ts };
+      },
+    },
+    {
+      id: "on-instance-ready",
+      title: "When the instance finishes loading",
+      description:
+        "Different from joining: the client has the world downloaded and you can actually move.",
+      kinds: ["gamelog.instance_ready"],
+      outputs: [{ id: "at", label: "At", type: "number" }],
+      map: (event): PortValues => ({ at: event.ts }),
+    },
+    {
+      id: "on-avatar-change",
+      title: "When someone changes avatar",
+      description:
+        "Anyone in your instance, you included. The avatar's name is only on some of these lines.",
+      kinds: ["gamelog.avatar_change"],
+      config: WHO_FIELDS,
+      // The avatar pipeline is the busiest thing in the log: a full room reloading on an instance
+      // transition is a burst of these, all at once.
+      maxFiresPerMinute: 120,
+      outputs: [
+        { id: "name", label: "Name", type: "string" },
+        {
+          id: "avatar",
+          label: "Avatar",
+          type: "string",
+          description: "Unset when the line named the wearer but not what they put on.",
+        },
+        { id: "at", label: "At", type: "number" },
+      ],
+      map: (event, config): PortValues | null => {
+        const payload = payloadOf(event);
+        const name = text(payload.displayNameClean) ?? text(payload.displayName);
+        if (name === null) return null;
+        // These lines name people by display name and never by id, so the who-filter gets a null
+        // id. That is the honest input, not a shortcut: `passesWho` already treats an
+        // unidentifiable person as failing both narrowings while leaving "anyone" open.
+        if (!passesWho(deps, config, event.accountId ?? null, null)) return null;
+        const avatar = text(payload.avatarName);
+        return { name, ...(avatar === null ? {} : { avatar }), at: event.ts };
+      },
+    },
+    {
+      id: "on-video-play",
+      title: "When a video starts",
+      description:
+        "A video player in the world resolved a URL. VRChat logs the link and never the title.",
+      kinds: ["gamelog.video_play"],
+      outputs: [
+        { id: "url", label: "URL", type: "string" },
+        {
+          id: "resolved",
+          label: "Resolved URL",
+          type: "string",
+          description: "What the player turned the link into, when the line said.",
+        },
+        { id: "at", label: "At", type: "number" },
+      ],
+      map: (event): PortValues | null => {
+        const payload = payloadOf(event);
+        const url = text(payload.url);
+        if (url === null) return null;
+        const resolved = text(payload.resolvedUrl);
+        return { url, ...(resolved === null ? {} : { resolved }), at: event.ts };
+      },
+    },
+    {
+      id: "on-download",
+      title: "When the client downloads something",
+      description: "Strings, images and asset bundles a world fetched. Busy worlds do this a lot.",
+      kinds: ["gamelog.download"],
+      /*
+       * The one preset whose default setting is a *filter* rather than "everything".
+       *
+       * A graph wired to every download in a populated world runs a few hundred times an hour by
+       * accident, and nobody who drags this node out is asking for that. Failures are what people
+       * mean, so failures are what it does until told otherwise.
+       */
+      config: [
+        {
+          kind: "select",
+          id: "only",
+          label: "Only",
+          options: [
+            { value: "failures", label: "Failures" },
+            { value: "any", label: "Anything" },
+            { value: "string", label: "Strings" },
+            { value: "image", label: "Images" },
+          ],
+          default: "failures",
+        },
+      ],
+      maxFiresPerMinute: 120,
+      outputs: [
+        { id: "url", label: "URL", type: "string" },
+        { id: "type", label: "Type", type: "string", description: "string, image or asset." },
+        { id: "failed", label: "Failed", type: "boolean" },
+        { id: "at", label: "At", type: "number" },
+      ],
+      map: (event, config): PortValues | null => {
+        const payload = payloadOf(event);
+        const failed = payload.failed === true;
+        const kind = text(payload.downloadKind) ?? "asset";
+        const only = typeof config.only === "string" ? config.only : "failures";
+        if (only === "failures" && !failed) return null;
+        if ((only === "string" || only === "image") && kind !== only) return null;
+        const url = text(payload.url);
+        return { ...(url === null ? {} : { url }), type: kind, failed, at: event.ts };
+      },
+    },
+    {
+      id: "on-sticker-spawn",
+      title: "When someone drops a sticker",
+      description: "With the file id of the sticker, when the line carries one.",
+      kinds: ["gamelog.sticker_spawn"],
+      config: WHO_FIELDS,
+      outputs: [
+        { id: "name", label: "Name", type: "string" },
+        { id: "user", label: "User", type: "user" },
+        { id: "sticker", label: "Sticker", type: "string" },
+        { id: "at", label: "At", type: "number" },
+      ],
+      map: (event, config): PortValues | null => {
+        const payload = payloadOf(event);
+        const user = text(payload.userId);
+        if (!passesWho(deps, config, event.accountId ?? null, user)) return null;
+        const name = text(payload.displayNameClean) ?? text(payload.displayName);
+        return {
+          ...(name === null ? {} : { name }),
+          ...(user === null ? {} : { user }),
+          ...(text(payload.contentId) === null ? {} : { sticker: payload.contentId }),
+          at: event.ts,
+        };
+      },
+    },
+    {
+      id: "on-prop-spawn",
+      title: "When someone spawns a prop",
+      description: "Props and items are one feature under two names, and both arrive here.",
+      kinds: ["gamelog.prop_spawn"],
+      config: WHO_FIELDS,
+      outputs: [
+        { id: "name", label: "Name", type: "string" },
+        { id: "user", label: "User", type: "user" },
+        { id: "prop", label: "Prop", type: "string" },
+        { id: "type", label: "Type", type: "string", description: "prop or item." },
+        { id: "at", label: "At", type: "number" },
+      ],
+      map: (event, config): PortValues | null => {
+        const payload = payloadOf(event);
+        const user = text(payload.userId);
+        if (!passesWho(deps, config, event.accountId ?? null, user)) return null;
+        const name = text(payload.displayNameClean) ?? text(payload.displayName);
+        return {
+          ...(name === null ? {} : { name }),
+          ...(user === null ? {} : { user }),
+          ...(text(payload.contentId) === null ? {} : { prop: payload.contentId }),
+          type: text(payload.spawnKind) ?? "prop",
+          at: event.ts,
+        };
+      },
+    },
+    {
+      id: "on-device-change",
+      title: "When my microphone or audio device changes",
+      description: "Real changes only. VRChat re-logs the current device constantly; those drop.",
+      kinds: ["gamelog.device_change"],
+      outputs: [
+        { id: "device", label: "Device", type: "string" },
+        { id: "type", label: "Type", type: "string", description: "microphone or audio." },
+        { id: "at", label: "At", type: "number" },
+      ],
+      map: (event): PortValues | null => {
+        const payload = payloadOf(event);
+        const device = text(payload.device);
+        if (device === null) return null;
+        return { device, type: text(payload.deviceKind) ?? "audio", at: event.ts };
+      },
+    },
+    {
+      id: "on-osc-ready",
+      title: "When OSC comes up",
+      description: "The port the client is listening on, so a graph can start sending to it.",
+      kinds: ["gamelog.osc_ready"],
+      outputs: [
+        { id: "port", label: "Port", type: "number" },
+        { id: "at", label: "At", type: "number" },
+      ],
+      map: (event): PortValues | null => {
+        const port = payloadOf(event).port;
+        return typeof port === "number" ? { port, at: event.ts } : null;
+      },
+    },
+    {
+      id: "on-environment",
+      title: "When the client reports its hardware",
+      description: "Build, Unity version, GPU and headset, once at the start of every session.",
+      kinds: ["gamelog.environment"],
+      outputs: [
+        { id: "build", label: "VRChat build", type: "string" },
+        { id: "platform", label: "Platform", type: "string" },
+        { id: "gpu", label: "Graphics device", type: "string" },
+        { id: "headset", label: "XR device", type: "string" },
+        { id: "info", label: "Everything", type: "json" },
+        { id: "at", label: "At", type: "number" },
+      ],
+      map: (event): PortValues | null => {
+        const info = payloadOf(event).info;
+        if (typeof info !== "object" || info === null || Array.isArray(info)) return null;
+        const map = info as Record<string, unknown>;
+        // The four named ports are the ones people build on; `info` carries the rest verbatim
+        // rather than growing a port per key VRChat might add.
+        const build = text(map["VRChat Build"]);
+        const platform = text(map.Platform);
+        const gpu = text(map["Graphics Device Name"]);
+        const headset = text(map["XR Device"]);
+        return {
+          ...(build === null ? {} : { build }),
+          ...(platform === null ? {} : { platform }),
+          ...(gpu === null ? {} : { gpu }),
+          ...(headset === null ? {} : { headset }),
+          info,
+          at: event.ts,
+        };
+      },
+    },
+    {
+      id: "on-api-failure",
+      title: "When the game client fails an API call",
+      description:
+        "The game's own requests, not vrc.zip's. Endpoints are grouped, so ids read :id.",
+      kinds: ["gamelog.api_failure"],
+      maxFiresPerMinute: 60,
+      outputs: [
+        { id: "status", label: "Status", type: "number" },
+        { id: "method", label: "Method", type: "string" },
+        { id: "endpoint", label: "Endpoint", type: "string" },
+        { id: "reason", label: "Reason", type: "string" },
+        { id: "at", label: "At", type: "number" },
+      ],
+      map: (event): PortValues => {
+        const payload = payloadOf(event);
+        const status = payload.status;
+        return {
+          ...(typeof status === "number" ? { status } : {}),
+          ...(text(payload.method) === null ? {} : { method: payload.method }),
+          ...(text(payload.endpoint) === null ? {} : { endpoint: payload.endpoint }),
+          ...(text(payload.reason) === null ? {} : { reason: payload.reason }),
+          at: event.ts,
+        };
+      },
+    },
+    {
+      id: "on-log-notification",
+      title: "When the game log shows a notification",
+      description:
+        "Read off the client's own log, so it works with no account signed in. Never merged with the ones the pipeline delivers.",
+      kinds: ["gamelog.notification"],
+      outputs: [
+        { id: "type", label: "Type", type: "string" },
+        { id: "from", label: "From", type: "string" },
+        { id: "user", label: "User", type: "user" },
+        { id: "message", label: "Message", type: "string" },
+        { id: "at", label: "At", type: "number" },
+      ],
+      map: (event): PortValues => {
+        const payload = payloadOf(event);
+        const from = text(payload.fromDisplayNameClean) ?? text(payload.fromDisplayName);
+        return {
+          ...(text(payload.notificationType) === null ? {} : { type: payload.notificationType }),
+          ...(from === null ? {} : { from }),
+          ...(text(payload.fromUserId) === null ? {} : { user: payload.fromUserId }),
+          ...(text(payload.message) === null ? {} : { message: payload.message }),
+          at: event.ts,
+        };
       },
     },
     {

@@ -13,6 +13,7 @@ import graphs012 from "./012_graphs.sql" with { type: "text" };
 import graphState013 from "./013_graph_state.sql" with { type: "text" };
 import graphStores014 from "./014_graph_stores.sql" with { type: "text" };
 import graphLastRun015 from "./015_graph_last_run.sql" with { type: "text" };
+import sessionEnvironment016 from "./016_session_environment.sql" with { type: "text" };
 
 /** One numbered migration. `version` must be unique, contiguous from 1, and ascending. */
 export type Migration = {
@@ -41,4 +42,5 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 13, name: "013_graph_state", sql: graphState013 },
   { version: 14, name: "014_graph_stores", sql: graphStores014 },
   { version: 15, name: "015_graph_last_run", sql: graphLastRun015 },
+  { version: 16, name: "016_session_environment", sql: sessionEnvironment016 },
 ];

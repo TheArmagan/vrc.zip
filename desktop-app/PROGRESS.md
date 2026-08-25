@@ -14,6 +14,12 @@ config-field kind, and a `vrchat://` opener that attaches to a running client in
 second one. Decision 241 adds twenty-eight **named triggers** over the pipeline and the game log, so
 a graph starts on "my status changed" or "a portal appeared" with typed ports, rather than on a
 pattern with a `json` blob.
+**The game log reader caught up with the client on 2026-08-25** (decisions 290 and 291): eleven new
+parsed kinds — video, downloads, sticker and prop spawns, avatar changes, audio devices, OSC, the
+hardware block, client API failures and log-derived notifications — the full instance access model on
+a parsed location, display names carried both as logged and de-sanitized, multi-line entries via
+`LogScanner`, migration 016 for the environment columns, twelve new named trigger nodes and a
+`Running game clients` node. `PARSER-PATTERNS.md` at the repo root is the reference it came from.
 **Decision 285 is the one to read first if a launch ever looks fine and does nothing:** Bun
 kills its subprocesses when the parent exits, so every handover goes through `os/detached.ts`.
 **vrc.zip updates itself as of 2026-08-24** (decisions 283 and 284): the update-on-run path
@@ -5570,6 +5576,88 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      `payload.path`, so normalising in the parser — the only place the raw line exists — fixes the
      feed row, the `gamelog.screenshot` payload and the node's `path` output at once. Normalising
      per consumer would have been three copies of one rule.
+290. **The log parser learned everything the client actually writes, not just the twelve markers
+     the plan listed.** The reference is `PARSER-PATTERNS.md` at the repo root — a pattern-by-pattern
+     write-up from a *different* project (a Rust log analyser), kept because it is the only complete
+     account of these shapes anywhere and it explains why each one is shaped that way.
+
+     Eleven new parser kinds: `instance-ready`, `avatar-change`, `video-play`, `download`,
+     `sticker-spawn`, `prop-spawn`, `device-change`, `osc-ready`, `environment`, `api-failure`,
+     `notification` and `friend-updated`. Each maps onto a `gamelog.*` bus kind and a named trigger
+     node beside the ones already there.
+
+     Four decisions inside it are the ones worth re-reading before changing any of this:
+
+     - **`parseLocation` now derives the access model**, and derives it *after* the loop over tags
+       rather than inside it. `groupAccessType` and `canRequestInvite` are overrides applied to
+       whatever the owner tag said, so reading them inline makes the answer depend on VRChat's field
+       order — which VRChat does not promise. `local:error_…` also parses now, as an offline visit
+       with `access: "unknown"`: it is the world a failed join drops you into, people sit in it for
+       an hour, and refusing it reported those sessions as having visited nowhere at all.
+     - **Names are carried twice.** `displayName` is exactly what the client wrote; `displayNameClean`
+       is the same string with VRChat's lookalike-Unicode substitutions (`․ ‚ ＆ ǃ ＃ ／ ：`) mapped
+       back. One field would have to choose between matching the file and being typeable, and both
+       consumers exist: search wants the clean one, a raw-line lookup wants the logged one.
+     - **`LogScanner` handles multi-line entries, and emits on the header line rather than the next
+       one.** Buffering every entry until the following line arrived is the obvious implementation
+       and is unusable live — a quiet instance would hold a `player-join` unemitted until somebody
+       else moved. Only a line that *opens* a block delays anything, and the only block is
+       `[UserInfoLogger] Environment Info`. One scanner per watched file: two clients writing at once
+       would otherwise interleave their continuation lines into each other's blocks.
+     - **`OnLeftRoom`, `OnDisconnected` and `OnPlayerLeftRoom` are one kind with a nullable reason**,
+       not three kinds. They all mean "no longer in an instance", and a graph author asking that
+       question should not have to wire three triggers to cover it. The trailing space on the
+       existing `OnPlayerLeft ` prefix is what keeps `OnPlayerLeftRoom` out of the player-departure
+       path; without it, that line parses as a departure by a player called "Room".
+
+     **`gamelog.download`, `gamelog.api_failure` and `gamelog.device_change` are `EPHEMERAL`.** They
+     reach the bus, so a graph can trigger on them, and they are never written to the feed. A busy
+     world fetches hundreds of assets an hour, the client re-logs its current microphone on every
+     device refresh, and each would otherwise be a feed row. The device repeats are dropped a second
+     time in `SessionTracker`, against the last device seen per kind — only a *change* is an event.
+
+     Migration 016 puts the environment block on the session row as columns rather than a JSON blob:
+     "which sessions ran on that GPU" and "what build was I on last Tuesday" are the questions a
+     session row exists to answer, and a blob makes every one of them a string operation.
+291. **`Running game clients` is a node, because `Me` answers a different question.** `Me` has a
+     `Game is running` boolean about one account. Sessions are the unit here (PLAN.md §1.7) — several
+     clients run at once, on different accounts, and one of them may be signed into an account
+     vrc.zip does not manage. A boolean cannot express any of that, so the node reports every open
+     session, with the instance, the headset and the OSC port each is on, and lets a config field
+     choose which one fills the single-value ports.
+
+     It is the third Me node with no account picker, alongside `My accounts` and `Show in VRChat`:
+     `actingAccount` throws when a graph has none, and "what is running on this computer" does not
+     need one. It reads rows and makes no request, so it is safe on a hot trigger.
+292. **The posters are typeset for 512px tall, not for the 1024x1536 file, and the app-capture inset
+     is gone.** A poster on a quad in-world is about a third of the authored size, and at a third,
+     every size decision 287 landed on was wrong: 11.5px of config string is under 4px of texture.
+     So the small type went up across the board - port labels, node subtitles, the eyebrow, the
+     meta line, the footer claims, the platform list - and the card metrics (`ROW_H`, `PAD`,
+     `headerH`) went up with it. The large type did not move; it was already fine.
+     - **The sublines took the inset's width and roughly doubled.** 18px in a 424px column became
+       32px across the full 824px. The inset had to go for that, and it deserved to: a 372px-wide
+       screenshot of a node editor is a grey smudge at 512px tall, so it was costing the one block
+       of copy on the poster half its width in exchange for nothing anyone could read. It was also
+       the only check that the redrawn graph still matched the real node registry, so **that check
+       is now manual** - open the three graphs in the editor and compare when a builtin's ports
+       move. The `src/shots/app-*.jpg` captures are unreferenced but still tracked.
+     - **The per-poster `zoom` from decision 287 was dead code and is deleted.** It was declared,
+       documented, and never applied to anything - `zoomOf` was never called, and the `.canvas`
+       rule it needed had no element to match. The two posters carrying `zoom: 0.9` / `0.95` were
+       rendering at 1.0 the whole time.
+     - **Every card width is now derived from a measurement, not chosen.** The rule that replaced
+       the zoom: cards stay inside x=1050 (the poster clips at 1064 and the band's edge fade eats
+       the last 18px), the chain runs strictly left to right, and each card gets the larger of what
+       its title needs and what its widest row needs. Those numbers came out of the rendered page,
+       via `.ht b`'s `scrollWidth` against `clientWidth` per node - guessing at monospace advance
+       widths put four cards off the right edge on the first pass.
+     - **Port labels sit a size below titles (13.5px vs 15.5px), and that is what makes five cards
+       fit.** The rows, not the titles, are the widest thing in most cards, so a point on `.p` is
+       worth more width than a point anywhere else. A port name is texture at the size these are
+       seen; a node title is the thing being read. Even so, `Notify on this computer` and `Send an
+       ntfy notification` still truncate - 271px and 290px of title against a budget that has 955px
+       for five cards and their gaps.
 
 ---
 
@@ -5578,6 +5666,18 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **VRChat does not delimit a `Received Notification:` line consistently, and a comma-only read
+  swallows the next field.** `of type:` is followed by a comma; `sender user id:` is followed by
+  ` of type:` with no comma between them. Reading "to the next `,`" — which is what the pattern
+  reference says, and it is right for the other fields — produced ids ending in
+  `usr_… of type:friendRequest`. Ids have no spaces in them, so the id fields cut at the first space
+  as well. Caught by a test, which is the only reason it is not shipped.
+
+- **`bun test` writes to the real state tree unless `VRCZIP_STATE_DIR` is set, and it says so
+  quietly.** The suite run for this change printed a keychain warning and a "forward proxy fell back
+  to port 54971" line from an orphaned `bun --watch` daemon. Neither failed anything; both are the
+  suite touching real ports and a real credential store.
 
 - **`Bun.spawn(...).unref()` does not outlive its parent on Windows, and nothing says so.** The
   child is started, the pid is real, and it is gone the instant the parent exits. Three separate

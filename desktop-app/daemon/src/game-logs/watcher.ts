@@ -12,7 +12,7 @@
 import { randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { listLogFiles } from "./discovery.ts";
-import { parseLine } from "./parser.ts";
+import { LogScanner, parseLine } from "./parser.ts";
 import type { ExitKind, LogSink, SessionSnapshot } from "./sessions.ts";
 import { SessionTracker } from "./sessions.ts";
 import {
@@ -84,6 +84,12 @@ interface WatchedFile {
    * crash five minutes later.
    */
   tracker: SessionTracker | null;
+  /**
+   * Per-file scanning state, so a multi-line entry that straddles two polled chunks still stitches
+   * back together. One per file and never shared: two clients writing at once would otherwise
+   * interleave their continuation lines into one another's blocks.
+   */
+  scanner: LogScanner;
   /** When this file's client started, for the tracker a dormant file may still grow into. */
   startedAt: number;
   /** Unix ms of the last observed growth, for staleness and poll backoff. */
@@ -305,6 +311,7 @@ export class LogWatcher {
       key,
       tail: new FileTail({ path, startOffset }),
       tracker: null,
+      scanner: new LogScanner(),
       startedAt,
       // Staleness is measured from the file's last write, not from when we happened to adopt it.
       // Seeding `lastGrowthAt` with `now` gives every long-dead log a fresh lease: the daemon
@@ -400,6 +407,7 @@ export class LogWatcher {
       file = {
         ...watched,
         tracker: null,
+        scanner: new LogScanner(),
         startedAt: this.now(),
         finished: false,
         primed: false,
@@ -420,7 +428,9 @@ export class LogWatcher {
     const tracker = file.tracker;
     if (tracker !== null) {
       for (const line of result.lines) {
-        tracker.ingest(parseLine(line));
+        // Through the scanner, not `parseLine` directly: a line with no header is a continuation of
+        // the entry above it, and the `Environment Info` block only exists as one.
+        for (const event of file.scanner.push(line)) tracker.ingest(event);
         if (!tracker.isLive) {
           // A quit marker ended the session mid-chunk. Anything after it is shutdown noise.
           file.finished = true;
@@ -462,7 +472,12 @@ export class LogWatcher {
     // A hard crash can leave the last line unterminated; it is still a real line now that the file
     // is known to be done.
     const pending = file.tail.flushPending();
-    if (pending !== null && tracker.isLive) tracker.ingest(parseLine(pending));
+    if (pending !== null && tracker.isLive) {
+      for (const event of file.scanner.push(pending)) tracker.ingest(event);
+    }
+    // Closes whatever block the file ended inside. A log that stops mid-`Environment Info` still
+    // has a usable block, and dropping it would lose the whole thing for a session that never quit.
+    if (tracker.isLive) for (const event of file.scanner.flush()) tracker.ingest(event);
     tracker.end(endedAt, exitKind);
   }
 }

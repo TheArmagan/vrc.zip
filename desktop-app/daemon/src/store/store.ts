@@ -48,6 +48,7 @@ import type {
   PluginGrantRow,
   PluginRow,
   RetentionConfigRow,
+  SessionEnvironment,
   SessionRow,
   WebhookDeliveryRow,
   WebhookRow,
@@ -195,6 +196,31 @@ export class Store {
       patch.account_id ?? null,
       patch.display_name ?? null,
       patch.vr_mode ?? null,
+      id,
+    );
+  }
+
+  /**
+   * Writes what the client is running on, from the `[UserInfoLogger] Environment Info` block, plus
+   * the OSC port from whichever line advertised it.
+   *
+   * A partial patch is normal and never destructive: an absent key leaves its column alone. The
+   * port is the one field written only when the column is still empty, because the first port
+   * advertised is the right one and later lines are OSCQuery on a random port.
+   */
+  updateSessionEnvironment(id: number, patch: Partial<SessionEnvironment>): void {
+    this.stmts.updateSessionEnvironment.run(
+      patch.vrchat_build ?? null,
+      patch.unity_version ?? null,
+      patch.platform ?? null,
+      patch.store ?? null,
+      patch.device_model ?? null,
+      patch.processor_type ?? null,
+      patch.graphics_device ?? null,
+      patch.system_memory ?? null,
+      patch.operating_system ?? null,
+      patch.xr_device ?? null,
+      patch.osc_port ?? null,
       id,
     );
   }
@@ -1271,6 +1297,23 @@ function prepareAll(db: Database) {
     updateSessionLocation: q<void, [string | null, string | null, number]>(
       SQL.updateSessionLocation,
     ),
+    updateSessionEnvironment: q<
+      void,
+      [
+        string | null,
+        string | null,
+        string | null,
+        string | null,
+        string | null,
+        string | null,
+        string | null,
+        string | null,
+        string | null,
+        string | null,
+        number | null,
+        number,
+      ]
+    >(SQL.updateSessionEnvironment),
     getSession: q<SessionRow, [number]>(SQL.getSession),
     listOpenSessions: q<SessionRow, []>(SQL.listOpenSessions),
     listSessions: q<SessionRow, [string, number]>(SQL.listSessions),

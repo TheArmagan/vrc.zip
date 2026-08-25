@@ -42,6 +42,16 @@ export const EPHEMERAL: ReadonlySet<string> = new Set([
   // something. Writing a row for the local hop would file a graph's internal plumbing under a
   // timeline that is otherwise about what happened in VRChat.
   "graph.signal.local",
+  // The three loudest things the game log says, none of which is an event in anybody's day.
+  //
+  // A busy world fetches hundreds of strings, images and asset bundles an hour; the client retries
+  // API calls it failed and logs each attempt; and VRChat re-logs the current microphone on every
+  // device refresh. They still reach the bus, so a graph can trigger on "an image failed to load"
+  // or "my mic changed" — they just do not each get a row in a timeline that is otherwise a record
+  // of where the user went and who they saw.
+  "gamelog.download",
+  "gamelog.api_failure",
+  "gamelog.device_change",
 ]);
 
 export interface FeedWriterOptions {

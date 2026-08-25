@@ -65,6 +65,10 @@ test("golden: markers.txt parses to the v1 marker table", () => {
         instanceId: "12345",
         region: "us",
         groupId: null,
+        access: "public",
+        ownerId: null,
+        ageGated: false,
+        offline: false,
       },
     },
     {
@@ -85,6 +89,10 @@ test("golden: markers.txt parses to the v1 marker table", () => {
         instanceId: "12345",
         region: "us",
         groupId: "grp_11112222-3333-4444-5555-666677778888",
+        access: "group-public",
+        ownerId: "grp_11112222-3333-4444-5555-666677778888",
+        ageGated: false,
+        offline: false,
       },
     },
     {
@@ -93,6 +101,7 @@ test("golden: markers.txt parses to the v1 marker table", () => {
       level: "Log",
       component: "Behaviour",
       displayName: "Kira Test",
+      displayNameClean: "Kira Test",
       userId: USER,
     },
     {
@@ -101,6 +110,7 @@ test("golden: markers.txt parses to the v1 marker table", () => {
       level: "Log",
       component: "Behaviour",
       displayName: "Someone (Else)",
+      displayNameClean: "Someone (Else)",
       userId: OTHER_USER,
     },
     {
@@ -109,6 +119,7 @@ test("golden: markers.txt parses to the v1 marker table", () => {
       level: "Log",
       component: "Behaviour",
       spawnerDisplayName: null,
+      spawnerDisplayNameClean: null,
       target: null,
       objectPath: "Portals/PortalInternalDynamic",
     },
@@ -125,9 +136,16 @@ test("golden: markers.txt parses to the v1 marker table", () => {
       level: "Log",
       component: "Behaviour",
       displayName: "Someone (Else)",
+      displayNameClean: "Someone (Else)",
       userId: OTHER_USER,
     },
-    { kind: "left-room", at: at("2024.03.09 14:23:10"), level: "Log", component: "Behaviour" },
+    {
+      kind: "left-room",
+      at: at("2024.03.09 14:23:10"),
+      level: "Log",
+      component: "Behaviour",
+      reason: null,
+    },
     {
       kind: "join-failed",
       at: at("2024.03.09 14:23:12"),
@@ -234,6 +252,10 @@ test("locations decompose into world, instance, region and group", () => {
     instanceId: "12345",
     region: "eu",
     groupId: "grp_abc",
+    access: "group-public",
+    ownerId: "grp_abc",
+    ageGated: false,
+    offline: false,
   });
   expect(parseLocation(WORLD)).toEqual({
     location: WORLD,
@@ -241,6 +263,10 @@ test("locations decompose into world, instance, region and group", () => {
     instanceId: null,
     region: null,
     groupId: null,
+    access: "public",
+    ownerId: null,
+    ageGated: false,
+    offline: false,
   });
   expect(parseLocation("private")).toBeNull();
 });

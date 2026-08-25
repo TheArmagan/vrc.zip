@@ -7,7 +7,7 @@ import type {
   SessionPatch,
   SessionSnapshot,
 } from "../game-logs/index.ts";
-import type { Store } from "../store/index.ts";
+import type { SessionEnvironment, Store } from "../store/index.ts";
 
 /**
  * Bridges the log watcher to the store and the EventBus.
@@ -21,6 +21,7 @@ import type { Store } from "../store/index.ts";
 const KIND: Record<string, GamelogEventKind> = {
   "world-enter": "gamelog.world_enter",
   "location-join": "gamelog.location_join",
+  "instance-ready": "gamelog.instance_ready",
   "player-join": "gamelog.player_join",
   "player-leave": "gamelog.player_leave",
   "portal-spawn": "gamelog.portal_spawn",
@@ -31,6 +32,37 @@ const KIND: Record<string, GamelogEventKind> = {
   "app-quit": "gamelog.app_quit",
   "vr-mode": "gamelog.vr_mode",
   authenticated: "gamelog.authenticated",
+  "avatar-change": "gamelog.avatar_change",
+  "video-play": "gamelog.video_play",
+  download: "gamelog.download",
+  "sticker-spawn": "gamelog.sticker_spawn",
+  "prop-spawn": "gamelog.prop_spawn",
+  "device-change": "gamelog.device_change",
+  "osc-ready": "gamelog.osc_ready",
+  environment: "gamelog.environment",
+  "api-failure": "gamelog.api_failure",
+  notification: "gamelog.notification",
+  "friend-updated": "gamelog.friend_updated",
+};
+
+/**
+ * `Environment Info` keys to their `sessions` columns.
+ *
+ * VRChat's own spelling on the left, so the map reads against a real log line, and the column on
+ * the right. A key absent from this table is a key the block carried and the row does not store,
+ * which is deliberate — see migration 016.
+ */
+const ENVIRONMENT_COLUMN: Readonly<Record<string, keyof SessionEnvironment>> = {
+  "VRChat Build": "vrchat_build",
+  "Unity Version": "unity_version",
+  Platform: "platform",
+  Store: "store",
+  "Device Model": "device_model",
+  "Processor Type": "processor_type",
+  "Graphics Device Name": "graphics_device",
+  "System Memory Size": "system_memory",
+  "Operating System": "operating_system",
+  "XR Device": "xr_device",
 };
 
 interface EventWithSubject {
@@ -107,6 +139,16 @@ export function createLogSink(store: Store, bus: EventBus): LogSink {
       // reached SQLite, so `GET /api/sessions` served `accountId: null` forever and a reload put
       // the session straight back to "unlinked". Every session row in a months-old database was
       // unattributed for this one reason.
+      if (patch.environment !== undefined || patch.oscPort !== undefined) {
+        const columns: Partial<SessionEnvironment> = {};
+        for (const [key, value] of Object.entries(patch.environment ?? {})) {
+          const column = ENVIRONMENT_COLUMN[key];
+          if (column !== undefined && column !== "osc_port") columns[column] = value;
+        }
+        if (patch.oscPort !== undefined && patch.oscPort !== null) columns.osc_port = patch.oscPort;
+        if (Object.keys(columns).length > 0) store.updateSessionEnvironment(rowId, columns);
+      }
+
       if (
         patch.accountId !== undefined ||
         patch.displayName !== undefined ||

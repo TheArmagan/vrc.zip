@@ -19,13 +19,20 @@ export {
   VRCHAT_STEAM_APP_ID,
 } from "./discovery.ts";
 export {
+  type DeviceKind,
+  type DownloadKind,
+  desanitizeName,
+  type InstanceAccess,
   type KnownEvent,
   type LineHeader,
+  LogScanner,
+  normalizeEndpoint,
   type ParsedEvent,
   type ParsedLocation,
   parseHeader,
   parseLine,
   parseLocation,
+  stripRichText,
   type VrMode,
 } from "./parser.ts";
 export {

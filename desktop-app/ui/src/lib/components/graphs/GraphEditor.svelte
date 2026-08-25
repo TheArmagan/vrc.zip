@@ -14,6 +14,16 @@
 
   **A node draws from its definition, never from an RPC.** See `GraphNodeCard.svelte`.
 
+  **Undo is a stack of whole documents, and it owns the dirty flag.** `commit()` is called after
+  every gesture that edits the graph and is the only thing that writes history; the Unsaved badge
+  asks the stack whether the canvas is standing where the last save was, so walking back to it turns
+  the badge off. Copy and paste move a `GraphDocument` fragment, which is the same shape a save
+  writes — see `clipboard.ts` — so pasting is the load path with new ids.
+
+  **Two selections.** Svelte Flow owns `node.selected` (the rubber band, Ctrl+click, Ctrl+A);
+  `selectedId` is the inspector's single-node pointer. They agree on the ordinary one-node case and
+  come apart deliberately when more is selected.
+
   The inspector on the right edits the selected node's config. A `secret` field is write-only: it
   posts to its own route and is never read back, so the box is always empty and says so.
 -->
@@ -25,10 +35,12 @@ import CircleStopIcon from "@lucide/svelte/icons/circle-stop";
 import EraserIcon from "@lucide/svelte/icons/eraser";
 import FlaskConicalIcon from "@lucide/svelte/icons/flask-conical";
 import PlayIcon from "@lucide/svelte/icons/play";
+import RedoIcon from "@lucide/svelte/icons/redo-2";
 import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
 import StepForwardIcon from "@lucide/svelte/icons/step-forward";
 import SaveIcon from "@lucide/svelte/icons/save";
 import TrashIcon from "@lucide/svelte/icons/trash-2";
+import UndoIcon from "@lucide/svelte/icons/undo-2";
 import {
   AFTER_PORT,
   assignable,
@@ -73,8 +85,16 @@ import { Badge } from "$lib/components/ui/badge/index.js";
 import * as DropdownMenu from "$lib/components/ui/dropdown-menu/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
 import { Input } from "$lib/components/ui/input/index.js";
+import {
+  getBuffer,
+  parseFragment,
+  placeFragment,
+  serializeFragment,
+  setBuffer,
+} from "$lib/graphs/clipboard.ts";
 import { defaultConfig } from "$lib/graphs/config.ts";
 import { clampSidebarWidth, SIDEBAR_DEFAULT_WIDTH } from "$lib/graphs/details.ts";
+import { GraphHistory, type Snapshot, touchedBetween } from "$lib/graphs/history.svelte.ts";
 import { iconFor } from "$lib/graphs/icons.ts";
 import { loopProblems, RUN_NOW_TYPE } from "$lib/graphs/loops.ts";
 import { NodePreview } from "$lib/graphs/node-preview.svelte.ts";
@@ -135,6 +155,43 @@ let aside = $state<HTMLElement | null>(null);
 /** What each node of this graph is remembering, so the inspector can offer to forget it. */
 let memory = $state<GraphMemoryEntry[]>([]);
 let running = $state(false);
+
+/**
+ * Undo and redo for this canvas. See `history.svelte.ts` for what an entry is and why it is a whole
+ * snapshot; `commit()` below is the only thing that writes to it.
+ */
+const history = new GraphHistory<Node, Edge>();
+
+/**
+ * Where the pointer last was over the canvas, in client coordinates, so a paste can land under it.
+ *
+ * A plain `let` and not `$state`: it is written on every pointer move and read only inside event
+ * handlers, and making the whole editor re-render sixty times a second to remember a coordinate
+ * would be a real cost for no visible gain.
+ */
+let pointer: { x: number; y: number } | null = null;
+
+/** Where the nodes being dragged started, so a drag that moved nothing is not an undo step. */
+let dragFrom: Map<string, { x: number; y: number }> | null = null;
+
+function stayedPut(from: ReadonlyMap<string, { x: number; y: number }>, node: Node): boolean {
+  const was = from.get(node.id);
+  return was !== undefined && was.x === node.position.x && was.y === node.position.y;
+}
+
+/**
+ * The counter behind every id this editor mints.
+ *
+ * The old `Date.now()` plus the array length was fine for one node at a time and wrong the moment
+ * paste existed: five nodes created in the same millisecond off the same array got five ids that
+ * differed only by an index that was itself changing. One monotonic sequence cannot collide with
+ * itself, and the timestamp keeps it from colliding with a previous session's.
+ */
+let idSeq = 0;
+function newId(kind: "node" | "edge"): string {
+  idSeq += 1;
+  return `${kind === "node" ? "n" : "e"}${Date.now().toString(36)}${idSeq.toString(36)}`;
+}
 
 /** The right-click menu: where, and what it offers. Null when nothing is open. */
 let menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
@@ -740,6 +797,219 @@ const selectedMemory = $derived(
   selectedId === null ? null : (memory.find((entry) => entry.nodeId === selectedId) ?? null),
 );
 
+/* ---------------------------------------------------------------------------------------------- */
+/* Selection, history and the clipboard                                                             */
+/* ---------------------------------------------------------------------------------------------- */
+
+/**
+ * Two selections, and they are not the same thing.
+ *
+ * Svelte Flow owns `node.selected` — the rubber band, Ctrl+click and Ctrl+A all write it, and it is
+ * what the canvas draws a ring around. `selectedId` is the *inspector's* pointer: one node, the one
+ * whose settings the right-hand panel is editing. Clicking a card sets both, which is why the
+ * ordinary one-node case is unchanged.
+ *
+ * They come apart the moment a second node joins, and the panel is honest about it rather than
+ * showing one node's fields while three are highlighted: with more than one selected it shows the
+ * count and what can be done to all of them.
+ */
+const selectedNodes = $derived(nodes.filter((node) => node.selected === true));
+const multiSelected = $derived(selectedNodes.length > 1);
+
+/** What copy, cut, duplicate and delete act on: the canvas selection, or the inspected node. */
+function targetIds(): string[] {
+  const marked = nodes.filter((node) => node.selected === true).map((node) => node.id);
+  if (marked.length > 0) return marked;
+  return selectedId === null ? [] : [selectedId];
+}
+
+/**
+ * Records what the document now looks like.
+ *
+ * Called *after* the change, by every gesture that edits the document, and it is also where `dirty`
+ * comes from: the badge asks the history whether the canvas is standing on the entry that was
+ * saved, rather than being a flag that only ever goes one way. Undo back to the saved state and the
+ * badge goes out.
+ *
+ * `key` is passed only by config edits, which coalesce per field visit.
+ */
+function commit(key: string | null = null): void {
+  history.push({ nodes, edges }, key);
+  dirty = !history.atSaved;
+}
+
+function undo(): void {
+  restore(history.undo());
+}
+
+function redo(): void {
+  restore(history.redo());
+}
+
+/**
+ * Puts a snapshot back on the canvas, and selects what it changed.
+ *
+ * The selection is the point: an undo that quietly repaired something two screens away looks
+ * exactly like an undo that did nothing. Whatever the step touched ends up highlighted, and a
+ * single touched node also becomes the inspected one so the panel follows the eye. A step that
+ * touched no node at all — undoing a paste, which removes them — leaves nothing selected.
+ */
+function restore(snapshot: Snapshot<Node, Edge> | null): void {
+  if (snapshot === null) return;
+  const touched = touchedBetween(nodes, snapshot.nodes);
+  nodes = snapshot.nodes.map((node) => ({ ...node, selected: touched.has(node.id) }));
+  edges = [...snapshot.edges];
+  const only = touched.size === 1 ? [...touched][0] : undefined;
+  if (only !== undefined) selectedId = only;
+  else if (selectedId !== null && !snapshot.nodes.some((node) => node.id === selectedId)) {
+    selectedId = null;
+  }
+  dirty = !history.atSaved;
+}
+
+function selectAll(): void {
+  if (nodes.length === 0) return;
+  nodes = nodes.map((node) => (node.selected === true ? node : { ...node, selected: true }));
+}
+
+function clearSelection(): void {
+  nodes = nodes.map((node) => (node.selected === true ? { ...node, selected: false } : node));
+  selectedId = null;
+}
+
+function selectOnly(ids: ReadonlySet<string>): void {
+  nodes = nodes.map((node) => ({ ...node, selected: ids.has(node.id) }));
+}
+
+/**
+ * The chosen nodes as a document, which is exactly what the clipboard carries.
+ *
+ * Only the wires *inside* the chosen set come along. A wire with one end outside has nothing to
+ * attach to once the copy lands somewhere else, and inventing an attachment would be guessing.
+ */
+function fragment(ids: readonly string[]): GraphDocument | null {
+  if (ids.length === 0) return null;
+  const chosen = new Set(ids);
+  const document = toDocument(chosen);
+  return document.nodes.length === 0 ? null : document;
+}
+
+/**
+ * Copies the selection into the buffer, and best-effort onto the system clipboard.
+ *
+ * The keyboard path does not need the second half — a real `copy` event carries the clipboard with
+ * it — but a menu item has no event to write into, and a copy from the menu that could not then be
+ * pasted into another window would be a menu item that quietly does less than the shortcut beside
+ * it. The write is fire and forget: a browser that refuses it leaves the buffer, which is what a
+ * paste falls back to anyway.
+ */
+function copySelection(): GraphDocument | null {
+  const document = fragment(targetIds());
+  if (document === null) return null;
+  setBuffer(document);
+  void navigator.clipboard?.writeText(serializeFragment(document)).catch(() => {});
+  return document;
+}
+
+function deleteIds(ids: readonly string[]): void {
+  if (ids.length === 0) return;
+  const gone = new Set(ids);
+  nodes = nodes.filter((node) => !gone.has(node.id));
+  edges = edges.filter((edge) => !gone.has(edge.source) && !gone.has(edge.target));
+  if (selectedId !== null && gone.has(selectedId)) selectedId = null;
+  commit();
+}
+
+/**
+ * Puts a fragment on the canvas: new ids, moved to where the paste happened, and selected.
+ *
+ * A node whose type this build does not have still lands, marked stale — the same marker a node
+ * whose type moved under it already wears. Dropping it instead would turn a paste from a machine
+ * with one more plugin installed into a silently smaller graph, and the daemon refuses the save
+ * with the missing type named, which is a better error than a card that never appeared.
+ */
+function pasteFragment(document: GraphDocument, at: { x: number; y: number } | null): void {
+  const placed = placeFragment(document, at, newId);
+  const added = placed.nodes.map((node) => ({
+    // The catalogue arriving late must not mark everything stale: before it loads, nothing is known
+    // to be missing.
+    ...toFlowNode(node, graphs.loaded && graphs.definition(node.type) === null),
+    selected: true,
+  }));
+  nodes = [...nodes.map((node) => ({ ...node, selected: false })), ...added];
+  edges = [...edges, ...placed.edges.map(toFlowEdge)];
+  const first = added[0];
+  if (first !== undefined && added.length === 1) selectedId = first.id;
+  commit();
+}
+
+/** Where a paste lands: under the pointer when it is over the canvas, otherwise offset from source. */
+function pastePoint(): { x: number; y: number } | null {
+  if (pointer === null) return null;
+  return toFlow(pointer.x, pointer.y);
+}
+
+function duplicateSelection(): void {
+  const document = fragment(targetIds());
+  if (document === null) return;
+  // No clipboard, and no pointer either: a duplicate belongs beside its original, whatever the
+  // mouse happens to be doing.
+  pasteFragment(document, null);
+}
+
+/**
+ * Ctrl+C and Ctrl+X, caught as the browser's own clipboard events rather than as keystrokes.
+ *
+ * The event is where the clipboard actually is: `clipboardData` is writable synchronously here and
+ * needs no permission, while `navigator.clipboard.writeText` is a promise behind a prompt that a
+ * packaged app should not be asking for. The in-memory buffer is written too, so a paste still
+ * works if the platform hands back nothing.
+ *
+ * A copy while the caret is in a text field is a text copy, and is left alone.
+ */
+function onCopy(event: ClipboardEvent): void {
+  if (isTextTarget(event.target)) return;
+  const document = copySelection();
+  if (document === null) return;
+  event.preventDefault();
+  event.clipboardData?.setData("text/plain", serializeFragment(document));
+}
+
+function onCut(event: ClipboardEvent): void {
+  if (isTextTarget(event.target)) return;
+  const ids = targetIds();
+  const document = copySelection();
+  if (document === null) return;
+  event.preventDefault();
+  event.clipboardData?.setData("text/plain", serializeFragment(document));
+  deleteIds(ids);
+}
+
+function onPaste(event: ClipboardEvent): void {
+  if (isTextTarget(event.target)) return;
+  const text = event.clipboardData?.getData("text/plain") ?? "";
+  // Ours from anywhere beats ours from here, and anything else on the clipboard is not a graph, so
+  // it falls through to what was last copied rather than to nothing happening.
+  const document = parseFragment(text) ?? getBuffer();
+  if (document === null) return;
+  event.preventDefault();
+  pasteFragment(document, pastePoint());
+}
+
+/**
+ * Whether a key belongs to whatever is being typed into.
+ *
+ * The inspector is a column of text fields, and Ctrl+Z in one of them means "take back what I just
+ * typed" — the browser's own undo, on that field's own history. Claiming it for the canvas would
+ * make the panel the one place in the app where undo does something else.
+ */
+function isTextTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  const tag = target.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+}
+
 async function load(id: string): Promise<void> {
   loadError = null;
   try {
@@ -748,6 +1018,9 @@ async function load(id: string): Promise<void> {
     const stale = new Set(loaded.staleNodes);
     nodes = loaded.definition.nodes.map((node) => toFlowNode(node, stale.has(node.id)));
     edges = loaded.definition.edges.map(toFlowEdge);
+    // The document as it is on disk is the bottom of the stack. Nothing before a load is undoable:
+    // the canvas the user was looking at a moment ago belonged to a different graph.
+    history.reset({ nodes, edges });
     dirty = false;
     memory = await api.graphs.memory(id);
   } catch (cause) {
@@ -845,21 +1118,21 @@ function isValidConnection(connection: Connection | Edge): boolean {
  * and the refusal looked identical to a type error, so "why will this not connect" had two very
  * different answers with one appearance.
  */
-function onconnect(connection: Connection): void {
-  dirty = true;
+function onconnect(connection: Connection, record = true): void {
   const replaced = edges.filter(
     (edge) => !(edge.target === connection.target && edge.targetHandle === connection.targetHandle),
   );
   edges = [
     ...replaced,
     {
-      id: `e${String(Date.now())}${String(edges.length)}`,
+      id: newId("edge"),
       source: connection.source,
       sourceHandle: connection.sourceHandle ?? null,
       target: connection.target,
       targetHandle: connection.targetHandle ?? null,
     },
   ];
+  if (record) commit();
 }
 
 /**
@@ -949,13 +1222,21 @@ function offerConversion(event: MouseEvent | TouchEvent, from: DroppedHandle, to
     items: bridges.map((bridge) => ({
       label: `Insert "${bridge.definition.title}" and wire it`,
       onSelect: () => {
-        const id = addNode(bridge.qualifiedId, bridge.definition, between(source.nodeId, target.nodeId));
-        onconnect({
-          source: source.nodeId,
-          sourceHandle: source.id ?? null,
-          target: id,
-          targetHandle: bridge.inputId,
-        });
+        const id = addNode(
+          bridge.qualifiedId,
+          bridge.definition,
+          between(source.nodeId, target.nodeId),
+          false,
+        );
+        onconnect(
+          {
+            source: source.nodeId,
+            sourceHandle: source.id ?? null,
+            target: id,
+            targetHandle: bridge.inputId,
+          },
+          false,
+        );
         onconnect({
           source: id,
           sourceHandle: bridge.outputId,
@@ -1054,9 +1335,14 @@ function pick(choice: PickerChoice): void {
   const request = picking;
   picking = null;
   if (request === null) return;
-  const id = addNode(choice.qualifiedId, choice.definition, request.at);
   const wire = request.wire;
-  if (wire === null || choice.portId === null) return;
+  // The node and the wire it was dropped from are one gesture, so they are one undo step.
+  const id = addNode(choice.qualifiedId, choice.definition, request.at, wire === null);
+  if (wire === null) return;
+  if (choice.portId === null) {
+    commit();
+    return;
+  }
   onconnect(
     wire.side === "source"
       ? { source: wire.nodeId, sourceHandle: wire.portId, target: id, targetHandle: choice.portId }
@@ -1144,36 +1430,41 @@ function addNode(
   definition: NodeDefinition,
   /** Where, in flow coordinates. The palette has no opinion; a dropped wire does. */
   at?: { x: number; y: number },
+  /**
+   * Whether this add is an undo step on its own. False for the conversion node, which is one step
+   * with the two wires it arrives between — undoing it in three presses would leave the graph in a
+   * state nobody built.
+   */
+  record = true,
 ): string {
-  const id = `n${String(Date.now())}${String(nodes.length)}`;
+  const id = newId("node");
   nodes = [
-    ...nodes,
+    ...nodes.map((node) => (node.selected === true ? { ...node, selected: false } : node)),
     {
       id,
       type: "vrcz",
       position: at ?? freeSpot(),
       data: { qualifiedId, config: defaultConfig(definition), stale: false },
+      selected: true,
     },
   ];
   selectedId = id;
-  dirty = true;
+  if (record) commit();
   return id;
 }
 
 function removeNode(id: string): void {
-  nodes = nodes.filter((node) => node.id !== id);
-  edges = edges.filter((edge) => edge.source !== id && edge.target !== id);
-  if (selectedId === id) selectedId = null;
-  dirty = true;
+  deleteIds([id]);
 }
 
+/** The header's remove button: everything selected, which is usually the one node in the panel. */
 function removeSelected(): void {
-  if (selectedId !== null) removeNode(selectedId);
+  deleteIds(targetIds());
 }
 
 function removeEdge(id: string): void {
   edges = edges.filter((edge) => edge.id !== id);
-  dirty = true;
+  commit();
 }
 
 /**
@@ -1188,16 +1479,56 @@ function removeEdge(id: string): void {
  * nobody types into a field by accident.
  */
 function ondelete({ nodes: gone }: { nodes: Node[] }): void {
-  dirty = true;
   if (selectedId !== null && gone.some((node) => node.id === selectedId)) selectedId = null;
+  commit();
+}
+
+/**
+ * What the empty canvas offers on a right-click.
+ *
+ * Paste is the reason it exists — a menu is the only place a paste can say *where*, and it pastes
+ * at the pointer that opened it rather than at wherever the mouse drifted to afterwards. Undo and
+ * redo are here as well because the canvas is where they are wanted and the toolbar is a long way
+ * from the middle of a large graph.
+ */
+function canvasMenu(event: MouseEvent): MenuItem[] {
+  const at = toFlow(event.clientX, event.clientY);
+  const held = getBuffer();
+  return [
+    ...(held === null
+      ? []
+      : [
+          {
+            label: `Paste ${held.nodes.length} node${held.nodes.length === 1 ? "" : "s"}`,
+            onSelect: () => pasteFragment(held, at),
+          },
+        ]),
+    ...(nodes.length === 0 ? [] : [{ label: "Select all", onSelect: selectAll }]),
+    ...(history.canUndo ? [{ label: "Undo", onSelect: undo }] : []),
+    ...(history.canRedo ? [{ label: "Redo", onSelect: redo }] : []),
+  ];
 }
 
 /** What a node's context menu offers. The definition is only needed for the label. */
 function nodeMenu(node: Node): MenuItem[] {
   const remembered = memory.find((entry) => entry.nodeId === node.id);
   const hasBreakpoint = breakpoints.has(node.id);
+  // Everything selected, which after the right-click handler above always includes this node. The
+  // count is in the labels because "Copy" over a selection of four should not look like it means
+  // the one under the pointer.
+  const count = targetIds().length;
+  const many = count > 1 ? ` ${String(count)} nodes` : "";
   return [
     { label: "Select", onSelect: () => (selectedId = node.id) },
+    { label: `Copy${many}`, onSelect: () => void copySelection() },
+    { label: `Duplicate${many}`, onSelect: duplicateSelection },
+    {
+      label: `Cut${many}`,
+      onSelect: () => {
+        const ids = targetIds();
+        if (copySelection() !== null) deleteIds(ids);
+      },
+    },
     /*
      * Offered on every node whatever the debug switch says.
      *
@@ -1222,7 +1553,11 @@ function nodeMenu(node: Node): MenuItem[] {
             onSelect: () => void forget(node.id),
           },
         ]),
-    { label: "Delete node", danger: true, onSelect: () => removeNode(node.id) },
+    {
+      label: count > 1 ? `Delete ${String(count)} nodes` : "Delete node",
+      danger: true,
+      onSelect: () => (count > 1 ? deleteIds(targetIds()) : removeNode(node.id)),
+    },
   ];
 }
 
@@ -1308,14 +1643,14 @@ function toggleBreakpoint(nodeId: string): void {
         }
       : node,
   );
-  dirty = true;
+  commit();
 }
 
 /** Takes every breakpoint off, which is the gesture after a debugging session rather than during. */
 function clearBreakpoints(): void {
   if (breakpoints.size === 0) return;
   nodes = nodes.map((node) => ({ ...node, data: { ...node.data, breakpoint: false } }));
-  dirty = true;
+  commit();
 }
 
 /**
@@ -1357,7 +1692,10 @@ function setConfig(fieldId: string, value: string | number | boolean): void {
       ? { ...node, data: { ...node.data, config: { ...(node.data as { config: object }).config, [fieldId]: value } } }
       : node,
   );
-  dirty = true;
+  // One undo step per field visit: everything typed into this field while it holds focus amends the
+  // same entry, and the panel's `focusout` closes it. Ctrl+Z takes the whole value back, not a
+  // character of it. See `history.svelte.ts`.
+  commit(`${id}:${fieldId}`);
 }
 
 /**
@@ -1602,9 +1940,18 @@ function pickField(
   });
 }
 
-function toDocument(): GraphDocument {
+/**
+ * The canvas as a document.
+ *
+ * `only` narrows it to a fragment, which is what the clipboard copies: the named nodes, and the
+ * edges with **both** ends among them. Save passes nothing and gets the whole graph, which is the
+ * same code path — a fragment and a graph being one shape is what lets a paste reuse the load.
+ */
+function toDocument(only?: ReadonlySet<string>): GraphDocument {
+  const kept = only === undefined ? nodes : nodes.filter((node) => only.has(node.id));
+  const inside = new Set(kept.map((node) => node.id));
   return {
-    nodes: nodes.map((node) => {
+    nodes: kept.map((node) => {
       const data = node.data as { qualifiedId: string; config: Record<string, never> };
       const breakpoint = (node.data as { breakpoint?: boolean }).breakpoint === true;
       return {
@@ -1617,11 +1964,13 @@ function toDocument(): GraphDocument {
         ...(breakpoint ? { breakpoint: true } : {}),
       };
     }),
-    edges: edges.map((edge) => ({
-      id: edge.id,
-      from: { node: edge.source, port: edge.sourceHandle ?? "" },
-      to: { node: edge.target, port: edge.targetHandle ?? "" },
-    })),
+    edges: edges
+      .filter((edge) => inside.has(edge.source) && inside.has(edge.target))
+      .map((edge) => ({
+        id: edge.id,
+        from: { node: edge.source, port: edge.sourceHandle ?? "" },
+        to: { node: edge.target, port: edge.targetHandle ?? "" },
+      })),
   };
 }
 
@@ -1631,6 +1980,9 @@ async function save(): Promise<void> {
   try {
     const saved = await api.graphs.update(graphId, { definition: toDocument() });
     graph = saved;
+    // The stack is kept, not cleared: undoing past a save is a normal thing to want. What changes
+    // is which entry counts as clean, so walking back to it takes the Unsaved badge off again.
+    history.markSaved();
     dirty = false;
     graphs.replace({ ...saved });
   } catch (cause) {
@@ -1642,23 +1994,60 @@ async function save(): Promise<void> {
 }
 
 /**
- * Ctrl+S, or Cmd+S.
+ * The canvas keyboard.
  *
- * **`preventDefault` runs whether or not there is anything to save**, and that is the point of
- * handling it at all. The browser's own Ctrl+S offers to write the page to disk, which is never what
- * somebody in a node editor meant — so the shortcut is claimed for as long as this component is
- * mounted, and a press with nothing dirty is simply a no-op rather than a Save Page dialog.
+ * **Ctrl+S is the exception to every rule below and always has been.** `preventDefault` runs whether
+ * or not there is anything to save, because the browser's own Ctrl+S offers to write the page to
+ * disk and that is never what somebody in a node editor meant. It also has no field guard: Ctrl+S
+ * with the caret in a config field is exactly when people reach for it, and the daemon takes whole
+ * documents, so being mid-edit changes nothing about what gets written.
  *
- * No input guard. Ctrl+S while the caret is in a config field is exactly when people reach for it,
- * and the daemon takes whole documents, so the field being mid-edit changes nothing about what gets
- * written.
+ * **Everything else defers to whatever is being typed into.** The inspector is a column of text
+ * fields, and Ctrl+Z, Ctrl+A and Ctrl+X in one of them mean the ordinary text things. A canvas that
+ * stole them would make the panel the one place in the app where undo does something else.
+ *
+ * Copy, cut and paste are not here at all: they arrive as the browser's own clipboard events, which
+ * is where the clipboard actually is. See `onCopy`.
  */
 function onWindowKey(event: KeyboardEvent): void {
-  if (event.key !== "s" && event.key !== "S") return;
+  const key = event.key.toLowerCase();
+  if (key === "s" && (event.ctrlKey || event.metaKey) && !event.altKey) {
+    event.preventDefault();
+    if (saving || !dirty) return;
+    void save();
+    return;
+  }
+  if (isTextTarget(event.target)) return;
+  if (key === "escape") {
+    // The menu and the picker close themselves on Escape, and stealing the same press to also
+    // deselect would make one key do two things at once.
+    if (menu !== null || picking !== null) return;
+    clearSelection();
+    return;
+  }
   if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
-  event.preventDefault();
-  if (saving || !dirty) return;
-  void save();
+  switch (key) {
+    case "z":
+      event.preventDefault();
+      if (event.shiftKey) redo();
+      else undo();
+      return;
+    case "y":
+      event.preventDefault();
+      redo();
+      return;
+    case "a":
+      event.preventDefault();
+      selectAll();
+      return;
+    case "d":
+      // Claimed from the browser's bookmark dialog, which is the reason a duplicate shortcut has to
+      // preventDefault even when there is nothing selected to duplicate.
+      event.preventDefault();
+      duplicateSelection();
+      return;
+    default:
+  }
 }
 
 async function saveSecret(fieldId: string): Promise<void> {
@@ -1674,7 +2063,12 @@ async function saveSecret(fieldId: string): Promise<void> {
 }
 </script>
 
-<svelte:window onkeydown={onWindowKey} />
+<svelte:window
+  onkeydown={onWindowKey}
+  oncopy={onCopy}
+  oncut={onCut}
+  onpaste={onPaste}
+/>
 
 <header class="flex shrink-0 items-center gap-3 border-b border-border px-4 py-3">
   <Button variant="ghost" size="sm" href={hrefFor("graphs")}>
@@ -1699,7 +2093,39 @@ async function saveSecret(fieldId: string): Promise<void> {
     </Badge>
   {/if}
   <div class="ml-auto flex items-center gap-2">
-    {#if selectedId !== null}
+    <!--
+      Undo and redo, next to the thing they are about.
+
+      Disabled rather than hidden: a pair of controls that vanish when the stack is empty makes the
+      toolbar move under the pointer, and "there is nothing to undo" is worth saying rather than
+      leaving somebody to hunt for a button that was there a second ago.
+    -->
+    <Button
+      variant="ghost"
+      size="sm"
+      disabled={!history.canUndo}
+      title="Undo (Ctrl+Z)"
+      aria-label="Undo"
+      onclick={undo}
+    >
+      <UndoIcon class="size-4" />
+    </Button>
+    <Button
+      variant="ghost"
+      size="sm"
+      disabled={!history.canRedo}
+      title="Redo (Ctrl+Y)"
+      aria-label="Redo"
+      onclick={redo}
+    >
+      <RedoIcon class="size-4" />
+    </Button>
+    {#if selectedNodes.length > 1}
+      <Button variant="ghost" size="sm" onclick={removeSelected}>
+        <TrashIcon class="size-4" />
+        Remove {selectedNodes.length} nodes
+      </Button>
+    {:else if selectedId !== null}
       <Button variant="ghost" size="sm" onclick={removeSelected}>
         <TrashIcon class="size-4" />
         Remove node
@@ -1947,7 +2373,19 @@ async function saveSecret(fieldId: string): Promise<void> {
     -->
     <!-- svelte-ignore a11y_no_static_element_interactions -- the double-click is a shortcut for
          something the palette on the left already does with a keyboard and a click. -->
-    <div class="min-w-0 flex-1" bind:this={canvas} ondblclick={onCanvasDoubleClick}>
+    <div
+      class="min-w-0 flex-1"
+      bind:this={canvas}
+      ondblclick={onCanvasDoubleClick}
+      onpointermove={(event: PointerEvent) => {
+        pointer = { x: event.clientX, y: event.clientY };
+      }}
+      onpointerleave={() => {
+        // Forgotten on the way out, so a paste driven from the keyboard after the mouse has left
+        // lands beside its original rather than at the last place the pointer happened to be.
+        pointer = null;
+      }}
+    >
       <SvelteFlow
         bind:nodes
         bind:edges
@@ -1958,11 +2396,29 @@ async function saveSecret(fieldId: string): Promise<void> {
         {onconnectend}
         onnodeclick={({ node }) => (selectedId = node.id)}
         onpaneclick={() => (selectedId = null)}
-        onnodedragstop={() => (dirty = true)}
+        onnodedragstart={({ nodes: moving }) => {
+          dragFrom = new Map(moving.map((node) => [node.id, { ...node.position }]));
+        }}
+        onnodedragstop={({ nodes: moved }) => {
+          // A drag that moved nothing is a click, and a click is not an edit. Svelte Flow reports a
+          // drag either way, which is how a plain click on a card used to raise the Unsaved badge.
+          const from = dragFrom;
+          dragFrom = null;
+          if (from !== null && moved.every((node) => stayedPut(from, node))) return;
+          commit();
+        }}
         onnodecontextmenu={({ node, event }) => {
           event.preventDefault();
           selectedId = node.id;
+          // Right-clicking a node outside the selection makes it the selection, which is what every
+          // other canvas does: the menu that opens has to be about the thing under the pointer, not
+          // about three others somewhere else.
+          if (node.selected !== true) selectOnly(new Set([node.id]));
           menu = { x: event.clientX, y: event.clientY, items: nodeMenu(node) };
+        }}
+        onpanecontextmenu={({ event }) => {
+          event.preventDefault();
+          menu = { x: event.clientX, y: event.clientY, items: canvasMenu(event) };
         }}
         onedgecontextmenu={({ edge, event }) => {
           event.preventDefault();
@@ -2017,12 +2473,46 @@ async function saveSecret(fieldId: string): Promise<void> {
       />
     {/if}
 
-    <aside class="w-72 shrink-0 overflow-y-auto border-l border-border p-3">
+    <!--
+      `focusout` is what ends a field's undo step. Everything typed into one box while it holds
+      focus is one entry; leaving the box closes it, so coming back to the same field later starts a
+      new one rather than swallowing the earlier visit. One handler on the panel instead of one per
+      input, because it is the same event for all of them.
+    -->
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <aside
+      class="w-72 shrink-0 overflow-y-auto border-l border-border p-3"
+      onfocusout={() => history.seal()}
+    >
       {#if saveError !== null}
         <ErrorNote message={saveError} />
       {/if}
 
-      {#if selected !== null && selectedDefinition !== null}
+      {#if multiSelected}
+        <!--
+          More than one node is selected, so there is no single set of settings to show. The count
+          and what can be done to all of them, rather than one node's fields while four are ringed
+          on the canvas — which would be the panel editing something other than what it appears to.
+        -->
+        <div class="mb-3 border-b border-border pb-3">
+          <div class="text-sm font-medium">{selectedNodes.length} nodes selected</div>
+          <p class="mt-1 text-[11px] text-muted-foreground">
+            Click one node to edit its settings.
+          </p>
+        </div>
+        <div class="flex flex-col gap-2">
+          <Button variant="secondary" size="sm" onclick={duplicateSelection}>
+            Duplicate (Ctrl+D)
+          </Button>
+          <Button variant="secondary" size="sm" onclick={() => void copySelection()}>
+            Copy (Ctrl+C)
+          </Button>
+          <Button variant="ghost" size="sm" onclick={removeSelected}>
+            <TrashIcon class="size-4" />
+            Delete
+          </Button>
+        </div>
+      {:else if selected !== null && selectedDefinition !== null}
         {@const owner = graphs.nodeTypes.get(selectedQualifiedId ?? "")?.owner ?? "vrcz"}
         {@const Icon = iconFor(selectedDefinition.category, owner)}
         <!--
@@ -2083,6 +2573,15 @@ async function saveSecret(fieldId: string): Promise<void> {
               <Button size="sm" variant="secondary" onclick={() => void saveSecret(field.id)}>
                 Save secret
               </Button>
+              <!--
+                Said here because there is nowhere else it could be said. A secret lives in the
+                credential store under the node's id and is never readable from the editor, so a
+                copied or duplicated node is a new id with nothing behind it. Leaving that silent
+                means a graph that looks complete and fails at run time on an empty credential.
+              -->
+              <p class="text-[11px] text-muted-foreground">
+                Copies and duplicates do not carry this. A pasted node needs its own.
+              </p>
             {:else if field.kind === "boolean"}
               <input
                 id={`cfg-${field.id}`}

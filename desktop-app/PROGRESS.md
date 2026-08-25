@@ -43,6 +43,10 @@ the palette drop a new node where the canvas is, not where the graph's origin is
 keys, one input port per key, over a `variadicInputSlots` mechanism and a `keys` config kind.
 **Decision 261 adds three launchers.** `Open VRChat` (through Steam or the executable, with every
 documented launch option that is not a `-force-` one), `Open a Steam app`, and `Open an executable`.
+**Decision 295 gives the canvas an undo stack, a selection that holds more than one node, and a
+clipboard.** Ctrl+Z/Y, Ctrl+C/X/V, Ctrl+D and Ctrl+A, a rubber band and Ctrl+click, and a paste that
+lands under the pointer. The stack also owns the Unsaved badge, so undoing back to the saved state
+turns it off.
 **Current phase:** Phase 4 is **complete** — 4.1 through 4.6, built on 2026-08-23 from the spec the
 planning pass of the same day produced (decision 206). Graphs are stored, run, edited on a canvas,
 armed behind a hold, and shared as files. What remains in the plan is Phase 5, packaging and polish,
@@ -647,10 +651,17 @@ get an **error output port**; and the port lattice grows **`list<T>`**.
       `graph.node.error` whether or not anybody is debugging. **Built** (decision 294). Verified by
       clicking, per the bar below, which is how the 202 bug in §Gotchas turned up.
 
+- [x] **4.11 Undo, multi-select and the clipboard** — not in the original plan, and the gap decision
+      206 left open on purpose: "undo/redo beyond what the browser gives" is nothing at all in a node
+      editor, and with an explicit save and no version history the canvas was the one screen where a
+      mistake was permanent. A stack of whole documents that also owns the Unsaved badge, a selection
+      that can hold more than one node, and a clipboard whose payload is a `GraphDocument` fragment.
+      **Built** (decision 295). Verified by clicking, per the bar below.
+
 **Phase 4 is complete.** 4.1 through 4.6 are built, and everything below the checklist that once
-said "Phase 4's" now has a caller. What is *not* here, stated rather than implied: no undo/redo on
-the canvas beyond what the browser gives, no graph versioning, and no `/app` surface — all three
-were decided against in decision 206 rather than skipped.
+said "Phase 4's" now has a caller. What is *not* here, stated rather than implied: no graph
+versioning and no `/app` surface — both were decided against in decision 206 rather than skipped.
+The third of those, "no undo/redo on the canvas", was reversed by decision 295 and is now 4.11.
 
 **Verification bar:** `bun test` over the engine (topological order, a `wait` across a simulated
 restart, all three concurrency modes, error ports, every ceiling); webhook, ntfy and OSC actions
@@ -5755,6 +5766,63 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      placeholders rather than plausible fakes, on purpose: a blank id fails at the node that needed
      it, saying so, where a fake `usr_…` would fail somewhere inside VRChat instead.
 
+295. **Undo, redo, multi-select and a clipboard on the canvas — and the undo stack is what owns the
+     Unsaved badge.** Decision 206 said no undo/redo "beyond what the browser gives", which in a node
+     editor is nothing at all: the browser undoes text in a field and has never heard of a node. Save
+     is explicit and there is no version history, so the canvas was the one screen in the app where a
+     mistake was permanent the moment you made it. This is that gap closed, plus the selection model
+     it needs.
+
+     - **A stack of whole documents, not a log of inverse operations** (`ui/src/lib/graphs/history.svelte.ts`).
+       The canvas already replaces its `nodes` and `edges` arrays wholesale on every change — it has
+       to, they are `$state.raw` bound into Svelte Flow — so a snapshot is a copy of two arrays that
+       were about to be rebuilt anyway. An operation log would need an inverse written for each of
+       the dozen places that mutate the document, and a missing one is an undo that corrupts the
+       graph silently rather than failing loudly. Bounded at 100 entries, reset on load, not
+       persisted. A save does **not** clear it: undoing past a save is a normal thing to want.
+     - **`dirty` is now derived from the stack, not a flag that only goes one way.** The stack knows
+       which entry is on disk, so undoing back to it clears the Unsaved badge and redoing away puts
+       it back. That is the honest answer to "does this differ from the file", and it is the reason
+       `markSaved()` exists rather than a plain `dirty = false`.
+     - **One undo step per field visit.** A push carrying the same coalescing key as the entry on top
+       replaces it, and the inspector's `focusout` seals the run. Ctrl+Z takes back the whole value
+       you typed, not its last character. Everything structural passes no key and always stacks.
+     - **An undo selects what it changed.** A step that repaired something two screens away is
+       otherwise indistinguishable from one that did nothing, and a single touched node also becomes
+       the inspected one so the panel follows the eye.
+     - **Two selections, deliberately.** Svelte Flow owns `node.selected` — its rubber band, its
+       Ctrl+click, and our Ctrl+A write it. `selectedId` stays the inspector's single-node pointer.
+       They agree on the ordinary one-node case; with more than one selected the panel shows the
+       count and the bulk actions rather than one node's fields while four are ringed, which would
+       be the panel editing something other than what it appears to.
+     - **The clipboard payload is a `GraphDocument` in a small envelope** (`ui/src/lib/graphs/clipboard.ts`),
+       which is the whole design: a fragment of a graph and a graph are the same shape, so pasting is
+       the load path with new ids, and what lands on the system clipboard is readable, pasteable JSON
+       rather than a private encoding. Copy and cut are handled as the browser's own `copy`/`cut`
+       events, where `clipboardData` is writable synchronously and no permission prompt is involved;
+       an in-memory buffer backs them so a paste still works when the platform hands back nothing.
+       Only the wires with **both** ends inside the selection travel.
+     - **A secret never travels.** Secrets live in the credential store keyed by node id and are
+       never readable from the editor, so a pasted node is a new id with nothing behind it. The
+       inspector's secret field says so, because a graph that looks complete and fails at run time on
+       an empty credential is the alternative.
+     - **A pasted node whose type this build does not have still lands, marked stale** — the same
+       marker a node whose type moved already wears. Dropping it would turn a paste from a machine
+       with one more plugin installed into a silently smaller graph, and the daemon refuses the save
+       with the missing type named, which is a better error than a card that never appeared.
+     - **Node ids are one monotonic sequence now.** `n${Date.now()}${nodes.length}` was fine for one
+       node at a time and wrong the moment paste existed: several nodes created in the same
+       millisecond off the same array got ids differing only by an index that was itself changing.
+
+     Bindings: Ctrl+Z, Ctrl+Y and Ctrl+Shift+Z, Ctrl+C/X/V, Ctrl+D duplicate, Ctrl+A select all,
+     Escape to deselect. Every one of them defers to whatever is being typed into — the inspector is
+     a column of text fields, and a canvas that stole Ctrl+Z there would make the panel the one place
+     in the app where undo does something else. **Ctrl+S is the exception it always was**, with no
+     field guard and an unconditional `preventDefault`. Undo and redo are also in the toolbar, in the
+     node context menu (with Copy, Duplicate and Cut), and in a canvas context menu that did not
+     exist before — which is the only place a paste can say *where*, so it pastes at the pointer that
+     opened it. Verified by clicking, per the Phase 4 bar.
+
 ---
 
 ## Gotchas
@@ -6671,6 +6739,11 @@ Carried in from research, not yet verified against running code:
   flush is a `queueMicrotask`, which no timer mock intercepts, and faking `setTimeout` deadlocks any
   helper that awaits one.
 
+- **Svelte Flow reports a drag for a plain click on a node.** `onnodedragstop` fires on pointer-up
+  whether or not anything moved, so the canvas had been marking the graph unsaved every time
+  somebody clicked a card to look at it. Harmless while `dirty` was a one-way flag; not harmless once
+  undo owns the badge, because a click would have pushed a history entry identical to the one under
+  it. `onnodedragstart` records where the dragged nodes were, and a stop that matches is not an edit.
 - **`overflow-hidden` on a node card deletes every port on it.** The redesigned card wanted it, to
   round the top off the category strip, and every `Handle` is absolutely positioned *outside* the
   card's edge — so all forty-nine of them vanished at once while the DOM kept reporting the right

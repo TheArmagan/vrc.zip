@@ -1,6 +1,6 @@
 {
   "name": "vrc.zip",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "private": true,
   "type": "module",
   "packageManager": "bun@1.4.0",

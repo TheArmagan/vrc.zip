@@ -5479,6 +5479,26 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 
      The posters carry no UNOFFICIAL marker, which is a deliberate exception to the branding
      guardrail in `PLAN.md` §Guardrails and was the owner's call. The app's own banner is unchanged.
+287. **The posters have a 100px safe area, and the graph canvas has a per-poster zoom to respect it.**
+     The first cut hung in-world and the small type came off the edges: a poster on a quad is not
+     always mapped 1:1, so anything near a border is the first thing lost. Two changes came out of
+     that, and the second is the interesting one.
+     - **One margin constant, `M`, and every margin-adjacent element placed from it.** Scattered
+       `64px` literals were how the safe area drifted per element in the first place. The small type
+       went up with it: the footer claims, the platform list, the eyebrow and the caption were the
+       sizes that failed first.
+     - **Cards no longer bleed off the right edge, so the canvas zooms instead.** Five node cards do
+       not fit across 1024px at the size four do. Letting the last one run off the edge cut its title
+       mid-word, which is the exact complaint; shrinking the type everywhere to suit the busiest
+       poster punished the other two. So `zoom` is per poster - 1.0, 0.9, 0.95 - which is a thing the
+       editor itself has, so the drawing stays truthful while every title stays whole.
+
+     Worth recording for the next person who tries to simplify that five-node graph: **it cannot be
+     four.** Dropping `template` and wiring `gate`'s output straight into the notification's message
+     fails `assignable` in `packages/plugin-api/src/nodes.ts`, because `X <: json` is deliberately
+     one-way and `json` into a `string` port is the unchecked cast the rule exists to refuse. Node
+     titles now truncate with an ellipsis instead of forcing a card wider, which is what the editor
+     does to a narrow card anyway.
 
 ---
 

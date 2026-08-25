@@ -1,10 +1,19 @@
 /**
- * Packaging: the whole app as one Windows executable. See PLAN.md §Phase 5.
+ * Packaging: the whole app as one executable. See PLAN.md §Phase 5.
  *
- * Run with `bun run package` from the workspace root. Output is `dist/vrc.zip.exe` — the daemon,
- * the UI bundle, and the Bun runtime in a single file with the app icon and version metadata on it.
- * Nothing else has to be copied next to it: state lives in `%LOCALAPPDATA%\vrc.zip`, and the UI is
- * inside the binary rather than in a `ui/dist` a user could delete or a second app could edit.
+ * Run with `bun run package` from the workspace root. Output is `dist/vrc.zip.exe` on Windows and
+ * `dist/vrc.zip` on Linux — the daemon, the UI bundle, and the Bun runtime in a single file, with
+ * the app icon and version metadata on it where the format carries any. Nothing else has to be
+ * copied next to it: state lives in `%LOCALAPPDATA%\vrc.zip` or `~/.local/state/vrc.zip`, and the
+ * UI is inside the binary rather than in a `ui/dist` a user could delete or a second app could edit.
+ *
+ * **Windows is the platform this is built for**, and Linux gets the same daemon: accounts,
+ * presence, the feed, the log watcher, the API mirror, plugins and the UI are the app, and they are
+ * all platform-neutral code that runs there unchanged. What Linux does not get is the Windows shell
+ * integration around them — tray icon, toasts, the install offer, Start-menu and autostart entries,
+ * the allocated console. Every one of those is already guarded at runtime (`IS_WINDOWS` in
+ * `daemon/src/os/*`), so a Linux build drops them instead of failing. Say that plainly in the
+ * release notes: the main features are there, the Windows-specific conveniences are not.
  *
  * Two things worth knowing about the shape of the build:
  *
@@ -29,11 +38,54 @@ import { APP_NAME, APP_VERSION } from "@vrcz/shared";
 const ROOT = join(import.meta.dir, "..", "..");
 const ICON_PATH = join("tools", "assets", "vrczip.ico");
 const UI_DIST = join("ui", "dist");
-const DEFAULT_OUTFILE = join("dist", "vrc.zip.exe");
 
-/** Cross-compilation targets Bun understands. Only the first is shipped today. */
-const TARGETS = ["bun-windows-x64", "bun-windows-x64-baseline"] as const;
+/**
+ * Cross-compilation targets Bun understands. The release publishes the two x64 ones; the rest are
+ * here because Bun can produce them and somebody on that machine should not have to patch this file
+ * to get a binary. An unpublished target is a target nobody has run, which is a different claim from
+ * "unsupported" and worth keeping distinct.
+ */
+const TARGETS = [
+  "bun-windows-x64",
+  "bun-windows-x64-baseline",
+  "bun-linux-x64",
+  "bun-linux-x64-baseline",
+  "bun-linux-x64-musl",
+  "bun-linux-arm64",
+  "bun-linux-arm64-musl",
+] as const;
 type Target = (typeof TARGETS)[number];
+
+/** Whether a target produces a PE binary, which is the only format the `--windows-*` flags fit. */
+export function isWindowsTarget(target: string): boolean {
+  return target.startsWith("bun-windows-");
+}
+
+/**
+ * Where the binary lands when `--outfile` is not given.
+ *
+ * The extension is not cosmetic on either side: Windows will not execute a file without it, and a
+ * Linux binary called `vrc.zip.exe` invites everyone who meets it to guess wrong about what it is.
+ */
+export function defaultOutfile(target: string): string {
+  return join("dist", isWindowsTarget(target) ? "vrc.zip.exe" : "vrc.zip");
+}
+
+/**
+ * The target matching the machine running the build, which is what `bun run package` should mean.
+ *
+ * Null rather than a fallback where Bun publishes nothing for the host. Silently handing a macOS
+ * developer a Windows executable was the old behaviour, and a build that produces a file you cannot
+ * run is worse than one that says which `--target` you meant.
+ */
+export function hostTarget(platform: string, arch: string): Target | null {
+  if (platform === "win32") return arch === "x64" ? "bun-windows-x64" : null;
+  if (platform === "linux") {
+    if (arch === "x64") return "bun-linux-x64";
+    if (arch === "arm64") return "bun-linux-arm64";
+  }
+  return null;
+}
 
 interface Options {
   target: Target;
@@ -48,8 +100,8 @@ function fail(message: string): never {
 }
 
 function parseArgs(argv: readonly string[]): Options {
-  let target: Target = "bun-windows-x64";
-  let outfile = DEFAULT_OUTFILE;
+  let target: Target | null = null;
+  let outfile: string | null = null;
   let skipUi = false;
 
   for (const arg of argv) {
@@ -70,7 +122,18 @@ function parseArgs(argv: readonly string[]): Options {
     }
   }
 
-  return { target, outfile, skipUi };
+  if (target === null) {
+    target = hostTarget(process.platform, process.arch);
+    if (target === null) {
+      fail(
+        `no default target for ${process.platform}/${process.arch}. Pass --target=… explicitly. Known: ${TARGETS.join(", ")}`,
+      );
+    }
+  }
+
+  // Resolved after the target, so `--target=bun-linux-x64` alone still writes a sensibly named file
+  // rather than an `.exe` that is an ELF binary.
+  return { target, outfile: outfile ?? defaultOutfile(target), skipUi };
 }
 
 /** Runs a command in the workspace root, inheriting stdio, and exits on failure. */
@@ -106,7 +169,11 @@ export function windowsVersion(version: string): string {
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
 
-  if (!existsSync(join(ROOT, ICON_PATH))) {
+  const windows = isWindowsTarget(options.target);
+
+  // Only Windows carries an icon in the binary. ELF has nowhere to put one — a desktop entry is
+  // where a Linux icon would go, and that belongs to a packaging format we do not ship yet.
+  if (windows && !existsSync(join(ROOT, ICON_PATH))) {
     fail(`icon missing at ${ICON_PATH}. Regenerate it with \`bun run icon\` (needs ffmpeg).`);
   }
 
@@ -137,24 +204,34 @@ async function main(): Promise<void> {
       // `dist/…` whatever the path here looks like. See EMBEDDED_UI_PREFIX in @vrcz/shared.
       `--asset=${UI_DIST}`,
       `--outfile=${outfile}`,
-      /*
-       * GUI subsystem: no console from Windows, so the app can make its own.
-       *
-       * A console-subsystem binary gets a window from the user's *default terminal application*,
-       * which on Windows 11 is usually Windows Terminal painting it with its default profile —
-       * PowerShell's icon and title. Double-clicking vrc.zip looked like opening PowerShell.
-       * `daemon/src/os/console.ts` allocates a `conhost` window instead, which takes its icon from
-       * this executable, and reroutes output into it.
-       */
-      "--windows-hide-console",
-      `--windows-icon=${ICON_PATH}`,
-      `--windows-title=${APP_NAME} (UNOFFICIAL)`,
-      `--windows-publisher=${APP_NAME}`,
-      `--windows-version=${windowsVersion(APP_VERSION)}`,
-      // The disclaimer belongs on the file properties too, not only in the UI: this is the one
-      // piece of the app someone can be handed without ever seeing a screen of ours.
-      `--windows-description=${APP_NAME} — VRChat companion daemon. UNOFFICIAL, not affiliated with VRChat Inc.`,
-      "--windows-copyright=GPL-3.0-or-later. Not affiliated with VRChat Inc.",
+      // Icon, subsystem and version metadata are PE features. Bun rejects these flags outright for
+      // a non-Windows target rather than ignoring them, so they are appended, not conditionally
+      // blanked — an empty `--windows-icon=` is still an error.
+      ...(windows
+        ? [
+            /*
+             * GUI subsystem: no console from Windows, so the app can make its own.
+             *
+             * A console-subsystem binary gets a window from the user's *default terminal
+             * application*, which on Windows 11 is usually Windows Terminal painting it with its
+             * default profile — PowerShell's icon and title. Double-clicking vrc.zip looked like
+             * opening PowerShell. `daemon/src/os/console.ts` allocates a `conhost` window instead,
+             * which takes its icon from this executable, and reroutes output into it.
+             *
+             * Linux needs none of this: a terminal launch already has a terminal, and a launch from
+             * a desktop file has no console to hide.
+             */
+            "--windows-hide-console",
+            `--windows-icon=${ICON_PATH}`,
+            `--windows-title=${APP_NAME} (UNOFFICIAL)`,
+            `--windows-publisher=${APP_NAME}`,
+            `--windows-version=${windowsVersion(APP_VERSION)}`,
+            // The disclaimer belongs on the file properties too, not only in the UI: this is the one
+            // piece of the app someone can be handed without ever seeing a screen of ours.
+            `--windows-description=${APP_NAME} — VRChat companion daemon. UNOFFICIAL, not affiliated with VRChat Inc.`,
+            "--windows-copyright=GPL-3.0-or-later. Not affiliated with VRChat Inc.",
+          ]
+        : []),
       join("daemon", "src", "index.ts"),
     ],
     "bun build --compile",

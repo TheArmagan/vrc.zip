@@ -7,6 +7,29 @@
 # runners are the developer's to run before triggering this — see CLAUDE.md, where that list lives.
 # Nothing in CI runs them, so a release is only as verified as the local run that preceded it.
 #
+# ## Three jobs, because there are two binaries and one release
+#
+# `meta` resolves the tag and refuses early; `build` is a matrix that packages Windows and Linux on
+# their own runners; `publish` creates the single release both assets hang off. The split exists
+# because `gh release create` is not idempotent — two matrix jobs each publishing would race to
+# delete and recreate each other's release, and the loser's asset would vanish. One publisher,
+# after every builder has finished, is the only arrangement where that cannot happen.
+#
+# `meta` also keeps the property the single job had: refuse *before* building rather than after. A
+# twenty-minute Windows build that ends in "there is already a release here" has wasted the time it
+# took to find out.
+#
+# ## Platforms
+#
+# Windows is what this is built for and Linux is a second target of the same daemon, not a port.
+# Accounts, presence, the feed, the log watcher, the API mirror, plugins and the UI are all
+# platform-neutral and run there unchanged. The Windows shell integration around them — tray icon,
+# toasts, the install offer, Start-menu and autostart entries — is guarded at runtime and simply
+# absent on Linux. The release notes say so; a download should not have to imply parity.
+#
+# The Linux asset is a `.tar.gz` rather than a zip, because the executable bit is part of the
+# artifact there and zip does not carry it. A binary that unpacks without `+x` is a bug report.
+#
 # ## Overwriting
 #
 # A release for the tag is replaced rather than added to: the old release is deleted, the tag is
@@ -51,31 +74,22 @@ concurrency:
 defaults:
   run:
     working-directory: desktop-app
-    # Git Bash on the Windows runner. One shell for every step means the scripting below reads the
-    # same as what a developer runs locally, rather than switching to PowerShell quoting halfway.
+    # Git Bash on the Windows runner, and the same shell on the Linux one. One shell for every step
+    # means the scripting below reads the same as what a developer runs locally, rather than
+    # switching to PowerShell quoting halfway.
     shell: bash
 
 jobs:
-  release:
-    # Windows, because the artifact is a Windows executable and Bun can cross-compile one from Linux
-    # but the icon and version metadata are the part that would quietly not survive it. The runner
-    # is the platform we ship, so what CI produces is what a user runs.
-    runs-on: windows-latest
-
+  # Resolve the version and tag once, so both builders and the publisher agree on the asset names
+  # rather than each deriving them and drifting.
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      exists: ${{ steps.existing.outputs.exists }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          # The tag is moved below, which needs the history the push is measured against.
-          fetch-depth: 0
-
-      - uses: oven-sh/setup-bun@v2
-        with:
-          # The same pin the gate reads. The runtime is a build input here — it is bundled into the
-          # executable and is what executes third-party plugin code — so a release built with a
-          # different Bun is a different product. See PLAN.md §Phase 5.
-          bun-version-file: desktop-app/.bun-version
-
-      - run: bun install --frozen-lockfile
 
       # Inputs reach these scripts as environment variables, never as `${{ }}` interpolated into
       # the script text. A tag containing a quote and a semicolon would otherwise be *code* here —
@@ -85,21 +99,17 @@ jobs:
         env:
           INPUT_TAG: ${{ inputs.tag }}
         run: |
-          version=$(bun -e 'console.log(JSON.parse(await Bun.file("package.json").text()).version)')
+          # `node`, not `bun`: this job exists to answer two questions and refuse, and setting up a
+          # pinned toolchain to read one JSON field would be the slowest part of it.
+          version=$(node -p "require('./package.json').version")
           tag="$INPUT_TAG"
           if [ -z "$tag" ]; then
             tag="v$version"
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          # The published asset. Versioned and platform-tagged because it is a file people keep:
-          # a `vrc.zip.zip` sitting in Downloads six months from now says nothing about which build
-          # it is, and this is a project whose whole install story starts in that folder.
-          echo "zip=vrc.zip-$version-windows-x64.zip" >> "$GITHUB_OUTPUT"
           echo "Publishing $tag from version $version"
 
-      # Refuse *before* building rather than after: a twenty-minute Windows build that ends in
-      # "there is already a release here" has wasted the time it took to find out.
       - name: check whether the release already exists
         id: existing
         env:
@@ -118,46 +128,171 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Builds the UI bundle and compiles it, the icon and the Bun runtime into one file. The script
-      # fails loudly if `ui/dist` is missing rather than shipping the placeholder page.
+  build:
+    needs: meta
+    strategy:
+      # One platform failing should not throw away a finished build of the other; the publisher
+      # will not run either way, and having the surviving artifact to download while you work out
+      # what broke is worth more than a cancelled job.
+      fail-fast: false
+      matrix:
+        include:
+          # Windows on Windows, because Bun can cross-compile the executable from Linux but the icon
+          # and version metadata are the part that would quietly not survive it. The runner is the
+          # platform we ship, so what CI produces is what a user runs.
+          - os: windows-latest
+            slug: windows-x64
+            target: bun-windows-x64
+            binary: vrc.zip.exe
+            archive: zip
+          # Linux on Linux, for the same reason and one more: the executable bit only exists on a
+          # filesystem that has one, and this is the job that puts it in the tarball.
+          - os: ubuntu-latest
+            slug: linux-x64
+            target: bun-linux-x64
+            binary: vrc.zip
+            archive: tar.gz
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # The same pin the gate reads. The runtime is a build input here — it is bundled into the
+          # executable and is what executes third-party plugin code — so a release built with a
+          # different Bun is a different product. See PLAN.md §Phase 5.
+          bun-version-file: desktop-app/.bun-version
+
+      - run: bun install --frozen-lockfile
+
+      # The published asset. Versioned and platform-tagged because it is a file people keep: a
+      # `vrc.zip.zip` sitting in Downloads six months from now says nothing about which build it is,
+      # and this is a project whose whole install story starts in that folder.
+      - name: name the asset
+        id: asset
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          SLUG: ${{ matrix.slug }}
+          ARCHIVE: ${{ matrix.archive }}
+        run: echo "name=vrc.zip-$VERSION-$SLUG.$ARCHIVE" >> "$GITHUB_OUTPUT"
+
+      # Builds the UI bundle and compiles it, the Bun runtime, and on Windows the icon, into one
+      # file. The script fails loudly if `ui/dist` is missing rather than shipping the placeholder
+      # page.
       - name: package
-        run: bun run package
+        env:
+          TARGET: ${{ matrix.target }}
+        # The script directly rather than `bun run package`, which goes through `--filter` and has
+        # no dependable way to forward `--target` to the other side of it.
+        run: bun tools/src/package.ts --target="$TARGET"
 
       # One executable, at the root of the archive and nothing beside it. `Compress-Archive` rather
       # than a `zip` binary because it is the one that is certainly on a Windows runner, and the
       # paths reach it through the environment for the same reason everything else here does.
       - name: zip
+        if: ${{ runner.os == 'Windows' }}
         env:
-          EXE_PATH: dist/vrc.zip.exe
-          ZIP_PATH: dist/${{ steps.meta.outputs.zip }}
+          EXE_PATH: dist/${{ matrix.binary }}
+          # Read by the verification below, which runs in its own PowerShell and cannot see a
+          # variable from this shell.
+          EXE_NAME: ${{ matrix.binary }}
+          ZIP_PATH: dist/${{ steps.asset.outputs.name }}
         run: |
           powershell -NoProfile -NonInteractive -Command 'Compress-Archive -Path $env:EXE_PATH -DestinationPath $env:ZIP_PATH -Force'
           # Prove what came out rather than trusting that it did: an archive with the wrong number
           # of entries, or the executable nested under a folder, is the kind of thing nobody notices
           # until somebody downloads it.
-          powershell -NoProfile -NonInteractive -Command 'Add-Type -AssemblyName System.IO.Compression.FileSystem; $z=[IO.Compression.ZipFile]::OpenRead((Resolve-Path $env:ZIP_PATH)); $z.Entries | ForEach-Object { $_.FullName }; if ($z.Entries.Count -ne 1 -or $z.Entries[0].FullName -ne "vrc.zip.exe") { $z.Dispose(); throw "expected exactly vrc.zip.exe at the archive root" }; $z.Dispose()'
+          powershell -NoProfile -NonInteractive -Command 'Add-Type -AssemblyName System.IO.Compression.FileSystem; $z=[IO.Compression.ZipFile]::OpenRead((Resolve-Path $env:ZIP_PATH)); $z.Entries | ForEach-Object { $_.FullName }; if ($z.Entries.Count -ne 1 -or $z.Entries[0].FullName -ne $env:EXE_NAME) { $z.Dispose(); throw "expected exactly $env:EXE_NAME at the archive root" }; $z.Dispose()'
 
-      # The checksum is of the *zip*, because the zip is what people download and what the notes
-      # tell them to verify. A digest of a file nobody fetches is a digest nobody can check.
-      - name: checksum
-        id: checksum
+      # `tar`, and gzip rather than a plain tar, because the binary is ~90MB of mostly compressible
+      # runtime. `-C dist` so the member is `vrc.zip` and not `dist/vrc.zip`: an archive that
+      # unpacks a directory nobody asked for is the Linux version of the nested-exe mistake above.
+      - name: tar
+        if: ${{ runner.os == 'Linux' }}
         env:
-          ZIP_NAME: ${{ steps.meta.outputs.zip }}
+          BINARY: ${{ matrix.binary }}
+          TAR_NAME: ${{ steps.asset.outputs.name }}
+        run: |
+          chmod +x "dist/$BINARY"
+          tar -czf "dist/$TAR_NAME" -C dist "$BINARY"
+          entries=$(tar -tzf "dist/$TAR_NAME")
+          echo "$entries"
+          if [ "$entries" != "$BINARY" ]; then
+            echo "::error::expected exactly $BINARY at the archive root"
+            exit 1
+          fi
+          # The executable bit is the whole reason this is a tarball. Check it is actually in there
+          # rather than assuming tar carried it.
+          mode=$(tar -tvzf "dist/$TAR_NAME" | awk '{print $1}')
+          case "$mode" in
+            *x*) ;;
+            *) echo "::error::$BINARY is not executable inside the archive ($mode)"; exit 1 ;;
+          esac
+
+      # The checksum is of the *archive*, because the archive is what people download and what the
+      # notes tell them to verify. A digest of a file nobody fetches is a digest nobody can check.
+      - name: checksum
+        env:
+          ASSET: ${{ steps.asset.outputs.name }}
         run: |
           cd dist
-          sha256sum "$ZIP_NAME" | awk '{print $1}' > "$ZIP_NAME.sha256"
-          digest=$(cat "$ZIP_NAME.sha256")
-          echo "sha256=$digest" >> "$GITHUB_OUTPUT"
-          echo "sha256 $digest"
+          sha256sum "$ASSET" | awk '{print $1}' > "$ASSET.sha256"
+          echo "sha256 $(cat "$ASSET.sha256")"
+
+      # Hand the archive to the publisher rather than publishing from here. Note that Actions zips
+      # the artifact for transport, which is exactly why the Linux asset is a tarball: the mode bits
+      # live inside it and survive the round trip.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-${{ matrix.slug }}
+          path: |
+            desktop-app/dist/${{ steps.asset.outputs.name }}
+            desktop-app/dist/${{ steps.asset.outputs.name }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The tag is moved below, which needs the history the push is measured against.
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: asset-*
+          merge-multiple: true
+          path: desktop-app/dist
+
+      - name: collect the assets
+        id: assets
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          win="vrc.zip-$VERSION-windows-x64.zip"
+          linux="vrc.zip-$VERSION-linux-x64.tar.gz"
+          for f in "$win" "$linux"; do
+            if [ ! -f "dist/$f" ]; then
+              echo "::error::dist/$f did not arrive from the build jobs"
+              exit 1
+            fi
+          done
+          echo "win=$win" >> "$GITHUB_OUTPUT"
+          echo "linux=$linux" >> "$GITHUB_OUTPUT"
+          echo "win_sha=$(cat "dist/$win.sha256")" >> "$GITHUB_OUTPUT"
+          echo "linux_sha=$(cat "dist/$linux.sha256")" >> "$GITHUB_OUTPUT"
 
       # Delete, then recreate. `gh release create` makes the tag at `--target`, so re-pointing is
       # what deleting the old ref buys — without it the new release would be published against
       # whatever commit the tag was made at, which may not be the code in this build.
       - name: replace the existing release and tag
-        if: ${{ steps.existing.outputs.exists == 'true' }}
+        if: ${{ needs.meta.outputs.exists == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.meta.outputs.tag }}
+          TAG: ${{ needs.meta.outputs.tag }}
         run: |
           gh release delete "$TAG" --yes
           git push --delete origin "refs/tags/$TAG" || true
@@ -165,20 +300,25 @@ jobs:
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.meta.outputs.tag }}
-          VERSION: ${{ steps.meta.outputs.version }}
-          SHA256: ${{ steps.checksum.outputs.sha256 }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          VERSION: ${{ needs.meta.outputs.version }}
           COMMIT: ${{ github.sha }}
           PRERELEASE: ${{ inputs.prerelease }}
-          ZIP_NAME: ${{ steps.meta.outputs.zip }}
+          WIN_NAME: ${{ steps.assets.outputs.win }}
+          LINUX_NAME: ${{ steps.assets.outputs.linux }}
+          WIN_SHA256: ${{ steps.assets.outputs.win_sha }}
+          LINUX_SHA256: ${{ steps.assets.outputs.linux_sha }}
         run: |
           notes=$(cat <<NOTES
           **UNOFFICIAL.** Not affiliated with, endorsed by, or operated by VRChat Inc. You sign in
           with your own VRChat credentials, and everything runs on your machine.
 
-          ### Install
+          Windows x64 and Linux x64. **Windows is the platform vrc.zip is built for**, and the one
+          every release is actually tested on.
 
-          Download \`$ZIP_NAME\` and unpack it. What comes out is one file, \`vrc.zip.exe\`, holding
+          ### Install on Windows
+
+          Download \`$WIN_NAME\` and unpack it. What comes out is one file, \`vrc.zip.exe\`, holding
           the daemon, the UI and its own Bun runtime. There is no installer and nothing else to copy.
 
           **Unpack it somewhere first.** Launching the executable from inside the zip runs it out of
@@ -193,19 +333,48 @@ jobs:
           The first launch gets a warning from Windows about an unrecognised publisher, because the
           executable is not code-signed. Check the digest below if that matters to you.
 
-          ### Verify
-
-          The digest covers the zip, which is the file you downloaded.
+          ### Install on Linux
 
           \`\`\`
-          certutil -hashfile $ZIP_NAME SHA256
+          tar -xzf $LINUX_NAME
+          ./vrc.zip
+          \`\`\`
+
+          Same single file, same self-contained runtime. It prints a launch URL and opens your
+          browser on it through \`xdg-open\`; on a headless box, or anywhere without one, copy the
+          URL out of the terminal. State lives in \`~/.local/state/vrc.zip\` (or \`\$XDG_STATE_HOME\`).
+          The master key goes to your keyring through \`secret-tool\` when one is running, and falls
+          back to a \`0600\` file when it is not — the UI says which, and it says so permanently
+          while it is the file.
+
+          **What Linux gets, and what it does not.** The app is here: multiple accounts, live
+          presence, the feed, the game-log watcher, the API mirror for other local apps, plugins and
+          the whole UI are platform-neutral and run the same. What is missing is the Windows shell
+          integration around them — the tray icon, desktop toasts, the install offer, the Start menu
+          entry and start-with-Windows. There is no packaging beyond the tarball, so keeping it
+          running and starting it at login are yours to arrange (a user systemd unit is the usual
+          answer). Treat Linux as working but less travelled: it gets less testing than Windows, and
+          rough edges there are worth reporting.
+
+          ### Verify
+
+          The digests cover the archives, which are the files you downloaded.
+
+          \`\`\`
+          certutil -hashfile $WIN_NAME SHA256
+          sha256sum $LINUX_NAME
           \`\`\`
           NOTES
           )
           notes="$notes
 
           \`\`\`
-          SHA256  $SHA256
+          $WIN_NAME
+          SHA256  $WIN_SHA256
+
+          $LINUX_NAME
+          SHA256  $LINUX_SHA256
+
           commit  $COMMIT
           \`\`\`"
 
@@ -215,21 +384,25 @@ jobs:
           args=(--target "$COMMIT" --title "vrc.zip $VERSION" --notes "$notes")
           if [ "$PRERELEASE" = "true" ]; then args+=(--prerelease); fi
 
-          gh release create "$TAG" "${args[@]}" "dist/$ZIP_NAME" "dist/$ZIP_NAME.sha256"
+          gh release create "$TAG" "${args[@]}" \
+            "dist/$WIN_NAME" "dist/$WIN_NAME.sha256" \
+            "dist/$LINUX_NAME" "dist/$LINUX_NAME.sha256"
 
       - name: summary
         env:
-          TAG: ${{ steps.meta.outputs.tag }}
-          VERSION: ${{ steps.meta.outputs.version }}
-          REPLACED: ${{ steps.existing.outputs.exists }}
-          SHA256: ${{ steps.checksum.outputs.sha256 }}
-          ZIP_NAME: ${{ steps.meta.outputs.zip }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          REPLACED: ${{ needs.meta.outputs.exists }}
+          WIN_NAME: ${{ steps.assets.outputs.win }}
+          LINUX_NAME: ${{ steps.assets.outputs.linux }}
+          WIN_SHA256: ${{ steps.assets.outputs.win_sha }}
+          LINUX_SHA256: ${{ steps.assets.outputs.linux_sha }}
         run: |
           {
             echo "### vrc.zip $VERSION"
             echo
             echo "- tag: \`$TAG\`"
-            echo "- asset: \`$ZIP_NAME\`"
             echo "- replaced an existing release: \`$REPLACED\`"
-            echo "- sha256 (of the zip): \`$SHA256\`"
+            echo "- \`$WIN_NAME\` — sha256 \`$WIN_SHA256\`"
+            echo "- \`$LINUX_NAME\` — sha256 \`$LINUX_SHA256\`"
           } >> "$GITHUB_STEP_SUMMARY"

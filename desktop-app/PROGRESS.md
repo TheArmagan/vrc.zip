@@ -4,7 +4,7 @@ Working log for anyone (human or agent) picking this up. **Read [`PLAN.md`](./PL
 the architecture and the reasoning. This file tracks only *state*: what exists, what's next, and what
 was decided along the way.
 
-**Last updated:** 2026-08-24
+**Last updated:** 2026-08-25
 **Phase 4 landed in one pass:** decisions 207–215. A durable run engine, thirty-two built-in node
 types, a Svelte Flow canvas, and graphs that export to a file. Read decision 206 first for why it is shaped
 the way it is; 208 is the engine's one load-bearing rule.
@@ -42,7 +42,10 @@ planning pass of the same day produced (decision 206). Graphs are stored, run, e
 armed behind a hold, and shared as files. What remains in the plan is Phase 5, packaging and polish,
 most of which shipped early. Shipping is wired up:
 `desktop-app-release.yml` packages the executable and publishes it to a GitHub Release on a manual
-trigger (decision 200).
+trigger (decision 200). **It publishes two of them as of 2026-08-25** — Windows x64 and Linux x64,
+built on their own runners by a matrix and hung off one release by a single publisher job (decision
+288). Windows stays the platform this is built for and the one a release is tested on; Linux runs
+the same daemon without the Windows shell integration, and the release notes say which is which.
 **Status: Phases 1 and 2 are both built.** Phase 1 was confirmed by hand on 2026-08-22 (1.10 and the
 profile card). Phase 2 closed on the same day: every numbered step is ticked, including 2.8's last
 two pieces (per-app budget overrides and a rate gauge that reports measured numbers instead of
@@ -61,7 +64,8 @@ end against VRCX through the handshake.
 
 **The app is distributable now, ahead of Phase 5:** `bun run package` produces one self-contained
 `dist/vrc.zip.exe` — daemon, UI bundle and Bun runtime in a single file, with the VZ icon and the
-version metadata on it, opening a browser on launch. It supersedes the `bun.exe` + `app/` layout in
+version metadata on it, opening a browser on launch. `--target=bun-linux-x64` produces the same
+thing as `dist/vrc.zip`, minus the PE-only icon and metadata. It supersedes the `bun.exe` + `app/` layout in
 PLAN.md §Phase 5 only until the plugin host needs a real runtime to spawn; decisions 91–94.
 
 **Next: Phase 3 — the plugin system.** Decision 105 put it ahead of Phase 4 because it is the largest
@@ -5503,6 +5507,49 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      one-way and `json` into a `string` port is the unchecked cast the rule exists to refuse. Node
      titles now truncate with an ellipsis instead of forcing a card wider, which is what the editor
      does to a narrow card anyway.
+288. **Linux x64 is a published target, and the release workflow grew a builder to produce it.**
+     Nothing in the daemon needed porting. `daemon/src/os/` has been `IS_WINDOWS`-guarded since
+     Phase 3, `paths.ts` has had the XDG branch since Phase 1, `keychain.ts` has the `secret-tool`
+     backend, `open-url.ts` shells `xdg-open`, and `runtimeAssetName` already resolves
+     `bun-linux-x64.zip` against a pin that has been in `BUN_RUNTIME_PINS` all along. What was
+     Windows-only was the *build*: `tools/src/package.ts` hardcoded one target, one `.exe` name, and
+     an unconditional block of `--windows-*` flags.
+     - **The `--windows-*` flags are appended for PE targets, not blanked for the others.** Bun
+       rejects them outright against an ELF target rather than ignoring them, so an empty
+       `--windows-icon=` is still a failed build. The icon check moved behind the same condition,
+       because ELF has nowhere to put one.
+     - **The default target is now the host**, and there is no fallback. The old default handed a
+       macOS or Linux developer a Windows executable from a bare `bun run package`, which is a file
+       the machine cannot run; `hostTarget` returns null there and the script says which `--target`
+       you meant. The outfile default follows the target - `vrc.zip.exe` or `vrc.zip` - since
+       Windows will not execute a file without the extension and a Linux binary named `.exe` invites
+       everyone who meets it to guess wrong.
+     - **The Linux asset is a `.tar.gz`.** The executable bit is part of the artifact and zip does
+       not carry it. A binary that unpacks without `+x` is a bug report, and Actions zips the
+       artifact for transport between jobs anyway, so the mode bits have to live *inside* the file
+       being moved. The workflow asserts the bit is there rather than trusting `tar` to have kept it.
+     - **The release workflow is three jobs now: `meta`, a `build` matrix, `publish`.** `gh release
+       create` is not idempotent, so two matrix jobs each publishing would race to delete and
+       recreate each other's release and the loser's asset would disappear. One publisher after
+       every builder is the only arrangement where that cannot happen. `meta` exists so the
+       already-exists refusal still lands *before* twenty minutes of building, which is the property
+       decision 201 was written to keep.
+     - **`bun tools/src/package.ts` rather than `bun run package`** in the workflow, because the
+       root script goes through `bun run --filter` and there is no dependable way to forward
+       `--target` across it.
+
+     **The claim made to users is deliberately narrower than "supported".** The release notes say
+     Windows is the platform vrc.zip is built for and the one every release is tested on, then say
+     what Linux does and does not get: the app is all there - accounts, presence, feed, log watcher,
+     API mirror, plugins, UI - and the Windows shell integration around it is not, so no tray icon,
+     no toasts, no install offer, no Start-menu or autostart entry, and nothing but a tarball for
+     packaging. That is the same distinction decision 286 drew for the posters and macOS: what
+     compiles is a wider set than what someone can go and download and be told works.
+
+     `bun-linux-arm64` and the `-musl` and `-baseline` variants are accepted by `--target` and built
+     by nobody. Listing them costs a line; publishing a binary no one has ever executed does not.
+     **Verified only as far as a cross-compile from Windows**: the ELF is produced and has the right
+     magic. It has not been run on Linux.
 
 ---
 

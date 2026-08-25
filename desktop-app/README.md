@@ -35,7 +35,7 @@ bun run lint         # biome check
 bun run format       # biome check --write
 bun run daemon       # bun --watch daemon/src/index.ts
 bun run codegen      # tools/src/codegen.ts (Phase 1.1)
-bun run package      # → dist/vrc.zip.exe, one self-contained Windows binary
+bun run package      # → dist/vrc.zip.exe (or dist/vrc.zip), one self-contained binary
 bun run icon         # regenerate tools/assets/vrczip.ico (needs ffmpeg)
 ```
 
@@ -46,9 +46,22 @@ second thing to drift.
 ## Packaging
 
 `bun run package` builds the UI, then compiles the daemon, that bundle and the Bun runtime into a
-single `dist/vrc.zip.exe` (~89MB) carrying the app icon and version metadata. Nothing has to sit
-next to it: state lives in `%LOCALAPPDATA%\vrc.zip`, and the UI is inside the binary rather than in
-a `ui/dist` a user could delete. Windows x64 is the only target built today.
+single binary (~90MB). Nothing has to sit next to it: state lives in `%LOCALAPPDATA%\vrc.zip` or
+`~/.local/state/vrc.zip`, and the UI is inside the binary rather than in a `ui/dist` a user could
+delete.
+
+The target defaults to the machine you are on, and the output name follows it: `dist/vrc.zip.exe` on
+Windows, carrying the app icon and version metadata, and `dist/vrc.zip` on Linux, where those flags
+have no PE to go into and are left off. Releases publish Windows x64 and Linux x64;
+`bun-linux-arm64` and the `-musl` and `-baseline` variants are accepted by `--target` but are not
+built by CI and nobody has run them.
+
+**Windows is the platform this is built for.** Linux runs the same daemon — accounts, presence, the
+feed, the log watcher, the API mirror, plugins, the UI, all of it platform-neutral code — and does
+without the Windows shell integration around it: tray icon, toasts, the install offer, Start-menu
+and autostart entries, the allocated console. Those are guarded at runtime (`IS_WINDOWS` in
+`daemon/src/os/`), so they drop rather than fail. The main features are there; the Windows-specific
+conveniences are not, and the release notes say so.
 
 The UI rides along as an embedded asset (`--asset=ui/dist`), which `daemon/src/servers/embedded-ui.ts`
 reads back through `Bun.embeddedFiles`. From source that list is empty and the UI server falls back

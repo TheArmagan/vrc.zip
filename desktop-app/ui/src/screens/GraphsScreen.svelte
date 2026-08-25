@@ -11,6 +11,7 @@
   sends real invites — the same reasoning, and the same primitive, as approving a plugin install.
 -->
 <script lang="ts">
+import BugIcon from "@lucide/svelte/icons/bug";
 import DownloadIcon from "@lucide/svelte/icons/download";
 import PencilIcon from "@lucide/svelte/icons/pencil";
 import PlayIcon from "@lucide/svelte/icons/play";
@@ -33,6 +34,7 @@ import { Skeleton } from "$lib/components/ui/skeleton/index.js";
 import { Switch } from "$lib/components/ui/switch/index.js";
 import { Textarea } from "$lib/components/ui/textarea/index.js";
 import { graphState, watchesFor } from "$lib/graphs/graph-state.ts";
+import { RUN_NOW_TYPE } from "$lib/graphs/loops.ts";
 import { hrefFor } from "$lib/router.ts";
 import { app } from "$lib/state/app.svelte.ts";
 import { graphs } from "$lib/state/graphs.svelte.ts";
@@ -447,6 +449,21 @@ async function runNow(graph: GraphSummary): Promise<void> {
                   <a class="font-medium hover:underline" href={hrefFor("graphs", graph.id)}>
                     {graph.name}
                   </a>
+                  {#if graph.debug}
+                    <!--
+                      Said on the card because debug mode is not free and it is not visible from
+                      anywhere else: while it is on, every run of this graph is recorded and its
+                      failures arrive as toasts wherever the user happens to be. A graph left in
+                      debug mode a fortnight ago is exactly the thing a list is for.
+                    -->
+                    <span
+                      class="flex items-center gap-1 text-xs text-muted-foreground"
+                      title="Runs of this graph are being recorded, and its failures are announced."
+                    >
+                      <BugIcon class="size-3.5" />
+                      Debugging
+                    </span>
+                  {/if}
                   <span class="ml-auto text-xs text-muted-foreground">
                     edited <RelativeTime ts={graph.updatedAt} />
                   </span>
@@ -584,16 +601,25 @@ async function runNow(graph: GraphSummary): Promise<void> {
                 >
                   <PencilIcon class="size-4" />
                 </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  aria-label="Run now"
-                  title="Run now"
-                  disabled={busy === graph.id}
-                  onclick={() => void runNow(graph)}
-                >
-                  <PlayIcon class="size-4" />
-                </Button>
+<!--
+                  Only where there is something to press.
+
+                  This used to be on every card and answered 409 on a graph with no manual trigger,
+                  which is a button whose only function is to tell you it was the wrong button.
+                  `triggerTypes` already arrives on the summary, so the question costs nothing.
+                -->
+                {#if graph.triggerTypes.includes(RUN_NOW_TYPE)}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label="Run now"
+                    title="Run now"
+                    disabled={busy === graph.id}
+                    onclick={() => void runNow(graph)}
+                  >
+                    <PlayIcon class="size-4" />
+                  </Button>
+                {/if}
                 <Button
                   variant="ghost"
                   size="icon"

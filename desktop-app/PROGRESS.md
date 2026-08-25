@@ -637,6 +637,15 @@ get an **error output port**; and the port lattice grows **`list<T>`**.
       `@vrcz/plugin-api` and two new repeatable config kinds (`fields`, `paths`). The typed ones'
       catalogues are generated from the pinned spec into `packages/api/src/generated/fields.ts`.
       **Built** (decision 253). Verified by clicking, per the bar below.
+- [x] **4.10 The debugger** — not in the original plan, and the gap it fills is the one a big graph
+      hits first: the engine held every value on every wire and threw all of it away when a run
+      settled, so "why did this do nothing" had no answer anywhere. A third switch on a graph
+      (`graphs.debug`, migration 017) turns on a recorded trace per run, breakpoints that really
+      park a run with Continue / Step / Stop, toasts that reach you on whatever screen you are on,
+      and a canvas that marks what failed and labels each wire with what went down it. Plus the
+      failure that had no record at all — a node whose `on error` wire swallowed it — which is now
+      `graph.node.error` whether or not anybody is debugging. **Built** (decision 294). Verified by
+      clicking, per the bar below, which is how the 202 bug in §Gotchas turned up.
 
 **Phase 4 is complete.** 4.1 through 4.6 are built, and everything below the checklist that once
 said "Phase 4's" now has a caller. What is *not* here, stated rather than implied: no undo/redo on
@@ -5686,6 +5695,65 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      `Instance`, `Avatar`, `Friend`) now say `… id` on the card face, because the card shows only the
      label and a hover title is not where an author reads a port's meaning. Phrase labels (`Who`,
      `Goes to`, `Wearing`, `Home world`) keep their wording — the badge beside them now carries it.
+294. **The graph debugger: a third switch on a graph, and the four things it turns on.** A big graph
+     had no way to be debugged. The engine knew everything — what was on every wire, which nodes
+     skipped, which node threw — and threw all of it away the instant a run settled, because
+     `graph_runs` is live state and is pruned on completion. The only survivor was one `events` row
+     saying finished or failed. So the whole feature is a decision to *keep a copy of what was
+     already there*, gated on a switch.
+
+     `graphs.debug` (migration 017), per graph, because a graph is the unit somebody sits down to
+     debug and the traces are the expensive half. Turning it on gives four things:
+
+     - **A recording.** `graph_traces`, one row per run, holding a step per node: status, duration,
+       and the values on every input and output port. **Not an `events` row**, which is the one place
+       this family breaks from decision 206 — a trace is large and per-node, and putting it in the
+       feed would bury the user's timeline under their own debugging and hand every webhook
+       subscriber a copy of every value the graph touched. Bounded by **count** rather than by age
+       (ten runs, pruned at insert), because age is the wrong axis: a graph fired twice this
+       afternoon has two traces worth keeping however old, and one firing every minute has ten
+       worth keeping however new the rest are. Values are summarised in `graphs/trace.ts` and the
+       cut is *visible* — a trace that silently showed the first 512 characters of a body would be
+       worse than no trace, because you would read it as the whole answer.
+     - **Breakpoints.** `GraphNode.breakpoint`, part of the **document**, so it survives the tab
+       closing — which is the case it exists for, a graph that misbehaves on a fire nobody was
+       watching. It parks the run the way a `Wait` does, and the two are told apart by exactly one
+       thing: a `Wait` always has a `resumeAt` and a breakpoint never does, so `listDueGraphRuns`
+       ignores a paused run *by construction* rather than by a flag agreeing with a flag. Continue,
+       Step and Stop are `resumeRun`/`stopRun` on the engine. `state.stepOver` is what stops Continue
+       parking on the spot it was just released from. Stop is not optional: a parked run holds a
+       concurrency slot, so on a `drop`-mode graph a breakpoint nobody continues refuses every fire
+       from then on — the trap decision 271 was about, reintroduced by a debugging feature.
+     - **Toasts, wherever you are.** `state/graph-debug.svelte.ts` off `app.svelte.ts`'s frame
+       dispatch, not off the editor: the failures worth catching happen while you are looking at
+       something else. Bursts fold per (graph, node) — forty failures inside a `For each` is three
+       toasts and a count, because forty stacked toasts is a screen you cannot read.
+     - **The canvas reads the recording.** A ring on the node that failed with its message inline, a
+       fade on the ones that skipped, and the value that flowed down each wire as its label.
+
+     Three things that are deliberately **not** gated on the switch:
+
+     - **`graph.node.error` is emitted always.** A node that threw onto its `on error` wire had no
+       record anywhere — the run reported finished and the failure vanished into a wire. That is the
+       same class of silence `graph.run.dropped` exists to break, and it is the single worst one in
+       the runtime: a node failing on every fire under a graph that reports success is the bug that
+       survives longest, because every other signal says the automation is working. Debug mode only
+       decides whether a toast lands on top of it.
+     - **A breakpoint on a graph that is not being debugged does nothing at all.** One forgotten in a
+       saved graph must not be able to park a run forever on a machine nobody is looking at, and
+       tying it to the switch the author flips when they sit down is the smallest rule that
+       guarantees it.
+     - **Turning debug off deletes the graph's traces.** Ten runs' worth of user objects kept for a
+       graph nobody is debugging, with no screen pointing at it, is a copy of the user's data with
+       no reason to exist.
+
+     Alongside it, two things about **Run now** that were wrong before any of this: the button was
+     drawn unconditionally and answered 409 on a graph with no manual trigger, which is a button
+     whose only function is to tell you it was the wrong button. It now appears only when there is a
+     `Run now` node, and a **test fire** menu lists every other trigger root — a real run started
+     from a node that would otherwise be waiting for a friend to come online. Its ports carry empty
+     placeholders rather than plausible fakes, on purpose: a blank id fails at the node that needed
+     it, saying so, where a fake `usr_…` would fail somewhere inside VRChat instead.
 
 ---
 
@@ -5694,6 +5762,23 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 Empirical notes. Add to this as you hit things — especially where the plan turns out to be wrong.
 
 Found by running code. Each of these contradicted an assumption, and most were silent failures.
+
+- **`ui/src/lib/api.ts`'s `request()` treated only `204` as bodyless, and every `202 Accepted` blew
+  up.** The graph routes that *start* something answer `c.body(null, 202)`, so `response.json()` was
+  called on an empty body, threw, and became `ApiError("malformed")` — "The daemon sent a response
+  this build cannot read." in a red box in the editor, after a **Run now that had worked perfectly**.
+  That has been true since Run now was written; nothing caught it because the failing path is a
+  successful request. Found by clicking, not by the suite, which is the fourth time §Gotchas has
+  said that about this editor. `request()` now also returns early for `205` and for any response
+  whose `Content-Length` is `0` — the status codes that are *defined* to carry no body, plus the
+  case that actually occurs, which is a 202 that simply did not send one.
+
+- **A `graph.note` carries no `graphName`.** The engine's `#emit` attaches the graph's name to every
+  kind it sends, but the rehearsal note is emitted straight to the bus from `builtins/actions.ts`
+  and carries only `graphId`. Anything titling itself from the payload therefore called every
+  rehearsal note "A graph", which is precisely useless on a machine with eleven of them. The
+  debugger's toasts resolve the name from the graph list instead — which is also more correct, since
+  a graph renamed since the event was emitted should be announced under what it is called now.
 
 - **VRChat does not delimit a `Received Notification:` line consistently, and a comma-only read
   swallows the next field.** `of type:` is followed by a comma; `sender user id:` is followed by

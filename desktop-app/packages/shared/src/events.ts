@@ -265,6 +265,27 @@ export type GraphEventKind =
   | "graph.run.failed"
   | "graph.run.dropped"
   | "graph.run.expired"
+  /**
+   * A node threw and the author's `on error` wire carried it onward, so the run did **not** end.
+   *
+   * The one failure in the whole runtime that had no record at all. `graph.run.failed` covers the
+   * unhandled case, and handling one is the author saying "I know this can break" — but what they
+   * meant was "and I will deal with it", not "and I will never hear about it again". A node that
+   * fails on every fire while the graph reports finished is the shape of bug that survives longest,
+   * because every signal says it is working.
+   *
+   * Emitted whatever the graph's debug switch says, for the same reason `graph.run.dropped` is:
+   * silence *is* the failure. Debug mode decides whether the editor puts a toast on top of it.
+   */
+  | "graph.node.error"
+  /**
+   * A run stopped on a `breakpoint` node and is waiting for a person to continue it.
+   *
+   * Only ever emitted for a graph in debug mode, which is the only mode where a breakpoint parks
+   * anything. Its counterpart is the run leaving `graph_runs`, so there is no `graph.run.resumed`:
+   * a resumed run either finishes or fails, and both of those are already said.
+   */
+  | "graph.run.paused"
   /** A ceiling was hit, or the graph was switched off from the UI. Payload carries the reason. */
   | "graph.disabled"
   /** Written by the built-in feed-note action, which is a graph's way of talking to the user. */
@@ -433,6 +454,8 @@ export const BUS_EVENT_KINDS = [
   "graph.run.failed",
   "graph.run.dropped",
   "graph.run.expired",
+  "graph.node.error",
+  "graph.run.paused",
   "graph.disabled",
   "graph.note",
   "graph.signal",

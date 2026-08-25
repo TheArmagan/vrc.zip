@@ -87,6 +87,13 @@ const deps: ControlDeps = {
   deleteGraphStoreEntry: async () => undefined,
   deleteGraphStore: async () => undefined,
   runGraphNow: async () => false,
+  setGraphDebug: async () => {
+    throw new Error("unused");
+  },
+  listGraphTraces: async () => [],
+  clearGraphTraces: async () => undefined,
+  resumeGraphRun: async () => false,
+  stopGraphRun: async () => false,
   setGraphSecret: async () => {},
   exportGraph: async () => {
     throw new Error("unused");

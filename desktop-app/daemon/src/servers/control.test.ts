@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type {
   DaemonStatus,
   Graph,
+  GraphTrace,
   JsonValue,
   RetentionSettings,
   RetentionUpdate,
@@ -513,6 +514,9 @@ interface Recorder {
   webhooksDeleted: string[];
   graphRuns: string[];
   graphSecrets: { node: string; field: string; value: string }[];
+  graphTraces: GraphTrace[];
+  graphResumes: { runId: string; step: boolean }[];
+  graphStops: string[];
   storeDeletes: string[];
   pluginInstalls: { rootDir: string; accountIds: readonly string[] }[];
   pluginToggles: { id: string; enabled: boolean }[];
@@ -568,6 +572,9 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     webhooksDeleted: [],
     graphRuns: [],
     graphSecrets: [],
+    graphTraces: [],
+    graphResumes: [],
+    graphStops: [],
     storeDeletes: [],
     pluginInstalls: [],
     pluginToggles: [],
@@ -614,6 +621,7 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     description: "",
     enabled: false,
     armed: false,
+    debug: false,
     concurrency: "parallel",
     accountId: "usr_a",
     disabledReason: null,
@@ -624,6 +632,8 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     staleNodes: [],
   };
   let graphs: Graph[] = [GRAPH];
+  /** The one run id the fake engine reports as parked on a breakpoint. Everything else is a 409. */
+  const PAUSED_RUN_ID = "run-paused";
   /** What the "forget" button acts on, and what the Stores panel's deletes land in. */
   const graphMemory = new Set<string>(["cooldown-node"]);
   const findGraph = (id: string): Graph => {
@@ -821,11 +831,34 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
       findGraph(graphId);
       seen.graphSecrets.push({ node, field, value });
     },
-    runGraphNow: async (graphId) => {
+    runGraphNow: async (graphId, triggerNode) => {
       findGraph(graphId);
-      seen.graphRuns.push(graphId);
-      // The fixture graph has no manual trigger unless a test gives it one.
-      return findGraph(graphId).definition.nodes.some((node) => node.type === "vrcz/run-now");
+      seen.graphRuns.push(triggerNode === undefined ? graphId : `${graphId}:${triggerNode}`);
+      const nodes = findGraph(graphId).definition.nodes;
+      // Naming a node is the test fire, and it works for any node the document actually has. With
+      // no name it is the manual trigger, which the fixture graph has only if a test gave it one.
+      return triggerNode === undefined
+        ? nodes.some((node) => node.type === "vrcz/run-now")
+        : nodes.some((node) => node.id === triggerNode);
+    },
+    setGraphDebug: async (graphId, debug) => replaceGraph({ ...findGraph(graphId), debug }),
+    listGraphTraces: async (graphId) => {
+      findGraph(graphId);
+      return [...seen.graphTraces];
+    },
+    clearGraphTraces: async (graphId) => {
+      findGraph(graphId);
+      seen.graphTraces.length = 0;
+    },
+    resumeGraphRun: async (graphId, runId, step) => {
+      findGraph(graphId);
+      seen.graphResumes.push({ runId, step });
+      return runId === PAUSED_RUN_ID;
+    },
+    stopGraphRun: async (graphId, runId) => {
+      findGraph(graphId);
+      seen.graphStops.push(runId);
+      return runId === PAUSED_RUN_ID;
     },
     publishPluginPanel: () => {},
     publishPluginToast: () => {},
@@ -3051,6 +3084,99 @@ describe("graph routes", () => {
     });
     expect((await call(deps, "/api/graphs/graph-1/run", { method: "POST" })).status).toBe(202);
     expect(seen.graphRuns).toEqual(["graph-1", "graph-1"]);
+  });
+
+  test("a test fire names its trigger, and an unknown one is still a 409", async () => {
+    const { deps, seen } = fakeDeps();
+    await call(deps, "/api/graphs/graph-1", {
+      ...json({
+        definition: {
+          nodes: [{ id: "n1", type: "vrcz/friend-online", position: { x: 0, y: 0 }, config: {} }],
+          edges: [],
+        },
+      }),
+      method: "PUT",
+    });
+
+    // The graph has no manual trigger, so the plain form still has nothing to press...
+    expect((await call(deps, "/api/graphs/graph-1/run", { method: "POST" })).status).toBe(409);
+    // ...while naming a trigger fires that one. This is the whole point of the test fire: exercise
+    // the other nine tenths of a graph without waiting for a friend to actually come online.
+    const res = await call(deps, "/api/graphs/graph-1/run", {
+      ...json({ triggerNode: "n1" }),
+      method: "POST",
+    });
+    expect(res.status).toBe(202);
+    expect(seen.graphRuns).toEqual(["graph-1", "graph-1:n1"]);
+
+    expect(
+      (
+        await call(deps, "/api/graphs/graph-1/run", {
+          ...json({ triggerNode: "nope" }),
+          method: "POST",
+        })
+      ).status,
+    ).toBe(409);
+  });
+
+  test("the debug switch round-trips onto the graph", async () => {
+    const { deps } = fakeDeps();
+    const res = await call(deps, "/api/graphs/graph-1/debug", {
+      ...json({ debug: true }),
+      method: "PUT",
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { debug: boolean }).debug).toBe(true);
+    expect(
+      ((await (await call(deps, "/api/graphs/graph-1")).json()) as { debug: boolean }).debug,
+    ).toBe(true);
+  });
+
+  test("the debug switch refuses anything that is not a boolean", async () => {
+    const { deps } = fakeDeps();
+    const res = await call(deps, "/api/graphs/graph-1/debug", {
+      ...json({ debug: "on" }),
+      method: "PUT",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("traces are readable and clearable", async () => {
+    const { deps } = fakeDeps();
+    expect((await (await call(deps, "/api/graphs/graph-1/traces")).json()) as unknown[]).toEqual(
+      [],
+    );
+    expect((await call(deps, "/api/graphs/graph-1/traces", { method: "DELETE" })).status).toBe(204);
+  });
+
+  test("continue, step and stop answer 409 for a run that is not paused", async () => {
+    // What a second click and a stale poll both look like, and neither is an error the author
+    // needs a red box about. 409 rather than 404 for the same reason `/run` uses it: the run
+    // exists, there is simply nothing to press.
+    const { deps, seen } = fakeDeps();
+    expect(
+      (await call(deps, "/api/graphs/graph-1/runs/run-live/resume", { method: "POST" })).status,
+    ).toBe(409);
+    expect(
+      (await call(deps, "/api/graphs/graph-1/runs/run-live/stop", { method: "POST" })).status,
+    ).toBe(409);
+
+    expect(
+      (
+        await call(deps, "/api/graphs/graph-1/runs/run-paused/resume", {
+          ...json({ step: true }),
+          method: "POST",
+        })
+      ).status,
+    ).toBe(202);
+    expect(
+      (await call(deps, "/api/graphs/graph-1/runs/run-paused/stop", { method: "POST" })).status,
+    ).toBe(202);
+    expect(seen.graphResumes).toEqual([
+      { runId: "run-live", step: false },
+      { runId: "run-paused", step: true },
+    ]);
+    expect(seen.graphStops).toEqual(["run-live", "run-paused"]);
   });
 
   test("the node catalogue is one list, whoever owns the type", async () => {

@@ -21,6 +21,7 @@ import {
   type GraphStoreSummary,
   type GraphSummary,
   type GraphTemplate,
+  type GraphTrace,
   type GraphUpdate,
   type GroupGalleryImagePage,
   type GroupGalleryImageSummary,
@@ -1244,17 +1245,55 @@ export interface ControlDeps {
    * decision 109's posture for plugins, applied to graphs.
    */
   setGraphArmed(graphId: string, armed: boolean): Promise<GraphSummary>;
+  /**
+   * Turns debugging on for one graph: traces, live breakpoints, and the editor's toasts.
+   *
+   * Switching it off **deletes the graph's traces**. They hold what flowed through every wire of
+   * the last ten runs, and keeping that for a graph nobody is debugging any more is a copy of the
+   * user's data with no screen pointing at it. See migration 017.
+   */
+  setGraphDebug(graphId: string, debug: boolean): Promise<GraphSummary>;
   /** Runs that have not finished. A completed run is a `graph.*` event, not a row. */
   listGraphRuns(graphId: string): Promise<GraphRunSummary[]>;
   /**
-   * Fires the graph's manual trigger, if it has one.
+   * What the last few runs of this graph did, node by node, with the values.
+   *
+   * Empty for a graph that is not in debug mode, and that is not a failure to report: nothing was
+   * recorded, because recording it is what the switch is for.
+   */
+  listGraphTraces(graphId: string): Promise<GraphTrace[]>;
+  /** Throws the recording away without turning debugging off. The run log's Clear. */
+  clearGraphTraces(graphId: string): Promise<void>;
+  /**
+   * Lets a run parked on a breakpoint carry on, all the way or by one node.
+   *
+   * False when the run is not paused — it finished, or the editor is a poll behind, or the button
+   * was pressed twice. None of those is an error and none should be reported as one.
+   */
+  resumeGraphRun(graphId: string, runId: string, step: boolean): Promise<boolean>;
+  /**
+   * Gives up on a run parked at a breakpoint.
+   *
+   * The reason a breakpoint is safe to offer at all: a parked run holds a concurrency slot for as
+   * long as it exists, so a `drop`-mode graph stopped at one and never continued would refuse every
+   * fire from then on.
+   */
+  stopGraphRun(graphId: string, runId: string): Promise<boolean>;
+  /**
+   * Fires the graph's manual trigger, or the trigger named by `triggerNode`.
    *
    * Through the engine's own `fire`, which is the same door a plugin trigger comes through — so a
    * manual run is subject to every ceiling and the graph's concurrency mode rather than being a
-   * special path around them. Answers false when the graph has no `run now` node, which is a fact
-   * about the document rather than an error.
+   * special path around them. Answers false when there is nothing to fire, which is a fact about
+   * the document rather than an error.
+   *
+   * Naming a trigger is the **test fire**: it starts a run from a node that would ordinarily be
+   * waiting for a friend to come online, handing it empty placeholder values so the walk has
+   * something on every wire. That is how the other nine tenths of a graph get exercised without
+   * waiting for the world to cooperate, and it is why the values are blank rather than plausible —
+   * see `placeholderOutputs`.
    */
-  runGraphNow(graphId: string): Promise<boolean>;
+  runGraphNow(graphId: string, triggerNode?: string): Promise<boolean>;
   /**
    * Stores (or clears, with an empty value) one node's `secret` config field.
    *
@@ -2753,13 +2792,17 @@ export function createControlApp({ port, deps, appApi, token }: ControlAppOption
 
     .get("/api/graphs/:id/export", async (c) => c.json(await deps.exportGraph(c.req.param("id"))))
 
-    .post("/api/graphs/:id/run", async (c) =>
+    .post("/api/graphs/:id/run", async (c) => {
+      // A body is optional here, and its absence is the ordinary "Run now": fire the manual
+      // trigger. Naming a node is the test fire. See `runGraphNow`.
+      const body = await readJsonObject(c.req.raw);
+      const triggerNode = body === undefined ? undefined : stringField(body, "triggerNode");
       // 409 rather than 404: the graph exists, it simply has nothing to press. A 404 would send the
       // user looking for a graph that is right in front of them.
-      (await deps.runGraphNow(c.req.param("id")))
+      return (await deps.runGraphNow(c.req.param("id"), triggerNode))
         ? c.body(null, 202)
-        : c.json({ error: "no_manual_trigger" }, 409),
-    )
+        : c.json({ error: "no_manual_trigger" }, 409);
+    })
 
     .put("/api/graphs/:id/secrets/:node/:field", async (c) => {
       const body = await readJsonObject(c.req.raw);
@@ -2883,6 +2926,54 @@ export function createControlApp({ port, deps, appApi, token }: ControlAppOption
    * the only thing thrown away is the thing that was breaking the compile.
    */
   const plain: Hono = app;
+
+  /*
+   * The graph debugger's five routes, off the chain for the reason above and for no other.
+   *
+   * They sit here rather than beside the other `/api/graphs` routes because that is where the
+   * compiler put them, which is worth saying out loud: they are part of the same resource and the
+   * same middleware, and the only thing this move throws away is an RPC type nobody consumes.
+   */
+  plain.put("/api/graphs/:id/debug", async (c) => {
+    const body = await readJsonObject(c.req.raw);
+    const debug = body?.debug;
+    if (typeof debug !== "boolean") {
+      return c.json({ error: "invalid_body", detail: "debug must be true or false" }, 400);
+    }
+    return c.json(await deps.setGraphDebug(c.req.param("id"), debug));
+  });
+
+  plain.get("/api/graphs/:id/traces", async (c) =>
+    c.json(await deps.listGraphTraces(c.req.param("id"))),
+  );
+
+  plain.delete("/api/graphs/:id/traces", async (c) => {
+    await deps.clearGraphTraces(c.req.param("id"));
+    return c.body(null, 204);
+  });
+
+  /*
+   * Continue, Step and Stop, for a run sitting on a breakpoint.
+   *
+   * `POST` on a sub-resource of the run rather than a `PUT` on the run itself: none of the three is
+   * a state to set, they are three different things to do to it, and only one of them is
+   * idempotent. 409 for a run that is not paused, matching `/run`'s reading of "the thing exists,
+   * there is simply nothing to press".
+   */
+  plain.post("/api/graphs/:id/runs/:runId/resume", async (c) => {
+    const body = await readJsonObject(c.req.raw);
+    const step = body?.step === true;
+    return (await deps.resumeGraphRun(c.req.param("id"), c.req.param("runId"), step))
+      ? c.body(null, 202)
+      : c.json({ error: "not_paused" }, 409);
+  });
+
+  plain.post("/api/graphs/:id/runs/:runId/stop", async (c) =>
+    (await deps.stopGraphRun(c.req.param("id"), c.req.param("runId")))
+      ? c.body(null, 202)
+      : c.json({ error: "not_paused" }, 409),
+  );
+
   plain.post("/api/settings/install", async (c) => {
     const body = (await readJsonObject(c.req.raw)) ?? {};
     return c.json(

@@ -1,4 +1,5 @@
 import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
+import { GRAPH_TRACE_LIMIT } from "@vrcz/shared";
 import { migrate } from "./migrate.ts";
 import {
   buildEventPage,
@@ -26,6 +27,7 @@ import type {
   GraphRow,
   GraphRunRow,
   GraphStoreRow,
+  GraphTraceRow,
   KindCount,
   LogOffsetRow,
   NewAuditEntry,
@@ -1073,6 +1075,17 @@ export class Store {
   }
 
   /**
+   * Turns tracing, breakpoints and the editor's toasts on for one graph.
+   *
+   * Takes no `updatedAt`, unlike its two neighbours, and that is deliberate rather than an omission:
+   * opening the debugger on a graph is not editing it, and stamping it would reorder the list under
+   * the user for looking at something. See `SQL.setGraphDebug`.
+   */
+  setGraphDebug(id: string, debug: boolean): void {
+    this.stmts.setGraphDebug.run(debug ? 1 : 0, id);
+  }
+
+  /**
    * Records a run, and stamps its graph with when it started.
    *
    * The stamp is here rather than at the engine's call site on purpose: `graph_runs` is deleted the
@@ -1124,10 +1137,18 @@ export class Store {
     this.stmts.updateGraphRunState.run(status, state, updatedAt, id);
   }
 
+  /**
+   * Parks a run on a node.
+   *
+   * `resumeAt` is nullable, and the null is what tells the two kinds of parking apart. A `Wait` has
+   * a time and the sweep picks it up; a **breakpoint** has none and only a person continues it —
+   * `listDueGraphRuns` requires a non-null `resume_at`, so a paused run is invisible to the sweep by
+   * construction rather than by a flag somewhere agreeing with a flag somewhere else.
+   */
   parkGraphRun(
     id: string,
     waitNode: string,
-    resumeAt: number,
+    resumeAt: number | null,
     state: string,
     updatedAt = Date.now(),
   ): void {
@@ -1141,6 +1162,39 @@ export class Store {
   /** A run ends by being deleted from here; its record is the `graph.*` event that was emitted. */
   deleteGraphRun(id: string): void {
     this.stmts.deleteGraphRun.run(id);
+  }
+
+  /**
+   * Records what one run did, and drops the graph's oldest trace if that made too many.
+   *
+   * The prune is here rather than on a timer for the same reason the run stamp is inside
+   * `insertGraphRun`: this is the only moment the count can grow, so it is the only moment the
+   * bound can be broken. A sweep would be a second thing to remember and a window in which the
+   * table is over its limit.
+   */
+  insertGraphTrace(trace: GraphTraceRow, keep = GRAPH_TRACE_LIMIT): void {
+    this.stmts.insertGraphTrace.run(
+      trace.run_id,
+      trace.graph_id,
+      trace.trigger_node,
+      trace.outcome,
+      trace.dry_run,
+      trace.failed_node,
+      trace.message,
+      trace.steps,
+      trace.started_at,
+      trace.finished_at,
+    );
+    this.stmts.pruneGraphTraces.run(trace.graph_id, trace.graph_id, keep);
+  }
+
+  listGraphTraces(graphId: string, limit = GRAPH_TRACE_LIMIT): GraphTraceRow[] {
+    return this.stmts.listGraphTraces.all(graphId, limit);
+  }
+
+  /** Throws the recording away. What "Clear" on the run log does, and what turning debug off does. */
+  clearGraphTraces(graphId: string): void {
+    this.stmts.clearGraphTraces.run(graphId);
   }
 
   /** What a stateful node remembered, or null. `value` is opaque to everything but that node. */
@@ -1530,6 +1584,7 @@ function prepareAll(db: Database) {
     deleteGraph: q<void, [string]>(SQL.deleteGraph),
     setGraphEnabled: q<void, [number, string | null, number, string]>(SQL.setGraphEnabled),
     setGraphArmed: q<void, [number, number, string]>(SQL.setGraphArmed),
+    setGraphDebug: q<void, [number, string]>(SQL.setGraphDebug),
 
     insertGraphRun: q<void, [string, string, string, string, number, string, number, number]>(
       SQL.insertGraphRun,
@@ -1542,9 +1597,17 @@ function prepareAll(db: Database) {
     countGraphRunsByStatus: q<{ n: number }, [string, string]>(SQL.countGraphRunsByStatus),
     nextQueuedGraphRun: q<GraphRunRow, [string]>(SQL.nextQueuedGraphRun),
     updateGraphRunState: q<void, [string, string, number, string]>(SQL.updateGraphRunState),
-    parkGraphRun: q<void, [string, number, string, number, string]>(SQL.parkGraphRun),
+    parkGraphRun: q<void, [string, number | null, string, number, string]>(SQL.parkGraphRun),
     listDueGraphRuns: q<GraphRunRow, [number, number]>(SQL.listDueGraphRuns),
     deleteGraphRun: q<void, [string]>(SQL.deleteGraphRun),
+
+    insertGraphTrace: q<
+      void,
+      [string, string, string, string, number, string | null, string | null, string, number, number]
+    >(SQL.insertGraphTrace),
+    listGraphTraces: q<GraphTraceRow, [string, number]>(SQL.listGraphTraces),
+    pruneGraphTraces: q<void, [string, string, number]>(SQL.pruneGraphTraces),
+    clearGraphTraces: q<void, [string]>(SQL.clearGraphTraces),
 
     getGraphState: q<{ value: string; updated_at: number }, [string, string, string]>(
       SQL.getGraphState,

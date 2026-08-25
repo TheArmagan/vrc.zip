@@ -47,6 +47,7 @@ import {
   WAIT_TYPE,
 } from "./intrinsics.ts";
 import { DEFAULT_GRAPH_LIMITS, GraphCounters, type GraphLimits } from "./limits.ts";
+import { pushStep, summarisePorts } from "./trace.ts";
 import type { NodeProvider, RunOutcome, RunState } from "./types.ts";
 
 export interface GraphEngineOptions {
@@ -333,6 +334,62 @@ export class GraphEngine {
     await this.#advance(runId);
   }
 
+  /**
+   * Lets a run parked on a breakpoint carry on, either to the end or by exactly one node.
+   *
+   * Answers false for a run that is not paused, which covers all three of the ways a Continue can
+   * arrive too late: the run finished, the editor is looking at a stale poll, or somebody pressed
+   * it twice. None of them is an error, and none of them should be reported as one.
+   *
+   * A run parked on a `Wait` is deliberately **not** resumable through here. Its `resume_at` is a
+   * time the author asked for, and skipping it from a debug panel would be a button that changes
+   * what the graph does rather than one that observes it.
+   */
+  async resumeRun(runId: string, options: { readonly step?: boolean } = {}): Promise<boolean> {
+    const run = this.#store.getGraphRun(runId);
+    if (run === null || run.status !== "waiting" || run.resume_at !== null) return false;
+    if (this.#walking.has(runId)) return false;
+    const state = readState(run);
+    const paused = state.paused ?? run.wait_node;
+    if (paused === null) return false;
+
+    delete state.paused;
+    // The one node the walk may pass without stopping. Cleared again the moment it parks.
+    state.stepOver = paused;
+    if (options.step === true) state.stepping = true;
+    else delete state.stepping;
+    this.#store.updateGraphRunState(runId, "running", JSON.stringify(state), this.#now());
+    await this.#advance(runId);
+    return true;
+  }
+
+  /**
+   * Gives up on a paused run.
+   *
+   * The escape hatch a breakpoint needs to be safe. A parked run holds a concurrency slot for as
+   * long as it exists, so a `drop`-mode graph stopped on a breakpoint nobody continues would refuse
+   * every fire from then on — the exact trap `#reclaimOrphanRuns` was written about, reintroduced
+   * by a debugging feature. Recorded as a failure rather than a finish, because it is one: the rest
+   * of the graph did not happen.
+   */
+  async stopRun(runId: string): Promise<boolean> {
+    const run = this.#store.getGraphRun(runId);
+    if (run === null || run.status !== "waiting" || run.resume_at !== null) return false;
+    const graph = this.#store.getGraph(run.graph_id);
+    if (graph === null) {
+      this.#store.deleteGraphRun(runId);
+      return true;
+    }
+    const state = readState(run);
+    this.#settle(graph, run, state, {
+      kind: "failed",
+      node: state.paused ?? run.wait_node ?? run.trigger_node,
+      message: "Stopped at a breakpoint.",
+    });
+    await this.#pumpQueue(run.graph_id);
+    return true;
+  }
+
   /* ---------------------------------------------------------------------------------------- */
   /* Arming                                                                                     */
   /* ---------------------------------------------------------------------------------------- */
@@ -408,7 +465,27 @@ export class GraphEngine {
     now: number,
   ): string {
     const id = randomUUID();
-    const state: RunState = { outputs: { [triggerNode]: outputs }, skipped: [], executed: [] };
+    const state: RunState = {
+      outputs: { [triggerNode]: outputs },
+      skipped: [],
+      executed: [],
+      // Seeded here and nowhere else: the presence of the array is what every `pushStep` downstream
+      // tests, so a run that started while debug was off stays untraced for its whole life even if
+      // the switch is flipped mid-flight. Half a trace, silently, is worse than none.
+      ...(graph.debug === 1
+        ? {
+            trace: [
+              {
+                nodeId: triggerNode,
+                status: "ok" as const,
+                at: now,
+                ms: 0,
+                outputs: summarisePorts(outputs),
+              },
+            ],
+          }
+        : {}),
+    };
     this.#store.insertGraphRun({
       id,
       graph_id: graph.id,
@@ -441,7 +518,7 @@ export class GraphEngine {
       }
       const state = readState(run);
       const outcome = await this.#walk(graph, document, run, state);
-      this.#settle(graph, run, outcome);
+      this.#settle(graph, run, state, outcome);
       // Awaited rather than detached, so "the next queued run starts when this one ends" is a fact
       // a caller can observe rather than a race a test has to sleep through.
       if (outcome.kind !== "waiting") {
@@ -614,6 +691,9 @@ export class GraphEngine {
         const stuck = this.#stuckNodes(document, allowed, state, incoming);
         if (stuck.length === 0) return { kind: "finished" };
         state.skipped.push(...stuck);
+        for (const id of stuck) {
+          pushStep(state.trace, { nodeId: id, status: "skipped", at: this.#now(), ms: 0 });
+        }
         this.#persist(run.id, state);
         continue;
       }
@@ -623,8 +703,47 @@ export class GraphEngine {
       const edges = incoming.get(nodeId) ?? [];
       if (edges.some((edge) => isDead(edge, state))) {
         state.skipped.push(nodeId);
+        // Recorded, because "it skipped" is the answer to the most common question a big graph
+        // raises. A node that never ran leaves no other mark anywhere: no output, no error, no feed
+        // row — and the author is left looking at a wire wondering which end of it went quiet.
+        pushStep(state.trace, { nodeId, status: "skipped", at: this.#now(), ms: 0 });
         this.#persist(run.id, state);
         continue;
+      }
+
+      /*
+       * Stop here and wait for a person.
+       *
+       * Two ways in and one exit. A `breakpoint` on the node is the author's standing instruction;
+       * `stepping` is the Step button asking for one node at a time. Both are honoured only in debug
+       * mode, and both are refused by `stepOver` for the single node a resume is walking past —
+       * without which Continue would park on the spot it had just been released from.
+       */
+      const pausing =
+        graph.debug === 1 &&
+        state.stepOver !== nodeId &&
+        (node.breakpoint === true || state.stepping === true);
+      if (pausing) {
+        if (insideForeach) {
+          // The same limit as `Wait`, for the same reason: parking mid-iteration would mean
+          // persisting a loop's scope, and `graph_runs.wait_node` names one node because that is
+          // all a run has ever needed to say. `loopProblems` in the editor says so before you run.
+          return {
+            kind: "failed",
+            node: nodeId,
+            message: "A breakpoint cannot be used inside a For each.",
+          };
+        }
+        delete state.stepOver;
+        state.paused = nodeId;
+        this.#store.parkGraphRun(run.id, nodeId, null, JSON.stringify(state), this.#now());
+        this.#emit("graph.run.paused", graph, {
+          runId: run.id,
+          triggerNode: run.trigger_node,
+          node: nodeId,
+          reason: node.breakpoint === true ? "breakpoint" : "step",
+        });
+        return { kind: "waiting", resumeAt: null };
       }
 
       if (state.executed.length >= this.#limits.maxNodesPerRun) {
@@ -637,6 +756,8 @@ export class GraphEngine {
 
       const inputs = gatherInputs(edges, state);
       state.executed.push(nodeId);
+      // Read before the node runs, so a step's `ms` is the node's own time and not the walk's.
+      const startedAt = this.#now();
 
       if (node.type === WAIT_TYPE) {
         if (insideForeach) {
@@ -658,6 +779,7 @@ export class GraphEngine {
       if (node.type === FOREACH_TYPE) {
         const outcome = await this.#runForeach(scope, state, nodeId, inputs);
         if (outcome.kind !== "finished") return outcome;
+        this.#ran(state, nodeId, startedAt, inputs);
         this.#persist(run.id, state);
         continue;
       }
@@ -683,6 +805,7 @@ export class GraphEngine {
           if (stop) iteration.stopped = true;
           state.outputs[nodeId] = { out: stop };
         }
+        this.#ran(state, nodeId, startedAt, inputs);
         this.#persist(run.id, state);
         continue;
       }
@@ -692,6 +815,7 @@ export class GraphEngine {
         // is recorded, so the other side's edges are dead and everything under it skips.
         const taken = inputs.value === true ? "true" : "false";
         state.outputs[nodeId] = { [taken]: inputs.payload ?? true };
+        this.#ran(state, nodeId, startedAt, inputs);
         this.#persist(run.id, state);
         continue;
       }
@@ -715,14 +839,41 @@ export class GraphEngine {
           accountId: actingAccount(node, graph),
         });
         state.outputs[nodeId] = gate(definition, produced);
+        this.#ran(state, nodeId, startedAt, inputs);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const routed = (outgoing.get(nodeId) ?? []).some(
           (edge) => edge.from.port === ERROR_PORT && !state.skipped.includes(edge.to.node),
         );
+        pushStep(state.trace, {
+          nodeId,
+          status: "error",
+          at: startedAt,
+          ms: this.#now() - startedAt,
+          inputs: summarisePorts(inputs),
+          message,
+          handled: routed,
+        });
         if (!routed) return { kind: "failed", node: nodeId, message };
-        // The author wired the failure onward, so it is data now rather than the end of the run.
-        // Only `error` is produced, which leaves every other branch of this node dead.
+        /*
+         * The author wired the failure onward, so it is data now rather than the end of the run.
+         * Only `error` is produced, which leaves every other branch of this node dead.
+         *
+         * And it is **said out loud**, unconditionally, which is the one thing this path was
+         * missing. Handling an error is the author saying "I know this can break", not "and I will
+         * never hear about it again" — a node failing on every single fire while the graph reports
+         * finished is the shape of bug that survives longest, because every other signal says the
+         * automation is working. Not gated on debug, for the same reason `graph.run.dropped` is
+         * not: the silence *is* the failure. Debug mode only decides whether a toast lands on top.
+         */
+        this.#emit("graph.node.error", graph, {
+          runId: run.id,
+          triggerNode: run.trigger_node,
+          dryRun: run.dry_run === 1,
+          node: nodeId,
+          nodeType: node.type,
+          message,
+        });
         state.outputs[nodeId] = { [ERROR_PORT]: message };
       }
       this.#persist(run.id, state);
@@ -884,14 +1035,15 @@ export class GraphEngine {
     return null;
   }
 
-  #settle(graph: GraphRow, run: GraphRunRow, outcome: RunOutcome): void {
+  #settle(graph: GraphRow, run: GraphRunRow, state: RunState, outcome: RunOutcome): void {
     if (outcome.kind === "waiting") return;
     this.#store.deleteGraphRun(run.id);
+    const now = this.#now();
     const base = {
       runId: run.id,
       triggerNode: run.trigger_node,
       dryRun: run.dry_run === 1,
-      durationMs: this.#now() - run.started_at,
+      durationMs: now - run.started_at,
     };
     if (outcome.kind === "finished") {
       this.#emit("graph.run.finished", graph, base);
@@ -901,6 +1053,61 @@ export class GraphEngine {
         node: outcome.node,
         message: outcome.message,
       });
+    }
+    this.#writeTrace(graph, run, state, outcome, now);
+  }
+
+  /**
+   * Keeps the recording, for a graph in debug mode.
+   *
+   * Last thing in `#settle` and wrapped, because it is the one step here that is not load-bearing:
+   * the run has already ended and its event has already gone out, so a failure to write a debugging
+   * aid must not be able to turn a finished run into an engine defect. The alternative — recording
+   * before the emit — would have exactly that failure mode.
+   *
+   * The closing step is appended here rather than at each of the seven places that return `failed`.
+   * Every one of them knows a node and a message, which is precisely what a step is, so one append
+   * against the outcome covers all of them and cannot fall out of step with a new one.
+   */
+  #writeTrace(
+    graph: GraphRow,
+    run: GraphRunRow,
+    state: RunState,
+    outcome: Exclude<RunOutcome, { kind: "waiting" }>,
+    now: number,
+  ): void {
+    const steps = state.trace;
+    if (steps === undefined) return;
+    try {
+      if (outcome.kind === "failed") {
+        // Unless the walk already recorded it. A node that threw records its own step, with its
+        // inputs attached; this covers the failures the walk raises *about* a node rather than
+        // inside one — a missing type, a ceiling, a `Collect` drawn outside its loop.
+        const last = steps.at(-1);
+        if (last?.nodeId !== outcome.node || last.status !== "error") {
+          pushStep(steps, {
+            nodeId: outcome.node,
+            status: "error",
+            at: now,
+            ms: 0,
+            message: outcome.message,
+          });
+        }
+      }
+      this.#store.insertGraphTrace({
+        run_id: run.id,
+        graph_id: graph.id,
+        trigger_node: run.trigger_node,
+        outcome: outcome.kind,
+        dry_run: run.dry_run,
+        failed_node: outcome.kind === "failed" ? outcome.node : null,
+        message: outcome.kind === "failed" ? outcome.message : null,
+        steps: JSON.stringify(steps),
+        started_at: run.started_at,
+        finished_at: now,
+      });
+    } catch (error) {
+      this.#onError(`graph ${graph.id} could not record a trace for run ${run.id}`, error);
     }
   }
 
@@ -1037,6 +1244,26 @@ export class GraphEngine {
     this.#store.updateGraphRunState(runId, "running", JSON.stringify(state), this.#now());
   }
 
+  /**
+   * Records a node that ran, reading what it produced back out of the state.
+   *
+   * Out of the state rather than from the caller, because that is the only copy that has been
+   * through `gate` — a condition that answered false produces nothing, and a trace that showed the
+   * `false` it "returned" would contradict the wire, which is exactly the disagreement somebody
+   * opens a trace to resolve. A no-op unless this run is being traced.
+   */
+  #ran(state: RunState, nodeId: string, startedAt: number, inputs: PortValues): void {
+    if (state.trace === undefined) return;
+    pushStep(state.trace, {
+      nodeId,
+      status: "ok",
+      at: startedAt,
+      ms: this.#now() - startedAt,
+      inputs: summarisePorts(inputs),
+      outputs: summarisePorts(state.outputs[nodeId] ?? {}),
+    });
+  }
+
   #drop(graph: GraphRow, nodeId: string, reason: DropReason, detail: string): void {
     this.#emit("graph.run.dropped", graph, { triggerNode: nodeId, reason, detail });
   }
@@ -1109,6 +1336,13 @@ function readState(run: GraphRunRow): RunState {
       skipped: parsed.skipped ?? [],
       executed: parsed.executed ?? [],
       ...(parsed.loops === undefined ? {} : { loops: parsed.loops }),
+      // Carried across the JSON boundary explicitly, like `loops`. A run parked on a `Wait` for an
+      // hour is reloaded from this text, and a trace that started before the pause has to be the
+      // same trace afterwards or the recording is of two different halves of one run.
+      ...(parsed.trace === undefined ? {} : { trace: parsed.trace }),
+      ...(parsed.paused === undefined ? {} : { paused: parsed.paused }),
+      ...(parsed.stepOver === undefined ? {} : { stepOver: parsed.stepOver }),
+      ...(parsed.stepping === undefined ? {} : { stepping: parsed.stepping }),
     };
   } catch {
     return { outputs: {}, skipped: [], executed: [] };

@@ -43,6 +43,7 @@ import {
   type GraphStoreSummary,
   type GraphSummary,
   type GraphTemplate,
+  type GraphTrace,
   type GraphUpdate,
   type GroupGalleryImagePage,
   type GroupGalleryImageSummary,
@@ -88,6 +89,8 @@ export type {
   GraphStoreSummary,
   GraphSummary,
   GraphTemplate,
+  GraphTrace,
+  GraphTraceStep,
   GraphUpdate,
   NodeTypeSummary,
   RateSeries,
@@ -1053,7 +1056,21 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     throw new ApiError("http", message, response.status, code);
   }
 
-  if (response.status === 204) return undefined as T;
+  /*
+   * A success the daemon deliberately sent no body with.
+   *
+   * `204` was the only case handled, and that was not enough: the graph routes that *start* something
+   * answer **202 Accepted** with `c.body(null, 202)` — Run now has done so since it was written, and
+   * Continue, Step and Stop do now. Every one of those fell through to `response.json()`, which threw
+   * on the empty body, and the editor put "The daemon sent a response this build cannot read." on
+   * screen after a Run now that had in fact worked perfectly.
+   *
+   * Both halves of the test matter. The status covers the codes that are defined to carry no body;
+   * `Content-Length: 0` covers a 202 or a 200 that simply did not send one, which is the actual
+   * shape here. A body that is genuinely absent has nothing to parse, whatever the status says.
+   */
+  if (response.status === 204 || response.status === 205) return undefined as T;
+  if (response.headers.get("content-length") === "0") return undefined as T;
 
   try {
     return (await response.json()) as T;
@@ -1585,13 +1602,68 @@ export const api = {
         body: { armed },
       }),
 
+    /**
+     * Turns the debugger on for one graph: traces, live breakpoints, and this app's toasts.
+     *
+     * Turning it **off deletes the graph's traces**, on the daemon side. Worth knowing at the call
+     * site, because it is the one switch here that throws something away.
+     */
+    setDebug: (graphId: string, debug: boolean): Promise<GraphSummary> =>
+      request<GraphSummary>(`/graphs/${encodeURIComponent(graphId)}/debug`, {
+        method: "PUT",
+        body: { debug },
+      }),
+
     /** Runs that have not finished. A completed run is a `graph.*` event in the feed, not a row. */
     runs: (graphId: string, signal?: AbortSignal): Promise<GraphRunSummary[]> =>
       request<GraphRunSummary[]>(`/graphs/${encodeURIComponent(graphId)}/runs`, withSignal(signal)),
 
-    /** Fires the manual trigger. Rejects `no_manual_trigger` when the graph has no such node. */
-    runNow: (graphId: string): Promise<void> =>
-      request<void>(`/graphs/${encodeURIComponent(graphId)}/run`, { method: "POST" }),
+    /**
+     * What the last few runs did, node by node, with the values that were on the wires.
+     *
+     * Empty for a graph that is not in debug mode, and that is an answer rather than a failure:
+     * nothing was recorded, because recording it is what the switch is for.
+     */
+    traces: (graphId: string, signal?: AbortSignal): Promise<GraphTrace[]> =>
+      request<GraphTrace[]>(`/graphs/${encodeURIComponent(graphId)}/traces`, withSignal(signal)),
+
+    /** Throws the recording away without turning the debugger off. */
+    clearTraces: (graphId: string): Promise<void> =>
+      request<void>(`/graphs/${encodeURIComponent(graphId)}/traces`, { method: "DELETE" }),
+
+    /**
+     * Lets a run parked on a breakpoint carry on, all the way or by one node.
+     *
+     * Rejects `not_paused` when the run has already moved on, which is what a second click and a
+     * stale poll both look like. Treat it as "nothing to do", not as a failure worth a red box.
+     */
+    resumeRun: (graphId: string, runId: string, step = false): Promise<void> =>
+      request<void>(
+        `/graphs/${encodeURIComponent(graphId)}/runs/${encodeURIComponent(runId)}/resume`,
+        { method: "POST", body: { step } },
+      ),
+
+    /** Gives up on a run parked at a breakpoint, freeing the concurrency slot it was holding. */
+    stopRun: (graphId: string, runId: string): Promise<void> =>
+      request<void>(
+        `/graphs/${encodeURIComponent(graphId)}/runs/${encodeURIComponent(runId)}/stop`,
+        { method: "POST" },
+      ),
+
+    /**
+     * Fires a trigger by hand.
+     *
+     * With no `triggerNode` this is the manual `Run now` node, and it rejects `no_manual_trigger`
+     * when the graph has none. Naming a trigger is the **test fire**: the run starts from a node
+     * that would ordinarily be waiting for something to happen, and every port it declares carries
+     * an empty placeholder. That is deliberate — a blank id fails at the node that needed it,
+     * saying so, where a plausible-looking one would fail somewhere inside VRChat instead.
+     */
+    runNow: (graphId: string, triggerNode?: string): Promise<void> =>
+      request<void>(`/graphs/${encodeURIComponent(graphId)}/run`, {
+        method: "POST",
+        body: triggerNode === undefined ? {} : { triggerNode },
+      }),
 
     /** The graphs vrc.zip ships, so a first canvas is an edit rather than a blank page. */
     templates: (signal?: AbortSignal): Promise<GraphTemplate[]> =>

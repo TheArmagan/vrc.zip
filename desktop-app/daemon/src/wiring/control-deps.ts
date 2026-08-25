@@ -33,6 +33,8 @@ import {
   type GraphStoreSummary,
   type GraphSummary,
   type GraphTemplate,
+  type GraphTrace,
+  type GraphTraceStep,
   isGraphConcurrency,
   isScope,
   type JsonValue,
@@ -139,7 +141,13 @@ import {
   runRetention as runRetentionPass,
   type Store,
 } from "../store/index.ts";
-import type { GrantRow, GraphKvEntryRow, GraphRow, GraphRunRow } from "../store/types.ts";
+import type {
+  GrantRow,
+  GraphKvEntryRow,
+  GraphRow,
+  GraphRunRow,
+  GraphTraceRow,
+} from "../store/types.ts";
 import type { UpdateChecker } from "../updates/checker.ts";
 import type { WebhookManager } from "../webhooks/index.ts";
 import { EPHEMERAL } from "./feed-writer.ts";
@@ -1088,6 +1096,7 @@ function graphSummary(row: GraphRow, extras: SummaryExtras = {}): GraphSummary {
     description: row.description,
     enabled: row.enabled === 1,
     armed: row.armed === 1,
+    debug: row.debug === 1,
     // The column is CHECK-constrained to the three modes, so this narrows rather than defaults;
     // the fallback is for a row written by a newer build than this one.
     concurrency: isGraphConcurrency(row.concurrency) ? row.concurrency : "parallel",
@@ -1222,6 +1231,64 @@ async function stampHashes(
   return { nodes, edges: document.edges };
 }
 
+/**
+ * What a test fire hands the graph in place of the thing that did not happen.
+ *
+ * **Every declared output gets a value, and that is the whole job.** The walk's one gating rule is
+ * a missing key: a port with no entry is a dead wire and everything under it skips. So a fire with
+ * an empty payload would start a run that walked precisely nothing, which is the opposite of a test.
+ *
+ * The values themselves are deliberately empty rather than plausible. An id shaped like a real
+ * `usr_` would send a test fire off to fetch a user who does not exist and produce a failure about
+ * VRChat rather than about the graph; an empty one fails immediately, at the node that needed it,
+ * saying so. The editor labels this a test fire for the same reason — nobody should read the run
+ * that comes out of it as evidence the graph works, only as evidence of where it goes.
+ */
+function placeholderOutputs(definition: {
+  outputs: readonly { id: string; type: string }[];
+}): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const port of definition.outputs) {
+    out[port.id] = port.type.startsWith("list<")
+      ? []
+      : port.type === "number"
+        ? 0
+        : port.type === "boolean"
+          ? false
+          : port.type === "json"
+            ? {}
+            : "";
+  }
+  return out;
+}
+
+/** A trace row as the editor reads it. `steps` is JSON in the column and a list on the wire. */
+function graphTrace(row: GraphTraceRow): GraphTrace {
+  return {
+    runId: row.run_id,
+    graphId: row.graph_id,
+    triggerNode: row.trigger_node,
+    outcome: row.outcome === "failed" ? "failed" : "finished",
+    dryRun: row.dry_run === 1,
+    failedNode: row.failed_node,
+    message: row.message,
+    // A row whose blob will not parse is a row with nothing to say, which is the same posture every
+    // other `payload` read in this file takes. It must not be able to break the list around it.
+    steps: parseSteps(row.steps),
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+  };
+}
+
+function parseSteps(raw: string): GraphTraceStep[] {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as GraphTraceStep[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 function graphRunSummary(row: GraphRunRow): GraphRunSummary {
   const progress = runProgress(row);
   return {
@@ -1236,6 +1303,16 @@ function graphRunSummary(row: GraphRunRow): GraphRunSummary {
     updatedAt: row.updated_at,
     currentNode: progress.currentNode,
     loops: progress.loops,
+    /*
+     * Waiting for a person rather than for a clock.
+     *
+     * Derived from the pair rather than read from the state blob, and that is what keeps the two
+     * from disagreeing: a `Wait` always parks with a `resumeAt` and a breakpoint never does, so the
+     * null *is* the distinction. The engine also writes `paused` into the state for its own use;
+     * this deliberately does not read it, because a summary that needed the blob parsed to answer
+     * a question two columns already answer is a third place for the answer to drift.
+     */
+    pausedNode: row.status === "waiting" && row.resume_at === null ? row.wait_node : null,
   };
 }
 
@@ -3031,6 +3108,52 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       return graphSummary(requireGraph(store, graphId), { definitionOf });
     },
 
+    async setGraphDebug(graphId, debug): Promise<GraphSummary> {
+      requireGraph(store, graphId);
+      store.setGraphDebug(graphId, debug);
+      /*
+       * Switching debug **off** throws the recording away.
+       *
+       * The traces hold what flowed through every wire of the last ten runs, which is worth keeping
+       * exactly as long as somebody is looking at it. Leaving them behind would mean a graph nobody
+       * is debugging any more still holding a copy of ten runs' worth of user objects, indefinitely,
+       * with nothing in the UI to say so or to clear it. Turning debug back on starts a fresh
+       * recording, which is what a person means by it.
+       *
+       * Not the other way round: switching *on* leaves whatever is there, because there is nothing.
+       */
+      if (!debug) store.clearGraphTraces(graphId);
+      return graphSummary(requireGraph(store, graphId), { definitionOf });
+    },
+
+    async listGraphTraces(graphId): Promise<GraphTrace[]> {
+      requireGraph(store, graphId);
+      return await Promise.resolve(store.listGraphTraces(graphId).map(graphTrace));
+    },
+
+    async clearGraphTraces(graphId): Promise<void> {
+      requireGraph(store, graphId);
+      store.clearGraphTraces(graphId);
+      await Promise.resolve();
+    },
+
+    async resumeGraphRun(graphId, runId, step): Promise<boolean> {
+      requireGraph(store, graphId);
+      const run = store.getGraphRun(runId);
+      // Checked against the graph in the path rather than trusting the run id alone: the id comes
+      // from a client, and continuing another graph's run from this graph's editor is a confusion
+      // worth refusing rather than a shortcut worth allowing.
+      if (run === null || run.graph_id !== graphId) return false;
+      return (await options.graphs?.resumeRun(runId, { step })) ?? false;
+    },
+
+    async stopGraphRun(graphId, runId): Promise<boolean> {
+      requireGraph(store, graphId);
+      const run = store.getGraphRun(runId);
+      if (run === null || run.graph_id !== graphId) return false;
+      return (await options.graphs?.stopRun(runId)) ?? false;
+    },
+
     async listGraphRuns(graphId): Promise<GraphRunSummary[]> {
       requireGraph(store, graphId);
       return await Promise.resolve(store.listGraphRuns(graphId).map(graphRunSummary));
@@ -3082,17 +3205,38 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
       await Promise.resolve();
     },
 
-    async runGraphNow(graphId): Promise<boolean> {
+    async runGraphNow(graphId, triggerNode): Promise<boolean> {
       const row = requireGraph(store, graphId);
       const engine = options.graphs;
       if (engine === undefined) return false;
-      const node = parseGraphDocument(row.definition).nodes.find(
-        (entry) => entry.type === RUN_NOW_TYPE,
-      );
+      const document = parseGraphDocument(row.definition);
+      /*
+       * Named trigger, or the manual one.
+       *
+       * The manual node stays the default so the plain "Run now" gesture is unchanged. Naming one
+       * is the *test fire*: it starts a run from a trigger that would ordinarily wait for a friend
+       * to come online, which is the only way to exercise the other nine tenths of a graph without
+       * waiting for the world to cooperate.
+       */
+      const node =
+        triggerNode === undefined
+          ? document.nodes.find((entry) => entry.type === RUN_NOW_TYPE)
+          : document.nodes.find((entry) => entry.id === triggerNode);
       if (node === undefined) return false;
+
+      const definition = engine.definitionOf(node.type);
+      if (definition === null || definition.kind !== "trigger") return false;
+      // A trigger with an incoming edge is not a root, and the engine never arms one. Firing it by
+      // hand would walk a branch from a node the graph itself would never start at.
+      if (document.edges.some((edge) => edge.to.node === node.id)) return false;
+
       // Not awaited to completion by the route — a run can park on a `wait` for an hour — but the
       // engine's own error handling owns whatever happens after this returns.
-      await engine.fire(graphId, node.id, { at: Date.now() });
+      await engine.fire(
+        graphId,
+        node.id,
+        node.type === RUN_NOW_TYPE ? { at: Date.now() } : placeholderOutputs(definition),
+      );
       return true;
     },
 

@@ -642,6 +642,14 @@ export const SQL = {
   setGraphEnabled: `
     UPDATE graphs SET enabled = ?, disabled_reason = ?, updated_at = ? WHERE id = ?`,
   setGraphArmed: `UPDATE graphs SET armed = ?, updated_at = ? WHERE id = ?`,
+  /*
+   * Debug does **not** stamp `updated_at`, unlike the other two switches.
+   *
+   * `updated_at` is what the list sorts by and what the card reports as "edited", and turning
+   * tracing on to look at a graph is not editing it. Reordering somebody's list because they opened
+   * the debugger on one row is the kind of small lie that makes a list untrustworthy.
+   */
+  setGraphDebug: `UPDATE graphs SET debug = ? WHERE id = ?`,
 
   insertGraphRun: `
     INSERT INTO graph_runs
@@ -694,6 +702,35 @@ export const SQL = {
     WHERE status = 'waiting' AND resume_at IS NOT NULL AND resume_at <= ?
     ORDER BY resume_at LIMIT ?`,
   deleteGraphRun: `DELETE FROM graph_runs WHERE id = ?`,
+
+  /*
+   * Traces — the recording a graph in debug mode makes of itself. See migration 017.
+   *
+   * `INSERT OR REPLACE` rather than a plain insert: the primary key is the run id, and a run that
+   * somehow settles twice should overwrite its own row rather than throw inside the settle path,
+   * where a throw would take down the walk that was otherwise finishing correctly.
+   */
+  insertGraphTrace: `
+    INSERT OR REPLACE INTO graph_traces
+      (run_id, graph_id, trigger_node, outcome, dry_run, failed_node, message, steps,
+       started_at, finished_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  listGraphTraces: `
+    SELECT * FROM graph_traces WHERE graph_id = ? ORDER BY finished_at DESC LIMIT ?`,
+  /*
+   * Keeps the newest `?` traces of one graph and drops the rest, by count rather than by age.
+   *
+   * Age is the wrong axis here and that is the whole design: a graph fired twice this afternoon has
+   * two traces worth keeping however old they are, and one firing every minute has ten worth keeping
+   * however new the rest are. Run at every insert, which is the only moment the count can grow.
+   */
+  pruneGraphTraces: `
+    DELETE FROM graph_traces
+    WHERE graph_id = ?
+      AND run_id NOT IN (
+        SELECT run_id FROM graph_traces WHERE graph_id = ? ORDER BY finished_at DESC LIMIT ?
+      )`,
+  clearGraphTraces: `DELETE FROM graph_traces WHERE graph_id = ?`,
 
   /*
    * The memory a cooldown or a counter node keeps. One value per (graph, node, key); the node that

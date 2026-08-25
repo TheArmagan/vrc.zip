@@ -390,6 +390,13 @@ export type GraphRow = {
   description: string;
   enabled: number;
   armed: number;
+  /**
+   * The author is debugging this graph: runs are traced, breakpoints park, and the editor toasts.
+   *
+   * A third switch and not a mode of the other two, because it is orthogonal to both — an armed
+   * graph doing real things is exactly the one worth tracing when it misbehaves. See migration 017.
+   */
+  debug: number;
   concurrency: string;
   account_id: string | null;
   definition: string;
@@ -404,7 +411,8 @@ export type GraphRow = {
   updated_at: number;
 };
 
-export type NewGraph = Omit<GraphRow, "disabled_reason" | "last_run_at">;
+/** `debug` is omitted for the same reason the other two are: a new graph is not being debugged. */
+export type NewGraph = Omit<GraphRow, "disabled_reason" | "last_run_at" | "debug">;
 
 /**
  * One run that has not finished — running, waiting on a `wait` node, or queued behind another.
@@ -426,6 +434,24 @@ export type GraphRunRow = {
 };
 
 export type NewGraphRun = Omit<GraphRunRow, "wait_node" | "resume_at">;
+
+/**
+ * One recorded run of a graph in debug mode. See migration 017 for why this is not an `events` row.
+ *
+ * `steps` is JSON — `GraphTraceStep[]` from `@vrcz/shared`. Nothing in the store interprets it.
+ */
+export type GraphTraceRow = {
+  run_id: string;
+  graph_id: string;
+  trigger_node: string;
+  outcome: string;
+  dry_run: number;
+  failed_node: string | null;
+  message: string | null;
+  steps: string;
+  started_at: number;
+  finished_at: number;
+};
 
 /** How much one node of a graph is remembering, for the editor's "forget" button. */
 export type GraphNodeStateRow = {

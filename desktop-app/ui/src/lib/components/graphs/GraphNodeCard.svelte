@@ -288,6 +288,21 @@ function dotStyle(portType: string): string {
       <CircleAlertIcon class="mt-px size-3 shrink-0" />
       <span>{node.problem ?? "This node type changed. Check its wiring."}</span>
     </div>
+  {:else if node.ranMessage !== undefined}
+    <!--
+      What it said when it broke, on the node that broke, which is the whole point of the marker.
+      Second to the two above on purpose: a loop rule and a stale type are reasons the *next* run
+      will go wrong, and this is a report about one that already did.
+
+      Clamped to two lines rather than truncated to one. A VRChat error is a sentence and the useful
+      half is often at the end of it; the inspector has the whole thing.
+    -->
+    <div
+      class="flex items-start gap-1.5 border-b border-border bg-destructive/10 px-3 py-1.5 text-[11px] text-destructive"
+    >
+      <CircleAlertIcon class="mt-px size-3 shrink-0" />
+      <span class="line-clamp-2">{node.ranMessage}</span>
+    </div>
   {/if}
 
   <div class="flex justify-between gap-4 px-3 py-2 text-[11px]">

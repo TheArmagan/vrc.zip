@@ -108,4 +108,26 @@ describe("loopProblems", () => {
 
     expect(loopProblems(nodes, edges)).toEqual([]);
   });
+
+  test("a breakpoint inside a body is flagged while it is being placed", () => {
+    // The engine refuses this at run time for the same reason it refuses a `Wait` there. Saying so
+    // here is the difference between finding out while you are placing the mark and finding out by
+    // watching a run die on it.
+    const nodes = [node("loop", FOREACH_TYPE), node("inner", "vrcz/note")];
+    const edges = [edge("loop", "item", "inner", "in")];
+
+    expect(loopProblems(nodes, edges, new Set(["inner"]))).toEqual([
+      {
+        nodeId: "inner",
+        message: "A breakpoint cannot be used inside a For each. This run would fail.",
+      },
+    ]);
+  });
+
+  test("a breakpoint outside every loop is fine", () => {
+    const nodes = [node("loop", FOREACH_TYPE), node("after", "vrcz/note")];
+    const edges = [edge("loop", "done", "after", "in")];
+
+    expect(loopProblems(nodes, edges, new Set(["after"]))).toEqual([]);
+  });
 });

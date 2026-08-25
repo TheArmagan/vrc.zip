@@ -19,9 +19,14 @@
 -->
 <script lang="ts">
 import ArrowLeftIcon from "@lucide/svelte/icons/arrow-left";
+import BugIcon from "@lucide/svelte/icons/bug";
 import ChevronRightIcon from "@lucide/svelte/icons/chevron-right";
+import CircleStopIcon from "@lucide/svelte/icons/circle-stop";
 import EraserIcon from "@lucide/svelte/icons/eraser";
+import FlaskConicalIcon from "@lucide/svelte/icons/flask-conical";
 import PlayIcon from "@lucide/svelte/icons/play";
+import RefreshCwIcon from "@lucide/svelte/icons/refresh-cw";
+import StepForwardIcon from "@lucide/svelte/icons/step-forward";
 import SaveIcon from "@lucide/svelte/icons/save";
 import TrashIcon from "@lucide/svelte/icons/trash-2";
 import {
@@ -65,17 +70,19 @@ import NodePicker, {
 } from "$lib/components/graphs/NodePicker.svelte";
 import RelativeTime from "$lib/components/RelativeTime.svelte";
 import { Badge } from "$lib/components/ui/badge/index.js";
+import * as DropdownMenu from "$lib/components/ui/dropdown-menu/index.js";
 import { Button } from "$lib/components/ui/button/index.js";
 import { Input } from "$lib/components/ui/input/index.js";
 import { defaultConfig } from "$lib/graphs/config.ts";
 import { clampSidebarWidth, SIDEBAR_DEFAULT_WIDTH } from "$lib/graphs/details.ts";
 import { iconFor } from "$lib/graphs/icons.ts";
-import { loopProblems } from "$lib/graphs/loops.ts";
+import { loopProblems, RUN_NOW_TYPE } from "$lib/graphs/loops.ts";
 import { NodePreview } from "$lib/graphs/node-preview.svelte.ts";
 import { familyColor, familyOf, isListPort, portColor } from "$lib/graphs/visuals.ts";
 import { hrefFor } from "$lib/router.ts";
 import { app } from "$lib/state/app.svelte.ts";
 import { graphRun } from "$lib/state/graph-run.svelte.ts";
+import { graphTraces, previewValue } from "$lib/state/graph-traces.svelte.ts";
 import { graphs } from "$lib/state/graphs.svelte.ts";
 import { prefs } from "$lib/state/prefs.svelte.ts";
 import { theme } from "$lib/state/theme.svelte.ts";
@@ -197,6 +204,27 @@ $effect(() => {
   return () => graphRun.stop();
 });
 
+/**
+ * The recording, which is a fetch rather than a poll.
+ *
+ * `graphRun` polls because it answers "where is it right now"; a trace answers "what did it do",
+ * which changes once per run. So this refreshes when the number of live runs *drops* — a run that
+ * left `graph_runs` is a run that just wrote its trace — and otherwise sits still. An idle canvas
+ * with the debugger on costs nothing here, which is the whole reason the two are separate modules.
+ */
+$effect(() => {
+  graphTraces.watch(graphId);
+  return () => graphTraces.stop();
+});
+
+let liveRunCount = $state(0);
+$effect(() => {
+  const count = graphRun.runs.length;
+  const before = liveRunCount;
+  liveRunCount = count;
+  if (count < before) void graphTraces.refresh();
+});
+
 /* ---------------------------------------------------------------------------------------------- */
 /* The presentation pass                                                                            */
 /* ---------------------------------------------------------------------------------------------- */
@@ -223,8 +251,46 @@ $effect(() => {
   applyVariadicFloors();
   applyWiredOutputs();
   applyWiredInputs();
+  applyTrace();
   applyEdgeStyles();
 });
+
+/**
+ * Marks each card with what it did in the run being inspected, and labels each wire with what
+ * flowed down it.
+ *
+ * This is the wire peek, and it is the reason a trace is worth keeping at all. Everything else in
+ * the debugger tells you *that* something went wrong; this is the only thing that shows you the
+ * value, which is nearly always the actual question — an id that arrived empty, a list that came
+ * back with nothing in it, a branch that took the side you did not expect.
+ *
+ * Three states per card and they are not the same thing:
+ *
+ *  - **ran** — it executed, and its outputs are on its wires.
+ *  - **failed** — it threw. The message goes on the card.
+ *  - **skipped** — it never ran, because something upstream produced nothing for the port feeding
+ *    it. This is the one with no other mark anywhere: no output, no error, no feed row.
+ *
+ * A node absent from the trace is *none of the three*: this run did not reach it. Drawn as nothing
+ * rather than as "skipped", because "the run went elsewhere" and "the wire above you went dead"
+ * are different sentences and the second one is a bug more often than the first.
+ */
+function applyTrace(): void {
+  const steps = graphTraces.steps;
+  let changed = false;
+  const next = nodes.map((node) => {
+    const step = steps.get(node.id);
+    const data = node.data as { ran?: string | undefined; ranMessage?: string | undefined };
+    const ran = step?.status;
+    const ranMessage = step?.status === "error" ? step.message : undefined;
+    if (data.ran === ran && data.ranMessage === ranMessage) return node;
+    changed = true;
+    // Both keys are written even when undefined, for the same reason `problem` is: spreading the
+    // old data would carry a stale marker straight through into a run that never touched the node.
+    return { ...node, data: { ...node.data, ran, ranMessage } };
+  });
+  if (changed) nodes = next;
+}
 
 /**
  * Raises a variadic node's slot count to cover the wires already in it.
@@ -343,7 +409,10 @@ function wiredInputFloor(definition: NodeDefinition, nodeId: string): number {
 /** Marks each node that breaks a loop rule, in the words the daemon would use at run time. */
 function applyProblems(): void {
   const problems = new Map(
-    loopProblems(canvasNodes, canvasEdges).map((problem) => [problem.nodeId, problem.message]),
+    loopProblems(canvasNodes, canvasEdges, breakpoints).map((problem) => [
+      problem.nodeId,
+      problem.message,
+    ]),
   );
   const changed = nodes.some(
     (node) => (node.data as { problem?: string }).problem !== problems.get(node.id),
@@ -363,6 +432,7 @@ function applyProblems(): void {
  * "this is the path when it breaks" is not a kind of data, it is a different kind of edge.
  */
 function applyEdgeStyles(): void {
+  const showValues = debugging && graphTraces.selected !== null;
   let changed = false;
   const next = edges.map((edge) => {
     const source = portType(edge.source, edge.sourceHandle ?? "", "source");
@@ -370,9 +440,45 @@ function applyEdgeStyles(): void {
     const style = isError
       ? "stroke: var(--destructive); stroke-width: 1.5; stroke-dasharray: 4 3;"
       : `stroke: ${source === null ? "var(--port-json)" : portColor(source)}; stroke-width: 1.75;`;
-    if (edge.style === style) return edge;
+    /*
+     * The value that was on this wire, as the edge's own label.
+     *
+     * `undefined` from `output` is not "the value was null" — it is the missing key the whole
+     * runtime gates on, which means this edge was **dead** and everything under it skipped. That is
+     * worth its own word on the canvas, because a dead wire looks exactly like a live one.
+     */
+    const label = showValues
+      ? graphTraces.steps.has(edge.source)
+        ? previewValue(graphTraces.output(edge.source, edge.sourceHandle ?? ""), 24)
+        : undefined
+      : undefined;
+    if (edge.style === style && edge.label === label) return edge;
     changed = true;
-    return { ...edge, style };
+    // The key is **removed** rather than set to undefined when there is nothing to show. Svelte
+    // Flow draws a label element for any edge carrying the key at all, so an empty string would be
+    // a little grey box hanging off every wire on the canvas — and `exactOptionalPropertyTypes`
+    // makes "absent" and "undefined" different things here, which is exactly the distinction
+    // wanted.
+    const { label: _previous, ...rest } = edge;
+    return {
+      ...rest,
+      style,
+      /*
+       * The halo is not decoration. An edge label is drawn at the wire's midpoint, and on a graph
+       * where two nodes sit close together that midpoint is *on top of a card* — where plain grey
+       * text on a card background is unreadable, which makes the peek useless exactly when the
+       * canvas is dense enough to need it. `paint-order: stroke` paints a fat background-coloured
+       * outline underneath the glyphs, which is the SVG way to get a knockout without a rectangle
+       * element Svelte Flow gives us no way to add (its edge props are `label` and `labelStyle`).
+       */
+      ...(label === undefined
+        ? {}
+        : {
+            label,
+            labelStyle:
+              "font-size: 10px; fill: var(--muted-foreground); paint-order: stroke; stroke: var(--background); stroke-width: 4px; stroke-linejoin: round;",
+          }),
+    };
   });
   if (changed) edges = next;
 }
@@ -556,6 +662,48 @@ const canvasEdges = $derived(
   })),
 );
 
+/** Which nodes carry a breakpoint. A set, because three separate things ask the same question. */
+const breakpoints = $derived(
+  new Set(
+    nodes
+      .filter((node) => (node.data as { breakpoint?: boolean }).breakpoint === true)
+      .map((node) => node.id),
+  ),
+);
+
+/**
+ * The triggers this graph can be fired from by hand.
+ *
+ * A trigger with an incoming edge is **not** one, and that is the engine's rule rather than a
+ * cosmetic filter: the engine only ever arms roots, so firing a non-root by hand would walk a
+ * branch from a node the graph itself would never start at. The daemon refuses it too; this is so
+ * the menu does not offer something that will be refused.
+ */
+const triggerNodes = $derived(
+  nodes.filter((node) => {
+    const definition = definitionOf(node);
+    if (definition === null || definition.kind !== "trigger") return false;
+    return !edges.some((edge) => edge.target === node.id);
+  }),
+);
+
+/** The manual `Run now` node, if the author put one on the canvas. */
+const manualTrigger = $derived(
+  triggerNodes.find((node) => (node.data as { qualifiedId: string }).qualifiedId === RUN_NOW_TYPE) ??
+    null,
+);
+
+/**
+ * The triggers the Test fire menu offers, which is every trigger *except* the manual one.
+ *
+ * The manual one has its own button and firing it is not a test — it is the thing it is for. Listing
+ * it twice, once as itself and once as a rehearsal of itself, would make the menu read as if the two
+ * did different things.
+ */
+const testFireable = $derived(triggerNodes.filter((node) => node.id !== manualTrigger?.id));
+
+const debugging = $derived(graph?.debug === true);
+
 const selected = $derived(nodes.find((node) => node.id === selectedId) ?? null);
 const selectedDefinition = $derived(definitionOf(selected));
 const selectedQualifiedId = $derived(
@@ -564,6 +712,30 @@ const selectedQualifiedId = $derived(
 const selectedProblem = $derived(
   selected === null ? null : ((selected.data as { problem?: string }).problem ?? null),
 );
+/** What the selected node did in the run being inspected, or null if that run never touched it. */
+const selectedStep = $derived(
+  selectedId === null ? null : (graphTraces.steps.get(selectedId) ?? null),
+);
+
+/**
+ * One port's recorded value as a row, at full length rather than clipped.
+ *
+ * The canvas gets `previewValue`; this is the panel, which is where the whole thing belongs — a
+ * wire label that wrapped to three lines would be unreadable, and a 512-character summary you can
+ * only see 24 characters of would be pointless. `side` is only in the key, so two ports called the
+ * same thing on either side of a node do not collide in the `{#each}`.
+ */
+function portRows(
+  values: Readonly<Record<string, unknown>> | undefined,
+  side: "in" | "out",
+): { key: string; port: string; value: string }[] {
+  return Object.entries(values ?? {}).map(([port, value]) => ({
+    key: `${side}:${port}`,
+    port,
+    value: previewValue(value, 240),
+  }));
+}
+
 const selectedMemory = $derived(
   selectedId === null ? null : (memory.find((entry) => entry.nodeId === selectedId) ?? null),
 );
@@ -591,7 +763,15 @@ function toFlowNode(node: WireNode, stale = false): Node {
     type: "vrcz",
     position: { ...node.position },
     // No definition in here on purpose — the card resolves it live. See `GraphNodeCard.svelte`.
-    data: { qualifiedId: node.type, config: { ...node.config }, stale },
+    data: {
+      qualifiedId: node.type,
+      config: { ...node.config },
+      stale,
+      // Part of the document, so it round-trips through save like a position does. `=== true`
+      // rather than the raw value: the field is optional, and an absent one has to reach the card
+      // as `false` and not as `undefined`, which draws as "unset" in a `class:` directive.
+      breakpoint: node.breakpoint === true,
+    },
   };
 }
 
@@ -1015,8 +1195,25 @@ function ondelete({ nodes: gone }: { nodes: Node[] }): void {
 /** What a node's context menu offers. The definition is only needed for the label. */
 function nodeMenu(node: Node): MenuItem[] {
   const remembered = memory.find((entry) => entry.nodeId === node.id);
+  const hasBreakpoint = breakpoints.has(node.id);
   return [
     { label: "Select", onSelect: () => (selectedId = node.id) },
+    /*
+     * Offered on every node whatever the debug switch says.
+     *
+     * Placing one is how somebody *starts* debugging — "stop here next time it runs" is a thing you
+     * decide while reading the graph, and hiding the gesture behind a switch you have not flipped
+     * yet is a chicken and egg. The label carries the caveat instead, which is the honest version:
+     * the mark is real, it is saved, and it does nothing until debug mode is on.
+     */
+    {
+      label: hasBreakpoint
+        ? "Remove breakpoint"
+        : debugging
+          ? "Break here"
+          : "Break here (needs debug mode)",
+      onSelect: () => toggleBreakpoint(node.id),
+    },
     ...(remembered === undefined
       ? []
       : [
@@ -1054,11 +1251,11 @@ async function forget(nodeId: string | null): Promise<void> {
  * than saving on the user's behalf: a canvas that saved itself to run once is a canvas that rewrote
  * an enabled graph without being asked.
  */
-async function runNow(): Promise<void> {
+async function runNow(triggerNode?: string): Promise<void> {
   running = true;
   saveError = null;
   try {
-    await api.graphs.runNow(graphId);
+    await api.graphs.runNow(graphId, triggerNode);
     // The readout polls on its own; this is only so the panel updates on the same tick as the click.
     await graphRun.refresh();
   } catch (cause) {
@@ -1066,6 +1263,90 @@ async function runNow(): Promise<void> {
   } finally {
     running = false;
   }
+}
+
+/**
+ * Turns the debugger on or off for this graph.
+ *
+ * Saved immediately, like Enabled and Armed and unlike the canvas: it is a setting rather than part
+ * of the document, and there is nothing to cancel. Turning it **off throws the traces away** on the
+ * daemon side, which is why the button says so.
+ *
+ * The list is updated too. `graphDebug` reads the flag off `graphs.graphs` to decide whether to
+ * toast, so a switch that only updated this component's copy would be a switch that visibly turned
+ * on and quietly did not.
+ */
+async function setDebug(next: boolean): Promise<void> {
+  saveError = null;
+  try {
+    const summary = await api.graphs.setDebug(graphId, next);
+    graphs.replace(summary);
+    if (graph !== null) graph = { ...graph, debug: summary.debug };
+    await graphTraces.refresh();
+  } catch (cause) {
+    saveError = describeError(cause);
+  }
+}
+
+/**
+ * Puts a breakpoint on a node, or takes it off.
+ *
+ * An edit to the document, so it marks the canvas dirty and takes effect on **save** — not
+ * immediately, the way debug mode does. That is the honest reading of what it is: the engine reads
+ * breakpoints out of the saved definition, so a breakpoint that appeared to apply before a save
+ * would be one that did nothing on the next fire.
+ */
+function toggleBreakpoint(nodeId: string): void {
+  nodes = nodes.map((node) =>
+    node.id === nodeId
+      ? {
+          ...node,
+          data: {
+            ...node.data,
+            breakpoint: (node.data as { breakpoint?: boolean }).breakpoint !== true,
+          },
+        }
+      : node,
+  );
+  dirty = true;
+}
+
+/** Takes every breakpoint off, which is the gesture after a debugging session rather than during. */
+function clearBreakpoints(): void {
+  if (breakpoints.size === 0) return;
+  nodes = nodes.map((node) => ({ ...node, data: { ...node.data, breakpoint: false } }));
+  dirty = true;
+}
+
+/**
+ * Continue, Step and Stop, for a run sitting on a breakpoint.
+ *
+ * A `not_paused` rejection is swallowed rather than shown. It is what a second click and a stale
+ * poll both look like, and neither is a failure the author needs a red box about — the readout
+ * refreshing to show the run gone says everything there is to say.
+ */
+async function resumeRun(runId: string, step: boolean): Promise<void> {
+  try {
+    await api.graphs.resumeRun(graphId, runId, step);
+  } catch (cause) {
+    if (!isNotPaused(cause)) saveError = describeError(cause);
+  }
+  await graphRun.refresh();
+  await graphTraces.refresh();
+}
+
+async function stopRun(runId: string): Promise<void> {
+  try {
+    await api.graphs.stopRun(graphId, runId);
+  } catch (cause) {
+    if (!isNotPaused(cause)) saveError = describeError(cause);
+  }
+  await graphRun.refresh();
+  await graphTraces.refresh();
+}
+
+function isNotPaused(cause: unknown): boolean {
+  return describeError(cause).includes("not_paused");
 }
 
 function setConfig(fieldId: string, value: string | number | boolean): void {
@@ -1325,11 +1606,15 @@ function toDocument(): GraphDocument {
   return {
     nodes: nodes.map((node) => {
       const data = node.data as { qualifiedId: string; config: Record<string, never> };
+      const breakpoint = (node.data as { breakpoint?: boolean }).breakpoint === true;
       return {
         id: node.id,
         type: data.qualifiedId,
         position: { x: node.position.x, y: node.position.y },
         config: data.config,
+        // Written only when it is set, so an ordinary graph's document is byte-for-byte what it was
+        // before breakpoints existed — which is what keeps an export shareable and a diff readable.
+        ...(breakpoint ? { breakpoint: true } : {}),
       };
     }),
     edges: edges.map((edge) => ({
@@ -1420,16 +1705,101 @@ async function saveSecret(fieldId: string): Promise<void> {
         Remove node
       </Button>
     {/if}
+    <!--
+      Run now, and only when there is something to press.
+
+      It used to sit here unconditionally and answer 409 on a graph with no manual trigger, which is
+      a button whose whole job is to tell you it was the wrong button. It appears when the author
+      has put a `Run now` node on the canvas, and the caret beside it offers a **test fire** from
+      any other trigger — the only way to exercise the other nine tenths of a graph without waiting
+      for a friend to actually come online.
+    -->
+    {#if manualTrigger !== null}
+      <Button
+        variant="secondary"
+        size="sm"
+        disabled={running}
+        title={dirty ? "Runs the saved graph, not the unsaved canvas." : "Fires the manual trigger."}
+        onclick={() => void runNow()}
+      >
+        <PlayIcon class="size-4" />
+        Run now
+      </Button>
+    {/if}
+
+    {#if testFireable.length > 0}
+      <DropdownMenu.Root>
+        <DropdownMenu.Trigger>
+          {#snippet child({ props })}
+            <Button
+              {...props}
+              variant="ghost"
+              size="sm"
+              disabled={running}
+              title="Start a run from one of this graph's triggers, with placeholder values."
+            >
+              <FlaskConicalIcon class="size-4" />
+              Test fire
+            </Button>
+          {/snippet}
+        </DropdownMenu.Trigger>
+        <DropdownMenu.Content align="end" class="max-w-80">
+          <!--
+            The caveat belongs here rather than in a tooltip nobody hovers. A test fire hands every
+            port an empty placeholder, so a graph that reads a user id gets `""` and fails at the
+            node that needed it. That is the design — a plausible-looking fake id would fail
+            somewhere inside VRChat instead, which is a much worse answer to "why did this break".
+          -->
+          <DropdownMenu.Label class="text-xs font-normal text-muted-foreground">
+            Starts a real run from a trigger, with empty placeholder values on every port.
+          </DropdownMenu.Label>
+          <DropdownMenu.Separator />
+          {#each testFireable as node (node.id)}
+            <DropdownMenu.Item onSelect={() => void runNow(node.id)}>
+              {titleOf(node.id)}
+            </DropdownMenu.Item>
+          {/each}
+        </DropdownMenu.Content>
+      </DropdownMenu.Root>
+    {/if}
+
+    <!--
+      The debug switch.
+
+      A button rather than a `Switch`, because it belongs in a row of buttons and because what it
+      turns on is not a setting so much as a mode: while it is on, every run of this graph is
+      recorded, breakpoints park runs, and failures arrive as toasts wherever you happen to be.
+      Turning it off deletes the recording, which the title says out loud — it is the one control
+      in this toolbar that throws something away.
+    -->
     <Button
-      variant="secondary"
+      variant={debugging ? "default" : "ghost"}
       size="sm"
-      disabled={running}
-      title={dirty ? "Runs the saved graph, not the unsaved canvas." : "Fires the manual trigger."}
-      onclick={() => void runNow()}
+      title={debugging
+        ? "Debugging: runs are recorded, breakpoints stop them, failures are announced. Turning this off deletes the recording."
+        : "Record every run of this graph, stop it at breakpoints, and announce failures."}
+      onclick={() => void setDebug(!debugging)}
     >
-      <PlayIcon class="size-4" />
-      Run now
+      <BugIcon class="size-4" />
+      Debug
     </Button>
+
+    {#if breakpoints.size > 0}
+      <!--
+        Taking them all off is a gesture in its own right, and it needs to be one control rather
+        than a hunt: breakpoints are saved in the document, so a graph shipped with three of them
+        still in it is a graph that stops dead the next time somebody turns debug on. Counting them
+        here is also the only place the canvas admits how many there are.
+      -->
+      <Button
+        variant="ghost"
+        size="sm"
+        title="Take every breakpoint off this graph."
+        onclick={clearBreakpoints}
+      >
+        Clear {breakpoints.size} breakpoint{breakpoints.size === 1 ? "" : "s"}
+      </Button>
+    {/if}
     <Button
       size="sm"
       disabled={saving || !dirty}
@@ -2304,10 +2674,187 @@ async function saveSecret(fieldId: string): Promise<void> {
                   {titleOf(loop.nodeId)}: item {loop.at} of {loop.of}
                 </div>
               {/each}
+
+              {#if run.pausedNode !== null}
+                <!--
+                  A paused run is the one thing in this panel that is not a readout.
+
+                  Nothing in the daemon will ever move it along, and it holds a concurrency slot for
+                  as long as it exists — so on a `drop`-mode graph a breakpoint nobody continues is
+                  a graph that refuses every fire from then on. Stop is here for exactly that, and
+                  it is why a breakpoint is safe to offer at all.
+                -->
+                <div class="mt-2 flex flex-wrap items-center gap-1">
+                  <Button size="sm" onclick={() => void resumeRun(run.id, false)}>
+                    <PlayIcon class="size-3.5" />
+                    Continue
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    title="Run one node, then stop again."
+                    onclick={() => void resumeRun(run.id, true)}
+                  >
+                    <StepForwardIcon class="size-3.5" />
+                    Step
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    title="Give up on this run and free the slot it is holding."
+                    onclick={() => void stopRun(run.id)}
+                  >
+                    <CircleStopIcon class="size-3.5" />
+                    Stop
+                  </Button>
+                </div>
+              {/if}
             </div>
           {/each}
         {/if}
       </div>
+
+      <!--
+        The run log: what the last few runs actually did, node by node.
+
+        Only for a graph in debug mode, because only a graph in debug mode records anything. The
+        empty state says that rather than saying "no runs", which would be a different and untrue
+        sentence — the graph may well have run a hundred times with nobody recording it.
+      -->
+      <div class="mt-6">
+        <div
+          class="mb-2 flex items-center gap-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground"
+        >
+          <span>Run log</span>
+          {#if debugging}
+            <button
+              class="ml-auto rounded p-1 hover:bg-accent"
+              title="Re-read the recording"
+              aria-label="Refresh the run log"
+              onclick={() => void graphTraces.refresh()}
+            >
+              <RefreshCwIcon class="size-3" />
+            </button>
+            {#if graphTraces.traces.length > 0}
+              <button
+                class="rounded px-1 py-0.5 text-[10px] font-normal normal-case hover:bg-accent"
+                onclick={() => void graphTraces.clear()}
+              >
+                Clear
+              </button>
+            {/if}
+          {/if}
+        </div>
+
+        {#if !debugging}
+          <p class="text-xs text-muted-foreground">
+            Turn on Debug to record what each run does, with the values that were on the wires.
+          </p>
+        {:else if graphTraces.traces.length === 0}
+          <p class="text-xs text-muted-foreground">
+            Nothing recorded yet. The next run of this graph lands here.
+          </p>
+        {:else}
+          {#each graphTraces.traces as trace (trace.runId)}
+            {@const chosen = graphTraces.selected?.runId === trace.runId}
+            <!--
+              Picking a run rewrites the whole canvas: the markers on the cards and the value on
+              every wire are read out of whichever run is selected. So the list is a set of radio
+              buttons rather than a set of expanders, and the chosen one is drawn as chosen.
+            -->
+            <button
+              class="mb-1 w-full rounded border p-2 text-left text-xs transition-colors hover:bg-accent"
+              class:border-primary={chosen}
+              class:border-border={!chosen}
+              onclick={() => (graphTraces.selectedRunId = trace.runId)}
+            >
+              <div class="flex items-center gap-2">
+                <span
+                  class="size-2 shrink-0 rounded-full"
+                  style="background: {trace.outcome === 'failed'
+                    ? 'var(--destructive)'
+                    : 'var(--success)'}"
+                  aria-hidden="true"
+                ></span>
+                <span class="font-medium">
+                  {trace.outcome === "failed" ? "Failed" : "Finished"}
+                </span>
+                {#if trace.dryRun}
+                  <Badge variant="outline" class="px-1 py-0 text-[10px]">rehearsal</Badge>
+                {/if}
+                <span class="ml-auto tabular-nums text-muted-foreground">
+                  {trace.finishedAt - trace.startedAt}ms
+                </span>
+              </div>
+              <div class="mt-1 text-muted-foreground">
+                <RelativeTime ts={trace.finishedAt} />
+                . {trace.steps.length}
+                {trace.steps.length === 1 ? "step" : "steps"}
+                . from {titleOf(trace.triggerNode)}
+              </div>
+              {#if trace.failedNode !== null}
+                <div class="mt-1 text-destructive">
+                  {titleOf(trace.failedNode)}: {trace.message ?? "It failed."}
+                </div>
+              {/if}
+            </button>
+          {/each}
+        {/if}
+      </div>
+
+      <!--
+        What the selected node did in the selected run, in full.
+
+        The card shows a marker and a wire shows a clipped preview; this is where the whole value
+        lives, because a 512-character summary is not something to draw on a canvas. Anchored to the
+        node the inspector above is already about, so it reads as one column rather than two panels
+        that happen to be stacked.
+      -->
+      {#if debugging && selectedId !== null && selectedStep !== null}
+        <div class="mt-6">
+          <div class="mb-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            This node, last run
+          </div>
+          <div class="rounded border border-border p-2 text-xs">
+            <div class="flex items-center gap-2">
+              <Badge
+                variant={selectedStep.status === "error"
+                  ? "destructive"
+                  : selectedStep.status === "skipped"
+                    ? "outline"
+                    : "secondary"}
+              >
+                {selectedStep.status === "ok"
+                  ? "ran"
+                  : selectedStep.status === "error"
+                    ? "failed"
+                    : "skipped"}
+              </Badge>
+              <span class="tabular-nums text-muted-foreground">{selectedStep.ms}ms</span>
+            </div>
+            {#if selectedStep.message !== undefined}
+              <p class="mt-1 text-destructive">{selectedStep.message}</p>
+              {#if selectedStep.handled === true}
+                <p class="mt-1 text-muted-foreground">
+                  The run carried on: this node's error is wired onward.
+                </p>
+              {/if}
+            {/if}
+            {#each portRows(selectedStep.inputs, "in") as row (row.key)}
+              <div class="mt-1 flex gap-2">
+                <span class="shrink-0 text-muted-foreground">in {row.port}</span>
+                <span class="min-w-0 flex-1 break-all text-right font-mono">{row.value}</span>
+              </div>
+            {/each}
+            {#each portRows(selectedStep.outputs, "out") as row (row.key)}
+              <div class="mt-1 flex gap-2">
+                <span class="shrink-0 text-muted-foreground">out {row.port}</span>
+                <span class="min-w-0 flex-1 break-all text-right font-mono">{row.value}</span>
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
     </aside>
   </div>
 {/if}

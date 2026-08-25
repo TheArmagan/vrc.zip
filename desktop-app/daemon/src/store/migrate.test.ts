@@ -45,6 +45,7 @@ describe("migrate", () => {
       "graph_runs",
       "graph_state",
       "graph_stores",
+      "graph_traces",
       "graphs",
       "log_offsets",
       "meta",

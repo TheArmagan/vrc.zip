@@ -60,6 +60,22 @@ class GraphRunState {
   }
 
   /**
+   * The runs stopped on a breakpoint, waiting for somebody to continue them.
+   *
+   * Separate from `runs` because they are the opposite kind of thing: a run in flight is weather,
+   * and a paused run is a **question** that will not answer itself. Nothing in the daemon will ever
+   * move one of these along, so the panel showing them cannot be a readout — it has to be a control.
+   */
+  get paused(): GraphRunSummary[] {
+    return this.runs.filter((run) => run.pausedNode !== null);
+  }
+
+  /** The node ids something is parked on, so a card can draw itself as stopped. */
+  get pausedNodes(): Set<string> {
+    return new Set(this.runs.flatMap((run) => (run.pausedNode === null ? [] : [run.pausedNode])));
+  }
+
+  /**
    * Starts watching one graph, replacing whatever was being watched.
    *
    * Idempotent for the same id, because the caller is an `$effect` that re-runs whenever anything

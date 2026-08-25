@@ -9,6 +9,7 @@ function graph(overrides: Partial<GraphSummary> = {}): GraphSummary {
     description: "",
     enabled: false,
     armed: false,
+    debug: false,
     concurrency: "parallel",
     accountId: null,
     disabledReason: null,

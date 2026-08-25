@@ -691,6 +691,10 @@ const EVENT_LABELS: Readonly<Partial<Record<BusEventKind, string>>> = {
   // have, which is the whole reason the kind exists rather than the fire being swallowed.
   "graph.run.dropped": "Graph fire dropped",
   "graph.run.expired": "Graph run expired",
+  // "Node failed", not "Graph failed": the run carried on, which is the entire difference between
+  // this and `graph.run.failed` and the reason somebody reading the feed needs both sentences.
+  "graph.node.error": "Graph node failed",
+  "graph.run.paused": "Graph run paused",
   "graph.disabled": "Graph disabled",
   "graph.note": "Graph note",
 };

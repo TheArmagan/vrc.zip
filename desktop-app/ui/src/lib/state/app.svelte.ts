@@ -31,6 +31,7 @@ import {
   type StreamState,
 } from "../stream.ts";
 import { consent } from "./consent.svelte.ts";
+import { graphDebug } from "./graph-debug.svelte.ts";
 import { liveSessions } from "./live-sessions.svelte.ts";
 import { pluginPanels } from "./plugin-panels.svelte.ts";
 import { prefs } from "./prefs.svelte.ts";
@@ -303,6 +304,17 @@ class AppState {
         break;
       case "consent":
         this.#applyConsentFrame(frame);
+        break;
+      /*
+       * The graph debugger's toasts.
+       *
+       * Here rather than in the editor because the failures worth catching happen while you are
+       * looking at something else — which is most of what makes a big graph hard to debug. Every
+       * `graph.*` frame is offered; `graphDebug` drops the ones belonging to a graph nobody put in
+       * debug mode, which is all of them until somebody does.
+       */
+      case "graph":
+        graphDebug.apply(frame);
         break;
       default:
         break;

@@ -16,6 +16,14 @@ import { foreachBodies, type GraphDocument, innermostLoop } from "@vrcz/shared";
 /** The intrinsic type ids the canvas has to recognise structurally, same as the engine. */
 export const FOREACH_TYPE = "vrcz/foreach";
 export const WAIT_TYPE = "vrcz/wait";
+/**
+ * The manual trigger, which the toolbar's Run now fires.
+ *
+ * Here with the other structural ids rather than in the editor, for the same reason they are: a type
+ * id the client has to recognise *as a shape* is the kind of string that gets copied into four files
+ * and then changed in three. It mirrors `RUN_NOW_TYPE` in `daemon/src/graphs/intrinsics.ts`.
+ */
+export const RUN_NOW_TYPE = "vrcz/run-now";
 export const COLLECT_TYPE = "vrcz/collect";
 export const STOP_WHEN_TYPE = "vrcz/stop-when";
 
@@ -164,13 +172,19 @@ export interface LoopProblem {
 /**
  * The loop rules a canvas can check on its own.
  *
- * Two of them, and both are things the engine refuses at run time with a sentence — so this says
- * the same sentence while the graph is still being drawn. Everything else about a loop is either
- * checked on save by the daemon or is not a rule at all.
+ * Three of them, and each is something the engine refuses at run time with a sentence — so this
+ * says the same sentence while the graph is still being drawn. Everything else about a loop is
+ * either checked on save by the daemon or is not a rule at all.
+ *
+ * `breakpoints` is which nodes carry one. Passed in rather than read off `CanvasNode`, because a
+ * breakpoint lives in the saved document and this shape is the canvas's own reduced view of it —
+ * and because the rule only bites for a graph in debug mode, which is a fact about the graph rather
+ * than about any node on it. An empty set is the ordinary case and costs nothing.
  */
 export function loopProblems(
   nodes: readonly CanvasNode[],
   edges: readonly CanvasEdge[],
+  breakpoints: ReadonlySet<string> = new Set(),
 ): LoopProblem[] {
   const bodies = bodiesOf(documentOf(nodes, edges));
   const inABody = new Set([...bodies.values()].flatMap((body) => [...body]));
@@ -181,6 +195,16 @@ export function loopProblems(
       problems.push({
         nodeId: node.id,
         message: "A Wait cannot be used inside a For each. This run would fail.",
+      });
+    }
+    if (breakpoints.has(node.id) && inABody.has(node.id)) {
+      // The same limit as `Wait`, and it has the same cause: parking mid-iteration would mean
+      // persisting a loop's scope, and a parked run names one node because that is all a run has
+      // ever needed to say. Said here so it is found while placing the breakpoint rather than by
+      // watching a run die on it.
+      problems.push({
+        nodeId: node.id,
+        message: "A breakpoint cannot be used inside a For each. This run would fail.",
       });
     }
     if (node.type === COLLECT_TYPE || node.type === STOP_WHEN_TYPE) {

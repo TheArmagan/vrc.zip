@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { NodeDefinition, PortValues } from "@vrcz/plugin-api/nodes";
 import { AFTER_PORT } from "@vrcz/plugin-api/nodes";
-import type { GraphDocument, GraphEdge, GraphNode } from "@vrcz/shared";
+import type { GraphDocument, GraphEdge, GraphNode, GraphTraceStep } from "@vrcz/shared";
+import { GRAPH_TRACE_LIMIT } from "@vrcz/shared";
 import type { BusEvent } from "../bus/event-bus.ts";
 import { EventBus } from "../bus/event-bus.ts";
 import { MEMORY, Store } from "../store/store.ts";
@@ -159,6 +160,8 @@ interface GraphOverrides {
   enabled: number;
   armed: number;
   concurrency: string;
+  /** Turns tracing and live breakpoints on, the way the Debug switch in the editor does. */
+  debug: boolean;
 }
 
 function harness(limits?: Parameters<typeof makeEngine>[3]): Harness {
@@ -212,6 +215,10 @@ function harness(limits?: Parameters<typeof makeEngine>[3]): Harness {
         created_at: state.now,
         updated_at: state.now,
       });
+      // A second statement rather than a column on the insert, because that is what the daemon
+      // does: `NewGraph` deliberately has no `debug`, so a graph is created undebugged and the
+      // switch is its own call. See migration 017.
+      if (overrides.debug === true) store.setGraphDebug(id, true);
       return id;
     },
     restart() {
@@ -1104,7 +1111,12 @@ describe("failure", () => {
     // The success path is dead and skips; the error path runs with the message as its input.
     expect(h.provider.order).toEqual(["boom", "tell"]);
     expect(h.provider.executed[1]?.inputs.in).toBe("nope");
-    expect(kinds(h.events)).toEqual(["graph.run.finished"]);
+    // And the failure is still said out loud, even though the run recovered from it. Handling an
+    // error is the author saying "I know this can break", not "and I will never hear about it
+    // again" — a node failing on every fire under a graph that reports finished is the bug that
+    // survives longest, because every other signal says the automation is working.
+    expect(kinds(h.events)).toEqual(["graph.node.error", "graph.run.finished"]);
+    expect(h.events[0]?.payload).toMatchObject({ node: "n2", message: "nope" });
   });
 
   test("a node type that is not available fails the run with a readable reason", async () => {
@@ -1985,5 +1997,288 @@ describe("a wait that outlived its graph", () => {
     h.now += DEFAULT_WAIT_MS;
     await h.engine.resumeDue();
     expect(h.provider.order).toEqual(["after"]);
+  });
+});
+
+/* -------------------------------------------------------------------------------------------- */
+/* Debug mode: traces and breakpoints                                                             */
+/* -------------------------------------------------------------------------------------------- */
+
+describe("debug mode", () => {
+  test("records nothing at all unless the graph is being debugged", async () => {
+    const h = harness();
+    h.provider.trigger("t").node("a", "action", () => ({ out: 1 }));
+    const id = h.graph({
+      nodes: [node("n1", "t"), node("n2", "a")],
+      edges: [edge("e1", "n1", "n2")],
+    });
+
+    await h.engine.fire(id, "n1", { out: "go" });
+
+    // The whole cost model rests on this: an undebugged graph writes no trace rows, so the feature
+    // costs nothing for the eleven graphs somebody is not looking at.
+    expect(h.store.listGraphTraces(id)).toEqual([]);
+  });
+
+  test("a traced run records what every node read and produced", async () => {
+    const h = harness();
+    h.provider
+      .trigger("t")
+      .node("a", "action", (inputs) => ({ out: `a:${String(inputs.in)}` }))
+      .node("b", "action", () => ({ out: "b" }));
+    const id = h.graph(
+      {
+        nodes: [node("n1", "t"), node("n2", "a"), node("n3", "b")],
+        edges: [edge("e1", "n1", "n2"), edge("e2", "n2", "n3")],
+      },
+      { debug: true },
+    );
+
+    await h.engine.fire(id, "n1", { out: "go" });
+
+    const [trace] = h.store.listGraphTraces(id);
+    expect(trace?.outcome).toBe("finished");
+    const steps = JSON.parse(trace?.steps ?? "[]") as GraphTraceStep[];
+    // The trigger is a step too, and it has to be: it is where the values a run walks on come from,
+    // and a recording starting at the second node could never explain the first one's inputs.
+    expect(steps.map((step) => step.nodeId)).toEqual(["n1", "n2", "n3"]);
+    expect(steps[0]?.outputs).toEqual({ out: "go" });
+    expect(steps[1]?.inputs).toEqual({ in: "go" });
+    expect(steps[1]?.outputs).toEqual({ out: "a:go" });
+  });
+
+  test("a node that skipped is recorded as skipped, not left out", async () => {
+    // The one state with no other mark anywhere: no output, no error, no feed row. A trace that
+    // omitted it would leave the author looking at a wire wondering which end went quiet.
+    const h = harness();
+    h.provider.trigger("t").node("after", "action", () => ({ out: 1 }));
+    const id = h.graph(
+      {
+        // A branch records only the side it took, so the other side's edge is dead and everything
+        // under it skips. One rule, and it is the same one a false condition and a handled error
+        // both reach — which is why testing any of the three tests the recording of all of them.
+        nodes: [node("n1", "t"), node("br", BRANCH_TYPE), node("n3", "after")],
+        edges: [edge("e1", "n1", "br", "out", "value"), edge("e2", "br", "n3", "true")],
+      },
+      { debug: true },
+    );
+
+    await h.engine.fire(id, "n1", { out: false });
+
+    const steps = JSON.parse(h.store.listGraphTraces(id)[0]?.steps ?? "[]") as GraphTraceStep[];
+    expect(steps.find((step) => step.nodeId === "n3")?.status).toBe("skipped");
+  });
+
+  test("a handled failure is recorded as handled, and the run still finishes", async () => {
+    const h = harness();
+    h.provider
+      .trigger("t")
+      .node("boom", "action", () => {
+        throw new Error("nope");
+      })
+      .node("tell", "action", () => ({ out: 1 }));
+    const id = h.graph(
+      {
+        nodes: [node("n1", "t"), node("n2", "boom"), node("n3", "tell")],
+        edges: [edge("e1", "n1", "n2"), edge("e2", "n2", "n3", ERROR_PORT)],
+      },
+      { debug: true },
+    );
+
+    await h.engine.fire(id, "n1", { out: null });
+
+    const [trace] = h.store.listGraphTraces(id);
+    expect(trace?.outcome).toBe("finished");
+    const steps = JSON.parse(trace?.steps ?? "[]") as GraphTraceStep[];
+    const failed = steps.find((step) => step.nodeId === "n2");
+    expect(failed?.status).toBe("error");
+    expect(failed?.message).toBe("nope");
+    // The bit the whole feature exists for. Without it, a handled error and a successful node are
+    // indistinguishable in the recording of a run that reported success.
+    expect(failed?.handled).toBe(true);
+  });
+
+  test("an unhandled failure closes the trace with the node it died on", async () => {
+    const h = harness();
+    h.provider.trigger("t").node("boom", "action", () => {
+      throw new Error("nope");
+    });
+    const id = h.graph(
+      { nodes: [node("n1", "t"), node("n2", "boom")], edges: [edge("e1", "n1", "n2")] },
+      { debug: true },
+    );
+
+    await h.engine.fire(id, "n1", { out: null });
+
+    const [trace] = h.store.listGraphTraces(id);
+    expect(trace?.outcome).toBe("failed");
+    expect(trace?.failed_node).toBe("n2");
+    expect(trace?.message).toBe("nope");
+  });
+
+  test("only the newest few runs of a graph are kept", async () => {
+    const h = harness();
+    h.provider.trigger("t").node("a", "action", () => ({ out: 1 }));
+    const id = h.graph(
+      { nodes: [node("n1", "t"), node("n2", "a")], edges: [edge("e1", "n1", "n2")] },
+      { debug: true },
+    );
+
+    for (let i = 0; i < GRAPH_TRACE_LIMIT + 4; i += 1) {
+      h.now += 1000;
+      await h.engine.fire(id, "n1", { out: i });
+    }
+
+    // Bounded by count rather than by age, and pruned at insert: the only moment the count can
+    // grow is the only moment the bound can be broken.
+    expect(h.store.listGraphTraces(id, 100)).toHaveLength(GRAPH_TRACE_LIMIT);
+  });
+
+  test("a breakpoint parks the run for a person, and the sweep never picks it up", async () => {
+    const h = harness();
+    h.provider.trigger("t").node("a", "action", () => ({ out: 1 }));
+    const id = h.graph(
+      {
+        nodes: [node("n1", "t"), { ...node("n2", "a"), breakpoint: true }],
+        edges: [edge("e1", "n1", "n2")],
+      },
+      { debug: true },
+    );
+
+    await h.engine.fire(id, "n1", { out: null });
+
+    expect(h.provider.order).toEqual([]);
+    const [run] = h.store.listGraphRuns(id);
+    expect(run?.status).toBe("waiting");
+    expect(run?.wait_node).toBe("n2");
+    // The null is the whole distinction between waiting for a clock and waiting for a person, and
+    // it is what keeps the sweep away: `listDueGraphRuns` requires a non-null `resume_at`.
+    expect(run?.resume_at).toBeNull();
+    expect(kinds(h.events)).toEqual(["graph.run.paused"]);
+
+    h.now += 3_600_000;
+    await h.engine.resumeDue();
+    expect(h.provider.order).toEqual([]);
+  });
+
+  test("a breakpoint is ignored entirely when the graph is not being debugged", async () => {
+    // The rule that makes a breakpoint safe to leave in a saved graph: one forgotten in a document
+    // must not be able to park a run forever on a machine nobody is looking at.
+    const h = harness();
+    h.provider.trigger("t").node("a", "action", () => ({ out: 1 }));
+    const id = h.graph({
+      nodes: [node("n1", "t"), { ...node("n2", "a"), breakpoint: true }],
+      edges: [edge("e1", "n1", "n2")],
+    });
+
+    await h.engine.fire(id, "n1", { out: null });
+
+    expect(h.provider.order).toEqual(["a"]);
+    expect(h.store.listGraphRuns(id)).toHaveLength(0);
+  });
+
+  test("continuing walks past the breakpoint rather than stopping on it again", async () => {
+    const h = harness();
+    h.provider
+      .trigger("t")
+      .node("a", "action", () => ({ out: 1 }))
+      .node("b", "action", () => ({ out: 2 }));
+    const id = h.graph(
+      {
+        nodes: [node("n1", "t"), { ...node("n2", "a"), breakpoint: true }, node("n3", "b")],
+        edges: [edge("e1", "n1", "n2"), edge("e2", "n2", "n3")],
+      },
+      { debug: true },
+    );
+
+    await h.engine.fire(id, "n1", { out: null });
+    const runId = h.store.listGraphRuns(id)[0]?.id ?? "";
+
+    expect(await h.engine.resumeRun(runId)).toBe(true);
+
+    // Both nodes, once each. Without `stepOver` the resumed walk re-reads the same `breakpoint`
+    // and parks on the spot it was just released from: a Continue button that does nothing.
+    expect(h.provider.order).toEqual(["a", "b"]);
+    expect(h.store.listGraphRuns(id)).toHaveLength(0);
+  });
+
+  test("stepping runs one node and stops at the next", async () => {
+    const h = harness();
+    h.provider
+      .trigger("t")
+      .node("a", "action", () => ({ out: 1 }))
+      .node("b", "action", () => ({ out: 2 }));
+    const id = h.graph(
+      {
+        nodes: [node("n1", "t"), { ...node("n2", "a"), breakpoint: true }, node("n3", "b")],
+        edges: [edge("e1", "n1", "n2"), edge("e2", "n2", "n3")],
+      },
+      { debug: true },
+    );
+
+    await h.engine.fire(id, "n1", { out: null });
+    const runId = h.store.listGraphRuns(id)[0]?.id ?? "";
+
+    await h.engine.resumeRun(runId, { step: true });
+    expect(h.provider.order).toEqual(["a"]);
+    // Parked again, on a node carrying no breakpoint of its own. That is what Step means.
+    expect(h.store.listGraphRuns(id)[0]?.wait_node).toBe("n3");
+
+    await h.engine.resumeRun(runId);
+    expect(h.provider.order).toEqual(["a", "b"]);
+  });
+
+  test("stopping a paused run gives up the slot it was holding", async () => {
+    // The reason a breakpoint is safe to offer at all. A parked run counts as live, so on a
+    // `drop`-mode graph one that nobody continues refuses every fire from then on.
+    const h = harness();
+    h.provider.trigger("t").node("a", "action", () => ({ out: 1 }));
+    const id = h.graph(
+      {
+        nodes: [node("n1", "t"), { ...node("n2", "a"), breakpoint: true }],
+        edges: [edge("e1", "n1", "n2")],
+      },
+      { debug: true, concurrency: "drop" },
+    );
+
+    await h.engine.fire(id, "n1", { out: null });
+    const runId = h.store.listGraphRuns(id)[0]?.id ?? "";
+    expect(h.store.countLiveGraphRuns(id)).toBe(1);
+
+    expect(await h.engine.stopRun(runId)).toBe(true);
+    expect(h.store.countLiveGraphRuns(id)).toBe(0);
+    expect(kinds(h.events)).toContain("graph.run.failed");
+    // And it still leaves a recording, because "somebody gave up on it here" is a run outcome.
+    expect(h.store.listGraphTraces(id)[0]?.outcome).toBe("failed");
+  });
+
+  test("resuming a run that is not paused answers false rather than throwing", async () => {
+    // What a second click and a stale poll both look like. Neither is an error.
+    const h = harness();
+    expect(await h.engine.resumeRun("no-such-run")).toBe(false);
+    expect(await h.engine.stopRun("no-such-run")).toBe(false);
+  });
+
+  test("a breakpoint inside a For each fails the run rather than parking it", async () => {
+    // The same limit as `Wait`, and the same cause: parking mid-iteration would have to persist a
+    // loop's scope, and a parked run names one node because that is all a run has needed to say.
+    const h = harness();
+    h.provider.trigger("t").node("body", "action", () => ({ out: 1 }));
+    const id = h.graph(
+      {
+        nodes: [
+          node("n1", "t"),
+          node("loop", FOREACH_TYPE),
+          { ...node("n2", "body"), breakpoint: true },
+        ],
+        edges: [edge("e1", "n1", "loop", "out", "list"), edge("e2", "loop", "n2", "item")],
+      },
+      { debug: true },
+    );
+
+    await h.engine.fire(id, "n1", { out: [1, 2] });
+
+    expect(kinds(h.events)).toContain("graph.run.failed");
+    expect(payloadOf(h.events, "graph.run.failed").message).toContain("For each");
   });
 });

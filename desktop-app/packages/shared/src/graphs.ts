@@ -57,6 +57,19 @@ export interface GraphNode {
    * referencing a stopped plugin is a normal state.
    */
   readonly defHash?: string;
+  /**
+   * Stop the run here, before this node executes, and wait for a person.
+   *
+   * Part of the document rather than a scribble the editor keeps to itself, for the same reason a
+   * node's position is: it is something the author placed. A breakpoint that evaporated when the
+   * tab closed would be useless for the case it exists for, which is a graph that misbehaves half
+   * an hour later on a fire nobody was sitting there watching.
+   *
+   * **Honoured only while the graph is in debug mode.** A breakpoint forgotten in a saved graph
+   * must not be able to park a run forever on a machine nobody is looking at, and tying it to the
+   * switch the author flips when they sit down to debug is the smallest rule that guarantees it.
+   */
+  readonly breakpoint?: boolean;
 }
 
 /** One end of an edge: a node instance and one of its ports. */
@@ -120,6 +133,18 @@ export interface GraphSummary {
   readonly enabled: boolean;
   /** Dry-run has been lifted, so outbound actions really happen. Never implied by `enabled`. */
   readonly armed: boolean;
+  /**
+   * The author is debugging this graph.
+   *
+   * A third switch rather than a client-side preference, and it buys three things that only the
+   * daemon can give: every run records a {@link GraphTrace}, a failure that `on error` swallowed is
+   * said out loud instead of vanishing into a wire, and `breakpoint` nodes actually park the run.
+   *
+   * Per graph, because that is the unit somebody debugs. A daemon-wide switch would mean the one
+   * graph you are looking at costs the same as the eleven you are not, and the traces are the
+   * expensive half: they hold what every node produced, which is the whole point of them.
+   */
+  readonly debug: boolean;
   readonly concurrency: GraphConcurrency;
   /** The default acting account. Null once the account it named is removed. */
   readonly accountId: string | null;
@@ -217,7 +242,84 @@ export interface GraphRunSummary {
   readonly currentNode: string | null;
   /** Where each loop currently is. Empty unless a `For each` is iterating right now. */
   readonly loops: readonly { readonly nodeId: string; readonly at: number; readonly of: number }[];
+  /**
+   * The node this run is parked **on** waiting for a person, rather than for a clock.
+   *
+   * A `Wait` and a breakpoint are the same row in `graph_runs` and are told apart by one thing: a
+   * `Wait` always has a `resumeAt` and a breakpoint never does. So this is derived rather than
+   * stored, which is what keeps the two from being able to disagree.
+   */
+  readonly pausedNode: string | null;
 }
+
+/**
+ * What one node did, once.
+ *
+ * The values are here because they are the question. "Which node failed" is already answered by
+ * `graph.run.failed` in the feed; what nobody could answer was *what was on the wire* — and on a
+ * canvas of forty nodes that is the difference between reading a graph and guessing at it.
+ *
+ * Every value has been through {@link GRAPH_TRACE_VALUE_LIMIT}, so what arrives here is a summary
+ * and says so. A trace is evidence for a person reading it, never something to replay a run from.
+ */
+export interface GraphTraceStep {
+  readonly nodeId: string;
+  /** `ok` ran, `error` threw, `skipped` was settled dead by an upstream port producing nothing. */
+  readonly status: "ok" | "error" | "skipped";
+  /** When it started, and how long it took. Unix ms, like every timestamp here. */
+  readonly at: number;
+  readonly ms: number;
+  /** What it read, by input port. Absent for a skip and for a trigger, which reads nothing. */
+  readonly inputs?: Readonly<Record<string, unknown>>;
+  /** What it produced, by output port. A port missing from here is a dead wire downstream. */
+  readonly outputs?: Readonly<Record<string, unknown>>;
+  /** The failure. Present exactly when `status` is `error`. */
+  readonly message?: string;
+  /**
+   * The author wired `on error` onward, so the run carried on.
+   *
+   * The single most useful bit in the whole trace: an unhandled failure ends the run and is loud,
+   * and a handled one is a node that quietly did nothing while the graph reported success.
+   */
+  readonly handled?: boolean;
+}
+
+/**
+ * One recorded run, kept only for a graph in debug mode.
+ *
+ * Not an `events` row, unlike every other piece of run history, and the reason is size: this holds
+ * what flowed through every wire, which is exactly the sort of thing the feed must not fill up
+ * with. It lives in its own table, bounded by count per graph rather than by age, and it is deleted
+ * with the graph.
+ */
+export interface GraphTrace {
+  readonly runId: string;
+  readonly graphId: string;
+  readonly triggerNode: string;
+  readonly outcome: "finished" | "failed";
+  readonly dryRun: boolean;
+  /** The node the run died on, and its message. Both null when the run finished. */
+  readonly failedNode: string | null;
+  readonly message: string | null;
+  /** In execution order. Truncated at {@link GRAPH_TRACE_STEP_LIMIT}, oldest kept. */
+  readonly steps: readonly GraphTraceStep[];
+  readonly startedAt: number;
+  readonly finishedAt: number;
+}
+
+/**
+ * How many runs of one graph are kept.
+ *
+ * Small on purpose. A trace answers "what did it just do", and the tenth-oldest run of a graph
+ * firing every minute is not evidence anybody is going to read — it is disk.
+ */
+export const GRAPH_TRACE_LIMIT = 10;
+
+/** Steps kept per trace. A `For each` over a thousand items is a run nobody reads step by step. */
+export const GRAPH_TRACE_STEP_LIMIT = 300;
+
+/** How much of one port value is kept, as JSON characters, before it is cut and marked. */
+export const GRAPH_TRACE_VALUE_LIMIT = 512;
 
 /**
  * What one node of a graph is remembering, so the editor can offer to forget it.
@@ -405,6 +507,9 @@ export function validateGraphDocument(value: unknown): GraphValidation {
     }
     if (node.defHash !== undefined && typeof node.defHash !== "string") {
       issues.push({ path: `${path}.defHash`, message: "must be a string when present" });
+    }
+    if (node.breakpoint !== undefined && typeof node.breakpoint !== "boolean") {
+      issues.push({ path: `${path}.breakpoint`, message: "must be a boolean when present" });
     }
   });
 

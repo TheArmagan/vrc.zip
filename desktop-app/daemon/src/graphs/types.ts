@@ -8,7 +8,7 @@
  */
 
 import type { NodeConfigValues, NodeDefinition, PortValues } from "@vrcz/plugin-api/nodes";
-import type { GraphNodeConfig } from "@vrcz/shared";
+import type { GraphNodeConfig, GraphTraceStep } from "@vrcz/shared";
 
 /**
  * `GraphNodeConfig` and `NodeConfigValues` must stay the same shape, and this is where that is
@@ -97,9 +97,38 @@ export interface RunState {
    * would be traffic generated whether or not a canvas was there to read it.
    */
   loops?: Record<string, { readonly at: number; readonly of: number }>;
+  /**
+   * What this run has done so far, one entry per node it settled. Debug mode only.
+   *
+   * In the run state rather than accumulated in memory because a run can outlive the process: a
+   * graph that waits an hour and then fails would otherwise produce a trace of only the half that
+   * happened after the resume, which is the half nobody needed to see.
+   */
+  trace?: GraphTraceStep[];
+  /**
+   * The node this run is stopped on, waiting for a person. Set by a breakpoint, cleared by a resume.
+   *
+   * The row already says as much — `status = 'waiting'` with a null `resume_at` — and this is the
+   * belt to that pair of braces: the row's version is what the *list* reads without parsing JSON,
+   * and this is what the walk reads when it picks the run back up.
+   */
+  paused?: string;
+  /**
+   * The one node a resumed run is allowed to walk past without stopping again.
+   *
+   * Without it, continuing from a breakpoint re-reads the same `breakpoint: true` and parks on the
+   * spot it just left — a Continue button that does nothing, forever.
+   */
+  stepOver?: string;
+  /** Stop again at the very next node, whether or not it has a breakpoint. The Step button. */
+  stepping?: boolean;
 }
 
 export type RunOutcome =
   | { readonly kind: "finished" }
-  | { readonly kind: "waiting"; readonly resumeAt: number }
+  /**
+   * Parked. `resumeAt` is null for a breakpoint, which is the difference between waiting for a
+   * clock and waiting for a person — the sweep only ever picks up the former.
+   */
+  | { readonly kind: "waiting"; readonly resumeAt: number | null }
   | { readonly kind: "failed"; readonly node: string; readonly message: string };

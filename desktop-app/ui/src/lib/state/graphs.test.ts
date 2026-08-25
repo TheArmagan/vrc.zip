@@ -19,6 +19,7 @@ function summary(id: string, name: string): GraphSummary {
     description: "",
     enabled: false,
     armed: false,
+    debug: false,
     concurrency: "parallel",
     accountId: null,
     disabledReason: null,

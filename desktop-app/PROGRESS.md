@@ -5610,6 +5610,14 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
        existing `OnPlayerLeft ` prefix is what keeps `OnPlayerLeftRoom` out of the player-departure
        path; without it, that line parses as a departure by a player called "Room".
 
+     **A spawn line's content id is found, not sliced** — corrected after the first pass shipped it
+     wrong. A real sticker line reads `spawned sticker inv_abc`, so taking everything after the
+     separator produced `"sticker inv_abc"`: a phrase, which matches no real id a graph compares it
+     against and files one sticker under two keys in a store. `contentIdOf` takes the first
+     space-separated token bearing a known content prefix (`file_`, `prop_`, `inv_`, …) and falls
+     back to the last token, so a prefix VRChat has not shipped yet still yields something id-shaped
+     without a code change. The pattern reference says `file_`; both spellings exist in the wild.
+
      **`gamelog.download`, `gamelog.api_failure` and `gamelog.device_change` are `EPHEMERAL`.** They
      reach the bus, so a graph can trigger on them, and they are never written to the feed. A busy
      world fetches hundreds of assets an hour, the client re-logs its current microphone on every

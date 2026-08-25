@@ -187,6 +187,29 @@ test("HandleApplicationQuit is a quit marker in both shapes", () => {
   }
 });
 
+test("a screenshot path is tidied into one spelling, whatever the game wrote", () => {
+  /*
+   * This string is not internal: it is the `path` on the `gamelog.screenshot` payload, the path the
+   * feed row shows, and the value the "When I take a screenshot" node hands to whatever moves or
+   * posts the file. A Windows-rooted path is normalised as Windows on every host, because on Linux
+   * it names a file inside the Proton bottle and resolving it against the daemon's own working
+   * directory would invent a path that exists nowhere.
+   */
+  const line = (body: string) => `2024.03.09 14:22:41 Log        -  [VRC Camera] ${body}`;
+  const of = (body: string) => {
+    const event = parseLine(line(body));
+    return event.kind === "screenshot" ? event.path : null;
+  };
+
+  const want = "C:\\Users\\test\\Pictures\\VRChat\\2024-03\\shot.png";
+  expect(of("Took screenshot to: C:/Users/test/Pictures/VRChat/2024-03/shot.png")).toBe(want);
+  expect(of("Took screenshot to: C:\\Users\\test\\Pictures\\VRChat/2024-03/shot.png")).toBe(want);
+  expect(
+    of("Took screenshot to: C:\\Users\\test\\Pictures\\VRChat\\2024-04\\..\\2024-03\\shot.png"),
+  ).toBe(want);
+  expect(of("Took screenshot to:    ")).toBeNull();
+});
+
 test("header validation rejects continuation lines cheaply", () => {
   expect(parseHeader("  at VRC.Something.Method ()")).toBeNull();
   expect(parseHeader("")).toBeNull();

@@ -12,6 +12,8 @@
  * Nothing here throws. An unrecognised or malformed line degrades to `{ kind: "unknown" }`.
  */
 
+import { gamePath } from "../paths.ts";
+
 /** How a session's client is presenting: headset or flatscreen. */
 export type VrMode = "vr" | "desktop";
 
@@ -339,7 +341,10 @@ export function parseLine(line: string): ParsedEvent {
   }
 
   if (body.startsWith(MARKER_SCREENSHOT)) {
-    const path = body.slice(MARKER_SCREENSHOT.length).trimEnd();
+    // Normalised here rather than downstream: this is the only place the raw line exists, and the
+    // string goes straight into the event payload, the feed row and the `on-screenshot` graph
+    // node's `path` output. See `gamePath` for why it is not `nativePath`.
+    const path = gamePath(body.slice(MARKER_SCREENSHOT.length));
     if (path.length === 0) return unmatched(at, line);
     return { ...base, kind: "screenshot", path };
   }

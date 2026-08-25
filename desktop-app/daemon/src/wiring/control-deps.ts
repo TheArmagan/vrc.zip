@@ -132,7 +132,7 @@ import {
   type WorldDetail,
   type WorldSummary,
 } from "../servers/control.ts";
-import type { Settings } from "../settings.ts";
+import { normaliseLogDirectories, type Settings } from "../settings.ts";
 import {
   applyRetentionUpdate,
   describeRetention,
@@ -3742,8 +3742,12 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
         ...(typeof patch.resolveAvatarIds === "boolean"
           ? { resolveAvatarIds: patch.resolveAvatarIds }
           : {}),
+        // Normalised, not just filtered: these are typed by hand, and a pasted
+        // `C:/Users/you/AppData/LocalLow/VRChat/VRChat` would otherwise be stored, listed and
+        // joined with log filenames in exactly the shape it was pasted. See
+        // `normaliseLogDirectories`.
         ...(Array.isArray(patch.logDirectories)
-          ? { logDirectories: patch.logDirectories.filter((d) => typeof d === "string") }
+          ? { logDirectories: normaliseLogDirectories(patch.logDirectories) }
           : {}),
       };
 

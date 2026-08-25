@@ -5550,6 +5550,26 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      by nobody. Listing them costs a line; publishing a binary no one has ever executed does not.
      **Verified only as far as a cross-compile from Windows**: the ELF is produced and has the right
      magic. It has not been run on Linux.
+289. **Every path the daemon hands out goes through one of two normalisers in `paths.ts`, and which
+     one depends on who wrote the path.** `nativePath` is for paths *we* own or a user typed at us:
+     it trims, resolves, and returns the host's own spelling. `gamePath` is for paths VRChat wrote
+     into its log, and it deliberately does **not** resolve — under Proton the game logs
+     `C:\Users\you\Pictures\VRChat\…`, a path inside the bottle, and resolving that on Linux would
+     produce `/home/you/…/C:\Users\you\…`, a file that exists nowhere. So `gamePath` picks the
+     *flavour from the string* (Windows-rooted normalises as Windows on every host, anything else
+     as the host's) and only fixes separators and `..`.
+
+     Applied at the four boundaries where a foreign path enters: the log directory overrides on the
+     way in from `settings.json` and from a settings patch (`normaliseLogDirectories`, which also
+     de-duplicates — two spellings of one directory used to be two entries the watcher polled
+     twice), `listLogFiles`, the `VRCZIP_STATE_DIR` override, and `process.execPath` via
+     `executablePath()`. That last one retired the hand-rolled `execPath.replace(/\//g, "\\")` in
+     `os/install.ts`, which fixed separators and not `..` or a trailing separator.
+
+     **The graph nodes needed no change and that is the point.** `on-screenshot` reads
+     `payload.path`, so normalising in the parser — the only place the raw line exists — fixes the
+     feed row, the `gamelog.screenshot` payload and the node's `path` output at once. Normalising
+     per consumer would have been three copies of one rule.
 
 ---
 
@@ -6481,6 +6501,16 @@ Carried in from research, not yet verified against running code:
   as pruned, an aggregate over it answers a question about the present, not about history.** The fix
   is a `last_run_at` column stamped inside `insertGraphRun` (migration 015), so the fact outlives the
   row it came from and no call site has to remember to record it.
+
+- **`join()` fixes the separators between the segments it is handed and not the ones already inside
+  them.** `join("C:/Users/you/AppData/LocalLow/VRChat/VRChat", "output_log_….txt")` returns
+  `C:/Users/you/AppData/LocalLow/VRChat/VRChat\output_log_….txt` — mixed, stored that way in
+  `sessions.log_path`, and printed that way in the UI. Every file it names opens perfectly, which is
+  why it survived: the path is *correct*, it is just spelled in two conventions at once. The
+  directory came from a settings override somebody pasted with forward slashes, so no amount of
+  `join`ing downstream was ever going to fix it. **Normalise a foreign path where it enters, not
+  where it is used** — `nativePath` for one a user typed, `gamePath` for one VRChat's log wrote (see
+  decision 289 for why those are two functions and not one).
 
 ---
 

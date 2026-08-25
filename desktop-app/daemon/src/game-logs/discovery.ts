@@ -10,6 +10,7 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { nativePath } from "../paths.ts";
 
 /** Which probe produced a candidate. Surfaced in settings so the path is explainable. */
 export type LogDirRule =
@@ -215,9 +216,19 @@ export interface LogFileEntry {
 
 /** Lists the `output_log_*.txt` files in one directory, newest last. Missing directory -> `[]`. */
 export async function listLogFiles(directory: string): Promise<LogFileEntry[]> {
+  /*
+   * Normalised before anything is joined onto it.
+   *
+   * `entry.path` is not a private handle: it becomes the watcher's key for the file, the
+   * `log_path` column on every session, and the path the UI prints on the Live sessions screen.
+   * `join()` fixes the separators between the segments it is handed and leaves the ones already
+   * inside `directory` alone, so an override typed as `C:/Users/you/.../VRChat` would produce
+   * `C:/Users/you/.../VRChat\output_log_2026-01-01.txt` and store it that way forever.
+   */
+  const root = nativePath(directory);
   let names: string[];
   try {
-    names = await readdir(directory);
+    names = await readdir(root);
   } catch {
     return [];
   }
@@ -225,7 +236,7 @@ export async function listLogFiles(directory: string): Promise<LogFileEntry[]> {
   const entries: LogFileEntry[] = [];
   for (const name of names) {
     if (!isLogFileName(name)) continue;
-    const path = join(directory, name);
+    const path = join(root, name);
     try {
       const info = await stat(path);
       if (!info.isFile()) continue;

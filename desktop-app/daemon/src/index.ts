@@ -39,6 +39,7 @@ import {
   startupLocation,
 } from "./os/startup.ts";
 import { shouldShowTray, startTray } from "./os/tray.ts";
+import { executablePath } from "./paths.ts";
 import { isPackaged } from "./servers/embedded-ui.ts";
 import { needsFirstRun, saveSettings } from "./settings.ts";
 import { restartInto, sweepSidecars } from "./updates/apply.ts";
@@ -299,7 +300,7 @@ async function offerInstall(daemon: Awaited<ReturnType<typeof startDaemon>>): Pr
   const target = installTarget();
   console.log("");
   console.log(
-    attention(`vrc.zip is running from a folder Windows cleans up: ${dirname(process.execPath)}`),
+    attention(`vrc.zip is running from a folder Windows cleans up: ${dirname(executablePath())}`),
   );
   console.log(
     note(

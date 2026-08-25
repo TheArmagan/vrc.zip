@@ -142,6 +142,24 @@ test("only VRChat's own log filenames are listed, oldest first", async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+test("a log file path is spelled the way the host spells paths, whatever the directory was", async () => {
+  /*
+   * `LogFileEntry.path` becomes `sessions.log_path` and is printed in the UI, and the directory it
+   * is built from is a setting somebody typed. A pasted `C:/Users/you/…/VRChat` used to come back
+   * as `C:/Users/you/…/VRChat\output_log_….txt` and be stored that way.
+   */
+  const dir = mkdtempSync(join(tmpdir(), "vrcz-sep-"));
+  writeFileSync(join(dir, "output_log_09-00-00.txt"), "a\n");
+
+  const awkward = `${dir.replaceAll(sep, "/")}/./`;
+  const files = await listLogFiles(awkward);
+  expect(files).toHaveLength(1);
+  expect(files[0]?.path).toBe(resolve(dir, "output_log_09-00-00.txt"));
+  if (sep === "\\") expect(files[0]?.path).not.toContain("/");
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("isLogFileName matches VRChat's naming only", () => {
   expect(isLogFileName("output_log_2024-03-09_14-22-01.txt")).toBe(true);
   expect(isLogFileName("output_log.txt.bak")).toBe(false);

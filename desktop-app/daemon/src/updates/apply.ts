@@ -31,6 +31,7 @@
 import { readdir, rename, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { noteInstalledVersion, startExecutable } from "../os/install.ts";
+import { executablePath } from "../paths.ts";
 import type { FetchLike, ReleaseAsset } from "./releases.ts";
 import { updateUserAgent } from "./releases.ts";
 
@@ -59,7 +60,7 @@ const SIDECAR_PATTERN = /\.exe\.(old|new)-\d+$/i;
  * Every failure is ignored, including "still in use". A leftover 80MB file is untidy; a start that
  * failed because it could not tidy up is broken.
  */
-export async function sweepSidecars(execPath: string = process.execPath): Promise<number> {
+export async function sweepSidecars(execPath: string = executablePath()): Promise<number> {
   const directory = dirname(execPath);
   let entries: string[];
   try {
@@ -98,7 +99,7 @@ export interface ApplyResult {
 export async function applyUpdate(
   asset: ReleaseAsset,
   version: string,
-  execPath: string = process.execPath,
+  execPath: string = executablePath(),
   fetchImpl: FetchLike = fetch,
 ): Promise<ApplyResult> {
   const download = sidecar(execPath, "new", process.pid);
@@ -188,7 +189,7 @@ export async function applyUpdate(
  * screen has broken something even though it updated successfully.
  */
 export function restartInto(
-  execPath: string = process.execPath,
+  execPath: string = executablePath(),
   args: readonly string[] = [],
 ): boolean {
   return startExecutable(execPath, args, dirname(execPath));

@@ -7,7 +7,7 @@ import {
   DEFAULT_UI_PORT,
 } from "@vrcz/shared";
 import { DEFAULT_INTERCEPT_HOSTS } from "./forward-proxy/server.ts";
-import { settingsPath } from "./paths.ts";
+import { nativePath, settingsPath } from "./paths.ts";
 
 /**
  * User settings, stored in the clear. **Nothing secret goes here** — credentials live in
@@ -89,6 +89,29 @@ export const DEFAULT_SETTINGS: Settings = {
   installOffered: false,
 };
 
+/**
+ * Puts a list of log directory overrides into the host's own path spelling, dropping blanks and
+ * duplicates.
+ *
+ * Applied on the way in from `settings.json` **and** on the way in from a settings patch, because
+ * these are the one path in the app a user types by hand. Someone pasting from a browser or a
+ * Linux-flavoured tutorial produces `C:/Users/you/AppData/LocalLow/VRChat/VRChat`, which works
+ * fine as an argument to `readdir` and then reads back as a mixed-separator string in the settings
+ * list and, joined with a filename, in every session row the watcher writes. Normalising here also
+ * makes the de-duplication mean something: two spellings of one directory are one directory, and
+ * before this they were two entries the watcher polled twice.
+ */
+export function normaliseLogDirectories(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  const seen = new Set<string>();
+  for (const entry of input) {
+    if (typeof entry !== "string") continue;
+    const path = nativePath(entry);
+    if (path !== "") seen.add(path);
+  }
+  return [...seen];
+}
+
 /** True until the user has completed first-run setup. The UI blocks on this. */
 export function needsFirstRun(settings: Settings): boolean {
   return settings.contact.trim() === "";
@@ -111,7 +134,7 @@ export async function loadSettings(env?: NodeJS.ProcessEnv): Promise<Settings> {
           ? parsed.forwardProxy.interceptHosts
           : [...DEFAULT_SETTINGS.forwardProxy.interceptHosts],
       },
-      logDirectories: Array.isArray(parsed.logDirectories) ? parsed.logDirectories : [],
+      logDirectories: normaliseLogDirectories(parsed.logDirectories),
       openBrowserOnStart: parsed.openBrowserOnStart ?? DEFAULT_SETTINGS.openBrowserOnStart,
       // `??` rather than a truthiness check, so a settings file that says `false` keeps saying
       // false while one written before this key existed inherits the default.

@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, posix, resolve, win32 } from "node:path";
 
 /**
  * Where the daemon keeps its state. See PLAN.md §1.2.
@@ -15,9 +15,75 @@ import { join } from "node:path";
  */
 const OVERRIDE_ENV = "VRCZIP_STATE_DIR";
 
+/**
+ * Rewrites a path into the host's own spelling: absolute, `.` and `..` collapsed, no trailing
+ * separator, and the platform's separator throughout — `\` on Windows, `/` everywhere else.
+ *
+ * Every path that leaves the daemon goes through this. Paths reach us in whatever shape their
+ * source produced: a user pastes `C:/Users/you/AppData/LocalLow/VRChat/VRChat` into settings, an
+ * argv-derived `process.execPath` can arrive with forward slashes, and `settings.json` keeps
+ * whatever was written into it a version ago. `join()` and `resolve()` fix the separators of the
+ * segments they are *given* but not of the string handed in, so a mixed root survives all the way
+ * to `sessions.log_path`, to the settings list, and to the console, where it reads as a bug even
+ * though every file it names opens fine.
+ *
+ * Empty in, empty out — an unset override or a blank input is not a path, and resolving it would
+ * silently return the working directory instead. Relative input resolves against the working
+ * directory, which is what a user typing one into settings means by it.
+ */
+export function nativePath(input: string): string {
+  const trimmed = input.trim();
+  if (trimmed === "") return "";
+  return resolve(trimmed);
+}
+
+/** A drive letter or a UNC prefix — the two ways a string announces itself as a Windows path. */
+const WINDOWS_ROOTED = /^(?:[a-zA-Z]:[\\/]|[\\/]{2}[^\\/])/;
+
+/**
+ * Tidies a path that came out of VRChat's own log, without pretending it is a path on this host.
+ *
+ * Separate from {@link nativePath}, and the difference is the whole point. `nativePath` resolves
+ * against the working directory, which is right for a path a user typed at us and wrong for one
+ * the game wrote: on Linux, VRChat runs in a Proton bottle and logs
+ * `C:\Users\you\Pictures\VRChat\2026-08\VRChat_1920x1080_….png`, a path inside the bottle. Resolving
+ * that would produce `/home/you/vrc.zip/C:\Users\you\…`, which is not a file anywhere.
+ *
+ * So the flavour is chosen by the string, not by the host: a Windows-rooted path is normalised as
+ * Windows (every separator becomes `\`, `.` and `..` collapse), anything else as POSIX. On Windows
+ * that lands on the host's own spelling, which is the case that matters — VRChat writes
+ * `C:\Users\…` with backslashes but `[VRC Camera] Took screenshot to:` has been seen with mixed
+ * separators, and that string is what the screenshot feed row shows and what the "When I take a
+ * screenshot" graph node hands to whatever moves or posts the file.
+ */
+export function gamePath(raw: string): string {
+  const trimmed = raw.trim();
+  if (trimmed === "") return "";
+  // Never resolved, only normalised: resolving would give a rootless string the daemon's own drive
+  // or working directory, which is an invented answer rather than a tidied one.
+  const windows = WINDOWS_ROOTED.test(trimmed) || process.platform === "win32";
+  return windows ? win32.normalize(trimmed) : posix.normalize(trimmed);
+}
+
+/**
+ * The running executable, in the host's own path spelling.
+ *
+ * Use this rather than `process.execPath` directly wherever the value is shown to someone, written
+ * to the registry, or compared against a path we composed ourselves. `process.execPath` is derived
+ * from how the process was launched, so a shell that spells the path with forward slashes hands
+ * one straight through — and this is the string the installer copies from, the updater renames, and
+ * the console prints back at the user.
+ */
+export function executablePath(): string {
+  return nativePath(process.execPath);
+}
+
 export function stateDir(env: NodeJS.ProcessEnv = process.env): string {
   const override = env[OVERRIDE_ENV];
-  if (override) return override;
+  // Normalised like every other path we hand out: the override is typed by a human into `.env`, and
+  // the whole state tree hangs off it, so a forward slash here would spread to every path derived
+  // from it.
+  if (override) return nativePath(override);
 
   if (process.platform === "win32") {
     const localAppData = env.LOCALAPPDATA;

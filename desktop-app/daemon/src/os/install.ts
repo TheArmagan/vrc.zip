@@ -41,7 +41,7 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { APP_NAME, APP_VERSION, REPOSITORY_URL } from "@vrcz/shared";
-import { stateDir } from "../paths.ts";
+import { executablePath, nativePath, stateDir } from "../paths.ts";
 import { startDetached } from "./detached.ts";
 import { deleteKey, readString, writeDword, writeString } from "./registry.ts";
 import {
@@ -177,7 +177,9 @@ export interface InstallResult {
 export function installDirectory(env: NodeJS.ProcessEnv = process.env): string | null {
   const local = env.LOCALAPPDATA;
   if (local === undefined || local.trim() === "") return null;
-  return join(local, APP_PARENT, APP_FOLDER);
+  // `nativePath` on the environment value, not just `join` after it: this path is written into the
+  // registry as `InstallLocation`, shown in settings, and compared against `process.execPath`.
+  return join(nativePath(local), APP_PARENT, APP_FOLDER);
 }
 
 /** The full path of the installed executable, or null. */
@@ -188,12 +190,15 @@ export function installTarget(env: NodeJS.ProcessEnv = process.env): string | nu
 
 /** Whether the running executable *is* the installed copy. Case-insensitive; this is Windows. */
 export function isInstalled(
-  execPath: string = process.execPath,
+  execPath: string = executablePath(),
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
   const target = installTarget(env);
   if (target === null) return false;
-  return execPath.replace(/\//g, "\\").toLowerCase() === target.toLowerCase();
+  // Both sides through `nativePath` rather than a hand-rolled slash swap, so `..` segments and a
+  // trailing separator compare equal too — `process.execPath` is derived from argv and arrives in
+  // whatever shape whoever launched us wrote it.
+  return nativePath(execPath).toLowerCase() === nativePath(target).toLowerCase();
 }
 
 /**
@@ -262,7 +267,7 @@ function writeShortcuts(target: string, desktop: boolean, startMenu: boolean): b
  */
 export async function installLocally(options: InstallOptions): Promise<InstallResult> {
   const env = options.env ?? process.env;
-  const execPath = options.execPath ?? process.execPath;
+  const execPath = nativePath(options.execPath ?? process.execPath);
 
   const failure = (reason: string): InstallResult => ({
     ok: false,
@@ -366,7 +371,7 @@ export interface UninstallResult {
  */
 export async function uninstallLocally(
   env: NodeJS.ProcessEnv = process.env,
-  execPath: string = process.execPath,
+  execPath: string = executablePath(),
 ): Promise<UninstallResult> {
   if (!IS_WINDOWS) return { ok: false, reason: "Uninstalling is Windows only.", path: null };
 
@@ -607,7 +612,7 @@ export interface UpdateResult {
  * read back and act on.
  */
 export async function updateInstalledCopy(
-  execPath: string = process.execPath,
+  execPath: string = executablePath(),
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<UpdateResult> {
   const from = installedVersion();

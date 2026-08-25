@@ -5479,6 +5479,10 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
 
      The posters carry no UNOFFICIAL marker, which is a deliberate exception to the branding
      guardrail in `PLAN.md` §Guardrails and was the owner's call. The app's own banner is unchanged.
+
+     They also no longer list macOS. The daemon has `darwin` branches throughout `daemon/src/os/`
+     and `paths.ts`, so the *code* is cross-platform, but a poster is a promise about what someone
+     can go and download, and that is a narrower thing than what compiles.
 287. **The posters have a 100px safe area, and the graph canvas has a per-poster zoom to respect it.**
      The first cut hung in-world and the small type came off the edges: a poster on a quad is not
      always mapped 1:1, so anything near a border is the first thing lost. Two changes came out of

@@ -533,7 +533,7 @@ function page(p: Poster): string {
       <div class="url disp">vrc.zip</div>
       <div class="claims">free / local-only / open source</div>
     </div>
-    <div class="plat">windows<br>macos<br>linux</div>
+    <div class="plat">windows<br>linux</div>
   </div>
 
 </div></body></html>`;

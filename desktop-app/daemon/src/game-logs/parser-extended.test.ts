@@ -190,13 +190,32 @@ describe("spawns", () => {
   test("a sticker line puts the id before the name", () => {
     // The inverse of a join line. Reusing the join parser here swapped the two fields.
     expect(
-      parseLine(line(`[StickersManager] User ${USER} (Kira Test) spawned sticker file_abc`)),
+      parseLine(line(`[StickersManager] User ${USER} (Kira Test) spawned file_abc`)),
     ).toMatchObject({
       kind: "sticker-spawn",
       userId: USER,
       displayName: "Kira Test",
-      contentId: "sticker file_abc",
+      contentId: "file_abc",
     });
+  });
+
+  test("the content id is the id alone, never the kind word in front of it", () => {
+    // A real line reads `spawned sticker inv_…`. Slicing everything after the separator produced
+    // `"sticker inv_…"`, which is a phrase: it matched no real id a graph compared it against.
+    expect(
+      parseLine(line(`[StickersManager] User ${USER} (Kira Test) spawned sticker inv_abc`)),
+    ).toMatchObject({ kind: "sticker-spawn", contentId: "inv_abc" });
+
+    expect(
+      parseLine(line(`[VRCItems] Item spawned prop prop_abc spawned by ${USER} (Kira Test)`)),
+    ).toMatchObject({ kind: "prop-spawn", contentId: "prop_abc", spawnKind: "prop" });
+  });
+
+  test("an unrecognised prefix falls back to the last token rather than the whole phrase", () => {
+    // A prefix VRChat has not shipped yet still yields something id-shaped, without a code change.
+    expect(
+      parseLine(line(`[StickersManager] User ${USER} (Kira Test) spawned sticker xyz_abc`)),
+    ).toMatchObject({ kind: "sticker-spawn", contentId: "xyz_abc" });
   });
 
   test("props and items are one kind, told apart by the id and not the wording", () => {

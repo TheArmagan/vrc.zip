@@ -735,6 +735,44 @@ function parseApiFailure(body: string): {
   return { status, method, endpoint, reason };
 }
 
+/**
+ * Every prefix a piece of spawnable content is identified by.
+ *
+ * `inv_` is here because that is what a real sticker line carries — the pattern reference says
+ * `file_`, and both shapes exist across builds. The list is what makes {@link contentIdOf} able to
+ * find the id inside a phrase instead of guessing at word positions.
+ */
+const CONTENT_ID_PREFIXES = ["file_", "prop_", "inv_", "invt_", "avtr_", "wrld_", "prod_"];
+
+/**
+ * The content id out of whatever the client wrote after `spawned`.
+ *
+ * VRChat does not write one shape here. `spawned sticker inv_abc` names the kind before the id;
+ * `spawned file_abc` does not. Slicing everything after the separator therefore produced
+ * `"sticker inv_abc"` as the id, which is a phrase and not an identifier — a graph comparing it
+ * against a real id never matched, and a store keyed on it filed the same sticker twice.
+ *
+ * So the id is *found* rather than sliced: the first whitespace-delimited token bearing a known
+ * prefix. A token-shaped tail with no recognised prefix falls back to the last token, which keeps a
+ * future prefix working without a code change; a phrase with no single token cannot produce one and
+ * returns null, because an unset field beats a made-up id.
+ */
+function contentIdOf(tail: string): string | null {
+  // `split(" ")` rather than a whitespace regex: the module's one regex is the auth line, and these
+  // lines are space-separated. Empty pieces from a double space are filtered out instead.
+  const tokens = tail
+    .trim()
+    .split(" ")
+    .filter((token) => token !== "");
+  if (tokens.length === 0) return null;
+  const known = tokens.find((token) =>
+    CONTENT_ID_PREFIXES.some((prefix) => token.startsWith(prefix)),
+  );
+  if (known !== undefined) return known;
+  const last = tokens[tokens.length - 1];
+  return last === undefined || last === "" ? null : last;
+}
+
 /** Pulls the first run of 4-5 digits out of a body. Used for the OSC port fallback. */
 function firstPort(body: string): number | null {
   let run = "";
@@ -867,13 +905,14 @@ export function parseLine(line: string): ParsedEvent {
     const spawned = rest.indexOf(STICKER_SPAWNED);
     if (spawned === -1) return unmatched(at, line);
     const { userId, displayName } = splitIdThenName(rest.slice(0, spawned));
-    const contentId = rest.slice(spawned + STICKER_SPAWNED.length).trimEnd();
+    // `spawned sticker inv_abc` names the kind before the id. The id is found, not sliced.
+    const contentId = contentIdOf(rest.slice(spawned + STICKER_SPAWNED.length));
     return {
       ...base,
       kind: "sticker-spawn",
       ...namePair(displayName),
       userId,
-      contentId: contentId === "" ? null : contentId,
+      contentId,
     };
   }
 
@@ -881,7 +920,7 @@ export function parseLine(line: string): ParsedEvent {
     const marker = body.startsWith(MARKER_PROP_SPAWN) ? MARKER_PROP_SPAWN : MARKER_ITEM_SPAWN;
     const rest = body.slice(marker.length);
     const by = rest.indexOf(PROP_SPAWNED_BY);
-    const contentId = (by === -1 ? rest : rest.slice(0, by)).trim();
+    const contentId = contentIdOf(by === -1 ? rest : rest.slice(0, by));
     const { userId, displayName } =
       by === -1
         ? { userId: null, displayName: "" }
@@ -891,10 +930,10 @@ export function parseLine(line: string): ParsedEvent {
       kind: "prop-spawn",
       ...namePair(displayName),
       userId,
-      contentId: contentId === "" ? null : contentId,
+      contentId,
       // From the identifier, not the wording. `[VRCItems] Item` and `[VRCProps] Prop` are the same
       // feature renamed, and a real archive spans the rename.
-      spawnKind: contentId.startsWith("prop_") ? "prop" : "item",
+      spawnKind: contentId?.startsWith("prop_") === true ? "prop" : "item",
     };
   }
 

@@ -1,0 +1,3 @@
+# Build output. `bun run docs/posters/src/build-posters.ts` regenerates these; the committed
+# artefact is the PNG in the parent directory, captured from them at a 1024x1536 viewport.
+*.html

@@ -5464,6 +5464,21 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      - **`CREATE_BREAKAWAY_FROM_JOB` is not set.** It fails outright in a job that does not permit
        breakaway, and vrc.zip is not in a job on the path that matters. It was tried first, from
        inside a shell that *had* jobbed the test process, which is how an afternoon goes.
+286. **The in-world posters are generated from a script, not drawn once and dropped in.**
+     `docs/posters/` holds three 1024x1536 PNGs meant to hang as wall textures in VRChat worlds, and
+     `docs/posters/src/build-posters.ts` is what produces them. The generated HTML is gitignored;
+     the PNG is the artefact, captured at a 1024x1536 viewport. Two reasons for the script.
+     - **The node cards are drawn from real node metadata**, so they use the titles, port names and
+       port labels that `daemon/src/graphs/builtins` actually ships. A poster is a promise about
+       what the app looks like, and a hand-drawn one goes stale the first time a port is renamed
+       with nobody noticing. Regenerating is a diff.
+     - **The inset is the check.** Each poster carries a real screenshot of the same graph in the
+       editor, so the drawing can be compared against the thing it draws without launching anything.
+       The three graphs were built through the control API against a throwaway `VRCZIP_STATE_DIR`,
+       which is also the way to rebuild the captures.
+
+     The posters carry no UNOFFICIAL marker, which is a deliberate exception to the branding
+     guardrail in `PLAN.md` §Guardrails and was the owner's call. The app's own banner is unchanged.
 
 ---
 

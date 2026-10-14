@@ -146,6 +146,9 @@ const deps: ControlDeps = {
     throw new Error("unused");
   },
   selectAvatar: async () => {},
+  openDeepLink: async () => {
+    throw new Error("unused");
+  },
   getInstance: async () => {
     throw new Error("unused");
   },

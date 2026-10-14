@@ -5823,6 +5823,37 @@ Decisions made in conversation that aren't obvious from `PLAN.md` alone.
      exist before — which is the only place a paste can say *where*, so it pastes at the pointer that
      opened it. Verified by clicking, per the Phase 4 bar.
 
+296. **`vrczip://selectavatar/<avtr_id>[/<account index>]` puts an account into an avatar.** The first
+     inbound link. Choices, in the order they bite:
+     - **Registered per user under `HKCU\Software\Classes\vrczip`**, by `os/url-scheme.ts`, pointing
+       at the installed copy when one exists and at the running executable otherwise. Written by
+       `installLocally`, removed by `--uninstall`, and re-checked on every packaged Windows start
+       the way `repairStartupEntry` re-checks the `Run` value, writing only when the command
+       differs. A source checkout never claims it, or `bun --watch` would own every link. Windows
+       only, like the install itself.
+     - **The process Windows starts forwards rather than becomes a second daemon.** It reads
+       `state.json`, posts the URL whole to `POST /api/deeplink`, and exits, *before*
+       `claimConsole`, so a click does not flash a console window. Nothing answering (no file, or a
+       file left by a crash) makes it start the daemon itself with `--no-open` and carry the link out
+       after `startDaemon`, which has already resumed every account. A timeout counts as handled:
+       somebody is listening, and a rival daemon would only find the ports taken.
+     - **When a link is present it is the only argument that counts.** The command line is `"exe"
+       "%1"` with a web page's string pasted in, so every other argument is dropped. `--uninstall`
+       is not something a page gets to ask for.
+     - **The index is the Accounts screen's order, from 0, and absent means 0.** Never "whichever
+       account is online": a link that dresses a different person depending on who is signed in is
+       the same guess `POST /api/avatars/:id/select` refuses to make. An index past the end is a 404
+       naming how many accounts there are.
+     - **One parser, in the daemon** (`wiring/deeplink.ts`), an exact regex over the whole string
+       using the control API's avatar id pattern. The forwarding process never interprets the link.
+     - **Every outcome is a toast**, failures included, with the avatar's name and thumbnail on
+       success. Nobody is looking at the daemon when a link arrives, and a link that silently did
+       nothing reads as broken. The route's error carries the same sentence as the toast.
+
+     Smoke-tested against a real daemon in a scratch state dir: the forwarding process exits in
+     under half a second and the daemon answers. Not yet clicked from a browser on a packaged build,
+     so the registry half is unverified end to end.
+
 ---
 
 ## Gotchas

@@ -150,6 +150,7 @@ import type {
 } from "../store/types.ts";
 import type { UpdateChecker } from "../updates/checker.ts";
 import type { WebhookManager } from "../webhooks/index.ts";
+import type { DeepLinkOutcome } from "./deeplink.ts";
 import { EPHEMERAL } from "./feed-writer.ts";
 import type { InstalledPluginView, PluginBudgetView, PluginHost } from "./plugin-host.ts";
 import { createSocialActions, type SocialActions } from "./social-actions.ts";
@@ -234,6 +235,11 @@ export interface ControlDepsOptions {
    * of them would get it.
    */
   readonly social?: SocialActions | undefined;
+  /**
+   * Carries out a `vrczip://` link. Built in `app.ts`, because it raises toasts and this file has no
+   * notifier. Absent means the route answers 503, which is what every test that does not care gets.
+   */
+  readonly openDeepLink?: ((url: string) => Promise<DeepLinkOutcome>) | undefined;
   readonly settings: Settings;
   readonly env?: NodeJS.ProcessEnv;
   readonly connectPipeline: (accountId: string) => void;
@@ -2201,6 +2207,13 @@ export function createControlDeps(options: ControlDepsOptions): ControlDeps {
      */
     async selectAvatar(avatarId, accountId): Promise<void> {
       await social.selectAvatar(accountId, avatarId);
+    },
+
+    async openDeepLink(url): Promise<DeepLinkOutcome> {
+      if (options.openDeepLink === undefined) {
+        throw new ControlError(503, "deeplinks_unavailable", "This daemon cannot open links.");
+      }
+      return await options.openDeepLink(url);
     },
 
     async inviteUserTo(accountId, userId, target, messageSlot): Promise<void> {

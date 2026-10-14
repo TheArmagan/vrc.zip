@@ -1552,6 +1552,15 @@ export interface ControlDeps {
   selectAvatar(avatarId: string, accountId: string): Promise<void>;
 
   /**
+   * Carries out a `vrczip://` link, which the operating system handed to a second vrc.zip process
+   * and that process forwarded here. See `wiring/deeplink.ts`.
+   *
+   * The daemon raises the toast for every outcome itself, because the process that forwarded the
+   * link has no window to report in. A rejection is a `ControlError` carrying the same sentence.
+   */
+  openDeepLink(url: string): Promise<{ action: string; avatarId: string; accountId: string }>;
+
+  /**
    * Many worlds at once, for a page of rows that each name one.
    *
    * **Never throws for an unresolvable world, and never throws `no_account`.** Cache hits are
@@ -2431,6 +2440,19 @@ export function createControlApp({ port, deps, appApi, token }: ControlAppOption
       }
       await deps.selectAvatar(avatarId, accountId);
       return c.json({ status: "ok" as const });
+    })
+
+    /*
+     * A `vrczip://` link, forwarded by the process the operating system started for it. The URL
+     * travels whole in the body and is parsed on this side, so there is one parser and the
+     * forwarding process never has to understand a link to pass it on.
+     */
+    .post("/api/deeplink", async (c) => {
+      const url = stringField(await readJsonObject(c.req.raw), "url");
+      if (url === undefined) {
+        throw new ControlError(400, "invalid_body", "url is required");
+      }
+      return c.json({ status: "ok" as const, ...(await deps.openDeepLink(url)) });
     })
 
     .get("/api/worlds/:id/instances", async (c) => {

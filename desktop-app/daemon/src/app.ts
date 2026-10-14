@@ -42,6 +42,7 @@ import { WebhookManager } from "./webhooks/index.ts";
 import { createAppApiDeps } from "./wiring/app-api-deps.ts";
 import { attachConsentAlerts } from "./wiring/consent-alert.ts";
 import { createControlDeps } from "./wiring/control-deps.ts";
+import { createDeepLinkHandler, type DeepLinkOutcome } from "./wiring/deeplink.ts";
 import { FeedWriter } from "./wiring/feed-writer.ts";
 import { createGraphApi } from "./wiring/graph-api.ts";
 import { createGraphData } from "./wiring/graph-data.ts";
@@ -98,6 +99,11 @@ export interface RunningDaemon {
   readonly webhooks: WebhookManager;
   readonly sessionToken: string;
   readonly launchUrl: string;
+  /**
+   * Carries out a `vrczip://` link. `index.ts` calls it for a link that arrived while no daemon was
+   * running, so the process the operating system started *is* the daemon. See `wiring/deeplink.ts`.
+   */
+  readonly openDeepLink: (url: string) => Promise<DeepLinkOutcome>;
   /**
    * The release checker, so the entry point can give it a restart to call.
    *
@@ -655,9 +661,25 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     },
   });
 
+  /*
+   * `vrczip://` links. Built here rather than in the control deps because it raises toasts, and the
+   * notifier lives here. The avatar label reads through `deps`, which exists by the time any link
+   * can arrive: the closure is only ever called from a route or from `index.ts` after startup.
+   */
+  const openDeepLink = createDeepLinkHandler({
+    accounts,
+    social,
+    notify: async (notification) => await notifier.notify(notification),
+    describeAvatar: async (avatarId, accountId) => {
+      const avatar = await deps.getAvatar(avatarId, accountId);
+      return { name: avatar.name, image: avatar.thumbnailImageUrl };
+    },
+  });
+
   const deps = createControlDeps({
     accounts,
     updates,
+    openDeepLink,
     store,
     bus,
     limiter,
@@ -935,6 +957,7 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<RunningD
     webhooks,
     sessionToken,
     launchUrl,
+    openDeepLink,
     /**
      * The release checker, handed back so `index.ts` can give it the one thing it cannot build for
      * itself: a restart. Installing an update ends in a handover, and the tidy shutdown that

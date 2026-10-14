@@ -10,6 +10,7 @@ import {
   startupSummary,
   versionText,
 } from "./cli/banner.ts";
+import { forwardDeepLink } from "./cli/deeplink.ts";
 import {
   applyWindowIcon,
   askConsoleYesNo,
@@ -39,10 +40,12 @@ import {
   startupLocation,
 } from "./os/startup.ts";
 import { shouldShowTray, startTray } from "./os/tray.ts";
+import { ensureUrlScheme } from "./os/url-scheme.ts";
 import { executablePath } from "./paths.ts";
 import { isPackaged } from "./servers/embedded-ui.ts";
 import { needsFirstRun, saveSettings } from "./settings.ts";
 import { restartInto, sweepSidecars } from "./updates/apply.ts";
+import { findDeepLinkArg } from "./wiring/deeplink.ts";
 
 /**
  * Daemon entry point.
@@ -360,6 +363,24 @@ async function offerInstall(daemon: Awaited<ReturnType<typeof startDaemon>>): Pr
 
 async function main(): Promise<void> {
   /*
+   * A `vrczip://` link, before anything else, including the console.
+   *
+   * When one is present it is the only argument that counts. Windows builds the command line by
+   * pasting the link into `"%1"`, so anything else on that line arrived *inside* a link, and a link
+   * is something any web page can write. Dropping the rest is what keeps `--uninstall` from being a
+   * thing a page can ask for.
+   *
+   * A daemon that is already running takes the link and this process exits without ever opening a
+   * window. Otherwise this process becomes the daemon, without the browser tab (somebody who clicked
+   * "wear this avatar" asked for an avatar, not for the app), and carries the link out once the
+   * accounts have resumed. See `cli/deeplink.ts`.
+   */
+  const deepLink = findDeepLinkArg(process.argv.slice(2));
+  if (deepLink !== null && (await forwardDeepLink(deepLink)) === "handled") {
+    process.exit(0);
+  }
+
+  /*
    * The console window, before anything is printed into it.
    *
    * `enableAnsiColour` asks an older Windows console to interpret escapes at all — chalk decides
@@ -395,7 +416,7 @@ async function main(): Promise<void> {
   if (console_ !== null && colour) forceColour();
 
   // One copy, read by four flags now: `--open`/`--no-open`, `--tray`/`--no-tray` and `--hidden`.
-  const argv = process.argv.slice(2);
+  const argv = deepLink === null ? process.argv.slice(2) : ["--no-open"];
 
   const code = await runSubcommand(argv);
   if (code !== null) {
@@ -467,6 +488,14 @@ async function main(): Promise<void> {
   }
 
   for (const line of daemon.startupNotes) console.log(note(line));
+
+  // After `startDaemon`, which has already resumed every account, so the index in the link counts
+  // the same list a running daemon would. The outcome is a toast either way; this line is for the
+  // console somebody may be looking at.
+  if (deepLink !== null) {
+    console.log(note("opening the vrczip:// link that started this run"));
+    void daemon.openDeepLink(deepLink).catch(() => undefined);
+  }
 
   /*
    * The first-run install offer.
@@ -545,6 +574,12 @@ async function main(): Promise<void> {
    */
   if (startup.supported && repairStartupEntry()) {
     console.log(note("repaired the Windows startup entry, which pointed at an old location"));
+  }
+
+  // The same repair for `vrczip://`, on the same terms: packaged Windows only, and silent unless it
+  // had to write. A source checkout never claims the scheme, or `bun --watch` would own every link.
+  if (process.platform === "win32" && isPackaged() && ensureUrlScheme()) {
+    console.log(note("registered vrczip:// links to open this copy"));
   }
 
   const tray = shouldShowTray(argv)

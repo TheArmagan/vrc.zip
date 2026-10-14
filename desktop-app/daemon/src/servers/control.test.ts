@@ -494,6 +494,7 @@ interface Recorder {
   groupInstanceFetches: { groupId: string; accountId: string | null }[];
   worldInstanceFetches: { worldId: string; accountId: string | null }[];
   avatarSelects: { avatarId: string; accountId: string }[];
+  deepLinks: string[];
   galleryPages: {
     groupId: string;
     galleryId: string;
@@ -557,6 +558,7 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     groupInstanceFetches: [],
     worldInstanceFetches: [],
     avatarSelects: [],
+    deepLinks: [],
     galleryPages: [],
     userBatches: [],
     mutualLookups: [],
@@ -1065,6 +1067,11 @@ function fakeDeps(overrides: Partial<ControlDeps> = {}): { deps: ControlDeps; se
     selectAvatar: async (avatarId, accountId) => {
       seen.avatarSelects.push({ avatarId, accountId });
       if (avatarId === AVATAR_MISSING) throw new ControlError(404, "unknown_avatar");
+    },
+    openDeepLink: async (url) => {
+      seen.deepLinks.push(url);
+      if (!url.startsWith("vrczip://")) throw new ControlError(400, "invalid_deeplink");
+      return { action: "selectAvatar", avatarId: AVATAR_ID, accountId: ACCOUNT.id };
     },
     listWorldInstances: async (worldId, accountId) => {
       seen.worldInstanceFetches.push({ worldId, accountId });
@@ -2090,6 +2097,45 @@ describe("POST /api/avatars/:id/select", () => {
     const res = await call(deps, `/api/avatars/${AVATAR_ID}/select?accountId=${ACCOUNT.id}`);
     expect(res.status).toBe(404);
     expect(seen.avatarSelects).toEqual([]);
+  });
+});
+
+describe("POST /api/deeplink", () => {
+  test("hands the link through whole and returns what was done", async () => {
+    const { deps, seen } = fakeDeps();
+    const url = `vrczip://selectavatar/${AVATAR_ID}/1`;
+    const res = await call(deps, "/api/deeplink", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      status: "ok",
+      action: "selectAvatar",
+      avatarId: AVATAR_ID,
+      accountId: ACCOUNT.id,
+    });
+    expect(seen.deepLinks).toEqual([url]);
+  });
+
+  test("requires a url, and surfaces the handler's refusal", async () => {
+    const { deps, seen } = fakeDeps();
+    const empty = await call(deps, "/api/deeplink", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(empty.status).toBe(400);
+    expect(seen.deepLinks).toEqual([]);
+
+    const bad = await call(deps, "/api/deeplink", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: "https://example.com" }),
+    });
+    expect(bad.status).toBe(400);
+    expect(await bad.json()).toMatchObject({ error: "invalid_deeplink" });
   });
 });
 

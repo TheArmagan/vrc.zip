@@ -53,6 +53,7 @@ import {
   writeShortcut,
 } from "./shortcut.ts";
 import { setStartupEnabled } from "./startup.ts";
+import { registerUrlScheme, removeUrlScheme } from "./url-scheme.ts";
 
 const IS_WINDOWS = process.platform === "win32";
 
@@ -321,6 +322,10 @@ export async function installLocally(options: InstallOptions): Promise<InstallRe
   }
   const listed = writeUninstallEntry(target, directory, size);
 
+  // `vrczip://` links now start the copy, not the download. Not reported: a link that does not open
+  // is found the first time somebody clicks one, and the next start repairs it anyway.
+  registerUrlScheme(target);
+
   const startup = setStartupEnabled(true, target);
 
   return {
@@ -381,6 +386,7 @@ export async function uninstallLocally(
   // as success, so uninstalling from a stray copy still clears the machine of the entries.
   setStartupEnabled(false);
   removeUninstallEntry();
+  removeUrlScheme();
   await removeShortcuts();
 
   if (directory === null) {
